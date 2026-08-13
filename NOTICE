@@ -1,0 +1,32 @@
+gaia-interagent
+Copyright (c) 2026 Gaia Wayfinder
+
+This product bundles no third-party code and has no runtime dependencies. It
+requires only Node.js (developed and tested on v24.12.0).
+
+Adapted, not reimplemented
+--------------------------
+scripts/wmux-lanes.mjs is an ADAPTER over the `peer-sessions-wmux` helper
+(`scripts/wmux_peer.py`), which is installed separately under the user's Codex
+skills directory. That helper owns all wmux terminal control: spawning agents,
+sending prompts, reading screens, stopping agents, and reaping exited surfaces,
+including its fail-closed rules for unparseable control-plane output.
+
+gaia-interagent deliberately does NOT duplicate that implementation. It shells
+out to the helper and adds only bus identity, the lane limit, artifact-handoff
+consumption, and a stale/exited sweep. It never passes `--yes` to the helper, so
+it can never close a surface or stop an agent.
+
+Derived work
+------------
+The bus core, event log, MCP server, and their test suite are derived from the
+reviewed Gaia Claude/Codex interop prototype (Phase 3), whose 79 tests are ported
+here unchanged apart from identifier renames.
+
+Prior art acknowledged in the design
+------------------------------------
+- Anthropic's Claude Code cross-session messaging (`SendMessage`/`ListAgents`)
+  informed the authority boundary. It is NOT used as a transport: it addresses
+  Claude Code sessions only, on macOS/Linux, and cannot reach a non-Claude client.
+- OpenAI's Codex MCP stdio server configuration informed the generated Codex
+  adapter. No global Codex configuration is read or written by this product.

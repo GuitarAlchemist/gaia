@@ -1,0 +1,38 @@
+{
+  "name": "gaia-interagent",
+  "version": "1.0.0",
+  "description": "Durable local coordination bus for Claude Code and Codex sessions: six non-privileged verbs over stdio MCP, an append-only event log, and wmux lane adapters.",
+  "author": {
+    "name": "Gaia Wayfinder"
+  },
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "coordination",
+    "multi-agent",
+    "claude-code",
+    "codex",
+    "wmux",
+    "event-log"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Gaia Interagent",
+    "shortDescription": "Coordinate Claude Code and Codex sessions over one durable local bus.",
+    "longDescription": "Gaia Interagent bundles a stdio MCP server and an append-only JSONL event bus so Claude Code sessions, Codex sessions, and local tooling can address each other by stable ref, thread work with correlation ids, and hand work over with an explicit return address. The tool surface is exactly six verbs — register, send, inbox, ack, heartbeat, handoff — and none of them can approve, merge, push, deploy, read credentials, or mutate configuration: privilege is prevented by absence rather than by a check. Message bodies are stored and delivered as untrusted text. Everything fails closed: a lock timeout or a damaged record makes a call write nothing and say so, and the log is never truncated, repaired, or reset. Windows-first, dependency-free, no network listener, no remote execution.",
+    "developerName": "Gaia Wayfinder",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write",
+      "Local"
+    ],
+    "defaultPrompt": [
+      "Check the interagent bus and show me pending work.",
+      "Register this session on the interagent bus.",
+      "Hand this task to my other Codex session."
+    ],
+    "brandColor": "#3B6EA5"
+  }
+}

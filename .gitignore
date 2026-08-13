@@ -1,0 +1,20 @@
+# Crash and temp debris. `tests/product.test.mjs` already refuses to let any of this
+# ship, but that check runs at `node --test` time — after `git add -A` would have
+# staged it. A Git Bash (Cygwin) crash with the working directory inside this tree
+# writes `bash.exe.stackdump` here, which has happened on three separate recorded
+# occasions and once invalidated an entire mutation sweep.
+*.stackdump
+*.dmp
+*.tmp
+*.swp
+*.orig
+*.rej
+*.bak
+*~
+
+# Never a dependency of this product: it has none, and no lockfile.
+node_modules/
+
+# Bus data belongs in a data directory outside the tree, never inside it.
+events.jsonl
+events.lock/

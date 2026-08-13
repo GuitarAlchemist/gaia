@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  supported:
+    name: supported (windows-latest, node ${{ matrix.node }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --version
+      - run: node --test
+
+  # DISCOVERY, not a gate. This product is documented Windows-first, NOTICE records
+  # testing on Node v24.12.0 only, and no lane in this evidence chain has ever run the
+  # suite on Linux. A job named `discovery` that fails the workflow exactly as the
+  # `supported` job does is a hard merge gate on an unmeasured platform, and its name
+  # would be claiming something its contract does not. `continue-on-error` makes the
+  # two agree: the result is reported and read, and it does not block.
+  #
+  # The POSIX data-directory branch (`defaultDataDir()` under XDG_DATA_HOME) and the
+  # spoofed-`$HOME` config tests are portable and pass locally, so Linux is plausibly
+  # green. Plausible is not measured. Promote this job to a gate on the first green run
+  # that is actually observed.
+  portability-discovery:
+    name: discovery (ubuntu-latest, node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --test

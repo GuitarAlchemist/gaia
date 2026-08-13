@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "gaia-interagent": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "./src/mcp-server.mjs"
+      ],
+      "cwd": ".",
+      "env": {
+        "GAIA_INTERAGENT_LOCK_TIMEOUT_MS": "10000"
+      }
+    }
+  }
+}

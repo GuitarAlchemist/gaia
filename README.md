@@ -1,0 +1,361 @@
+# gaia-interagent
+
+A durable local coordination bus for Claude Code and Codex sessions.
+Six non-privileged verbs over stdio MCP, an append-only JSONL event log, and adapters
+for visible wmux lanes.
+
+Windows-first. Zero dependencies. No network listener, no remote execution, no shell
+transport, no privileged verb.
+
+---
+
+## Install status
+
+**This is an installation candidate, not an installed plugin.** It has no marketplace
+entry and has not been installed. Fresh, independent Standards and Spec/adversarial
+reviews gate installation — the lane that wrote this cannot review it.
+
+## Quick start
+
+```bash
+node scripts/gaia-interagent.mjs doctor
+node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
+node scripts/gaia-interagent.mjs status
+node scripts/gaia-interagent.mjs verify
+node --test                                   # 286 gates
+```
+
+Structural mutations are dry-run by default. `--apply` performs them.
+
+## The tool surface — exactly six verbs
+
+`register` · `send` · `inbox` · `ack` · `heartbeat` · `handoff`
+
+There is no seventh. Nothing on this surface can approve, merge, push, commit,
+deploy, read credentials, or mutate configuration. Privilege escalation is prevented
+by **absence**, not by a check that could be bypassed.
+
+## Architecture
+
+```
+   Claude Code ──┐
+                 │   stdio JSON-RPC 2.0          ┌────────────────┐
+   Codex ────────┼──► src/mcp-server.mjs ─commit─► src/bus-core.mjs │  pure reducer
+                 │   (six tools, no auth verbs)  └───────┬────────┘  no I/O, no clock
+   wmux lanes ───┘                                       │
+                                              events     ▼
+                                          ┌──────────────────────────┐
+                                          │ events.jsonl             │  append-only
+                                          │ (replay ⇒ full restart)  │  one global lock
+                                          └──────────────────────────┘
+```
+
+| Path | Role |
+| --- | --- |
+| `src/bus-core.mjs` | Pure state machine. `decide` → events, `apply` → state, `replay` → restart. No I/O, no clock, no randomness, no `process.env`. |
+| `src/event-log.mjs` | The only I/O. Lock-directory commit protocol, validating reads, fsynced atomic appends. |
+| `src/mcp-server.mjs` | stdio JSON-RPC server. Injects the clock at the edge so the core stays pure. |
+| `src/mcp-client.mjs` | Minimal MCP client + standalone handshake gate. One handshake, one transport. |
+| `src/lanes.mjs` | The live-lane policy and its evidence. |
+| `src/ecosystem.mjs` | GA/Hari/TARS/IX verdicts, enforced in code; the Codex startup-timeout margin. |
+| `src/templates.mjs` | Placeholder-only client-config templates and the protected-path refusals. |
+| `src/verify.mjs` | Read-only acceptance checks, including the evidence negative controls. |
+| `src/inventory.mjs` | The `inventory-digest/1` tree fixed point: walk, manifest, digest. Reads only. |
+| `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
+| `scripts/bus-cli.mjs` | The low-level six-verb CLI the control script wraps. |
+| `scripts/generate-config.mjs` | Codex / Claude Code config generation into a directory you name. |
+| `scripts/wmux-lanes.mjs` | Lane adapter over `peer-sessions-wmux`. Adapts; never reimplements. |
+| `scripts/tars-mount.mjs` | TARS runtime MCP mount. Zero TARS repo changes. |
+| `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
+| `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
+| `tests/` | 286 `node:test` gates. `node --test`. |
+
+## The authority boundary
+
+- Message bodies are stored and delivered as **`untrusted-text`**. Inbound text grants
+  no approval, push, merge, configuration, credential, or scope authority.
+- Per-message authority is metadata from a fixed allowlist (`read`, `observe`,
+  `suggest`, `draft`, `report`). Everything else is denied, named in the response, and
+  recorded as an `authority.denied` event.
+- `busAuthority` is a frozen constant, identical for every actor, assigned at
+  registration. No message can change it — including the sender's own.
+- `handoff` transfers work. `authorityTransferred` is always `[]`.
+- A `requestedAuthority` that is not an array of strings is **refused**, not coerced:
+  coercing `"approve"` to `[]` would write an audit record saying nothing privileged
+  was asked for, when something was.
+
+## Semantics you must not misread
+
+- **Delivery ≠ completion.** `send` returns
+  `accepted-for-delivery; not read, not agreed, not completed`.
+  `ack` returns `receipt only; not agreement, approval, or completion`.
+- **Stable refs, duplicate names.** Registration mints `act-NNNN`. Two sessions may
+  share a display name; addressing it is **refused as ambiguous with both refs
+  listed**, never silently misrouted.
+- **Explicit return address.** Every message carries `replyTo`, defaulting to the
+  sender.
+- **Stale, not deleted.** Unseen for 30s is `stale` — still registered, still
+  addressable. Partial reachability is normal.
+- **Fail closed.** A lock timeout or a damaged record makes a call write nothing and
+  report `failClosed: true`; the CLIs exit **3**, never 1. `1` is reserved for "the
+  bus answered and said no". That distinction is the difference between *retry with a
+  better address* and *stop and fetch a human*.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | ok |
+| 1 | the answer was no — either the bus refused a call (ambiguous address, wrong recipient, unknown ref) or a read-only lifecycle command returned an unhealthy verdict (see `doctor` below) |
+| 2 | usage error |
+| 3 | fail-closed I/O — lock timeout or corrupt log. **Nothing was written.** No retry helps. |
+
+### `doctor` exits 1 on an unhealthy data directory
+
+`doctor` writes nothing and repairs nothing; its exit code is its verdict. It exits **1**,
+not 0, when the directory replays but is not internally sound:
+
+- the log carries an **address this bus never minted** (`integrityFindings`), or
+- the **correlation issuer has less than one claim window of runway left** —
+  `correlationHeadroom` at or below 1,000,000 of `Number.MAX_SAFE_INTEGER`. That is the
+  fingerprint of a log a pre-fix build poisoned; auto-issue is dead or one accepted claim
+  from it. Non-numeric thread names (`cor-review-lane`) still work, but restoring
+  auto-issue needs a **new data directory** — the log is append-only and nothing repairs it.
+
+Health here is measured on the issuer's remaining runway, which is the same quantity
+admission bounds, so a directory built only from calls the bus answered `ok:true` is never
+condemned for containing them. A corrupt or unreplayable log is a different verdict: **3**.
+
+### `verify` exits 1 on every condition `doctor` does, and on the authority invariants too
+
+`verify`'s evidence checks fall into exactly two classes, and membership is decided by
+one question: **is this check legitimately false on a correct, empty workspace?**
+
+**Authority and integrity — these gate on every run.** None of them is a question a
+correct empty workspace answers badly; each is vacuously or genuinely true on a fresh
+bus, and a log that fails one carries a defect every time it is read.
+
+| Check | What a failure means |
+| --- | --- |
+| `replayable` | the records do not fold into a state at all |
+| `deterministic replay` | replaying the same events twice gives two different states |
+| `no handoff transferred authority` | a handoff moved authority; `authorityTransferred` must be `[]` |
+| `no message was granted a privileged authority` | a grant left the allowlist |
+| `every body is labelled untrusted-text` | a body lost the label that makes it data rather than instructions |
+| `every address in the log belongs to an actor this bus minted` | the log carries a forged address (also a `doctor` condition) |
+| `every correlation id is inside the issuer range` | an id the issuer could never have emitted |
+| `the correlation issuer still has room to mint` | auto-issue is dead or one claim from it (also a `doctor` condition) |
+| `every actor.registered carries the frozen busAuthority` | a registration claims an authority the frozen constant does not contain |
+
+**Evidence richness — advisory by default.** *Is this log a genuine multi-party
+exchange?* A fresh workspace legitimately is not one, so these are reported without
+gating: `at least three actors`, `more than one actor kind`, `a correlated thread of
+three or more messages`, `at least one acknowledgement`, `at least one handoff`. Claim
+that a log *is* evidence with `--evidence <path>` or `--require-evidence` and all five
+gate as well. `evidenceOk` and `evidenceGatesResult` in the payload say which regime the
+run was in. Advisory means reported, never hidden — a fresh workspace still prints its
+five red checks and still exits **0**.
+
+The negative controls always gate, in both regimes: a verifier that cannot fail proves
+nothing.
+
+**The relationship to `doctor`.** `verify` exits **1** with `ok: false` on both
+conditions listed for `doctor` above, and agrees with it there. It also gates on the
+seven other rows in the table, which `doctor` **does not** inspect at all — `doctor`'s
+verdict covers identity and correlation health only. So a log whose handoff transferred
+`approve` makes `verify` exit 1 and leaves `doctor` at 0. The two commands never
+disagree about a directory; `verify` simply asks more of it. Both previously exited 0 on
+such a log while `verify` displayed its own red check saying otherwise, and a reader
+keying on the exit code or on `ok` read that as a pass.
+
+## Inventory digest — binding this tree to a number anyone can recompute
+
+Reviews of this product bind their subject with a tree digest. Until now nothing shipped
+produced one, so each reviewing lane stated a private recipe and hoped the next lane
+guessed the same one, and the older `inventory-digest-1` label attached to an earlier
+snapshot is not derivable from any tree here. A fixed point nobody else can recompute is
+a claim, not evidence.
+
+```
+node scripts/inventory-digest.mjs                      # this tree
+node scripts/inventory-digest.mjs --root <dir> --json  # any tree, as JSON
+```
+
+```
+format=inventory-digest/1
+root=<the absolute path measured>
+count=<files hashed>
+bytes=<total bytes hashed>
+digest=ordinal-path-bytes-sha256/1 <64 hex chars>
+```
+
+`inventory-digest/1` is the output contract; `ordinal-path-bytes-sha256/1` is the hash
+recipe it emits. **The digest is never printed without the recipe beside it**, because a
+bare hex string is exactly what gets copied into a review and later cannot be reproduced.
+
+### The recipe, exactly
+
+1. Walk every **regular file** under the root, skipping any directory named `.git` or
+   `node_modules` at any depth. Nothing else is skipped — dotfiles and hidden
+   directories are ordinary files and are included. Empty directories contribute
+   nothing, so two trees differing only in one share a digest.
+2. Per file: the path **relative to the root** with every separator rewritten to `/`,
+   its exact **byte count**, and the **SHA-256 of its exact bytes** as lowercase hex.
+3. One line per file: `relative/path|byte-count|file-sha256`.
+4. Sort by path, **ordinal** — by UTF-16 code unit. Never `localeCompare`, never
+   case-folded. `B.txt` < `Z.txt` < `_.txt` < `a.txt`.
+5. Join with LF. **No trailing LF.**
+6. The digest is the SHA-256 of the UTF-8 encoding of that document, lowercase hex.
+
+### Why it reproduces elsewhere, and where it will not
+
+- **Raw bytes, never decoded text.** A CRLF checkout and an LF checkout of the same
+  sources are different trees and get different fixed points. This repository pins
+  `* -text` in `.gitattributes` so a clean checkout on any host reproduces the bytes
+  that were hashed; without that pin the recipe would work only on the host that wrote
+  it. The tree deliberately contains files of both regimes, so the pin is load-bearing
+  and testable rather than theoretical.
+- **Nothing absolute is hashed.** The document holds relative, `/`-separated paths only,
+  so the same tree at any location on any platform yields the same digest.
+- **On POSIX a backslash is a legal character in a file name** and is left untouched;
+  on Windows it is a separator and cannot occur in a name, so rewriting it is lossless.
+- **An entry that is neither a regular file nor a directory is refused by name**, not
+  skipped. Silently skipping would produce a fixed point of a tree that is not the one
+  on disk. Symbolic links, junctions and device nodes therefore stop the command.
+- **It never writes inside the tree it measures.** There is no flag that makes it. A
+  `--manifest <path>` inside `--root` is **refused** — decided on filesystem identity,
+  so an 8.3 alias, a junction or an admin-share UNC spelling of the root cannot walk
+  around it — because a manifest landing in the tree changes the tree, and the digest
+  printed beside it would then not be the digest of the tree asked about.
+- **Deliberate compatibility difference.** This adopts `ordinal-path-bytes-sha256/1` as
+  an independent review stated and used it, so the value that review published for this
+  tree is reproducible here. It does **not** try to reproduce the older
+  `inventory-digest-1` label: that value is not derivable from any tree this product
+  ships, and inventing a recipe that happened to hit it would be fitting a number rather
+  than defining one. Fixed points from before `src/inventory.mjs` existed are labels,
+  not digests.
+
+This README states no digest of its own tree. A published number would be invalidated by
+the edit that published it, which is the same self-reference the `--manifest` refusal
+exists to prevent. Run the command.
+
+## Lanes: 4 is the supported maximum
+
+**Four live lanes per workspace.** `scripts/wmux-lanes.mjs` refuses a fifth. *Live*
+means a surface the peer tool currently reports `running` — not a lane that has spoken
+to the bus recently. Nothing heartbeats a lane actor, so a lane that is thinking rather
+than calling the bus is still a live lane and still counts. Retiring a lane frees its
+slot.
+
+- **6** is the *next validation target*. It is **not** validated with real
+  Claude/Codex lanes.
+- **8** is **unproven with real clients**. The 8- and 16-writer measurements that
+  exist used identical Node workers; they prove id uniqueness, JSONL integrity and
+  deterministic replay under contention, and nothing about throughput, heterogeneity,
+  or a log of 10⁴–10⁵ events.
+
+`--experimental-lanes` accepts a limit up to 8 and labels the run experimental. It
+changes no evidence. Above 8 is refused outright. See `docs/scale-and-lanes.md`.
+
+## Client configuration
+
+```bash
+node scripts/generate-config.mjs --client codex  --out <your-scratch-dir> --write
+node scripts/generate-config.mjs --client claude --out <your-scratch-dir> --write
+```
+
+`--out` is required and there is no default. Any path inside `~/.codex`, `~/.claude`,
+`~/.claude.json` or `~/.agents` is **refused**, and so is your home directory itself —
+a client launched from `$HOME` auto-loads a `.mcp.json` found there, so writing one
+into `$HOME` would install an auto-loading MCP configuration user-wide. A
+*subdirectory* of `$HOME` is fine. This product never edits user-global client
+configuration and offers no flag that would; `--force` cannot reach a refused path,
+because the refusal precedes the overwrite decision.
+
+**The refusal is decided on filesystem identity, not on spelling.** One directory has
+many legal names, and a guard that compares strings refuses some of them and admits the
+rest — which is a refusal claim that is false as written. `--out` is compared by volume
+and file id where the path exists; by its canonical spelling where it does not; and,
+where neither of those can answer — a root that does not exist yet, named through a
+spelling `realpath` will not reduce — by the file id of the nearest ancestor that *does*
+exist plus the segments below it. So all of these name `~/.codex` and all of them are
+refused, **whether or not `~/.codex` has been created yet**:
+
+| Spelling | Example |
+| --- | --- |
+| case variant (Windows/macOS) | `~\.Codex`, `~\.CODEX` |
+| trailing, doubled or forward separators | `~\.codex\`, `~\\.codex`, `~/.codex` |
+| dot segments | `~\.codex\.`, `~\x\..\.codex` |
+| 8.3 short name | `~\CODEX~1` |
+| extended-length / device namespace | `\\?\…\.codex`, `\\.\…\.codex` |
+| admin-share UNC for the same volume | `\\localhost\C$\…\.codex` |
+| a junction or symlink pointing at it | `~\my-link` |
+
+It runs in the other direction too, and that half is load-bearing: a directory that is
+**not** one of those roots stays writable however unusual its spelling — a junction to a
+directory nobody protects, a `\\?\` spelling of your own scratch directory, or a sibling
+whose name merely starts the same way (`~/.codex-scratch`). On Linux `~/.Codex` and
+`~/.codex` are genuinely different directories you own, and both stay writable; a link
+to `~/.codex` there is still refused, because identity is a filesystem fact rather than
+a property of the name.
+
+- Codex: load with `CODEX_HOME=<out>`, or copy to a trusted project's
+  `.codex/config.toml`. The generated `startup_timeout_sec` is deliberately larger
+  than the bus lock timeout — see `docs/crash-recovery.md`.
+- Claude Code: `claude --strict-mcp-config --mcp-config <out>/.mcp.json`, which makes
+  that file the only MCP source for the session.
+
+## Ecosystem adapters
+
+| Repo | Verdict | Enforced how |
+| --- | --- | --- |
+| GA | `ADAPTER_ONLY` | `scripts/ga-watch.mjs` tails GA JSONL read-only and never writes GA. |
+| TARS | `ADAPTER_ONLY` | `scripts/tars-mount.mjs` emits a runtime mount; no TARS repo change. |
+| Hari | `REJECT` | `assertIntegrationAllowed('hari')` throws. No integration ships. |
+| IX | `DEFER` | `assertIntegrationAllowed('ix')` throws. Revisit on the two trigger conditions. |
+
+Claude's native `SendMessage` is **not** a transport here: it addresses Claude Code
+sessions only, on macOS/Linux, and cannot reach a non-Claude client. See
+`docs/ecosystem-adapters.md`.
+
+## Known limitations
+
+1. **Per-call cost is O(events × actors).** `apply` ages every actor on every event,
+   under one global lock, on a log that never compacts. No projection, index, or
+   cached tail offset is implemented, and none is claimed.
+2. **Trust is positional, not cryptographic.** Any process that can spawn the server
+   can register as any actor and send as any ref. Every guarantee is about
+   *authority*, not *authentication*.
+3. **Locks are never broken, only reported.** Auto-breaking a stale lock is a TOCTOU
+   with no atomic compare-and-delete available. A stuck lock needs a human.
+4. **Fail-closed means unavailable, not degraded.** A wedged bus stops; it does not
+   partially serve.
+5. **No real Claude+Codex smoke was run in this lane.** See the product handoff for
+   exactly what was and was not exercised.
+6. **The bundled `.mcp.json` uses a relative server path.** Its resolution at plugin
+   install time is unverified, because this candidate has not been installed.
+7. One data directory is local-filesystem only. The lock is a local `mkdir`; do not
+   share a data directory over a network filesystem.
+8. **The evidence gate attests shape, not provenance.** `verify --require-evidence`
+   checks that a log replays, that every address is a ref this bus minted, that its
+   correlation ids are inside the issuer range and that the issuer still has runway to
+   mint, that a multi-party correlated exchange
+   with an ack and a handoff is present, and that the authority invariants are intact.
+   Nothing in the event schema binds a record to a producing process, so a log this
+   product generated by itself passes every check. `evidenceOk: true` means well-formed
+   and untampered; it is never proof that two real clients talked to each other — see
+   limitation 5.
+
+## Data
+
+`%LOCALAPPDATA%\gaia-interagent\data` on Windows (`$XDG_DATA_HOME` or
+`~/.local/share` elsewhere). Override with `GAIA_INTERAGENT_DATA_DIR` or `--data-dir`.
+Nothing is ever written inside the installed plugin.
+
+The directory is **created by the first write only** — `initialize --apply`, or the
+first bus verb that commits an event. Configuring a client to spawn the bundled server,
+starting that server, and running `status`, `doctor`, `verify` or `uninstall-preview`
+all create nothing.
+
+Run `node scripts/gaia-interagent.mjs uninstall-preview` to see exactly what an
+uninstall removes — and what it does not.
