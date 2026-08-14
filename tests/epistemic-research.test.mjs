@@ -68,6 +68,10 @@ const validInput = () => ({
 test('builds a deterministic, content-addressed advisory research proposal', () => {
   const first = buildResearchProposal(validInput());
   const second = buildResearchProposal(structuredClone(validInput()));
+  const offsetInput = validInput();
+  offsetInput.createdAt = '2026-08-14T13:30:00.000-04:00';
+  offsetInput.expiresAt = '2026-08-15T13:30:00.000-04:00';
+  const normalized = buildResearchProposal(offsetInput);
 
   assert.equal(first.schema, RESEARCH_PROPOSAL_SCHEMA);
   assert.equal(first.kind, 'epistemic-research-proposal');
@@ -77,6 +81,9 @@ test('builds a deterministic, content-addressed advisory research proposal', () 
   assert.equal(first.revision.algorithm, 'sha256');
   assert.equal(first.revision.digest, first.proposalId.slice(4));
   assert.equal(encodeResearchProposal(first), encodeResearchProposal(second));
+  assert.equal(first.createdAt, '2026-08-14T17:30:00.000Z');
+  assert.equal(normalized.createdAt, first.createdAt);
+  assert.equal(normalized.expiresAt, first.expiresAt);
   assert.equal(first.authority.executionAuthorized, false);
   assert.deepEqual(first.authority.requested, []);
 });
@@ -98,7 +105,7 @@ test('the existing send verb carries the proposal as untrusted advisory text', (
     to: 'demerzel',
     kind: 'epistemic-research-proposal',
     text,
-    requestedAuthority: ['suggest'],
+    requestedAuthority: [],
   });
 
   assert.equal(sent.error, null);
@@ -107,7 +114,7 @@ test('the existing send verb carries the proposal as untrusted advisory text', (
   assert.equal(message.text, text);
   assert.equal(message.trust, 'untrusted-text');
   assert.equal(message.authority.effect, 'none');
-  assert.deepEqual(message.authority.granted, ['suggest']);
+  assert.deepEqual(message.authority.granted, []);
 });
 
 test('encoding refuses a tampered or widened materialized proposal', () => {
