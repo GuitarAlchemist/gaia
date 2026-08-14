@@ -70,6 +70,13 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `tests/` | 286 `node:test` gates. `node --test`. |
 
+Engineering and research work is governed by
+[`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
+In particular, load-bearing interfaces and seams use **Design It Twice** before
+implementation, while experiments require falsifiable hypotheses, controls,
+immutable provenance, quantified uncertainty, and independent replay. This is a
+process constraint, not runtime authority and not evidence of integration.
+
 ## The authority boundary
 
 - Message bodies are stored and delivered as **`untrusted-text`**. Inbound text grants

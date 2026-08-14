@@ -175,9 +175,32 @@ test('a skill ships and has the frontmatter plugin validation requires', () => {
   }
 });
 
-test('LICENSE and NOTICE ship', () => {
+test('LICENSE, NOTICE, and the engineering doctrine ship', () => {
   assert.ok(existsSync(join(ROOT, 'LICENSE')));
   assert.ok(existsSync(join(ROOT, 'NOTICE')));
   assert.ok(readFileSync(join(ROOT, 'NOTICE'), 'utf8').includes('peer-sessions-wmux'),
     'NOTICE credits the wmux helper this product adapts rather than reimplements');
+
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  const doctrinePath = join(ROOT, 'docs', 'engineering-and-research-principles.md');
+  assert.ok(existsSync(doctrinePath), 'the normative engineering doctrine ships');
+  assert.ok(readme.includes('docs/engineering-and-research-principles.md'),
+    'the product entry point links to the doctrine');
+
+  const doctrine = readFileSync(doctrinePath, 'utf8');
+  const requiredPrinciples = [
+    'ENG-01', 'ENG-02', 'ENG-03', 'ENG-04', 'ENG-05', 'ENG-06', 'ENG-07', 'ENG-08',
+    'SCI-01', 'SCI-02', 'SCI-03', 'SCI-04', 'SCI-05', 'SCI-06', 'SCI-07',
+  ];
+  for (const id of requiredPrinciples) {
+    assert.equal(doctrine.match(new RegExp(`^### ${id} —`, 'gm'))?.length ?? 0, 1,
+      `${id} is declared exactly once`);
+  }
+  for (const requiredPhrase of [
+    'Freshness, quality, acceptance, and authority remain independent axes.',
+    'A marker is evidence that work stopped, not evidence that its claims are true.',
+    'Alternative generation is advisory.',
+  ]) {
+    assert.ok(doctrine.includes(requiredPhrase), `doctrine retains: ${requiredPhrase}`);
+  }
 });
