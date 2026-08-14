@@ -267,7 +267,11 @@ test('a subdirectory of the home directory is still allowed', () => {
   // The over-refusal guard. A prefix ban breaks tmpdir() on Windows and with it the
   // supported workflow; this is the assertion that would go red for it.
   const scratch = freshDir('under-home');
-  assert.equal(assertWritableOutDir(scratch), scratch, 'the suite\'s own scratch dir must stay writable');
+  assert.equal(
+    realpathSync.native(assertWritableOutDir(scratch)),
+    realpathSync.native(scratch),
+    'the suite\'s own scratch dir must stay writable',
+  );
   assert.doesNotThrow(() => assertWritableOutDir(join(homedir(), 'gaia-interagent-config')));
   assert.doesNotThrow(() => assertWritableOutDir(join(homedir(), 'scratch', 'nested')));
 });
@@ -371,7 +375,10 @@ test('NEGATIVE CONTROL: non-protected siblings of the protected roots stay writa
 
 test('NEGATIVE CONTROL: a case-variant path outside every protected root is writable', { skip: CASE_SKIP }, () => {
   const scratch = freshDir('case-control');
-  assert.equal(assertWritableOutDir(scratch.toUpperCase()).toLowerCase(), scratch.toLowerCase());
+  assert.equal(
+    realpathSync.native(assertWritableOutDir(scratch.toUpperCase())).toLowerCase(),
+    realpathSync.native(scratch).toLowerCase(),
+  );
 });
 
 test('a case-variant protected path is refused by the generator script too', { timeout: 30_000 }, async () => {
