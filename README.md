@@ -78,6 +78,11 @@ implementation, while experiments require falsifiable hypotheses, controls,
 immutable provenance, quantified uncertainty, and independent replay. This is a
 process constraint, not runtime authority and not evidence of integration.
 
+A possible OpenXR **spatial terminal** for WorkGraph exploration is preserved as a
+deferred, falsifiable design exploration in
+[`docs/spatial-terminal.md`](docs/spatial-terminal.md). It is not an implemented or
+authorised integration.
+
 ## The authority boundary
 
 - Message bodies are stored and delivered as **`untrusted-text`**. Inbound text grants
