@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 289 gates
+node --test                                   # 298 gates
 ```
 
 Structural mutations are dry-run by default. `--apply` performs them.
@@ -57,6 +57,7 @@ by **absence**, not by a check that could be bypassed.
 | `src/mcp-server.mjs` | stdio JSON-RPC server. Injects the clock at the edge so the core stays pure. |
 | `src/mcp-client.mjs` | Minimal MCP client + standalone handshake gate. One handshake, one transport. |
 | `src/epistemic-research.mjs` | Pure, content-addressed advisory research-proposal builder; it executes nothing and changes no bus verb. |
+| `src/context-capsule.mjs` | Experimental exact-pin, read-only fact projection with deterministic receipts; no bus, model, search, or persistence. |
 | `src/lanes.mjs` | The live-lane policy and its evidence. |
 | `src/ecosystem.mjs` | GA/Hari/TARS/IX verdicts, enforced in code; the Codex startup-timeout margin. |
 | `src/templates.mjs` | Placeholder-only client-config templates and the protected-path refusals. |
@@ -69,7 +70,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/tars-mount.mjs` | TARS runtime MCP mount. Zero TARS repo changes. |
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
-| `tests/` | 289 `node:test` gates. `node --test`. |
+| `tests/` | 298 `node:test` gates. `node --test`; data-driven cases can make the runner report more executed tests than top-level `test()` declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
