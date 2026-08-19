@@ -81,6 +81,12 @@ implementation, while experiments require falsifiable hypotheses, controls,
 immutable provenance, quantified uncertainty, and independent replay. This is a
 process constraint, not runtime authority and not evidence of integration.
 
+Coordination observability follows a discrete-first mechanics model described in
+[`docs/discrete-coordination-mechanics.md`](docs/discrete-coordination-mechanics.md):
+typed balance, queue, graph-gradient, stability, and fatigue observables are valid
+research candidates, while continuum stress tensors, torseurs, mixed-unit stress
+scalars, and mechanics-derived automatic routing remain deferred or rejected.
+
 A possible OpenXR **spatial terminal** for WorkGraph exploration is preserved as a
 deferred, falsifiable design exploration in
 [`docs/spatial-terminal.md`](docs/spatial-terminal.md). It is not an implemented or
