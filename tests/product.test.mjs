@@ -204,3 +204,27 @@ test('LICENSE, NOTICE, and the engineering doctrine ship', () => {
     assert.ok(doctrine.includes(requiredPhrase), `doctrine retains: ${requiredPhrase}`);
   }
 });
+
+test('the shipped skill links holdout-safe reporting doctrine, and the doctrine states its two load-bearing rules', () => {
+  // This gate checks a *pointer* and two *sentences*. It does not, and cannot, check
+  // that a reviewer obeyed the doctrine: freehand prose has no machine-checkable
+  // observable, and nothing here inspects a sealed store or proves containment. The
+  // doctrine is doctrine; calling it a control would be the dishonesty it forbids.
+  const doctrinePath = join(ROOT, 'docs', 'holdout-safe-reporting.md');
+  assert.ok(existsSync(doctrinePath), 'the holdout-safe reporting doctrine ships');
+
+  const skill = readFileSync(join(ROOT, 'skills', 'gaia-interagent', 'SKILL.md'), 'utf8');
+  assert.ok(skill.includes('docs/holdout-safe-reporting.md'),
+    'the shipped skill points at the doctrine, so a lane that loads the skill can find it');
+
+  const doctrine = readFileSync(doctrinePath, 'utf8');
+  assert.ok(doctrine.includes('A quantity leaks if it is a function of both revisions.'),
+    'the doctrine states the cross-revision leak rule verbatim');
+  assert.ok(/snapshot trees, not as a commit range/.test(doctrine)
+    && /\bprecondition\b/.test(doctrine),
+    'the doctrine states the snapshot-review precondition of sealed mode');
+  assert.ok(doctrine.includes('changed/unchanged vector'),
+    'the doctrine names the prohibited quantity by its own name');
+  assert.match(doctrine, /^- Do not publish the path-level changed\/unchanged vector/m,
+    'the doctrine prohibits publishing the cross-revision changed/unchanged vector');
+});
