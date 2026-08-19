@@ -1,16 +1,16 @@
 # Holdout-safe reporting — doctrine
 
-**Status: normative doctrine. Not a control, and not machine-enforced.**
+**Status: normative doctrine, with a structural control for six official artifact classes.**
 
 This document tells a curator, a reviewer and a decision-maker what may and may not appear in an
-open document about a lineage that has been declared sealed. Nothing in this repository checks that
-you obeyed it. A shipped gate checks that this file exists, that the skill points at it, and that it
-still states the two rules below; no gate can check the prose you write, and calling this a control
-would be exactly the dishonesty it forbids.
+open document about a lineage that has been declared sealed. `src/reporting-context.mjs` enforces a
+closed public schema for six official artifact classes; it does not inspect arbitrary prose. No
+gate can check every sentence someone writes, and calling that broader prose channel controlled
+would be exactly the dishonesty this doctrine forbids.
 
-It is doctrine because the leak channel it covers — a human writing a sentence — has no
-machine-checkable observable. A control whose failure mode is "nothing happens" is not a control.
-That is stated here, in the doctrine itself, so no later reader mistakes its scope.
+It remains doctrine because the residual leak channel — a human writing a sentence outside the
+finalizer — has no machine-checkable observable. The structural control and the prose doctrine are
+separate claims so neither is mistaken for the other.
 
 ## 1. The one rule
 
@@ -53,11 +53,11 @@ written down:
 | Scope statement in a review | may be a diff | written forward, about the successor alone |
 | Continuity (that the successor succeeds the predecessor) | attested by the reviewer | attested by the curator, not the reviewer |
 
-The obligation covers **every open document class**, not a fixed list: handoffs, Standards reviews,
-Spec reviews, milestone reconciliations, preflights, readiness reports, bus message bodies, commit
-messages, and any class invented after this file was written. The test is not "is it on the list"
-but: **could a future evaluator be obliged to read this document?** If yes, it is an open document
-and this doctrine binds it.
+The structural R1 policy covers exactly `handoff`, `standards-review`, `spec-review`,
+`reconciliation`, `preflight`, and `readiness`. That list is closed: a seventh class requires a new
+policy digest and activation receipt before sealing. The doctrine remains broader and covers bus
+message bodies, commit messages, and any future open class. Its test is not "is it on the list"
+but: **could a future evaluator be obliged to read this document?** If yes, the doctrine binds it.
 
 ## 4. Prohibited in any open document about a sealed lineage
 
@@ -139,7 +139,7 @@ made elsewhere, under someone's own authority.
 |---|---|---|
 | **Curator** | hold both revisions; declare a lineage sealed before the successor exists; route cross-revision material to the sealed store | evaluate the population — a curator holds the vector by construction |
 | **Decision-maker** | release sealed material to a named reader, producing one append-only record naming reader and released digest | confer any capability by releasing; the record unlocks nothing |
-| **Reviewer** | review the successor on its own terms and render a verdict under their own authority | attest the relationship between successor and predecessor; read the seal, except after a release, which permanently removes them from the evaluator pool |
+| **Reviewer** | inspect the evidence needed for a trustworthy verdict, including both revisions when necessary; send detailed observations to the curator channel; publish only the canonical public report | attest continuity as an authority fact; publish diff-derived evidence; evaluate that population after becoming exposed |
 | **Evaluator** | hold frozen identities; read the corpus once | read the seal, ever — reading disqualifies |
 | **Process owner** | author and amend this doctrine | change any behaviour by amending it |
 
@@ -156,17 +156,17 @@ the bus is incomplete.
 
 If you are reviewing a revision of a sealed lineage:
 
-1. Review the successor. Do not request the predecessor, and do not fetch it if you can avoid it.
-2. Recompute the successor's fixed point yourself from the tree you hold, and cite it with its
-   recipe. A review that cannot show it measured something has verified nothing.
-3. Write the scope statement forward. Describe what exists and what it is for. If a sentence needs
-   the word "changed", "still", "unchanged", "now", "no longer", or "as before" to make sense, it is
-   probably a cross-revision statement wearing prose.
-4. Report tests and cleanliness as totals over your one tree.
-5. Do not attest continuity. That the successor really descends from the predecessor is discharged
-   by the curator, not by you. Say so in your review rather than implying you checked it.
-6. If you cannot render a verdict without the diff, **say that in the review and stop**. That is a
-   real finding about this doctrine, not a failure on your part — see §13.
+1. Use all evidence necessary for a trustworthy review. If that includes the predecessor or a
+   diff, treat yourself as exposed and permanently ineligible to evaluate this population.
+2. Recompute the successor's fixed point yourself from the tree you hold. Put detailed paths,
+   comparisons, and observations in private evidence routed through the curator's explicitly
+   bound write function. Keep the readable Adapter in the trusted composition root.
+3. Produce the official artifact through `finalizeInventoryRoutedReport`; publish only its returned
+   canonical JSON. Do not append a prose scope statement or a private diagnostic.
+4. Do not attest continuity as an authority fact. The policy and activation receipt record the
+   curator-side causal claim; neither the reviewer nor the finalizer grants it.
+5. If the structural finalizer is unavailable or the routing policy is ambiguous, refuse. Do not
+   fall back to a freehand sealed review.
 
 If you are writing any other open document — a handoff, a reconciliation, a message body — apply §4
 and §5 unchanged. The document class does not matter; the obligation to a future evaluator does.
@@ -180,8 +180,9 @@ When something is ambiguous, the safe direction is to **write less and refuse ra
 - If you are unsure whether a document is open, treat it as open.
 - If a seal, a store or a release record is missing, damaged or contradictory, stop and report it.
   Produce no partial document; a partial open document is still a published one.
-- A refusal produces no artifact on any path and no diagnostic quoting a path from either revision.
-  Error text is an open document too.
+- A refusal produces no partial **open** artifact and no diagnostic quoting a path from either
+  revision. Because the private payload is written before its public pointer, a later refusal may
+  leave an unreferenced object in the sealed store. That orphan is private, not published.
 
 There is no state in which publishing a doubtful quantity is the recoverable choice. Refusing costs
 a round trip; publishing costs the population permanently.
@@ -191,8 +192,9 @@ a round trip; publishing costs the population permanently.
 These are open, and this doctrine does not close them. Each is recorded so it cannot later be
 mistaken for a settled property.
 
-- **`UNKNOWN{ReviewSufficiencyUnderSeal}`** — whether two independent reviewers can render a
-  trustworthy verdict from a single-revision receipt alone. Untested. Gate: §13.
+- **`UNKNOWN{ReviewSufficiencyUnderSeal}`** — two independent reviewers rendered verdicts from one
+  already-approved single-revision capsule once. That is one observation, not a distribution. The
+  structural finalizer no longer forces future reviewers to sacrifice necessary private evidence.
 - **`UNKNOWN{ExposureEnumerability}`** — whether exposure is enumerable in practice, given that any
   holder of both revisions can re-derive the vector without registering. A release register is a
   list of names, never a list of labels, and is partial evidence, never an invariant.
@@ -204,14 +206,15 @@ mistaken for a settled property.
   diff was the reviewer's primary instrument. Distinct from sufficiency: not that a verdict is
   impossible, but that it is degraded. To be measured, not assumed away.
 
-## 13. Required stop gate before any module is built
+## 13. Historical stop gate and current prerequisite
 
-**No lineage-receipt module, sealed store, manifest writer, exposure register or command-line tool
-may be implemented until the review-sufficiency experiment has been run and its result recorded.**
+The review-sufficiency experiment was run before the lineage-receipt module was built. Its two
+independent signable verdicts are bound in `docs/holdout-safe-reporting-design.md`; this historical
+gate is complete and must not be represented as pending.
 
 The order is fixed, and the order matters more than the design:
 
-1. This doctrine, and the skill pointer to it. *(This step.)*
+1. This doctrine, and the skill pointer to it.
 2. The snapshot-review precondition of §6, declared.
 3. **The review-sufficiency experiment.** Two independent reviewers, working from an already-burned
    revision and a public single-revision receipt alone, each attempt a verdict. Run it on an
@@ -219,11 +222,12 @@ The order is fixed, and the order matters more than the design:
    burned. Record the outcome whichever way it goes.
 4. Only then, if the experiment passes: the module, written test-first, under its own independent
    Standards and Spec review, by an author who is not the reviewer.
-5. Only then: a curator constituted, and a first seal minted.
+5. Only then: a curator constituted, and a first seal minted. Neither this document nor the R1
+   finalizer performs that step.
 
-Step 3 is a genuine decision point. **If the reviewers report that a single-revision receipt is
-insufficient for a trustworthy verdict, stop.** Building the module anyway would trade a real
-control — independent review — for a statistical property the module cannot deliver on its own.
+Before any future `t_seal`, an exact inventory-routing policy and its activation receipt must be in
+force. The current policy closes six official artifact classes. Ambiguity, a missing activation
+binding, or a new class under the old digest is a typed refusal, not a reason to publish freehand.
 
 ## 14. What this doctrine does not do
 

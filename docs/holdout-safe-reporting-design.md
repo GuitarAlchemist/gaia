@@ -212,3 +212,84 @@ Reject this seam if any of the following becomes true:
   predecessor divergence therefore names the side only; the successor's own digests, being
   single-revision, still travel. This is a tightening, not a narrowing of a control, and it is
   recorded here so a reviewer rules on it rather than discovering it.
+
+## 12. Inventory-routing amendment before `t_seal`
+
+The lineage receipt protects one structured output, but official handoffs and reviews could still
+publish their own cross-revision prose beside it. Before a future `t_seal`, the reporting process
+therefore needs one structural entry point that owns the split between private evidence and the
+public commitment. This amendment records that seam; it authorises no seal or publication.
+
+### 12.1 Design It Twice
+
+Three materially different interfaces were considered:
+
+| Interface | Depth and locality | Principal failure mode | Decision |
+|---|---|---|---|
+| Six class-specific Markdown templates | shallow; policy duplicated in every producer | one template drifts, a future class bypasses the others, and arbitrary prose remains | reject |
+| A validator scanning completed prose | apparently central but semantically shallow | synonyms, encodings, and document length leak without matching a forbidden token | reject |
+| One typed finalizer over `buildLineageReceipt` | deep; one call owns validation, channel order, public schema, and delegation | callers can bypass it with freehand prose, which remains an explicit doctrine residual | select |
+
+A curator service or gateway was also considered. It would provide stronger process isolation but
+would add persistence, deployment, and authentication before a second real adapter exists. Defer
+it until two consumers demonstrate that the in-process seam is insufficient.
+
+### 12.2 Selected interface
+
+`finalizeInventoryRoutedReport(request, sealedWrite)` accepts an exact policy, one of six exact
+artifact classes, producer and peer roles, input receipt digests, an existing lineage declaration,
+and either open or private evidence. In sealed mode it writes canonical private evidence first,
+then delegates to `buildLineageReceipt`, then returns a canonical closed-field public report. It
+returns neither detailed evidence nor the sealed lineage manifest. In unsealed mode it preserves
+ordinary open evidence and the existing unsealed receipt without a write capability.
+
+Policy version 1 closes exactly these classes: `handoff`, `standards-review`, `spec-review`,
+`reconciliation`, `preflight`, `readiness`. A new class cannot inherit the old policy by analogy;
+it requires a new policy digest and activation receipt before sealing.
+
+### 12.3 Invariants and refusals
+
+- Private evidence is durable before the lineage manifest; no public report exists until both
+  writes succeed. A later failure can leave a private orphan, never a partial public artifact.
+- The returned JSON contains no arbitrary prose and is canonical, deeply frozen, and independent
+  of input receipt ordering.
+- Curator, Standards reviewer, and Spec reviewer refs are distinct. Each artifact class has one
+  exact producer role. These refs are assertions, not authentication or delegated authority.
+- Detailed Standards and Spec evidence may inspect both revisions privately. Review quality is not
+  traded away; exposure disqualifies that reviewer from later evaluating the population.
+- The six bus verbs remain exactly `register`, `send`, `inbox`, `ack`, `heartbeat`, `handoff`.
+- Typed refusals are bare and leak-free: `RoutingPolicyRequired`, `RoutingPolicyDigestMismatch`,
+  `RoutingPolicyOrderUnverifiable`, `ArtifactClassNotRouted`, `ReportFieldSetViolation`,
+  `RoleSeparationViolation`, `SealedSinkRequired`, `SealedSinkForbidden`, `ArtifactConflict`.
+
+### 12.4 Negative controls
+
+The minimum test surface refuses a missing, duplicate, or extra routed class; unknown classes;
+open prose in sealed mode; private evidence in unsealed mode; a missing write capability or a
+readable Adapter passed in its place; policy or
+activation mismatches; curator/reviewer collapse; wrong producer roles; non-canonical private data;
+and sink diagnostics containing private paths. It also proves all six positive classes, private-
+before-manifest ordering, deterministic input ordering, successor-safe public JSON, and unchanged
+unsealed behaviour.
+
+### 12.5 Store, migration, and reversibility
+
+A curator-only sealed store is required for the claimed process boundary. Producers receive one
+captured write function; curator access control is supplied outside this module. The finalizer
+accepts no Adapter object, so prototype methods, getters, and readable surfaces do not cross the
+seam. It also owns and freezes a descriptor-validated canonical copy of the request before its
+first asynchronous write. This JavaScript capability is still not cryptographic isolation when
+code shares one operating-system principal, and the design must not claim otherwise.
+
+Open reports remain signable because the finalizer returns canonical UTF-8 JSON containing fixed
+policy, activation, evidence, and lineage commitments without publishing changed-path vectors.
+Signing is deliberately outside this module; a signature would attest those bytes under an
+external identity system, not make the hidden evidence public.
+
+The amendment is freely reversible until an external consumer cites an R1 report. Thereafter it is
+migratable: retain the canonical report preimage, policy and activation receipts, and support the
+old schema while a new policy version is activated. Never reinterpret an old digest in place.
+
+Reject or redesign the seam if a meaningful independent verdict cannot be produced while detailed
+evidence stays private; a deployed sink is readable by producers despite its declared boundary; an
+unknown class reaches publication; or a seventh bus verb becomes necessary.

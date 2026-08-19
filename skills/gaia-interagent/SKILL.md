@@ -95,9 +95,12 @@ counts, no diff stat, and not even which predecessor a successor descends from.
 Single-revision facts (that tree's own fixed point, its cleanliness, its test totals)
 stay publishable. Sealing is forward-only; nothing restores a lineage already published.
 
-This is doctrine, not enforcement: no check here reads your prose. Read
-`docs/holdout-safe-reporting.md` before writing any open document — a review, a
-handoff, a message body — about a sealed lineage.
+Freehand prose remains doctrine: no check here can mediate every sentence. For an official
+handoff, Standards review, Spec review, reconciliation, preflight, or readiness artifact, read
+`references/reporting-context-template.md` and publish only the structural finalizer's returned
+canonical report. Review quality is not weakened: sealed detailed evidence goes to the curator
+channel, while the open artifact carries commitments only. Read `docs/holdout-safe-reporting.md`
+before writing any other open document or message body about a sealed lineage.
 
 ## Do not
 

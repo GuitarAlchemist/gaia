@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 314 gates
+node --test                                   # 326 gates
 ```
 
 Structural mutations are dry-run by default. `--apply` performs them.
@@ -64,6 +64,7 @@ by **absence**, not by a check that could be bypassed.
 | `src/verify.mjs` | Read-only acceptance checks, including the evidence negative controls. |
 | `src/inventory.mjs` | The `inventory-digest/1` tree fixed point: walk, manifest, digest. Reads only. |
 | `src/lineage-receipt.mjs` | `gaia-lineage-receipt/1`: one open receipt returned, one sealed cross-revision manifest handed to a caller-supplied sink and never returned. Reads only. |
+| `src/reporting-context.mjs` | Structural two-channel finalizer for official inventory-routed reports; sealed details cross one captured write capability and only canonical commitments return. |
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
 | `scripts/bus-cli.mjs` | The low-level six-verb CLI the control script wraps. |
 | `scripts/generate-config.mjs` | Codex / Claude Code config generation into a directory you name. |
@@ -72,7 +73,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 314 `node:test` gates. `node --test`; data-driven cases can make the runner report more executed tests than top-level `test()` declarations. |
+| `tests/` | 326 `node:test` gates. `node --test`; data-driven cases can make the runner report more executed tests than top-level `test()` declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
@@ -327,6 +328,27 @@ cryptographic**. Sealing is forward-only; burned lineages stay burned. No bus ve
 none is widened, and no digest recipe is introduced. The decision, the alternatives, the
 invariants and the reversibility trigger are recorded in
 [`docs/holdout-safe-reporting-design.md`](docs/holdout-safe-reporting-design.md).
+
+### Inventory-routed official reports
+
+`finalizeInventoryRoutedReport(request, sealedWrite)` is the single structural entry point for the
+policy's six official classes: `handoff`, `standards-review`, `spec-review`, `reconciliation`,
+`preflight`, and `readiness`. In sealed mode it writes canonical private evidence to the
+caller-supplied curator write function, delegates the lineage commitment to
+`buildLineageReceipt`, and returns only canonical `gaia-inventory-routed-report/1` JSON. Detailed
+reviews can therefore use both revisions privately without publishing their changed-path vector.
+
+The finalizer accepts the function itself, not an Adapter object. It synchronously copies the
+validated request into an immutable canonical value before the first write, then uses that owned
+value for both its content commitment and the sealed write. A readable Adapter may remain in the
+trusted composition root, but only its explicitly bound `writeSealed` function crosses this seam.
+
+In unsealed mode ordinary open evidence is preserved and no write capability is permitted. The sealed class
+set is exact rather than extensible: adding a class requires a new policy digest and activation
+receipt before sealing. The returned bytes are suitable for an external signing system, but this
+module authenticates nobody, constitutes no curator, grants no authority, and mints no seal. The
+agent procedure is
+[`skills/gaia-interagent/references/reporting-context-template.md`](skills/gaia-interagent/references/reporting-context-template.md).
 
 ## Lanes: 4 is the supported maximum
 
