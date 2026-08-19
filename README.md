@@ -22,8 +22,28 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 326 gates
+node --test                                   # 330 gates
 ```
+
+### Functional factory tracer
+
+Run a complete, evidence-gated three-role coordination cycle around a real artifact:
+
+```bash
+npm run factory:smoke -- \
+  --data-dir ./state/factory-smoke \
+  --artifact ./README.md \
+  --out ./state/factory-smoke-report.json \
+  --task "Review this candidate"
+```
+
+The command uses only the six bus verbs and produces a persisted, independently
+replayable coordination receipt. It registers coordinator, builder, and reviewer;
+sends and acknowledges three correlated messages; records a zero-authority handoff;
+and fails unless Gaia's evidence gate passes. It deliberately launches no model and
+executes no repository code: it proves the factory control-plane path, not the quality
+or provenance of an AI-produced change. Real wmux/Claude/Codex execution remains the
+next adapter layer.
 
 Structural mutations are dry-run by default. `--apply` performs them.
 
@@ -66,6 +86,7 @@ by **absence**, not by a check that could be bypassed.
 | `src/lineage-receipt.mjs` | `gaia-lineage-receipt/1`: one open receipt returned, one sealed cross-revision manifest handed to a caller-supplied sink and never returned. Reads only. |
 | `src/reporting-context.mjs` | Structural two-channel finalizer for official inventory-routed reports; sealed details cross one captured write capability and only canonical commitments return. |
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
+| `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
 | `scripts/bus-cli.mjs` | The low-level six-verb CLI the control script wraps. |
 | `scripts/generate-config.mjs` | Codex / Claude Code config generation into a directory you name. |
 | `scripts/wmux-lanes.mjs` | Lane adapter over `peer-sessions-wmux`. Adapts; never reimplements. |
@@ -73,7 +94,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 326 `node:test` gates. `node --test`; data-driven cases can make the runner report more executed tests than top-level `test()` declarations. |
+| `tests/` | 330 `node:test` gates. `node --test`; data-driven cases can make the runner report more executed tests than top-level `test()` declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
