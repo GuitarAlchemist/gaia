@@ -837,9 +837,15 @@ test('assertPathOutsideRoots generalises the guard while assertManifestOutsideRo
   assert.throws(() => assertManifestOutsideRoot(one, beyond), InventoryError,
     'and the one-root spelling fails closed identically');
 
-  // The one-root spelling still behaves exactly as it did, including on an alias.
+  // The one-root spelling still behaves exactly as it did. Case is an alias only
+  // on Windows; POSIX paths are case-sensitive, so the upper-case spelling is a
+  // distinct outside path there.
   assert.throws(() => assertManifestOutsideRoot(one, join(one, 'm.txt')), InventoryError);
-  assert.throws(() => assertManifestOutsideRoot(one, join(one.toUpperCase(), 'm.txt')), InventoryError);
+  if (process.platform === 'win32') {
+    assert.throws(() => assertManifestOutsideRoot(one, join(one.toUpperCase(), 'm.txt')), InventoryError);
+  } else {
+    assert.doesNotThrow(() => assertManifestOutsideRoot(one, join(one.toUpperCase(), 'm.txt')));
+  }
   assert.doesNotThrow(() => assertManifestOutsideRoot(one, join(outside, 'm.txt')));
   assert.doesNotThrow(() => assertManifestOutsideRoot(one, join(two, 'm.txt')),
     'and it still forbids only the root it was given');
@@ -942,12 +948,18 @@ test('the CLI refuses a sealed manifest sited inside a measured root or a declar
     }), 'utf8');
 
     const before = [successor, predecessor, openStore].flatMap((r) => everyFile(r));
-    for (const [label, destination] of [
+    const destinations = [
       ['inside the successor root', join(successor, 'manifest.json')],
       ['inside the predecessor root', join(predecessor, 'deep', 'manifest.json')],
       ['inside a declared open store', join(openStore, 'reviews', 'manifest.json')],
-      ['inside the successor root, spelled in upper case', join(successor.toUpperCase(), 'manifest.json')],
-    ]) {
+    ];
+    if (process.platform === 'win32') {
+      destinations.push([
+        'inside the successor root, spelled in upper case',
+        join(successor.toUpperCase(), 'manifest.json'),
+      ]);
+    }
+    for (const [label, destination] of destinations) {
       const result = await run(CLI, [
         '--successor', successor, '--predecessor', predecessor, '--lineage', 'lineage-alpha',
         '--declaration', declFile, '--sealed', '--sealed-manifest', destination,
