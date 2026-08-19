@@ -184,36 +184,106 @@ function identityOf(p) {
 }
 
 /**
- * Refuse to write a manifest anywhere inside the tree it describes.
+ * How far the containment walk climbs before it gives up — a runaway guard, and not a
+ * depth at which containment stops being checked.
  *
- * A manifest that lands in the measured tree changes that tree, so the digest reported
+ * Termination does not rest on it: `dirname` reaches a fixed point for every string, so the
+ * walk's own exit condition always fires on its own. The bound exists only so that a
+ * pathological input cannot spin.
+ *
+ * It is a fail-closed depth ceiling, NOT an unreachable one. 4096 ancestors sits well beyond
+ * any practical tree, but it is not beyond what a filesystem can hold: Linux imposes no limit
+ * on total path length and allows 255 bytes per component, and Windows drops its 260-character
+ * limit under the extended-length namespace or long-path opt-in. A chain that reaches this
+ * bound is therefore a real input, not one argued away — which is precisely why exhausting it
+ * has to have a specified, safe outcome.
+ *
+ * Because it decides nothing about containment, exhausting it REFUSES rather than
+ * returning. A guard that falls out of its loop and returns has answered "outside every
+ * root" — the one answer it has no evidence for, and the answer that lets a document land
+ * inside a tree the caller is measuring.
+ */
+export const ANCESTOR_WALK_BOUND = 4096;
+
+/**
+ * Refuse to write anywhere inside any of a set of roots.
+ *
+ * A document that lands in a tree being measured changes that tree, so the digest reported
  * beside it is never the digest of the tree it was asked about — the output would be
- * self-referential, and a self-referential fixed point is worse than none. This is a
- * refusal rather than a documented caveat for that reason.
+ * self-referential, and a self-referential fixed point is worse than none. The same
+ * refusal generalises to roots that are not measured but must stay free of a document:
+ * the holdout-safe lineage seam needs a sealed store proved outside both revisions AND
+ * outside every declared open document store, which is one guard against several roots
+ * rather than a different guard.
  *
  * Containment is decided on filesystem identity where the path exists, exactly as the
  * output-directory guard does, so an 8.3 alias, a junction, the extended-length
- * namespace or an admin-share UNC spelling of the root cannot walk around it. Where
+ * namespace or an admin-share UNC spelling of a root cannot walk around it. Where
  * nothing on the chain exists, it falls back to comparing resolved strings, which is a
  * spelling test and is the weaker of the two — stated rather than implied.
+ *
+ * Containment is a property of the WHOLE chain from the target to the filesystem root: a
+ * target is inside a root if that root is anywhere on its chain, at any distance. The walk
+ * therefore runs to the filesystem root and stops only there. It is bounded by
+ * `ANCESTOR_WALK_BOUND` against a runaway, and exhausting that bound is a refusal — an
+ * undecided containment is never reported as a permitted one.
+ *
+ * An empty root set forbids nothing, so a caller with no roots to protect needs no
+ * special case.
+ *
+ * @param {string[]} roots directories the target must stay outside of.
+ * @param {string} targetPath the document's intended path.
+ * @param {(target: string, base: string) => string} [describe] the refusal wording.
  */
-export function assertManifestOutsideRoot(root, manifestPath) {
-  const base = resolve(root);
-  const target = resolve(manifestPath);
-  const baseId = identityOf(base);
+export function assertPathOutsideRoots(roots, targetPath, describe = undefined) {
+  const target = resolve(targetPath);
+  const bases = roots.map((root) => resolve(root));
+  const baseIds = bases.map(identityOf);
 
-  const refuse = () => {
-    throw new InventoryError(`${target} is inside the tree it measures (${base}); a self-referential `
-      + 'manifest changes the digest it reports. Name a path outside the root.');
+  const refuse = (base) => {
+    throw new InventoryError(describe
+      ? describe(target, base)
+      : `${target} is inside ${base}, a root it must stay outside of; a document written `
+        + 'inside a measured tree changes the digest reported beside it. Name a path '
+        + 'outside every root.');
   };
 
-  let cursor = dirname(target);
-  for (let depth = 0; depth < 64; depth += 1) {
+  // The walk starts AT the target, not at its parent. A target that IS a forbidden root is
+  // inside it in the only sense that matters here: naming a not-yet-existing path as both the
+  // document's destination and a protected root would otherwise create that path and land the
+  // document exactly at the root it had to stay outside of.
+  let cursor = target;
+  for (let steps = 0; steps < ANCESTOR_WALK_BOUND; steps += 1) {
     const id = identityOf(cursor);
-    if (baseId !== null && id !== null && id === baseId) refuse();
-    if (cursor === base) refuse();
+    for (let index = 0; index < bases.length; index += 1) {
+      if (baseIds[index] !== null && id !== null && id === baseIds[index]) refuse(bases[index]);
+      if (cursor === bases[index]) refuse(bases[index]);
+    }
     const parent = dirname(cursor);
+    // The filesystem root, and the only way out of this loop that means anything: the
+    // whole chain was walked and no forbidden root was on it.
     if (parent === cursor) return;
     cursor = parent;
   }
+
+  // The runaway guard was exhausted before the chain ended, so containment was never
+  // decided. Undecided is refused. The wording names neither the target nor any root:
+  // there is no root to name, and a refusal message is an open document too.
+  throw new InventoryError(
+    'the ancestors of the named path could not be walked to the filesystem root within '
+    + `${ANCESTOR_WALK_BOUND} steps, so whether it lies inside a forbidden root was never `
+    + 'decided; an undecided containment is refused, never permitted. Name a shallower path.');
+}
+
+/**
+ * Refuse to write a manifest anywhere inside the tree it describes.
+ *
+ * The one-root spelling of `assertPathOutsideRoots`, kept because it is the name every
+ * existing caller and test uses and because its refusal says the one thing that matters
+ * to a tool measuring a single tree: the manifest would be self-referential.
+ */
+export function assertManifestOutsideRoot(root, manifestPath) {
+  assertPathOutsideRoots([root], manifestPath, (target, base) =>
+    `${target} is inside the tree it measures (${base}); a self-referential `
+    + 'manifest changes the digest it reports. Name a path outside the root.');
 }

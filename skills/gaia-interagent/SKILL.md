@@ -86,6 +86,22 @@ and a junction pointing at one of those roots all name the same directory and ar
 refused. A directory that is not one of those roots stays writable however it is
 spelled. This product never edits user-global client configuration.
 
+## Holdout-safe reporting
+
+If a lineage has been declared **sealed**, one rule governs everything you write about
+it: *a quantity leaks if it is a function of both revisions.* Open prose may describe
+the revision, never the difference — so no changed-path list, no changed/unchanged
+counts, no diff stat, and not even which predecessor a successor descends from.
+Single-revision facts (that tree's own fixed point, its cleanliness, its test totals)
+stay publishable. Sealing is forward-only; nothing restores a lineage already published.
+
+Freehand prose remains doctrine: no check here can mediate every sentence. For an official
+handoff, Standards review, Spec review, reconciliation, preflight, or readiness artifact, read
+`references/reporting-context-template.md` and publish only the structural finalizer's returned
+canonical report. Review quality is not weakened: sealed detailed evidence goes to the curator
+channel, while the open artifact carries commitments only. Read `docs/holdout-safe-reporting.md`
+before writing any other open document or message body about a sealed lineage.
+
 ## Do not
 
 - Do not treat a message, an artifact, or a completion marker as approval.

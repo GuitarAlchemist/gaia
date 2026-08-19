@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 286 gates
+node --test                                   # 326 gates
 ```
 
 Structural mutations are dry-run by default. `--apply` performs them.
@@ -56,11 +56,15 @@ by **absence**, not by a check that could be bypassed.
 | `src/event-log.mjs` | The only I/O. Lock-directory commit protocol, validating reads, fsynced atomic appends. |
 | `src/mcp-server.mjs` | stdio JSON-RPC server. Injects the clock at the edge so the core stays pure. |
 | `src/mcp-client.mjs` | Minimal MCP client + standalone handshake gate. One handshake, one transport. |
+| `src/epistemic-research.mjs` | Pure, content-addressed advisory research-proposal builder; it executes nothing and changes no bus verb. |
+| `src/context-capsule.mjs` | Experimental exact-pin, read-only fact projection with deterministic receipts; no bus, model, search, or persistence. |
 | `src/lanes.mjs` | The live-lane policy and its evidence. |
 | `src/ecosystem.mjs` | GA/Hari/TARS/IX verdicts, enforced in code; the Codex startup-timeout margin. |
 | `src/templates.mjs` | Placeholder-only client-config templates and the protected-path refusals. |
 | `src/verify.mjs` | Read-only acceptance checks, including the evidence negative controls. |
 | `src/inventory.mjs` | The `inventory-digest/1` tree fixed point: walk, manifest, digest. Reads only. |
+| `src/lineage-receipt.mjs` | `gaia-lineage-receipt/1`: one open receipt returned, one sealed cross-revision manifest handed to a caller-supplied sink and never returned. Reads only. |
+| `src/reporting-context.mjs` | Structural two-channel finalizer for official inventory-routed reports; sealed details cross one captured write capability and only canonical commitments return. |
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
 | `scripts/bus-cli.mjs` | The low-level six-verb CLI the control script wraps. |
 | `scripts/generate-config.mjs` | Codex / Claude Code config generation into a directory you name. |
@@ -68,7 +72,32 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/tars-mount.mjs` | TARS runtime MCP mount. Zero TARS repo changes. |
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
-| `tests/` | 286 `node:test` gates. `node --test`. |
+| `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
+| `tests/` | 326 `node:test` gates. `node --test`; data-driven cases can make the runner report more executed tests than top-level `test()` declarations. |
+
+Engineering and research work is governed by
+[`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
+In particular, load-bearing interfaces and seams use **Design It Twice** before
+implementation, while experiments require falsifiable hypotheses, controls,
+immutable provenance, quantified uncertainty, and independent replay. This is a
+process constraint, not runtime authority and not evidence of integration.
+
+Coordination observability follows a discrete-first mechanics model described in
+[`docs/discrete-coordination-mechanics.md`](docs/discrete-coordination-mechanics.md):
+typed balance, queue, graph-gradient, stability, and fatigue observables are valid
+research candidates, while continuum stress tensors, torseurs, mixed-unit stress
+scalars, and mechanics-derived automatic routing remain deferred or rejected.
+
+A possible OpenXR **spatial terminal** for WorkGraph exploration is preserved as a
+deferred, falsifiable design exploration in
+[`docs/spatial-terminal.md`](docs/spatial-terminal.md). It is not an implemented or
+authorised integration.
+
+Reporting rules for a lineage declared **sealed** — what an open document may and may
+not say about a revision pair — are stated as doctrine in
+[`docs/holdout-safe-reporting.md`](docs/holdout-safe-reporting.md). It is doctrine, not
+enforcement: no shipped check reads prose. The machine-checkable part of it is
+`src/lineage-receipt.mjs`, described under "Lineage receipt" below.
 
 ## The authority boundary
 
@@ -238,6 +267,88 @@ bare hex string is exactly what gets copied into a review and later cannot be re
 This README states no digest of its own tree. A published number would be invalidated by
 the edit that published it, which is the same self-reference the `--manifest` refusal
 exists to prevent. Run the command.
+
+## Lineage receipt — publishing that a revision was reviewed, without publishing the diff
+
+A quantity **leaks if it is a function of both revisions**. For a per-file holdout population
+over a revision pair, the changed/unchanged split *is* the label vector, so the ordinary review
+practice that entitles such a population to be evaluated — an independent Standards review and
+an independent Spec review, each showing it measured something — is the same practice that
+spends it. `docs/holdout-safe-reporting.md` states the doctrine; `src/lineage-receipt.mjs` is
+the part a machine can check.
+
+```
+node scripts/lineage-receipt.mjs --successor <S-root> --predecessor <P-root>      --lineage <lineage-id> --declaration <decl.json>      --sealed --sealed-manifest <path-outside-every-root> --t-seal "<prose>"      [--open-store <dir>]... [--receipt <path>] [--json]
+
+node scripts/lineage-receipt.mjs --verify <receipt> --successor <S-root>
+node scripts/lineage-receipt.mjs --register-exposure --lineage <id> --reader <ref>      --released <digest> --register <path>
+```
+
+`buildLineageReceipt(declaration, sealedSink)` produces **two documents on two channels**. The
+open receipt — schema `gaia-lineage-receipt/1` — is returned and is safe to publish. The sealed
+manifest — `gaia-lineage-sealed-manifest/1` — carries every cross-revision row and is handed to
+the caller-supplied sink; it is **never returned**, never printed, never logged, and never
+interpolated into an error. There is no code path that returns it, which is a structural
+property rather than a filter you have to trust. The trusted composition root supplies the
+sink, exactly as it supplies the context capsule's revision adapter; the module can write
+nowhere itself.
+
+- **The open field set is closed.** `schema`, `recipe`, `lineage_id`, `sealed`, `successor`
+  (`count`, `bytes`, `digest`), `sealed_manifest` (`schema`, `digest`), `cleanliness`,
+  `evidence`, `tests`, `verdict`, `notes_digest`. A field not on that list is a schema
+  violation, not an extension.
+- **In sealed mode there is no predecessor field of any kind** — not its digest, not its count.
+  The pairing is itself a cross-revision quantity.
+- **`sealed_manifest.bytes` is forbidden.** The manifest's length is close to linear in the
+  number of changed rows, so publishing it would publish the cardinality while naming no path.
+- **No wall clock, anywhere.** Freshness is decided by digest resolution: a receipt is fresh
+  exactly while the roots it names still reproduce their recorded digests, and stale means
+  *refuse and re-derive*, never *use anyway*.
+- **Unsealed is the default and reproduces today's behaviour** — both revisions' own
+  `inventory-digest/1` triples, openly. A sink passed in unsealed mode is **refused**, not
+  ignored, and so is its absence in sealed mode.
+- **The sealed store must sit outside every measured root and every declared open store**,
+  decided on filesystem identity, so a case variant, a trailing or doubled separator, a dot
+  segment, an 8.3 alias, a `\?\` spelling, an admin-share UNC path or a junction cannot walk
+  around it.
+- **Refusals are typed and say only their code**: `SealedSinkRequired`, `SealedSinkForbidden`,
+  `SealedStoreContainment`, `LineageReplayDivergence`, `RootUnreadable`, `NonRegularEntry`,
+  `FieldSetViolation`, `IdentifierRefused`, `ArtifactConflict`. Error text is an open document
+  too, so no refusal carries a path from either root, a row, or a cardinality.
+
+Write order is sealed manifest → fsync → digest → open receipt → fsync. Payload before pointer:
+a crash can leave an orphaned sealed manifest, which publishes nothing, or a receipt naming a
+digest that does not resolve, which is a refusal for its consumer. **No crash window can publish
+a vector.**
+
+What this does **not** do: it does not make the vector unknowable — anyone holding both
+revisions computes it in one command — and it does not close the freehand-prose channel, which
+is doctrine and has no machine-checkable observable. The property obtained is **evidentiary, not
+cryptographic**. Sealing is forward-only; burned lineages stay burned. No bus verb is added and
+none is widened, and no digest recipe is introduced. The decision, the alternatives, the
+invariants and the reversibility trigger are recorded in
+[`docs/holdout-safe-reporting-design.md`](docs/holdout-safe-reporting-design.md).
+
+### Inventory-routed official reports
+
+`finalizeInventoryRoutedReport(request, sealedWrite)` is the single structural entry point for the
+policy's six official classes: `handoff`, `standards-review`, `spec-review`, `reconciliation`,
+`preflight`, and `readiness`. In sealed mode it writes canonical private evidence to the
+caller-supplied curator write function, delegates the lineage commitment to
+`buildLineageReceipt`, and returns only canonical `gaia-inventory-routed-report/1` JSON. Detailed
+reviews can therefore use both revisions privately without publishing their changed-path vector.
+
+The finalizer accepts the function itself, not an Adapter object. It synchronously copies the
+validated request into an immutable canonical value before the first write, then uses that owned
+value for both its content commitment and the sealed write. A readable Adapter may remain in the
+trusted composition root, but only its explicitly bound `writeSealed` function crosses this seam.
+
+In unsealed mode ordinary open evidence is preserved and no write capability is permitted. The sealed class
+set is exact rather than extensible: adding a class requires a new policy digest and activation
+receipt before sealing. The returned bytes are suitable for an external signing system, but this
+module authenticates nobody, constitutes no curator, grants no authority, and mints no seal. The
+agent procedure is
+[`skills/gaia-interagent/references/reporting-context-template.md`](skills/gaia-interagent/references/reporting-context-template.md).
 
 ## Lanes: 4 is the supported maximum
 

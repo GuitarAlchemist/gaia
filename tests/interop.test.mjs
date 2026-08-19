@@ -36,13 +36,16 @@ function freshDir(name) {
 /** Run a command to completion and capture everything. Never throws on non-zero. */
 function run(args, { env = {}, input } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env } });
+    const hasInput = input !== undefined;
+    const child = spawn(process.execPath, args, {
+      stdio: [hasInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...env },
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
-    if (input !== undefined) child.stdin.write(input);
-    child.stdin.end();
+    if (hasInput) child.stdin.end(input);
     child.on('close', (code) => resolve({ code, stdout, stderr }));
   });
 }
