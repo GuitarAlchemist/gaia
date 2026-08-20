@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 366 gates
+node --test                                   # 370 gates
 ```
 
 ### Functional factory tracer
@@ -137,6 +137,8 @@ by **absence**, not by a check that could be bypassed.
 | `src/reporting-context.mjs` | Structural two-channel finalizer for official inventory-routed reports; sealed details cross one captured write capability and only canonical commitments return. |
 | `src/factory-agent.mjs` | Deep module for clean linked-worktree admission, exact candidate identity, bounded subscription-agent invocation, sensitive output evidence, and reviewer non-mutation checks. |
 | `src/github-portfolio.mjs` | Deterministic portfolio revision, conservative classification, bounded scheduling, and one-step authority intent. |
+| `src/github-portfolio-authority.mjs` | Exact Ed25519 grant verification plus an atomic, one-use file ledger; prompts and bus text confer no authority. |
+| `src/github-portfolio-execution.mjs` | Binds one authorized portfolio intent to one local factory-agent run, linked worktree, and external evidence directory. |
 | `src/github-read-adapter.mjs` | Read-only `gh` ingestion adapter with fail-closed query-cap detection. |
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
 | `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
@@ -149,7 +151,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 366 `node:test` gates. `node --test`; data-driven cases can make the runner report more executed tests than top-level `test()` declarations. |
+| `tests/` | 370 `node:test` gates. `node --test`; data-driven cases can make the runner report more executed tests than top-level `test()` declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

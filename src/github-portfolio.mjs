@@ -289,7 +289,71 @@ function verifyPortfolio(portfolio) {
   return body;
 }
 
-export function createPortfolioFactory({ githubRead } = {}) {
+function buildIntent(portfolio, next) {
+  const workItem = portfolio.workItems.find(
+    ({ repository, itemId }) => repository === next.repository && itemId === next.itemId,
+  );
+  const body = {
+    action: 'RUN_FACTORY_AGENT',
+    repository: next.repository,
+    itemKind: next.itemKind,
+    itemId: next.itemId,
+    itemNumber: next.itemNumber,
+    task: `Resolve ${next.repository}#${next.itemNumber}: ${workItem.title}`,
+    evidenceState: workItem.state,
+    snapshotRevision: portfolio.revision,
+    requiredAuthority: 'FACTORY_RUN',
+  };
+  return { ...body, intentRevision: sha256(canonicalJson(body)) };
+}
+
+function safeErrorIdentity(error) {
+  const safeToken = (value, fallback) => (
+    typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u.test(value)
+      ? value
+      : fallback
+  );
+  const dataProperty = (key, fallback) => {
+    if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+      return fallback;
+    }
+    let current = error;
+    while (current !== null) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+      if (descriptor) {
+        return Object.hasOwn(descriptor, 'value')
+          ? safeToken(descriptor.value, fallback)
+          : fallback;
+      }
+      current = Object.getPrototypeOf(current);
+    }
+    return fallback;
+  };
+  return {
+    name: dataProperty('name', 'Error'),
+    code: dataProperty('code', 'ExecutionFailed'),
+  };
+}
+
+function failedExecutionTransition(portfolio, intent, authorization, idempotencyKey, error) {
+  const body = {
+    schema: 'gaia-github-portfolio-transition/1',
+    status: 'EXECUTION_FAILED',
+    fromRevision: portfolio.revision,
+    intent,
+    authority: {
+      grantId: authorization.grantId,
+      intentRevision: authorization.intentRevision,
+    },
+    execution: {
+      idempotencyKey,
+      error: safeErrorIdentity(error),
+    },
+  };
+  return deepFreeze({ ...body, revision: sha256(canonicalJson(body)) });
+}
+
+export function createPortfolioFactory({ githubRead, authority, factoryExecution } = {}) {
   if (!githubRead || typeof githubRead.read !== 'function') {
     throw new PortfolioFactoryError('InvalidAdapter', 'githubRead.read is required');
   }
@@ -331,22 +395,73 @@ export function createPortfolioFactory({ githubRead } = {}) {
           revision: sha256(canonicalJson(receiptBody)),
         });
       }
+      const intent = buildIntent(freshPortfolio, next);
+      if (request.grant !== undefined) {
+        if (!authority || typeof authority.consume !== 'function'
+            || !factoryExecution || typeof factoryExecution.execute !== 'function') {
+          throw new PortfolioFactoryError(
+            'InvalidAdapter', 'authorized advance requires authority and factoryExecution adapters',
+          );
+        }
+        const authorization = await authority.consume({
+          grant: structuredClone(request.grant), intent: structuredClone(intent),
+        });
+        if (!authorization || authorization.status !== 'AUTHORIZED'
+            || authorization.grantId !== request.grant?.grantId
+            || authorization.intentRevision !== intent.intentRevision) {
+          throw new PortfolioFactoryError(
+            'GrantInvalid', 'authority did not consume an exact grant for this intent',
+          );
+        }
+        const idempotencyKey = sha256(canonicalJson({
+          grantId: authorization.grantId, intentRevision: intent.intentRevision,
+        }));
+        let factoryReceipt;
+        try {
+          factoryReceipt = await factoryExecution.execute({
+            intent: structuredClone(intent), idempotencyKey,
+          });
+        } catch (error) {
+          return failedExecutionTransition(
+            request.portfolio, intent, authorization, idempotencyKey, error,
+          );
+        }
+        if (!factoryReceipt || factoryReceipt.schema !== 'gaia-agent-factory-receipt/1'
+            || !['completed', 'rejected'].includes(factoryReceipt.status)
+            || factoryReceipt.task !== intent.task) {
+          return failedExecutionTransition(
+            request.portfolio,
+            intent,
+            authorization,
+            idempotencyKey,
+            { name: 'PortfolioFactoryError', code: 'ExecutionProtocol' },
+          );
+        }
+        const execution = {
+          idempotencyKey,
+          receiptRevision: sha256(canonicalJson(factoryReceipt)),
+          receipt: structuredClone(factoryReceipt),
+        };
+        const authorizedBody = {
+          schema: 'gaia-github-portfolio-transition/1',
+          status: factoryReceipt.status === 'completed' ? 'CANDIDATE_READY' : 'CANDIDATE_REJECTED',
+          fromRevision: request.portfolio.revision,
+          intent,
+          authority: {
+            grantId: authorization.grantId,
+            intentRevision: authorization.intentRevision,
+          },
+          execution,
+        };
+        return deepFreeze({
+          ...authorizedBody, revision: sha256(canonicalJson(authorizedBody)),
+        });
+      }
       const receiptBody = {
         schema: 'gaia-github-portfolio-transition/1',
         status: 'AWAITING_AUTHORITY',
         fromRevision: request.portfolio.revision,
-        intent: {
-          action: 'RUN_FACTORY_AGENT',
-          repository: next.repository,
-          itemKind: next.itemKind,
-          itemId: next.itemId,
-          itemNumber: next.itemNumber,
-          evidenceState: freshPortfolio.workItems.find(
-            ({ repository, itemId }) => repository === next.repository && itemId === next.itemId,
-          ).state,
-          snapshotRevision: request.portfolio.revision,
-          requiredAuthority: 'FACTORY_RUN',
-        },
+        intent,
       };
       return deepFreeze({ ...receiptBody, revision: sha256(canonicalJson(receiptBody)) });
     },
