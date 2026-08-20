@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 346 gates
+node --test                                   # 366 gates
 ```
 
 ### Functional factory tracer
@@ -77,6 +77,24 @@ not prove that it avoided network, writes elsewhere, or a transient Git action
 whose final observable state was restored. `REQUEST_CHANGES` is
 retained verbatim and exits fail-closed with code `3`.
 
+### Read-only GitHub portfolio survey
+
+Create a deterministic, content-addressed inventory and advisory schedule across every
+repository visible to the authenticated `gh` CLI:
+
+```bash
+npm run portfolio:survey -- survey \
+  --organization GuitarAlchemist \
+  --policy-revision sha256:portfolio-policy-v1 \
+  --out ../state/gaia-github-portfolio.json
+```
+
+The adapter performs only `gh repo list`, `gh search`, and read-only `gh api` calls. It
+fails closed when a query reaches its result cap, retains unavailable relationship,
+review, and check evidence as `UNKNOWN`, and never writes GitHub state. `advance` emits
+one exact `AWAITING_AUTHORITY` intent; R1 has no create, update, publish, merge, or push
+capability. See [`docs/github-portfolio-factory.md`](docs/github-portfolio-factory.md).
+
 Structural mutations are dry-run by default. `--apply` performs them.
 
 ## The tool surface — exactly six verbs
@@ -118,9 +136,12 @@ by **absence**, not by a check that could be bypassed.
 | `src/lineage-receipt.mjs` | `gaia-lineage-receipt/1`: one open receipt returned, one sealed cross-revision manifest handed to a caller-supplied sink and never returned. Reads only. |
 | `src/reporting-context.mjs` | Structural two-channel finalizer for official inventory-routed reports; sealed details cross one captured write capability and only canonical commitments return. |
 | `src/factory-agent.mjs` | Deep module for clean linked-worktree admission, exact candidate identity, bounded subscription-agent invocation, sensitive output evidence, and reviewer non-mutation checks. |
+| `src/github-portfolio.mjs` | Deterministic portfolio revision, conservative classification, bounded scheduling, and one-step authority intent. |
+| `src/github-read-adapter.mjs` | Read-only `gh` ingestion adapter with fail-closed query-cap detection. |
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
 | `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
 | `scripts/factory-agent.mjs` | Real Claude worker → Codex read-only reviewer tracer. Produces a fail-closed, content-addressed run receipt; never commits or publishes. |
+| `scripts/github-portfolio.mjs` | One-command read-only organization survey; writes only a caller-named new local report. |
 | `scripts/bus-cli.mjs` | The low-level six-verb CLI the control script wraps. |
 | `scripts/generate-config.mjs` | Codex / Claude Code config generation into a directory you name. |
 | `scripts/wmux-lanes.mjs` | Lane adapter over `peer-sessions-wmux`. Adapts; never reimplements. |
@@ -128,7 +149,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 346 `node:test` gates. `node --test`; data-driven cases can make the runner report more executed tests than top-level `test()` declarations. |
+| `tests/` | 366 `node:test` gates. `node --test`; data-driven cases can make the runner report more executed tests than top-level `test()` declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

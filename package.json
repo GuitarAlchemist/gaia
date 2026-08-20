@@ -13,6 +13,7 @@
     "verify": "node scripts/gaia-interagent.mjs verify",
     "handshake": "node src/mcp-client.mjs",
     "factory:smoke": "node scripts/factory-smoke.mjs",
-    "factory:agent": "node scripts/factory-agent.mjs"
+    "factory:agent": "node scripts/factory-agent.mjs",
+    "portfolio:survey": "node scripts/github-portfolio.mjs"
   }
 }
