@@ -12,6 +12,7 @@
     "doctor": "node scripts/gaia-interagent.mjs doctor",
     "verify": "node scripts/gaia-interagent.mjs verify",
     "handshake": "node src/mcp-client.mjs",
-    "factory:smoke": "node scripts/factory-smoke.mjs"
+    "factory:smoke": "node scripts/factory-smoke.mjs",
+    "factory:agent": "node scripts/factory-agent.mjs"
   }
 }

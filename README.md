@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 330 gates
+node --test                                   # 346 gates
 ```
 
 ### Functional factory tracer
@@ -44,6 +44,38 @@ and fails unless Gaia's evidence gate passes. It deliberately launches no model 
 executes no repository code: it proves the factory control-plane path, not the quality
 or provenance of an AI-produced change. Real wmux/Claude/Codex execution remains the
 next adapter layer.
+
+### Real subscription-backed agent tracer
+
+After creating a clean linked Git worktree, run one real Claude implementation
+worker followed by an independent Codex reviewer:
+
+```bash
+npm run factory:agent -- \
+  --worktree ../my-project-gaia-run \
+  --task "Implement the bounded change and its focused tests" \
+  --out ../state/gaia-agent-run.json
+```
+
+The v1 profile is deliberately closed: Claude is a host-user worker instructed
+to stay in the linked worktree; Codex is an ephemeral, sandbox-requested read-only
+reviewer. Both inherit only a minimal OS environment allowlist, excluding API
+keys, cloud-routing overrides, and custom provider endpoints so their installed
+subscription logins are used. Gaia refuses primary and submodule-primary
+checkouts, dirty entry state, physical receipt/evidence aliases into the
+candidate, final worker HEAD/index drift, changed paths crossing junctions or
+symlinks, missing changes, unsupported changed
+path types, malformed verdicts, reviewer mutations (including ignored files),
+timeouts, excessive output, and any non-zero agent exit.
+
+The receipt binds the base commit, status and binary-patch digests, every changed
+file's size and SHA-256, content-addressed local evidence for both bounded agent
+outputs, the requested/observed authority boundary, and the exact reviewer
+verdict. The CLI itself never commits, pushes, merges, or installs. Claude still
+runs with host-user authority: prompt policy and post-hoc Git/worktree checks do
+not prove that it avoided network, writes elsewhere, or a transient Git action
+whose final observable state was restored. `REQUEST_CHANGES` is
+retained verbatim and exits fail-closed with code `3`.
 
 Structural mutations are dry-run by default. `--apply` performs them.
 
@@ -85,8 +117,10 @@ by **absence**, not by a check that could be bypassed.
 | `src/inventory.mjs` | The `inventory-digest/1` tree fixed point: walk, manifest, digest. Reads only. |
 | `src/lineage-receipt.mjs` | `gaia-lineage-receipt/1`: one open receipt returned, one sealed cross-revision manifest handed to a caller-supplied sink and never returned. Reads only. |
 | `src/reporting-context.mjs` | Structural two-channel finalizer for official inventory-routed reports; sealed details cross one captured write capability and only canonical commitments return. |
+| `src/factory-agent.mjs` | Deep module for clean linked-worktree admission, exact candidate identity, bounded subscription-agent invocation, sensitive output evidence, and reviewer non-mutation checks. |
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
 | `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
+| `scripts/factory-agent.mjs` | Real Claude worker → Codex read-only reviewer tracer. Produces a fail-closed, content-addressed run receipt; never commits or publishes. |
 | `scripts/bus-cli.mjs` | The low-level six-verb CLI the control script wraps. |
 | `scripts/generate-config.mjs` | Codex / Claude Code config generation into a directory you name. |
 | `scripts/wmux-lanes.mjs` | Lane adapter over `peer-sessions-wmux`. Adapts; never reimplements. |
@@ -94,7 +128,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 330 `node:test` gates. `node --test`; data-driven cases can make the runner report more executed tests than top-level `test()` declarations. |
+| `tests/` | 346 `node:test` gates. `node --test`; data-driven cases can make the runner report more executed tests than top-level `test()` declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
