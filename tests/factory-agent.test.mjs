@@ -201,7 +201,9 @@ test('fails closed when a worker changes HEAD or the Git index', async () => {
   assert.equal(reviewerCalled, false);
 });
 
-test('rejects a changed file reached through a junction to outside the worktree', async () => {
+test('rejects a changed file reached through a junction to outside the worktree', {
+  skip: process.platform !== 'win32',
+}, async () => {
   const { worktree } = fixture('candidate-junction');
   const outside = join(scratch, 'candidate-junction-outside');
   const alias = join(worktree, 'external-alias');
