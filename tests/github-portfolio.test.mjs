@@ -137,17 +137,167 @@ test('advance emits one exact authority-bound intent and performs no effect', as
   assert.equal(receipt.schema, 'gaia-github-portfolio-transition/1');
   assert.equal(receipt.status, 'AWAITING_AUTHORITY');
   assert.equal(receipt.fromRevision, portfolio.revision);
-  assert.deepEqual(receipt.intent, {
+  const { intentRevision, ...intent } = receipt.intent;
+  assert.deepEqual(intent, {
     action: 'RUN_FACTORY_AGENT',
     repository: 'GuitarAlchemist/ga',
     itemKind: 'ISSUE',
     itemId: 'issue-ga-1',
     itemNumber: 1,
+    task: 'Resolve GuitarAlchemist/ga#1: Repair the canonical chatbot',
     evidenceState: 'READY',
     snapshotRevision: portfolio.revision,
     requiredAuthority: 'FACTORY_RUN',
   });
+  assert.match(intentRevision, /^[a-f0-9]{64}$/u);
   assert.equal(writes, 0);
+});
+
+test('advance executes one factory run only after an exact grant is consumed', async () => {
+  let consumed = 0;
+  let executed = 0;
+  const authority = {
+    consume: async ({ grant, intent }) => {
+      consumed += 1;
+      if (grant.grantId === 'grant-wrong-intent') {
+        return {
+          status: 'AUTHORIZED', grantId: grant.grantId, intentRevision: 'f'.repeat(64),
+        };
+      }
+      assert.deepEqual(grant, {
+        schema: 'gaia-github-portfolio-grant/1',
+        grantId: 'grant-001',
+        intentRevision: intent.intentRevision,
+      });
+      return {
+        status: 'AUTHORIZED', grantId: grant.grantId, intentRevision: intent.intentRevision,
+      };
+    },
+  };
+  const factoryExecution = {
+    execute: async ({ intent, idempotencyKey }) => {
+      executed += 1;
+      assert.match(idempotencyKey, /^[a-f0-9]{64}$/u);
+      return {
+        schema: 'gaia-agent-factory-receipt/1', status: 'completed', task: intent.task,
+      };
+    },
+  };
+  const factory = createPortfolioFactory({
+    githubRead: { read: async () => completeSnapshot([ga]) },
+    authority,
+    factoryExecution,
+  });
+  const portfolio = await factory.survey({
+    organization: 'GuitarAlchemist', policyRevision: 'sha256:portfolio-policy-v1',
+  });
+  const awaiting = await factory.advance({ portfolio });
+  await assert.rejects(factory.advance({
+    portfolio,
+    grant: {
+      schema: 'gaia-github-portfolio-grant/1',
+      grantId: 'grant-wrong-intent',
+      intentRevision: awaiting.intent.intentRevision,
+    },
+  }), (error) => error instanceof PortfolioFactoryError && error.code === 'GrantInvalid');
+  assert.equal(executed, 0);
+  const completed = await factory.advance({
+    portfolio,
+    grant: {
+      schema: 'gaia-github-portfolio-grant/1',
+      grantId: 'grant-001',
+      intentRevision: awaiting.intent.intentRevision,
+    },
+  });
+
+  assert.equal(completed.status, 'CANDIDATE_READY');
+  assert.equal(completed.authority.grantId, 'grant-001');
+  assert.equal(completed.authority.intentRevision, awaiting.intent.intentRevision);
+  assert.match(completed.execution.idempotencyKey, /^[a-f0-9]{64}$/u);
+  assert.match(completed.execution.receiptRevision, /^[a-f0-9]{64}$/u);
+  assert.equal(completed.execution.receipt.status, 'completed');
+  assert.equal(consumed, 2);
+  assert.equal(executed, 1);
+});
+
+test('advance returns a redacted failure receipt after a consumed grant', async () => {
+  const authority = {
+    consume: async ({ grant, intent }) => ({
+      status: 'AUTHORIZED', grantId: grant.grantId, intentRevision: intent.intentRevision,
+    }),
+  };
+  let failureMode = 'throw';
+  let getterEvaluated = false;
+  const factoryExecution = {
+    execute: async () => {
+      if (failureMode === 'protocol') {
+        return { schema: 'wrong-receipt/1', status: 'completed', task: 'wrong task' };
+      }
+      if (failureMode === 'getter') {
+        const error = {};
+        Object.defineProperty(error, 'name', {
+          get() {
+            getterEvaluated = true;
+            return 'SensitiveError';
+          },
+        });
+        throw error;
+      }
+      const error = new Error('sensitive provider output');
+      error.code = 'AgentFailed';
+      throw error;
+    },
+  };
+  const factory = createPortfolioFactory({
+    githubRead: { read: async () => completeSnapshot([ga]) }, authority, factoryExecution,
+  });
+  const portfolio = await factory.survey({
+    organization: 'GuitarAlchemist', policyRevision: 'sha256:portfolio-policy-v1',
+  });
+  const awaiting = await factory.advance({ portfolio });
+  const failed = await factory.advance({
+    portfolio,
+    grant: {
+      schema: 'gaia-github-portfolio-grant/1',
+      grantId: 'grant-failure',
+      intentRevision: awaiting.intent.intentRevision,
+    },
+  });
+
+  assert.equal(failed.status, 'EXECUTION_FAILED');
+  assert.deepEqual(failed.execution.error, { name: 'Error', code: 'AgentFailed' });
+  assert.equal(JSON.stringify(failed).includes('sensitive provider output'), false);
+  assert.equal(failed.authority.grantId, 'grant-failure');
+  assert.match(failed.revision, /^[a-f0-9]{64}$/u);
+
+  failureMode = 'protocol';
+  const protocolFailed = await factory.advance({
+    portfolio,
+    grant: {
+      schema: 'gaia-github-portfolio-grant/1',
+      grantId: 'grant-protocol',
+      intentRevision: awaiting.intent.intentRevision,
+    },
+  });
+  assert.equal(protocolFailed.status, 'EXECUTION_FAILED');
+  assert.deepEqual(protocolFailed.execution.error, {
+    name: 'PortfolioFactoryError', code: 'ExecutionProtocol',
+  });
+  assert.equal(JSON.stringify(protocolFailed).includes('wrong-receipt'), false);
+
+  failureMode = 'getter';
+  const getterFailed = await factory.advance({
+    portfolio,
+    grant: {
+      schema: 'gaia-github-portfolio-grant/1',
+      grantId: 'grant-getter',
+      intentRevision: awaiting.intent.intentRevision,
+    },
+  });
+  assert.equal(getterEvaluated, false);
+  assert.deepEqual(getterFailed.execution.error, {
+    name: 'Error', code: 'ExecutionFailed',
+  });
 });
 
 test('advance refuses a portfolio whose content no longer matches its revision', async () => {
