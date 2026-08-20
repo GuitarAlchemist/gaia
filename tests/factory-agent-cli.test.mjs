@@ -1,0 +1,61 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const SCRIPT = join(ROOT, 'scripts', 'factory-agent.mjs');
+const scratch = mkdtempSync(join(tmpdir(), 'gaia-factory-agent-cli-'));
+
+test.after(() => rmSync(scratch, { recursive: true, force: true }));
+
+function git(cwd, ...args) {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+}
+
+test('requires the bounded worktree, task, and receipt arguments', () => {
+  const result = spawnSync(process.execPath, [SCRIPT], { cwd: ROOT, encoding: 'utf8' });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /missing --worktree/i);
+});
+
+test('refuses a receipt path inside the candidate before launching an agent', () => {
+  const result = spawnSync(process.execPath, [
+    SCRIPT,
+    '--worktree', ROOT,
+    '--task', 'must not run',
+    '--out', join(ROOT, 'forbidden-agent-receipt.json'),
+  ], { cwd: scratch, encoding: 'utf8' });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /outside the candidate worktree/i);
+});
+
+test('refuses a receipt path physically inside the candidate through a junction', () => {
+  const repo = join(scratch, 'junction-repo');
+  const worktree = join(scratch, 'junction-worktree');
+  const alias = join(scratch, 'junction-alias');
+  git(scratch, 'init', repo);
+  git(repo, 'config', 'user.name', 'Gaia Test');
+  git(repo, 'config', 'user.email', 'gaia@example.invalid');
+  writeFileSync(join(repo, 'candidate.txt'), 'before\n', 'utf8');
+  git(repo, 'add', 'candidate.txt');
+  git(repo, 'commit', '-m', 'fixture');
+  git(repo, 'worktree', 'add', '-b', 'gaia-junction', worktree, 'HEAD');
+  symlinkSync(worktree, alias, 'junction');
+
+  const physicalReceipt = join(worktree, 'receipt.json');
+  const result = spawnSync(process.execPath, [
+    SCRIPT,
+    '--worktree', worktree,
+    '--task', 'must not run',
+    '--out', join(alias, 'receipt.json'),
+  ], { cwd: scratch, encoding: 'utf8' });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /physically outside the candidate worktree/i);
+  assert.equal(existsSync(physicalReceipt), false);
+});
