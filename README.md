@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 407 gates
+node --test                                   # 413 gates
 ```
 
 ### Functional factory tracer
@@ -48,7 +48,8 @@ next adapter layer.
 ### Real subscription-backed agent tracer
 
 After creating a clean linked Git worktree, run one real Claude implementation
-worker followed by an independent Codex reviewer:
+worker followed by an independent Codex reviewer. If that review requests changes,
+the same command permits one bounded Claude repair and one fresh Codex review:
 
 ```bash
 npm run factory:agent -- \
@@ -57,9 +58,10 @@ npm run factory:agent -- \
   --out ../state/gaia-agent-run.json
 ```
 
-The v1 profile is deliberately closed: Claude is a host-user worker instructed
-to stay in the linked worktree; Codex is an ephemeral, sandbox-requested read-only
-reviewer. Both inherit only a minimal OS environment allowlist, excluding API
+The v1 profile is deliberately closed: Claude is a host-user worker and, at most
+once, repairer instructed to stay in the linked worktree; Codex is an ephemeral,
+sandbox-requested read-only reviewer launched fresh for each review. All invocations
+inherit only a minimal OS environment allowlist, excluding API
 keys, cloud-routing overrides, and custom provider endpoints so their installed
 subscription logins are used. Gaia refuses primary and submodule-primary
 checkouts, dirty entry state, physical receipt/evidence aliases into the
@@ -69,13 +71,14 @@ path types, malformed verdicts, reviewer mutations (including ignored files),
 timeouts, excessive output, and any non-zero agent exit.
 
 The receipt binds the base commit, status and binary-patch digests, every changed
-file's size and SHA-256, content-addressed local evidence for both bounded agent
-outputs, the requested/observed authority boundary, and the exact reviewer
-verdict. The CLI itself never commits, pushes, merges, or installs. Claude still
+file's size and SHA-256, content-addressed local evidence for every bounded agent
+output, the requested/observed authority boundary, and both reviewer verdicts when
+a repair occurs. The fresh final reviewer is authoritative. The CLI itself never
+commits, pushes, merges, or installs. Claude still
 runs with host-user authority: prompt policy and post-hoc Git/worktree checks do
 not prove that it avoided network, writes elsewhere, or a transient Git action
-whose final observable state was restored. `REQUEST_CHANGES` is
-retained verbatim and exits fail-closed with code `3`.
+whose final observable state was restored. A second `REQUEST_CHANGES` is retained
+verbatim, starts no loop, and exits fail-closed with code `3`.
 
 ### Read-only GitHub portfolio survey
 
@@ -184,7 +187,7 @@ by **absence**, not by a check that could be bypassed.
 | `src/github-read-adapter.mjs` | Read-only `gh` ingestion adapter with fail-closed query-cap detection. |
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
 | `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
-| `scripts/factory-agent.mjs` | Real Claude worker → Codex read-only reviewer tracer. Produces a fail-closed, content-addressed run receipt; never commits or publishes. |
+| `scripts/factory-agent.mjs` | Real Claude worker → Codex read-only review → optional one Claude repair → fresh Codex review tracer. Produces a fail-closed, content-addressed run receipt; never commits or publishes. |
 | `scripts/github-portfolio.mjs` | One-command read-only organization survey; writes only a caller-named new local report. |
 | `scripts/github-portfolio-operator.mjs` | Two operator verbs, `init` and `run`. Parses a closed argument list, proves stdin is a terminal, names which streams the terminal is, and composes the existing adapters. Decides nothing about authority. |
 | `scripts/bus-cli.mjs` | The low-level six-verb CLI the control script wraps. |
@@ -194,7 +197,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 407 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 413 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

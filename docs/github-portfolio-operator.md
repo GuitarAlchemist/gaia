@@ -59,6 +59,12 @@ display it as untrusted data, demand a confirmation bound to the full intent rev
 unlock the private key with an interactively-read passphrase, mint a short-lived grant in
 memory, consume it, execute, and leave a receipt.
 
+Execution may include one bounded repair after an initial independent
+`REQUEST_CHANGES`, followed by one fresh final review. That correction is not another
+operator action: it remains inside the already-confirmed intent, repository, linked
+worktree, grant claim, and idempotency identity. The operator is not prompted again,
+no second grant is minted, and a second `REQUEST_CHANGES` ends the run rejected.
+
 This is deeper than (a) and (b) at the same interface width, and the depth is exactly the
 part that is dangerous to reimplement per call site:
 

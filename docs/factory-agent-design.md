@@ -18,8 +18,9 @@ Three interfaces were considered before implementation:
    shell-shaped interface and makes authority, quoting, and provider identity
    caller claims.
 3. **A provider-neutral factory core with closed provider profiles.** The core
-   owns linked-worktree isolation, candidate identity, review non-mutation, and
-   receipt semantics. Small adapters own the exact Claude and Codex invocations.
+   owns linked-worktree isolation, candidate identity, review non-mutation, one
+   bounded repair, and receipt semantics. Small adapters own the exact Claude and
+   Codex invocations.
 
 Design 3 was selected. It has the smallest stable public seam while hiding the
 volatile CLI mechanics. The v1 profiles are intentionally closed rather than
@@ -33,7 +34,9 @@ pretending arbitrary commands are safe providers.
 - a non-empty task;
 - one host-user worker process instructed to write only in that worktree;
 - one sandbox-requested read-only reviewer adapter returning exactly `APPROVE` or
-  `REQUEST_CHANGES`.
+  `REQUEST_CHANGES`;
+- one explicit repair adapter, used at most once and only after the initial reviewer
+  returns `REQUEST_CHANGES`.
 
 The worker must produce at least one regular-file change. Gaia binds the base
 commit, index tree, Git status bytes, binary patch, and each changed or deleted
@@ -41,6 +44,20 @@ file. A mismatched final worker HEAD or index is refused. The reviewer receives 
 of the candidate identity. Gaia binds the complete worktree tree (including
 ignored files) before review and refuses if that tree, HEAD, index, or candidate
 identity changes during review.
+
+An initial `APPROVE` ends the run exactly as before. An initial `REQUEST_CHANGES`
+does not become success and does not start a loop. Gaia gives one repair adapter the
+exact initial candidate identity and the exact reviewer output. The repair must keep
+HEAD and the index unchanged and must produce a different, non-empty candidate
+identity. A fresh reviewer then judges that repaired identity. Its verdict is the
+authoritative `reviewer` and determines `completed` or `rejected`; a second
+`REQUEST_CHANGES` ends rejected and can never invoke another repair.
+
+Receipts without a repair retain the v1 shape. Repaired receipts add optional
+`repair` and `reviews` fields: `reviews.initial` preserves the first rejection,
+`reviews.final` equals the authoritative `reviewer`, and `changeSet` is the repaired
+candidate. Worker, initial-review, repair, and final-review outputs are persisted as
+four separately named content-addressed evidence objects.
 
 The command resolves reparse points and reserves its receipt plus an exclusive
 content-addressed evidence directory physically outside the worktree before
@@ -50,6 +67,16 @@ sizes, and SHA-256 identities are bound there and replayed after persistence.
 Successful review, rejected review, launch failure, timeout, output overflow, and
 protocol failure all produce distinct machine-readable outcomes. Approval grants
 no publication authority.
+
+Repair absence, malformed repair output, repair HEAD/index mutation, removal of the
+candidate, and a claimed repair that leaves the candidate identity unchanged fail with
+typed errors. The portfolio layer records those failures as `EXECUTION_FAILED` after
+the existing one-use grant is spent. Repair receives no second grant or idempotency key.
+
+The public `scripts/factory-agent.mjs` composition wires the closed Claude repair
+profile explicitly. Worker, repair, and each reviewer invocation receive the same
+caller-bounded timeout; importing its `runFactoryAgentCli` seam performs no command and
+allows the composition to be verified without spawning subscription providers.
 
 ## Provider boundaries
 
@@ -79,6 +106,9 @@ HEAD or index tree differs from its entry value; an ignored reviewer mutation is
 accepted; a rejected verdict exits as success;
 an API/cloud override reaches a subscription profile; a terminated child keeps
 running; or the candidate and model-output evidence cannot be replayed.
+Also reject this seam if one `REQUEST_CHANGES` can cause two repairs, the final reviewer
+does not receive the repaired identity, a second rejection starts a loop, or a repair
+failure is represented as an ordinary rejected candidate.
 
 The host-user worker remains a disclosed residual. Prompt policy plus post-hoc
 worktree observation cannot prove that it avoided network, secrets, installs, or

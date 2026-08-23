@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
+  buildClaudeRepairInvocation,
   buildClaudeWorkerInvocation,
   buildCodexReviewerInvocation,
   FactoryAgentError,
@@ -87,12 +88,14 @@ test('binds a real worker change and independent approval into one receipt', asy
   assert.match(receipt.changeSet.identity, /^[0-9a-f]{64}$/);
   assert.match(receipt.worker.evidence.sha256, /^[0-9a-f]{64}$/);
   assert.match(receipt.reviewer.evidence.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(Object.hasOwn(receipt, 'repair'), false);
+  assert.equal(Object.hasOwn(receipt, 'reviews'), false);
 });
 
-test('records an honest REQUEST_CHANGES verdict without rewriting it as success', async () => {
+test('fails closed when REQUEST_CHANGES has no explicit repair adapter', async () => {
   const { worktree } = fixture('request-changes');
 
-  const receipt = await executeAgentFactory({
+  await assert.rejects(executeAgentFactory({
     worktree,
     evidenceDir: evidenceDir('request-changes'),
     task: 'change candidate.txt',
@@ -103,10 +106,126 @@ test('records an honest REQUEST_CHANGES verdict without rewriting it as success'
     runReviewer: async () => ({
       provider: 'fixture-reviewer', verdict: 'REQUEST_CHANGES', output: 'wrong bytes',
     }),
+  }), (error) => error instanceof FactoryAgentError && error.code === 'RepairAdapterRequired');
+});
+
+test('stops rejected after one repair and one fresh REQUEST_CHANGES review', async () => {
+  const { worktree } = fixture('repair-rejected');
+  let reviews = 0;
+  let repairs = 0;
+  const receipt = await executeAgentFactory({
+    worktree,
+    evidenceDir: evidenceDir('repair-rejected'),
+    task: 'change candidate.txt correctly',
+    runWorker: async ({ cwd }) => {
+      writeFileSync(join(cwd, 'candidate.txt'), 'incorrect\n', 'utf8');
+      return { provider: 'fixture-worker', output: 'worker' };
+    },
+    runReviewer: async () => {
+      reviews += 1;
+      return {
+        provider: `fixture-reviewer-${reviews}`,
+        verdict: 'REQUEST_CHANGES',
+        output: reviews === 1 ? 'B01 remains' : 'B02 remains after repair',
+      };
+    },
+    runRepair: async ({ cwd }) => {
+      repairs += 1;
+      writeFileSync(join(cwd, 'candidate.txt'), 'different but still wrong\n', 'utf8');
+      return { provider: 'fixture-repair', output: 'one repair' };
+    },
   });
 
   assert.equal(receipt.status, 'rejected');
   assert.equal(receipt.reviewer.verdict, 'REQUEST_CHANGES');
+  assert.equal(receipt.reviewer.provider, 'fixture-reviewer-2');
+  assert.equal(receipt.reviews.initial.provider, 'fixture-reviewer-1');
+  assert.equal(reviews, 2);
+  assert.equal(repairs, 1, 'there is no repair loop');
+});
+
+for (const [name, expectedCode, runRepair] of [
+  ['repair protocol failure', 'RepairProtocol', async () => ({ output: 'missing provider' })],
+  ['repair no-change failure', 'RepairNoChange', async () => ({
+    provider: 'fixture-repair', output: 'claimed repair without bytes',
+  })],
+  ['repair control-state failure', 'RepairGitMutation', async ({ cwd }) => {
+    writeFileSync(join(cwd, 'candidate.txt'), 'repair and stage\n', 'utf8');
+    git(cwd, 'add', 'candidate.txt');
+    return { provider: 'fixture-repair', output: 'staged' };
+  }],
+]) {
+  test(`fails closed on ${name}`, async () => {
+    const { worktree } = fixture(name.replaceAll(' ', '-'));
+    await assert.rejects(executeAgentFactory({
+      worktree,
+      evidenceDir: evidenceDir(name.replaceAll(' ', '-')),
+      task: 'change candidate.txt',
+      runWorker: async ({ cwd }) => {
+        writeFileSync(join(cwd, 'candidate.txt'), 'incorrect\n', 'utf8');
+        return { provider: 'fixture-worker', output: 'worker' };
+      },
+      runReviewer: async () => ({
+        provider: 'fixture-reviewer', verdict: 'REQUEST_CHANGES', output: 'B01',
+      }),
+      runRepair,
+    }), (error) => error instanceof FactoryAgentError && error.code === expectedCode);
+  });
+}
+
+test('runs exactly one bounded repair and makes the fresh final review authoritative', async () => {
+  const { worktree } = fixture('repair-approved');
+  const reviewCalls = [];
+  let repairCalls = 0;
+
+  const receipt = await executeAgentFactory({
+    worktree,
+    evidenceDir: evidenceDir('repair-approved'),
+    task: 'change candidate.txt correctly',
+    runWorker: async ({ cwd }) => {
+      writeFileSync(join(cwd, 'candidate.txt'), 'incorrect\n', 'utf8');
+      return { provider: 'fixture-worker', output: 'initial worker output' };
+    },
+    runReviewer: async ({ changeSet }) => {
+      reviewCalls.push(changeSet.identity);
+      if (reviewCalls.length === 1) {
+        return {
+          provider: 'fixture-reviewer-initial',
+          verdict: 'REQUEST_CHANGES',
+          output: 'FINDING B01: candidate.txt must contain correct bytes',
+        };
+      }
+      assert.equal(readFileSync(join(worktree, 'candidate.txt'), 'utf8'), 'correct\n');
+      return {
+        provider: 'fixture-reviewer-final', verdict: 'APPROVE', output: 'final approval',
+      };
+    },
+    runRepair: async ({ cwd, initialCandidate, findings }) => {
+      repairCalls += 1;
+      assert.equal(initialCandidate.identity, reviewCalls[0]);
+      assert.equal(findings, 'FINDING B01: candidate.txt must contain correct bytes');
+      writeFileSync(join(cwd, 'candidate.txt'), 'correct\n', 'utf8');
+      return { provider: 'fixture-repair', output: 'repair output' };
+    },
+  });
+
+  assert.equal(repairCalls, 1);
+  assert.equal(reviewCalls.length, 2, 'there is one initial and one fresh final review');
+  assert.notEqual(reviewCalls[0], reviewCalls[1]);
+  assert.equal(receipt.status, 'completed');
+  assert.equal(receipt.reviewer.provider, 'fixture-reviewer-final');
+  assert.equal(receipt.reviewer.verdict, 'APPROVE');
+  assert.equal(receipt.repair.provider, 'fixture-repair');
+  assert.equal(receipt.reviews.initial.verdict, 'REQUEST_CHANGES');
+  assert.equal(receipt.reviews.final.verdict, 'APPROVE');
+  assert.equal(receipt.changeSet.identity, reviewCalls[1]);
+  const evidencePaths = [
+    receipt.worker.evidence.path,
+    receipt.reviews.initial.evidence.path,
+    receipt.repair.evidence.path,
+    receipt.reviews.final.evidence.path,
+  ];
+  assert.equal(new Set(evidencePaths).size, 4, 'each actor has distinct evidence');
 });
 
 test('fails closed when the reviewer mutates worker output', async () => {
@@ -153,6 +272,27 @@ test('Claude worker profile is shell-free and strips alternate paid-provider rou
   assert.ok(invocation.args.includes('--no-session-persistence'));
   assert.match(invocation.args.at(-1), /change candidate\.txt/);
   assert.match(invocation.args.at(-1), /Do not commit, push, install/i);
+});
+
+test('Claude repair profile binds the initial candidate and exact findings without new authority', () => {
+  const invocation = buildClaudeRepairInvocation({
+    cwd: 'C:\\fixture worktree',
+    task: 'change candidate.txt',
+    initialCandidate: { identity: 'b'.repeat(64) },
+    findings: 'B01 exact reviewer finding',
+    env: {
+      PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture',
+      ANTHROPIC_API_KEY: 'must-not-leak', OPENAI_API_KEY: 'must-not-leak',
+    },
+  });
+
+  assert.equal(invocation.command, 'claude');
+  assert.equal(invocation.shell, false);
+  assert.deepEqual(Object.keys(invocation.env).sort(), ['PATH', 'USERPROFILE']);
+  assert.match(invocation.args.at(-1), new RegExp('b{64}', 'u'));
+  assert.match(invocation.args.at(-1), /B01 exact reviewer finding/u);
+  assert.match(invocation.args.at(-1), /one bounded repair worker/u);
+  assert.match(invocation.args.at(-1), /Do not commit, push, install/u);
 });
 
 test('Codex reviewer profile is ephemeral, read-only, and strips API routes', () => {

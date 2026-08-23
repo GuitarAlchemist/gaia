@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 
 import {
   executeAgentFactory,
+  runClaudeRepair,
   runClaudeWorker,
   runCodexReviewer,
 } from './factory-agent.mjs';
@@ -102,12 +103,15 @@ export function createAgentFactoryExecutionAdapter({
   executeFactory = executeAgentFactory,
   runWorker = runClaudeWorker,
   runReviewer = runCodexReviewer,
+  runRepair = runClaudeRepair,
 }) {
   const repository = canonicalRepository(expectedRepository, 'expectedRepository');
   const suppliedWorktree = resolve(canonicalText(worktree, 'worktree'));
   if (typeof executeFactory !== 'function' || typeof runWorker !== 'function'
-      || typeof runReviewer !== 'function') {
-    throw new PortfolioExecutionError('InvalidAdapter', 'factory, worker, and reviewer must be functions');
+      || typeof runReviewer !== 'function' || typeof runRepair !== 'function') {
+    throw new PortfolioExecutionError(
+      'InvalidAdapter', 'factory, worker, repair, and reviewer must be functions',
+    );
   }
   const physicalEvidenceRoot = physicalDirectory(
     evidenceRoot, 'evidenceRoot', 'InvalidEvidenceRoot',
@@ -144,6 +148,7 @@ export function createAgentFactoryExecutionAdapter({
         task,
         runWorker,
         runReviewer,
+        runRepair,
       });
     },
   });

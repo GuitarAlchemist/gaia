@@ -17,6 +17,13 @@ caller-owned ledger before execution, so replay fails closed. The resulting tran
 is `CANDIDATE_READY`, `CANDIDATE_REJECTED`, or `EXECUTION_FAILED`; the last form retains
 the authority and idempotency identities but exposes no provider message.
 
+The local factory may use the same execution once for a bounded correction: initial
+`REQUEST_CHANGES` -> one repair -> one fresh final review. This is internal to the one
+execution. It consumes neither a second grant nor a second idempotency key, and a final
+`REQUEST_CHANGES` is terminal rather than a loop. The final reviewer remains
+authoritative; repair and both review observations are optional receipt fields so an
+initial approval preserves the original receipt shape.
+
 Both untrusted inputs are taken into Gaia's own structures before they are used. The
 caller's grant is copied from its property descriptors before it is handed to the
 authority, and the provider's receipt is projected the same way after the grant is
@@ -63,6 +70,9 @@ would expose mechanisms, widen authority, or make replay depend on hidden state.
    which fields are extra stays the authority's judgement.
 10. Grant consumption is one-use and precedes execution. A failed run does not silently
     make the grant reusable; an operator must survey again and issue a new grant.
+    A bounded repair is part of that same consumed execution and never receives new
+    authority. Missing or invalid repair capability, Git control mutation, and no-change
+    repair are typed `EXECUTION_FAILED` outcomes.
 11. The execution adapter is bound to one repository, one linked worktree, and one
     external evidence root. Its idempotency directory is derived from the grant and
     intent revisions. At construction it measures the worktree's own Git origin remote

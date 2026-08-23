@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 /**
- * Run one real subscription-backed worker and one independent read-only reviewer.
+ * Run one real subscription-backed worker, at most one repair, and independent reviews.
  * The caller supplies an already-created clean linked Git worktree. The primary
  * checkout is never accepted and this command never commits, pushes, or merges.
  */
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import {
   assertPhysicalOutsideWorktree,
   executeAgentFactory,
   FactoryAgentError,
+  runClaudeRepair,
   runClaudeWorker,
   runCodexReviewer,
 } from '../src/factory-agent.mjs';
@@ -62,7 +64,12 @@ function requirePhysicalOutside(worktree, candidate, label) {
   }
 }
 
-async function main(argv) {
+export async function runFactoryAgentCli(argv, {
+  executeFactory = executeAgentFactory,
+  runWorker = runClaudeWorker,
+  runReviewer = runCodexReviewer,
+  runRepair = runClaudeRepair,
+} = {}) {
   const flags = parseArgs(argv);
   const worktree = resolve(flags.worktree);
   const output = resolve(flags.out);
@@ -81,28 +88,32 @@ async function main(argv) {
     status: 'running',
     worker: 'claude-subscription',
     reviewer: 'codex-subscription',
+    repair: 'claude-subscription-bounded-once',
     worktreeRole: 'caller-supplied-linked-worktree',
     evidenceStore: evidenceDir,
   }), { encoding: 'utf8', flag: 'wx' });
 
   try {
-    const receipt = await executeAgentFactory({
+    const receipt = await executeFactory({
       worktree,
       evidenceDir,
       task: flags.task,
-      runWorker: (context) => runClaudeWorker(context, { timeoutMs: flags.timeoutMs }),
-      runReviewer: (context) => runCodexReviewer(context, { timeoutMs: flags.timeoutMs }),
+      runWorker: (context) => runWorker(context, { timeoutMs: flags.timeoutMs }),
+      runReviewer: (context) => runReviewer(context, { timeoutMs: flags.timeoutMs }),
+      runRepair: (context) => runRepair(context, { timeoutMs: flags.timeoutMs }),
     });
     const completed = serialize({
       schema: 'gaia-agent-factory-run/1',
       status: receipt.status,
       workerProfile: 'claude-subscription',
       reviewerProfile: 'codex-subscription-read-only',
+      repairProfile: 'claude-subscription-bounded-once',
       result: receipt,
     });
     writeFileSync(output, completed, 'utf8');
     process.stdout.write(completed);
     if (receipt.status === 'rejected') process.exitCode = 3;
+    return receipt;
   } catch (error) {
     const failed = serialize({
       schema: 'gaia-agent-factory-run/1',
@@ -121,10 +132,15 @@ async function main(argv) {
   }
 }
 
-try {
-  await main(process.argv.slice(2));
-} catch (error) {
-  const suffix = error.receiptPath ? `; failure receipt: ${error.receiptPath}` : '';
-  process.stderr.write(`${error.name}: ${error.message}${suffix}\n`);
-  process.exitCode = error instanceof UsageError ? 2 : error instanceof FactoryAgentError ? 3 : 1;
+const directExecution = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (directExecution) {
+  try {
+    await runFactoryAgentCli(process.argv.slice(2));
+  } catch (error) {
+    const suffix = error.receiptPath ? `; failure receipt: ${error.receiptPath}` : '';
+    process.stderr.write(`${error.name}: ${error.message}${suffix}\n`);
+    process.exitCode = error instanceof UsageError ? 2 : error instanceof FactoryAgentError ? 3 : 1;
+  }
 }
