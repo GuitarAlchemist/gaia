@@ -73,6 +73,11 @@ candidate, and a claimed repair that leaves the candidate identity unchanged fai
 typed errors. The portfolio layer records those failures as `EXECUTION_FAILED` after
 the existing one-use grant is spent. Repair receives no second grant or idempotency key.
 
+The public `scripts/factory-agent.mjs` composition wires the closed Claude repair
+profile explicitly. Worker, repair, and each reviewer invocation receive the same
+caller-bounded timeout; importing its `runFactoryAgentCli` seam performs no command and
+allows the composition to be verified without spawning subscription providers.
+
 ## Provider boundaries
 
 - Claude runs non-interactively as the host user with a prompt-requested
