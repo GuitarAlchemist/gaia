@@ -46,6 +46,7 @@ const USAGE = `usage:
   github-portfolio-operator.mjs run --portfolio FILE --repository OWNER/NAME
       --private-key FILE --public-key FILE --ledger DIR --worktree DIR
       --evidence-root DIR --out NEW_FILE [--ttl-seconds 120] [--timeout-ms 600000]
+      [--progress-format human|jsonl]
 
 Both commands require an interactive session. Windows reads the passphrase from a masked
 OS dialog; other platforms use the terminal. Run reads its confirmation from the
@@ -57,7 +58,7 @@ const OPTIONS = {
   init: ['private-key', 'public-key'],
   run: [
     'portfolio', 'repository', 'private-key', 'public-key', 'ledger', 'worktree',
-    'evidence-root', 'out', 'ttl-seconds', 'timeout-ms',
+    'evidence-root', 'out', 'ttl-seconds', 'timeout-ms', 'progress-format',
   ],
 };
 
@@ -133,6 +134,8 @@ export async function runPortfolioOperatorCli(argv, {
   writeStdout = (chunk) => process.stdout.write(chunk),
   writeProgress = (chunk) => process.stderr.write(chunk),
   nowMs = () => Date.now(),
+  progressScheduler,
+  heartbeatIntervalMs = 10_000,
 } = {}) {
   const command = argv[0];
   if (command !== 'init' && command !== 'run') throw new UsageError(USAGE);
@@ -167,8 +170,19 @@ export async function runPortfolioOperatorCli(argv, {
   const timeoutMs = args['timeout-ms'] === undefined
     ? 10 * 60_000
     : boundedInteger(args['timeout-ms'], 'timeout-ms', 1_000, 30 * 60_000);
+  const progressFormat = args['progress-format'] ?? 'human';
+  if (!['human', 'jsonl'].includes(progressFormat)) {
+    throw new UsageError('--progress-format must be human or jsonl');
+  }
   assertInteractive(isInteractive);
-  const progress = createCliProgress({ timeoutMs, write: writeProgress, nowMs });
+  const progress = createCliProgress({
+    timeoutMs,
+    format: progressFormat,
+    write: writeProgress,
+    nowMs,
+    scheduler: progressScheduler,
+    heartbeatIntervalMs,
+  });
   progress.validating();
 
   let receipt;

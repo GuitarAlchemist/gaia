@@ -40,11 +40,15 @@ function parseArgs(argv) {
   if (flags.reviewer && flags.reviewer !== 'codex') {
     throw new UsageError('v1 reviewer profile is exactly codex');
   }
+  const progressFormat = flags['progress-format'] ?? 'human';
+  if (!['human', 'jsonl'].includes(progressFormat)) {
+    throw new UsageError('--progress-format must be human or jsonl');
+  }
   const timeoutMs = flags['timeout-ms'] === undefined ? 10 * 60_000 : Number(flags['timeout-ms']);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 30 * 60_000) {
     throw new UsageError('--timeout-ms must be an integer from 1000 through 1800000');
   }
-  return { ...flags, timeoutMs };
+  return { ...flags, timeoutMs, progressFormat };
 }
 
 function inside(root, candidate) {
@@ -73,9 +77,18 @@ export async function runFactoryAgentCli(argv, {
   writeStdout = (chunk) => process.stdout.write(chunk),
   writeProgress = (chunk) => process.stderr.write(chunk),
   nowMs = () => Date.now(),
+  progressScheduler,
+  heartbeatIntervalMs = 10_000,
 } = {}) {
   const flags = parseArgs(argv);
-  const progress = createCliProgress({ timeoutMs: flags.timeoutMs, write: writeProgress, nowMs });
+  const progress = createCliProgress({
+    timeoutMs: flags.timeoutMs,
+    format: flags.progressFormat,
+    write: writeProgress,
+    nowMs,
+    scheduler: progressScheduler,
+    heartbeatIntervalMs,
+  });
   progress.validating();
   const worktree = resolve(flags.worktree);
   const output = resolve(flags.out);
@@ -105,7 +118,7 @@ export async function runFactoryAgentCli(argv, {
   }
 
   try {
-    progress.authorizedExecution();
+    progress.executionStarting();
     const adapters = instrumentFactoryAdapters({
       runWorker: (context) => runWorker(context, { timeoutMs: flags.timeoutMs }),
       runReviewer: (context) => runReviewer(context, { timeoutMs: flags.timeoutMs }),

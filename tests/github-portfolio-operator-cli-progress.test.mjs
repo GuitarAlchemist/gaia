@@ -35,6 +35,7 @@ test('operator run keeps its final result on stdout and reports authorized repai
     '--evidence-root', join(scratch, 'evidence'),
     '--out', join(scratch, 'receipt.json'),
     '--timeout-ms', '2000',
+    '--progress-format', 'jsonl',
   ], {
     isInteractive: () => true,
     nowMs: () => {
@@ -139,4 +140,69 @@ test('operator progress writer failure cannot prevent the authorized result', as
   });
   assert.equal(exitCode, 0);
   assert.equal(executed, 1);
+});
+
+test('operator defaults to human progress and reserves authorized wording for grant execution', async () => {
+  const publicKeyPath = join(scratch, 'human-operator.pub');
+  writeFileSync(publicKeyPath, 'fixture public key', 'utf8');
+  const stdout = [];
+  const stderr = [];
+  const exitCode = await runPortfolioOperatorCli([
+    'run',
+    '--portfolio', join(scratch, 'human-portfolio.json'),
+    '--repository', 'GuitarAlchemist/ga',
+    '--private-key', join(scratch, 'human.key'),
+    '--public-key', publicKeyPath,
+    '--ledger', join(scratch, 'human-ledger'),
+    '--worktree', join(scratch, 'human-worktree'),
+    '--evidence-root', join(scratch, 'human-evidence'),
+    '--out', join(scratch, 'human-receipt.json'),
+  ], {
+    isInteractive: () => true,
+    writeStdout: (chunk) => stdout.push(chunk),
+    writeProgress: (chunk) => stderr.push(chunk),
+    createGithubRead: () => ({}),
+    createAuthority: () => ({}),
+    createExecution: ({ runWorker, runReviewer }) => ({
+      execute: async () => {
+        await runWorker({});
+        await runReviewer({});
+      },
+    }),
+    runWorker: async () => ({ provider: 'fixture-worker', output: 'worker' }),
+    runReviewer: async () => ({
+      provider: 'fixture-reviewer', verdict: 'APPROVE', output: 'review',
+    }),
+    runOperator: async ({ execution }) => {
+      await execution.execute({});
+      return {
+        status: 'AUTHORIZED', transition: { status: 'CANDIDATE_READY' }, revision: 'c'.repeat(64),
+      };
+    },
+    summarize: () => ({ text: 'OPERATOR RESULT\n', exitCode: 0 }),
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(stdout.join(''), 'OPERATOR RESULT\n');
+  const human = stderr.join('');
+  assert.match(human, /Gaia: Authorized execution starting/u);
+  assert.match(human, /Gaia: Worker running/u);
+  assert.match(human, /\(not an ETA\)/u);
+  assert.doesNotMatch(human, /"schema"|execution_starting/u);
+});
+
+test('operator progress format refuses every value outside the closed pair', async () => {
+  await assert.rejects(runPortfolioOperatorCli([
+    'run',
+    '--portfolio', join(scratch, 'invalid-format-portfolio.json'),
+    '--repository', 'GuitarAlchemist/ga',
+    '--private-key', join(scratch, 'invalid-format.key'),
+    '--public-key', join(scratch, 'invalid-format.pub'),
+    '--ledger', join(scratch, 'invalid-format-ledger'),
+    '--worktree', join(scratch, 'invalid-format-worktree'),
+    '--evidence-root', join(scratch, 'invalid-format-evidence'),
+    '--out', join(scratch, 'invalid-format-receipt.json'),
+    '--progress-format', 'none',
+  ], {
+    isInteractive: () => true,
+  }), /--progress-format must be human or jsonl/u);
 });

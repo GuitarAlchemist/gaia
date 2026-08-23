@@ -81,20 +81,26 @@ allows the composition to be verified without spawning subscription providers.
 ## CLI progress contract
 
 The public composition wraps the worker, reviewer, and repair adapters; the pure factory
-state machine has no progress callback. `stderr` receives one redacted
-`gaia-cli-progress/1` JSON object per line for validation, authorized execution, worker
-start/completion, initial review start/verdict, optional repair start/completion, final
-review start/verdict, and terminal outcome. `stdout` remains the final run JSON only.
+state machine has no progress callback. By default `stderr` receives redacted human
+lines for validation, `execution_starting`, worker start/completion, initial review
+start/verdict, optional repair start/completion, final review start/verdict, and terminal
+outcome. This direct CLI has no grant and never emits `authorized_execution`.
+`--progress-format jsonl` selects one closed `gaia-cli-progress/1` JSON object per line;
+the only other accepted value is the default `human`. `stdout` remains the final run JSON
+only.
 
-Every record carries monotone elapsed milliseconds and
+Every JSON record carries monotone elapsed milliseconds and
 `remainingProviderTimeUpperBoundMs`. The latter is `--timeout-ms` multiplied by the
 maximum number of provider invocations still reachable (four initially, then at most
 three, two, one, and zero). It is an upper bound on remaining provider time only, not a
 prediction or an end-to-end ETA; local Git inspection, evidence persistence, and receipt
-I/O are deliberately not assigned fictional deadlines. Records use closed stage,
-verdict, and outcome values and never interpolate task text, paths, secrets, provider
-identity, or provider output. Clock and writer failures degrade observability only and
-cannot change execution or receipts.
+I/O are deliberately not assigned fictional deadlines. Human lines render both durations
+in seconds/minutes/hours and label the bound `(not an ETA)`. While a provider is running,
+an unreferenced 10-second timer refreshes its stage, elapsed time, and bound; it is stopped
+on completion or failure. Records use closed stage, verdict, and outcome values and never
+interpolate task text, paths, secrets, provider identity, or provider output. Clock,
+writer, and timer failures degrade observability only and cannot change execution or
+receipts.
 
 ## Provider boundaries
 
