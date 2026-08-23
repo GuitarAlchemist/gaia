@@ -97,7 +97,9 @@ prediction or an end-to-end ETA; local Git inspection, evidence persistence, and
 I/O are deliberately not assigned fictional deadlines. Human lines render both durations
 in seconds/minutes/hours and label the bound `(not an ETA)`. While a provider is running,
 an unreferenced 10-second timer refreshes its stage, elapsed time, and bound; it is stopped
-on completion or failure. Records use closed stage, verdict, and outcome values and never
+on completion or failure. Each callback also carries an active generation token, so a
+timer retained by a failed `stop` or `unref` cannot emit after cleanup or terminal
+outcome. Records use closed stage, verdict, and outcome values and never
 interpolate task text, paths, secrets, provider identity, or provider output. Clock,
 writer, and timer failures degrade observability only and cannot change execution or
 receipts.

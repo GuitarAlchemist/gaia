@@ -284,6 +284,56 @@ test('a bounded heartbeat refreshes a running provider and leaves no timer behin
   assert.equal(active.size, 0, 'completion clears every heartbeat timer');
 });
 
+test('retained timer callbacks cannot emit after terminal cleanup failures', async () => {
+  const worktree = join(scratch, 'stale-heartbeat-worktree');
+  const out = join(scratch, 'stale-heartbeat-receipt.json');
+  mkdirSync(worktree);
+  const stderr = [];
+  const retained = [];
+  let starts = 0;
+  const scheduler = {
+    start(callback) {
+      starts += 1;
+      retained.push(callback);
+      const thisStart = starts;
+      return {
+        unref() {
+          if (thisStart === 2) throw new Error('unref failed after registration');
+        },
+      };
+    },
+    stop() {
+      throw new Error('stop failed and retained the callback');
+    },
+  };
+
+  await runFactoryAgentCli([
+    '--worktree', worktree,
+    '--task', 'stale heartbeat guard',
+    '--out', out,
+    '--progress-format', 'jsonl',
+  ], {
+    writeStdout: () => {},
+    writeProgress: (chunk) => stderr.push(chunk),
+    progressScheduler: scheduler,
+    executeFactory: async ({ runWorker, runReviewer }) => {
+      await runWorker({});
+      await runReviewer({});
+      return { schema: 'gaia-agent-factory-receipt/1', status: 'completed' };
+    },
+    runWorker: async () => ({ provider: 'fixture-worker', output: 'worker' }),
+    runReviewer: async () => ({
+      provider: 'fixture-reviewer', verdict: 'APPROVE', output: 'review',
+    }),
+  });
+
+  assert.equal(parseProgress(stderr).at(-1).stage, 'terminal_outcome');
+  const terminalLength = stderr.length;
+  for (const callback of retained) callback();
+  assert.equal(stderr.length, terminalLength,
+    'stale callbacks emit nothing after terminal_outcome even when cleanup failed');
+});
+
 test('progress format is closed to human and jsonl', async () => {
   const worktree = join(scratch, 'invalid-format-worktree');
   mkdirSync(worktree);

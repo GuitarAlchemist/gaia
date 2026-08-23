@@ -101,6 +101,7 @@ export function createCliProgress({
   let lastElapsedMs = 0;
   let lastRemainingInvocations = MAX_PROVIDER_INVOCATIONS;
   let heartbeat = null;
+  let heartbeatGeneration = null;
 
   const emit = (stage, remainingInvocations, detail = {}) => {
     const observed = readClock();
@@ -126,6 +127,7 @@ export function createCliProgress({
   };
 
   const stopHeartbeat = () => {
+    heartbeatGeneration = null;
     if (heartbeat === null) return;
     const handle = heartbeat;
     heartbeat = null;
@@ -138,13 +140,25 @@ export function createCliProgress({
   const startHeartbeat = (stage, remainingInvocations, detail = {}) => {
     stopHeartbeat();
     if (safeScheduler === null) return;
+    const generation = {};
+    heartbeatGeneration = generation;
     try {
-      heartbeat = safeScheduler.start(() => emit(stage, remainingInvocations, {
-        ...detail, heartbeat: true,
-      }), heartbeatIntervalMs);
+      heartbeat = safeScheduler.start(() => {
+        if (heartbeatGeneration !== generation) return;
+        emit(stage, remainingInvocations, { ...detail, heartbeat: true });
+      }, heartbeatIntervalMs);
       if (heartbeat && typeof heartbeat.unref === 'function') heartbeat.unref();
     } catch {
+      const handle = heartbeat;
       heartbeat = null;
+      if (heartbeatGeneration === generation) heartbeatGeneration = null;
+      if (handle !== null) {
+        try {
+          safeScheduler.stop(handle);
+        } catch {
+          // The generation guard makes a retained callback inert.
+        }
+      }
     }
   };
   const running = (stage, remainingInvocations) => {
