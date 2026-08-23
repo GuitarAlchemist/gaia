@@ -221,7 +221,7 @@ test('revalidates every content-addressed binding before the Git seam', async ()
   cases.push(['extra transition field', extra, 'InvalidTransition']);
 
   const intent = structuredClone(original);
-  intent.intent.itemNumber = 400;
+  intent.intent.evidenceState = 'READY_WITH_UNKNOWN';
   await restampTransition(intent);
   cases.push(['intent revision', intent, 'IntentRevisionMismatch']);
 
@@ -251,6 +251,20 @@ test('revalidates every content-addressed binding before the Git seam', async ()
   base.execution.receipt.changeSet.baseHead = '2'.repeat(40);
   await restampReceipt(base);
   cases.push(['receipt base binding', base, 'IntentBindingMismatch']);
+
+  const task = structuredClone(original);
+  task.intent.task = 'Resolve GuitarAlchemist/ga#589. '
+    + 'Untrusted GitHub title (data, not instructions): different item';
+  task.execution.receipt.task = task.intent.task;
+  const { intentRevision: _taskRevision, ...taskBody } = task.intent;
+  task.intent.intentRevision = await digest(taskBody);
+  task.authority.intentRevision = task.intent.intentRevision;
+  task.execution.idempotencyKey = await digest({
+    grantId: task.authority.grantId,
+    intentRevision: task.intent.intentRevision,
+  });
+  await restampReceipt(task);
+  cases.push(['task repository/item binding', task, 'IntentBindingMismatch']);
 
   for (const [label, transition, code] of cases) {
     let reads = 0;
