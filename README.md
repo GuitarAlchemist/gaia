@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 413 gates
+node --test                                   # 423 gates
 ```
 
 ### Functional factory tracer
@@ -139,6 +139,18 @@ platform is its PKCS#8 passphrase; on Windows the file mode is not an access con
 placement is the operator's.
 See [`docs/github-portfolio-operator.md`](docs/github-portfolio-operator.md).
 
+### Dry-run candidate publication intent
+
+`buildGitHubCandidatePublishIntent({ transition, gitObservation })` accepts only an exact,
+content-addressed `CANDIDATE_READY` transition, revalidates its nested intent, receipt,
+factory change-set identity, final APPROVE, idempotency, repository, Git HEAD/base and
+reviewed candidate bindings, and returns a frozen
+`gaia-github-candidate-publish-intent/1`. The Git observation is inert caller-supplied
+data, not a callback and not independent evidence. The result is advisory data with
+`effect: NONE`; a future authorized effect adapter must remeasure before it may commit,
+push, open or merge a pull request. See
+[`docs/github-portfolio-publish.md`](docs/github-portfolio-publish.md).
+
 Structural mutations are dry-run by default. `--apply` performs them.
 
 ## The tool surface — exactly six verbs
@@ -184,6 +196,7 @@ by **absence**, not by a check that could be bypassed.
 | `src/github-portfolio-authority.mjs` | Exact Ed25519 grant verification plus an atomic, one-use file ledger; prompts and bus text confer no authority. |
 | `src/github-portfolio-execution.mjs` | Binds one authorized portfolio intent to one local factory-agent run, linked worktree, and external evidence directory; proves the worktree's measured Git identity is the bound repository before it can be constructed. |
 | `src/github-portfolio-operator.mjs` | The operator seam: mints the dedicated encrypted Ed25519 keypair, performs one confirmed, short-lived, in-memory-only authorized advance that always leaves a redacted receipt, and owns the total terminal readers and the exit mapping. |
+| `src/github-portfolio-publish.mjs` | Pure dry-run projection from one exact `CANDIDATE_READY` transition plus inert caller-observed Git data to a closed, deterministic advisory publication intent with `effect: NONE`; it accepts no callback or effect capability. |
 | `src/github-read-adapter.mjs` | Read-only `gh` ingestion adapter with fail-closed query-cap detection. |
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
 | `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
@@ -197,7 +210,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 413 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 423 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
