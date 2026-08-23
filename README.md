@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 384 gates
+node --test                                   # 402 gates
 ```
 
 ### Functional factory tracer
@@ -95,6 +95,45 @@ review, and check evidence as `UNKNOWN`, and never writes GitHub state. `advance
 one exact `AWAITING_AUTHORITY` intent; R1 has no create, update, publish, merge, or push
 capability. See [`docs/github-portfolio-factory.md`](docs/github-portfolio-factory.md).
 
+### Operating the portfolio factory
+
+Reaching the factory's authorized path takes a human with a key. Mint one, once:
+
+```bash
+npm run portfolio:operator -- init \
+  --private-key ../state/gaia-operator.key \
+  --public-key  ../state/gaia-operator.pub
+```
+
+Then authorize exactly one run against a pinned portfolio revision:
+
+```bash
+npm run portfolio:operator -- run \
+  --portfolio     ../state/gaia-github-portfolio.json \
+  --repository    GuitarAlchemist/ga \
+  --private-key   ../state/gaia-operator.key \
+  --public-key    ../state/gaia-operator.pub \
+  --ledger        ../state/gaia-operator-ledger \
+  --worktree      ../candidate-worktree \
+  --evidence-root ../state/gaia-operator-evidence \
+  --out           ../state/gaia-operator-receipt.json
+```
+
+`run` re-reads GitHub, materializes the one `AWAITING_AUTHORITY` intent, shows every
+GitHub-derived field of it through one display control that strips terminal control and
+bidirectional characters and bounds the line, and requires the operator to type that
+intent's full revision. Only then does it read the encrypted key, mint a short-lived grant
+in memory, spend it exactly once, and execute. The passphrase and the confirmation come
+from an interactive terminal and from nowhere else: there is no option, environment
+variable, or file that supplies either, so a session driving this process with a pipe
+cannot authorize anything. The grant is never written down, the receipt path is claimed
+before authority is spent, and every path that returns after that claim leaves a redacted
+receipt there — including walking away from a prompt, which is a refusal that names
+itself and exits `1`, never a silent success. What protects the private key on every
+platform is its PKCS#8 passphrase; on Windows the file mode is not an access control and
+placement is the operator's.
+See [`docs/github-portfolio-operator.md`](docs/github-portfolio-operator.md).
+
 Structural mutations are dry-run by default. `--apply` performs them.
 
 ## The tool surface — exactly six verbs
@@ -139,11 +178,13 @@ by **absence**, not by a check that could be bypassed.
 | `src/github-portfolio.mjs` | Deterministic portfolio revision, conservative classification, bounded scheduling, and one-step authority intent. |
 | `src/github-portfolio-authority.mjs` | Exact Ed25519 grant verification plus an atomic, one-use file ledger; prompts and bus text confer no authority. |
 | `src/github-portfolio-execution.mjs` | Binds one authorized portfolio intent to one local factory-agent run, linked worktree, and external evidence directory; proves the worktree's measured Git identity is the bound repository before it can be constructed. |
+| `src/github-portfolio-operator.mjs` | The operator seam: mints the dedicated encrypted Ed25519 keypair, performs one confirmed, short-lived, in-memory-only authorized advance that always leaves a redacted receipt, and owns the total terminal readers and the exit mapping. |
 | `src/github-read-adapter.mjs` | Read-only `gh` ingestion adapter with fail-closed query-cap detection. |
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
 | `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
 | `scripts/factory-agent.mjs` | Real Claude worker → Codex read-only reviewer tracer. Produces a fail-closed, content-addressed run receipt; never commits or publishes. |
 | `scripts/github-portfolio.mjs` | One-command read-only organization survey; writes only a caller-named new local report. |
+| `scripts/github-portfolio-operator.mjs` | Two operator verbs, `init` and `run`. Parses a closed argument list, proves stdin is a terminal, names which streams the terminal is, and composes the existing adapters. Decides nothing about authority. |
 | `scripts/bus-cli.mjs` | The low-level six-verb CLI the control script wraps. |
 | `scripts/generate-config.mjs` | Codex / Claude Code config generation into a directory you name. |
 | `scripts/wmux-lanes.mjs` | Lane adapter over `peer-sessions-wmux`. Adapts; never reimplements. |
@@ -151,7 +192,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 384 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 402 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
