@@ -37,11 +37,17 @@ than something this pure module independently measured.
 - The observed change-set identity must equal the independently reviewed identity.
 - The factory change-set identity is independently recomputed using the exact shipped
   factory recipe: SHA-256 of its fixed-order JSON body followed by one LF.
-- The authoritative receipt reviewer must be `APPROVE`, carry the read-only reviewer
-  binding, and, after a repair, equal `reviews.final` while `reviews.initial` remains
-  `REQUEST_CHANGES`.
+- The authoritative receipt reviewer must have the exact factory shape, an `APPROVE`
+  verdict, its read-only authority and postcondition, and content-addressed evidence whose
+  role, path, size, digest, media type, and policy are all bound. After a repair, the exact
+  repair record must bind distinct initial and repaired identities, the repaired identity
+  must equal the verified current change set, `reviews.initial` must be the factory's
+  `reviewer-initial` `REQUEST_CHANGES`, and `reviews.final` must exactly equal the
+  authoritative `reviewer-final`.
 - Rejected, failed, malformed, accessor-bearing, tampered, mismatched, or stale inputs
   fail with typed `GitHubCandidatePublishError` codes before any output is returned.
+- Top-level, nested, and revoked Proxy values are rejected through Node's non-trapping
+  Proxy classifier before any prototype, descriptor, or own-key reflection.
 - JSON object key order does not affect any revision.
 - The returned object and every nested value are frozen.
 - The module imports no filesystem, process, child-process, network, credential, Git

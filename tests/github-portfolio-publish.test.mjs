@@ -72,7 +72,7 @@ async function readyTransition() {
       authority: 'sandbox-requested-read-only',
       verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged',
       verdict: 'APPROVE',
-      evidence: { sha256: SHA_D },
+      evidence: evidence('reviewer', SHA_D),
     },
   };
   const authority = { grantId: 'grant-399', intentRevision: intent.intentRevision };
@@ -101,6 +101,17 @@ function gitObservationFor(transition, overrides = {}) {
     baseOid: transition.execution.receipt.changeSet.baseHead,
     changeSetIdentity: transition.execution.receipt.changeSet.identity,
     ...overrides,
+  };
+}
+
+function evidence(role, sha256, bytes = 17) {
+  return {
+    role,
+    path: `C:\\tmp\\gaia-evidence\\${role}-${sha256}.txt`,
+    bytes,
+    sha256,
+    mediaType: 'text/plain; charset=utf-8',
+    policy: 'local-sensitive-content-addressed',
   };
 }
 
@@ -309,6 +320,48 @@ test('the pure builder rejects a callback capability without invoking it', async
   assert.equal(callbackCalls, 0);
 });
 
+test('rejects top-level, nested and revoked proxies without executing any trap', async () => {
+  const transition = await readyTransition();
+  const observation = gitObservationFor(transition);
+  let traps = 0;
+  const handler = {
+    get() { traps += 1; return undefined; },
+    getOwnPropertyDescriptor() { traps += 1; return undefined; },
+    getPrototypeOf() { traps += 1; return Object.prototype; },
+    has() { traps += 1; return false; },
+    ownKeys() { traps += 1; return []; },
+  };
+
+  const topLevel = new Proxy({ transition, gitObservation: observation }, handler);
+  assert.throws(
+    () => buildGitHubCandidatePublishIntent(topLevel),
+    (error) => error instanceof GitHubCandidatePublishError
+      && error.code === 'InvalidRequest',
+  );
+  assert.equal(traps, 0, 'top-level proxy traps stay dormant');
+
+  const nested = structuredClone(transition);
+  nested.execution = new Proxy(nested.execution, handler);
+  assert.throws(
+    () => buildGitHubCandidatePublishIntent({ transition: nested, gitObservation: observation }),
+    (error) => error instanceof GitHubCandidatePublishError
+      && error.code === 'InvalidTransition',
+  );
+  assert.equal(traps, 0, 'nested proxy traps stay dormant');
+
+  const revoked = Proxy.revocable(structuredClone(observation), handler);
+  revoked.revoke();
+  assert.throws(
+    () => buildGitHubCandidatePublishIntent({
+      transition,
+      gitObservation: revoked.proxy,
+    }),
+    (error) => error instanceof GitHubCandidatePublishError
+      && error.code === 'GitObservationInvalid',
+  );
+  assert.equal(traps, 0, 'revoked proxy traps stay dormant');
+});
+
 test('refuses malformed Git observations instead of treating missing evidence as fresh',
   async () => {
   const transition = await readyTransition();
@@ -362,9 +415,28 @@ test('refuses a fully restamped candidate whose authoritative reviewer requests 
   );
 
   const lineage = await readyTransition();
-  lineage.execution.receipt.repair = { provider: 'claude' };
+  const currentIdentity = lineage.execution.receipt.changeSet.identity;
+  lineage.execution.receipt.reviewer = {
+    ...lineage.execution.receipt.reviewer,
+    evidence: evidence('reviewer-final', SHA_D),
+  };
+  lineage.execution.receipt.repair = {
+    provider: 'claude',
+    evidence: evidence('repair', SHA_C),
+    authority: 'host-user-process',
+    requestedScope: 'linked-worktree-only',
+    observedScope: 'git-candidate-and-worktree-tree',
+    initialCandidateIdentity: SHA_A,
+    repairedCandidateIdentity: currentIdentity,
+  };
   lineage.execution.receipt.reviews = {
-    initial: { verdict: 'REQUEST_CHANGES' },
+    initial: {
+      provider: 'codex-initial',
+      evidence: evidence('reviewer-initial', SHA_B),
+      authority: 'sandbox-requested-read-only',
+      verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged',
+      verdict: 'REQUEST_CHANGES',
+    },
     final: { ...lineage.execution.receipt.reviewer, provider: 'different-reviewer' },
   };
   lineage.execution.receiptRevision = await digest(lineage.execution.receipt);
@@ -387,3 +459,104 @@ test('refuses a fully restamped candidate whose authoritative reviewer requests 
     gitObservation: gitObservationFor(lineage),
   }));
   });
+
+test('refuses a fully restamped reviewer skeleton without factory evidence lineage', async () => {
+  const transition = await readyTransition();
+  transition.execution.receipt.reviewer = {
+    verdict: 'APPROVE',
+    authority: 'sandbox-requested-read-only',
+    verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged',
+  };
+  transition.execution.receiptRevision = await digest(transition.execution.receipt);
+  transition.revision = await digest((({ revision: _discard, ...body }) => body)(transition));
+
+  assert.throws(
+    () => buildGitHubCandidatePublishIntent({
+      transition,
+      gitObservation: gitObservationFor(transition),
+    }),
+    (error) => error instanceof GitHubCandidatePublishError
+      && error.code === 'ReviewerBindingMismatch',
+  );
+
+  for (const [label, mutate] of [
+    ['extra reviewer field', (reviewer) => { reviewer.output = 'unbound'; }],
+    ['empty provider', (reviewer) => { reviewer.provider = ''; }],
+    ['wrong evidence role', (reviewer) => { reviewer.evidence.role = 'reviewer-final'; }],
+    ['unbound evidence path', (reviewer) => { reviewer.evidence.path = 'reviewer.txt'; }],
+    ['invalid evidence bytes', (reviewer) => { reviewer.evidence.bytes = -1; }],
+    ['invalid evidence digest', (reviewer) => { reviewer.evidence.sha256 = 'not-a-sha'; }],
+    ['wrong evidence media type', (reviewer) => { reviewer.evidence.mediaType = 'text/html'; }],
+    ['wrong evidence policy', (reviewer) => { reviewer.evidence.policy = 'public'; }],
+  ]) {
+    const candidate = await readyTransition();
+    mutate(candidate.execution.receipt.reviewer);
+    candidate.execution.receiptRevision = await digest(candidate.execution.receipt);
+    candidate.revision = await digest((({ revision: _discard, ...body }) => body)(candidate));
+    assert.throws(
+      () => buildGitHubCandidatePublishIntent({
+        transition: candidate,
+        gitObservation: gitObservationFor(candidate),
+      }),
+      (error) => error instanceof GitHubCandidatePublishError
+        && error.code === 'ReviewerBindingMismatch',
+      label,
+    );
+  }
+});
+
+test('refuses a fully restamped repaired receipt bound to a different candidate', async () => {
+  const transition = await readyTransition();
+  const currentIdentity = transition.execution.receipt.changeSet.identity;
+  transition.execution.receipt.reviewer = {
+    provider: 'codex-final',
+    evidence: evidence('reviewer-final', SHA_D),
+    authority: 'sandbox-requested-read-only',
+    verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged',
+    verdict: 'APPROVE',
+  };
+  transition.execution.receipt.repair = {
+    provider: 'claude-repair',
+    evidence: evidence('repair', SHA_C),
+    authority: 'host-user-process',
+    requestedScope: 'linked-worktree-only',
+    observedScope: 'git-candidate-and-worktree-tree',
+    initialCandidateIdentity: SHA_A,
+    repairedCandidateIdentity: currentIdentity === SHA_B ? SHA_C : SHA_B,
+  };
+  transition.execution.receipt.reviews = {
+    initial: {
+      provider: 'codex-initial',
+      evidence: evidence('reviewer-initial', SHA_B),
+      authority: 'sandbox-requested-read-only',
+      verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged',
+      verdict: 'REQUEST_CHANGES',
+    },
+    final: structuredClone(transition.execution.receipt.reviewer),
+  };
+  transition.execution.receiptRevision = await digest(transition.execution.receipt);
+  transition.revision = await digest((({ revision: _discard, ...body }) => body)(transition));
+
+  assert.throws(
+    () => buildGitHubCandidatePublishIntent({
+      transition,
+      gitObservation: gitObservationFor(transition),
+    }),
+    (error) => error instanceof GitHubCandidatePublishError
+      && error.code === 'RepairIdentityMismatch',
+  );
+
+  transition.execution.receipt.repair.repairedCandidateIdentity = currentIdentity;
+  transition.execution.receipt.repair.initialCandidateIdentity = currentIdentity;
+  transition.execution.receiptRevision = await digest(transition.execution.receipt);
+  transition.revision = await digest((({ revision: _discard, ...body }) => body)(transition));
+  assert.throws(
+    () => buildGitHubCandidatePublishIntent({
+      transition,
+      gitObservation: gitObservationFor(transition),
+    }),
+    (error) => error instanceof GitHubCandidatePublishError
+      && error.code === 'RepairIdentityMismatch',
+    'initial and repaired identities must be distinct',
+  );
+});

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { types as utilTypes } from 'node:util';
 
 export const GITHUB_CANDIDATE_PUBLISH_INTENT_SCHEMA =
   'gaia-github-candidate-publish-intent/1';
@@ -79,6 +80,7 @@ function ownJson(value, budget = { nodes: 65_536 }, seen = new Set(), depth = 0)
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value !== 'object') fail('InvalidTransition', 'input contains a non-JSON value');
+  if (utilTypes.isProxy(value)) fail('InvalidTransition', 'input contains a Proxy');
   if (seen.has(value)) fail('InvalidTransition', 'input contains a cycle');
   const array = Array.isArray(value);
   if (Object.getPrototypeOf(value) !== (array ? Array.prototype : Object.prototype)) {
@@ -130,8 +132,13 @@ function deepFreeze(value) {
 }
 
 function ownRequest(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)
-      || Object.getPrototypeOf(value) !== Object.prototype) {
+  if (!value || typeof value !== 'object') {
+    fail('InvalidRequest', 'request must be a plain object');
+  }
+  if (utilTypes.isProxy(value)) {
+    fail('InvalidRequest', 'request must not be a Proxy');
+  }
+  if (Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
     fail('InvalidRequest', 'request must be a plain object');
   }
   const descriptors = Object.getOwnPropertyDescriptors(value);
@@ -215,28 +222,107 @@ function verifyChangeSet(value) {
   return { baseHead, identity };
 }
 
-function verifyReviewer(receipt) {
-  const reviewer = receipt.reviewer;
-  if (!reviewer || typeof reviewer !== 'object' || Array.isArray(reviewer)) {
-    fail('ReviewerBindingMismatch', 'execution receipt has no authoritative reviewer');
+function verifyEvidence(value, expectedRole, field) {
+  requireExactKeys(
+    value,
+    ['role', 'path', 'bytes', 'sha256', 'mediaType', 'policy'],
+    field,
+    'ReviewerBindingMismatch',
+  );
+  if (value.role !== expectedRole || value.mediaType !== 'text/plain; charset=utf-8'
+      || value.policy !== 'local-sensitive-content-addressed') {
+    fail('ReviewerBindingMismatch', `${field} does not match the factory evidence policy`);
   }
-  if (reviewer.verdict !== 'APPROVE') {
-    fail('ReviewerNotApproved', 'authoritative final reviewer did not approve the candidate');
+  const path = requireText(value.path, `${field}.path`, 'ReviewerBindingMismatch');
+  const sha = requireSha(value.sha256, `${field}.sha256`, 'ReviewerBindingMismatch');
+  if (!Number.isSafeInteger(value.bytes) || value.bytes < 0) {
+    fail('ReviewerBindingMismatch', `${field}.bytes must be a non-negative safe integer`);
   }
-  if (reviewer.authority !== 'sandbox-requested-read-only'
-      || reviewer.verifiedPostcondition !== 'git-head-index-and-worktree-tree-unchanged') {
+  if (path.split(/[\\/]/u).at(-1) !== `${expectedRole}-${sha}.txt`) {
+    fail('ReviewerBindingMismatch', `${field}.path does not bind its role and digest`);
+  }
+}
+
+function verifyReview(value, expectedRole, expectedVerdict, field) {
+  requireExactKeys(
+    value,
+    ['provider', 'evidence', 'authority', 'verifiedPostcondition', 'verdict'],
+    field,
+    'ReviewerBindingMismatch',
+  );
+  requireText(value.provider, `${field}.provider`, 'ReviewerBindingMismatch');
+  verifyEvidence(value.evidence, expectedRole, `${field}.evidence`);
+  if (value.verdict !== expectedVerdict) {
+    if (expectedVerdict === 'APPROVE') {
+      fail('ReviewerNotApproved', 'authoritative final reviewer did not approve the candidate');
+    }
+    fail('ReviewerBindingMismatch', `${field} does not carry the required verdict`);
+  }
+  if (value.authority !== 'sandbox-requested-read-only'
+      || value.verifiedPostcondition !== 'git-head-index-and-worktree-tree-unchanged') {
     fail('ReviewerBindingMismatch', 'authoritative reviewer binding is invalid');
   }
+}
+
+function verifyRepair(value, changeSetIdentity) {
+  requireExactKeys(
+    value,
+    [
+      'provider', 'evidence', 'authority', 'requestedScope', 'observedScope',
+      'initialCandidateIdentity', 'repairedCandidateIdentity',
+    ],
+    'receipt.repair',
+    'ReviewerBindingMismatch',
+  );
+  requireText(value.provider, 'receipt.repair.provider', 'ReviewerBindingMismatch');
+  verifyEvidence(value.evidence, 'repair', 'receipt.repair.evidence');
+  if (value.authority !== 'host-user-process'
+      || value.requestedScope !== 'linked-worktree-only'
+      || value.observedScope !== 'git-candidate-and-worktree-tree') {
+    fail('ReviewerBindingMismatch', 'repair authority or scope does not match the factory');
+  }
+  const initial = requireSha(
+    value.initialCandidateIdentity,
+    'receipt.repair.initialCandidateIdentity',
+    'ReviewerBindingMismatch',
+  );
+  const repaired = requireSha(
+    value.repairedCandidateIdentity,
+    'receipt.repair.repairedCandidateIdentity',
+    'ReviewerBindingMismatch',
+  );
+  if (repaired !== changeSetIdentity || initial === repaired) {
+    fail('RepairIdentityMismatch', 'repair identities do not bind distinct old and current candidates');
+  }
+}
+
+function verifyReviewer(receipt, changeSetIdentity) {
   const repaired = Object.hasOwn(receipt, 'repair');
   const reviewedTwice = Object.hasOwn(receipt, 'reviews');
   if (repaired !== reviewedTwice) {
     fail('ReviewerBindingMismatch', 'repair and review lineage must be present together');
   }
-  if (reviewedTwice) {
-    if (!receipt.reviews || receipt.reviews.initial?.verdict !== 'REQUEST_CHANGES'
-        || canonicalJson(receipt.reviews.final) !== canonicalJson(reviewer)) {
-      fail('ReviewerBindingMismatch', 'final reviewer does not bind the repair review lineage');
-    }
+  if (!reviewedTwice) {
+    verifyReview(receipt.reviewer, 'reviewer', 'APPROVE', 'receipt.reviewer');
+    return;
+  }
+  requireExactKeys(
+    receipt.reviews,
+    ['initial', 'final'],
+    'receipt.reviews',
+    'ReviewerBindingMismatch',
+  );
+  verifyRepair(receipt.repair, changeSetIdentity);
+  verifyReview(
+    receipt.reviews.initial,
+    'reviewer-initial',
+    'REQUEST_CHANGES',
+    'receipt.reviews.initial',
+  );
+  verifyReview(receipt.reviews.final, 'reviewer-final', 'APPROVE', 'receipt.reviews.final');
+  verifyReview(receipt.reviewer, 'reviewer-final', 'APPROVE', 'receipt.reviewer');
+  if (canonicalJson(receipt.reviews.final) !== canonicalJson(receipt.reviewer)) {
+    fail('ReviewerBindingMismatch', 'final reviewer does not bind the repair review lineage');
   }
 }
 
@@ -331,7 +417,7 @@ function verifyTransition(supplied) {
   if (changeSet.baseHead !== baseHead) {
     fail('IntentBindingMismatch', 'candidate change set does not bind the receipt base HEAD');
   }
-  verifyReviewer(receipt);
+  verifyReviewer(receipt, changeSet.identity);
   return { transition, intent, receipt, baseHead, changeSetIdentity: changeSet.identity };
 }
 
