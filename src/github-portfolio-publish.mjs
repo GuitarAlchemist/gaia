@@ -30,6 +30,9 @@ const canonicalJson = (value) => {
 };
 
 const sha256 = (value) => createHash('sha256').update(canonicalJson(value)).digest('hex');
+const factorySha256 = (value) => createHash('sha256')
+  .update(`${JSON.stringify(value)}\n`)
+  .digest('hex');
 
 function fail(code, message) {
   throw new GitHubCandidatePublishError(code, message);
@@ -126,6 +129,117 @@ function deepFreeze(value) {
   return value;
 }
 
+function ownRequest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype) {
+    fail('InvalidRequest', 'request must be a plain object');
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key !== 'string')) {
+    fail('InvalidRequest', 'request must carry no symbol-keyed field');
+  }
+  const expected = ['gitObservation', 'transition'];
+  if (keys.length !== expected.length || [...keys].sort().some(
+    (key, index) => key !== expected[index],
+  )) {
+    fail('InvalidRequest', 'request must contain exactly transition and gitObservation');
+  }
+  const owned = {};
+  for (const key of keys) {
+    const descriptor = descriptors[key];
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) {
+      fail('InvalidRequest', 'every request field must be enumerable own data');
+    }
+    owned[key] = descriptor.value;
+  }
+  return owned;
+}
+
+function verifyChangeSet(value) {
+  requireExactKeys(
+    value,
+    [
+      'baseHead', 'statusBytes', 'statusSha256', 'patchBytes', 'patchSha256', 'files',
+      'identity',
+    ],
+    'receipt.changeSet',
+  );
+  const baseHead = requireOid(value.baseHead, 'receipt.changeSet.baseHead');
+  const natural = (candidate, field) => {
+    if (!Number.isSafeInteger(candidate) || candidate < 0) {
+      fail('IntentBindingMismatch', `${field} must be a non-negative safe integer`);
+    }
+    return candidate;
+  };
+  const statusBytes = natural(value.statusBytes, 'receipt.changeSet.statusBytes');
+  const patchBytes = natural(value.patchBytes, 'receipt.changeSet.patchBytes');
+  const statusSha256 = requireSha(value.statusSha256, 'receipt.changeSet.statusSha256');
+  const patchSha256 = requireSha(value.patchSha256, 'receipt.changeSet.patchSha256');
+  if (!Array.isArray(value.files) || value.files.length === 0) {
+    fail('IntentBindingMismatch', 'receipt.changeSet.files must be a non-empty array');
+  }
+  const files = value.files.map((file, index) => {
+    requireExactKeys(
+      file, ['path', 'state', 'bytes', 'sha256'], `receipt.changeSet.files[${index}]`,
+    );
+    const path = requireText(file.path, `receipt.changeSet.files[${index}].path`);
+    if (file.state === 'present') {
+      return {
+        path,
+        state: 'present',
+        bytes: natural(file.bytes, `receipt.changeSet.files[${index}].bytes`),
+        sha256: requireSha(file.sha256, `receipt.changeSet.files[${index}].sha256`),
+      };
+    }
+    if (file.state === 'deleted' && file.bytes === 0 && file.sha256 === null) {
+      return { path, state: 'deleted', bytes: 0, sha256: null };
+    }
+    fail('IntentBindingMismatch', `receipt.changeSet.files[${index}] has an invalid state`);
+  });
+  if (new Set(files.map(({ path }) => path)).size !== files.length) {
+    fail('IntentBindingMismatch', 'receipt.changeSet.files contains a duplicate path');
+  }
+  const body = {
+    baseHead, statusBytes, statusSha256, patchBytes, patchSha256, files,
+  };
+  const identity = requireSha(
+    value.identity, 'receipt.changeSet.identity', 'IntentBindingMismatch',
+  );
+  if (factorySha256(body) !== identity) {
+    fail(
+      'ChangeSetIdentityMismatch',
+      'candidate change-set content does not match the factory identity recipe',
+    );
+  }
+  return { baseHead, identity };
+}
+
+function verifyReviewer(receipt) {
+  const reviewer = receipt.reviewer;
+  if (!reviewer || typeof reviewer !== 'object' || Array.isArray(reviewer)) {
+    fail('ReviewerBindingMismatch', 'execution receipt has no authoritative reviewer');
+  }
+  if (reviewer.verdict !== 'APPROVE') {
+    fail('ReviewerNotApproved', 'authoritative final reviewer did not approve the candidate');
+  }
+  if (reviewer.authority !== 'sandbox-requested-read-only'
+      || reviewer.verifiedPostcondition !== 'git-head-index-and-worktree-tree-unchanged') {
+    fail('ReviewerBindingMismatch', 'authoritative reviewer binding is invalid');
+  }
+  const repaired = Object.hasOwn(receipt, 'repair');
+  const reviewedTwice = Object.hasOwn(receipt, 'reviews');
+  if (repaired !== reviewedTwice) {
+    fail('ReviewerBindingMismatch', 'repair and review lineage must be present together');
+  }
+  if (reviewedTwice) {
+    if (!receipt.reviews || receipt.reviews.initial?.verdict !== 'REQUEST_CHANGES'
+        || canonicalJson(receipt.reviews.final) !== canonicalJson(reviewer)) {
+      fail('ReviewerBindingMismatch', 'final reviewer does not bind the repair review lineage');
+    }
+  }
+}
+
 function verifyTransition(supplied) {
   const transition = ownJson(supplied);
   requireExactKeys(
@@ -213,13 +327,12 @@ function verifyTransition(supplied) {
     fail('IntentBindingMismatch', 'completed execution receipt does not bind the intent task');
   }
   const baseHead = requireOid(receipt.base?.head, 'receipt.base.head');
-  if (receipt.changeSet?.baseHead !== baseHead) {
+  const changeSet = verifyChangeSet(receipt.changeSet);
+  if (changeSet.baseHead !== baseHead) {
     fail('IntentBindingMismatch', 'candidate change set does not bind the receipt base HEAD');
   }
-  const changeSetIdentity = requireSha(
-    receipt.changeSet?.identity, 'receipt.changeSet.identity', 'IntentBindingMismatch',
-  );
-  return { transition, intent, receipt, baseHead, changeSetIdentity };
+  verifyReviewer(receipt);
+  return { transition, intent, receipt, baseHead, changeSetIdentity: changeSet.identity };
 }
 
 function ownGitObservation(value) {
@@ -228,7 +341,7 @@ function ownGitObservation(value) {
     observation = ownJson(value);
   } catch (error) {
     if (error instanceof GitHubCandidatePublishError) {
-      fail('GitReadProtocol', 'gitRead returned an unsupported observation');
+      fail('GitObservationInvalid', 'caller supplied an unsupported Git observation');
     }
     throw error;
   }
@@ -236,32 +349,27 @@ function ownGitObservation(value) {
     observation,
     ['repository', 'headOid', 'baseOid', 'changeSetIdentity'],
     'git observation',
-    'GitReadProtocol',
+    'GitObservationInvalid',
   );
-  requireText(observation.repository, 'git.repository', 'GitReadProtocol');
-  requireOid(observation.headOid, 'git.headOid', 'GitReadProtocol');
-  requireOid(observation.baseOid, 'git.baseOid', 'GitReadProtocol');
-  requireSha(observation.changeSetIdentity, 'git.changeSetIdentity', 'GitReadProtocol');
+  requireText(observation.repository, 'git.repository', 'GitObservationInvalid');
+  requireOid(observation.headOid, 'git.headOid', 'GitObservationInvalid');
+  requireOid(observation.baseOid, 'git.baseOid', 'GitObservationInvalid');
+  requireSha(
+    observation.changeSetIdentity, 'git.changeSetIdentity', 'GitObservationInvalid',
+  );
   return observation;
 }
 
 /**
  * Turn one independently approved local candidate into descriptive publication data.
  *
- * `gitRead.read` is the only adapter seam. The request explicitly carries `effect: NONE`;
- * this module has no filesystem, network, Git mutation, credential or authority adapter.
+ * Both inputs are owned JSON data. The module has no callback or Adapter seam and no
+ * filesystem, network, Git mutation, credential or authority capability.
  */
-export async function buildGitHubCandidatePublishIntent({ transition, gitRead } = {}) {
-  if (!gitRead || typeof gitRead.read !== 'function') {
-    fail('InvalidAdapter', 'gitRead.read is required');
-  }
-  const verified = verifyTransition(transition);
-  const observed = ownGitObservation(await gitRead.read({
-    effect: 'NONE',
-    repository: verified.intent.repository,
-    expectedHeadOid: verified.baseHead,
-    expectedChangeSetIdentity: verified.changeSetIdentity,
-  }));
+export function buildGitHubCandidatePublishIntent(supplied) {
+  const request = ownRequest(supplied);
+  const verified = verifyTransition(request.transition);
+  const observed = ownGitObservation(request.gitObservation);
   if (observed.repository !== verified.intent.repository) {
     fail('RepositoryIdentityMismatch', 'candidate Git repository does not match the intent');
   }
@@ -292,6 +400,7 @@ export async function buildGitHubCandidatePublishIntent({ transition, gitRead } 
       headOid: observed.headOid,
       baseOid: observed.baseOid,
       changeSetIdentity: observed.changeSetIdentity,
+      observation: 'CALLER_OBSERVED_READ_ONLY_DATA',
     },
     requestedOperations: [...REQUESTED_OPERATIONS],
   };
