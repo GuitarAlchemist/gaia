@@ -149,7 +149,9 @@ node scripts/github-portfolio-operator.mjs run \
   --worktree      ../candidate-worktree \
   --evidence-root ../state/gaia-operator-evidence \
   --out           ../state/gaia-operator-receipt.json \
-  [--ttl-seconds 120]
+  [--ttl-seconds 120] \
+  [--timeout-ms 600000] \
+  [--progress-format human|jsonl]
 ```
 
 `--repository` is a pre-commitment: the operator states which repository they are willing
@@ -173,6 +175,20 @@ operator is being asked to judge.
 
 The operator must type the full 64-character intent revision; anything else — including
 the revision of a different intent — refuses.
+
+The CLI emits the same redacted human progress as the direct factory CLI to `stderr`;
+`--progress-format jsonl` selects closed `gaia-cli-progress/1` JSON Lines instead.
+Validation is visible before authority; `authorized_execution` appears only when the
+existing authority seam has consumed the grant and calls its execution adapter. Later
+records report bounded worker/reviewer/repair stages, verdicts, readable elapsed time,
+and the terminal transition. A provider still running emits an unreferenced liveness
+heartbeat every 10 seconds and all provider exit paths stop that timer. The
+`remainingProviderTimeUpperBoundMs` field is computed only from `--timeout-ms` and the
+maximum remaining provider invocations. It is not a predictive ETA and excludes local
+validation and persistence. Progress contains no task, GitHub content, paths, keys,
+passphrases, signatures, or provider output. A progress writer, clock, or timer failure is
+best-effort telemetry loss only: it cannot alter confirmation, grant use, execution,
+receipt, stdout, or exit status. Human output labels every bound `(not an ETA)`.
 
 ### Leaving the prompt without answering it
 

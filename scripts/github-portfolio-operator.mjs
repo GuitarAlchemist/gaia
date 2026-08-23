@@ -13,6 +13,8 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import {
   initOperatorKeypair,
@@ -24,6 +26,12 @@ import {
 import { createFileEd25519AuthorityAdapter } from '../src/github-portfolio-authority.mjs';
 import { createAgentFactoryExecutionAdapter } from '../src/github-portfolio-execution.mjs';
 import { createGitHubReadAdapter } from '../src/github-read-adapter.mjs';
+import {
+  runClaudeRepair,
+  runClaudeWorker,
+  runCodexReviewer,
+} from '../src/factory-agent.mjs';
+import { createCliProgress, instrumentFactoryAdapters } from '../src/cli-progress.mjs';
 
 class UsageError extends Error {
   constructor(message) {
@@ -37,7 +45,8 @@ const USAGE = `usage:
 
   github-portfolio-operator.mjs run --portfolio FILE --repository OWNER/NAME
       --private-key FILE --public-key FILE --ledger DIR --worktree DIR
-      --evidence-root DIR --out NEW_FILE [--ttl-seconds 120]
+      --evidence-root DIR --out NEW_FILE [--ttl-seconds 120] [--timeout-ms 600000]
+      [--progress-format human|jsonl]
 
 Both commands require an interactive session. Windows reads the passphrase from a masked
 OS dialog; other platforms use the terminal. Run reads its confirmation from the
@@ -49,7 +58,7 @@ const OPTIONS = {
   init: ['private-key', 'public-key'],
   run: [
     'portfolio', 'repository', 'private-key', 'public-key', 'ledger', 'worktree',
-    'evidence-root', 'out', 'ttl-seconds',
+    'evidence-root', 'out', 'ttl-seconds', 'timeout-ms', 'progress-format',
   ],
 };
 
@@ -78,7 +87,7 @@ function required(args, name) {
 
 function boundedInteger(value, name, minimum, maximum) {
   if (!/^[0-9]+$/u.test(value)) {
-    throw new UsageError(`--${name} must be a whole number of seconds`);
+    throw new UsageError(`--${name} must be a whole number`);
   }
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
@@ -89,8 +98,8 @@ function boundedInteger(value, name, minimum, maximum) {
 
 // The one precondition this script exists to enforce. A pipe is not a person, and an
 // agent driving this process has a pipe.
-function assertInteractive() {
-  if (!process.stdin.isTTY) {
+function assertInteractive(isInteractive = () => process.stdin.isTTY) {
+  if (!isInteractive()) {
     throw new UsageError(
       'this command requires an interactive terminal for operator presence and confirmation, and stdin is not one',
     );
@@ -109,8 +118,25 @@ const confirmAtTerminal = ({ prompt }) => readConfirmationFromTerminal({
   prompt, input: process.stdin, output: process.stderr,
 });
 
-async function main() {
-  const argv = process.argv.slice(2);
+export async function runPortfolioOperatorCli(argv, {
+  initKeypair = initOperatorKeypair,
+  runOperator = runOperatorFactory,
+  summarize = summarizeOperatorReceipt,
+  createAuthority = createFileEd25519AuthorityAdapter,
+  createExecution = createAgentFactoryExecutionAdapter,
+  createGithubRead = createGitHubReadAdapter,
+  runWorker = runClaudeWorker,
+  runReviewer = runCodexReviewer,
+  runRepair = runClaudeRepair,
+  readPassphraseFn = readPassphrase,
+  confirmFn = confirmAtTerminal,
+  isInteractive = () => process.stdin.isTTY,
+  writeStdout = (chunk) => process.stdout.write(chunk),
+  writeProgress = (chunk) => process.stderr.write(chunk),
+  nowMs = () => Date.now(),
+  progressScheduler,
+  heartbeatIntervalMs = 10_000,
+} = {}) {
   const command = argv[0];
   if (command !== 'init' && command !== 'run') throw new UsageError(USAGE);
   const args = parseArgs(argv.slice(1), OPTIONS[command]);
@@ -118,11 +144,11 @@ async function main() {
   if (command === 'init') {
     const privateKeyPath = required(args, 'private-key');
     const publicKeyPath = required(args, 'public-key');
-    assertInteractive();
-    const summary = await initOperatorKeypair({
-      privateKeyPath, publicKeyPath, readPassphrase,
+    assertInteractive(isInteractive);
+    const summary = await initKeypair({
+      privateKeyPath, publicKeyPath, readPassphrase: readPassphraseFn,
     });
-    process.stdout.write(`operator key minted\n  private ${summary.privateKeyPath}\n`
+    writeStdout(`operator key minted\n  private ${summary.privateKeyPath}\n`
       + `  public  ${summary.publicKeyPath}\n`);
     return 0;
   }
@@ -141,39 +167,84 @@ async function main() {
   const ttlSeconds = args['ttl-seconds'] === undefined
     ? 120
     : boundedInteger(args['ttl-seconds'], 'ttl-seconds', 1, 900);
-  assertInteractive();
-
-  const receipt = await runOperatorFactory({
-    portfolioPath,
-    repository,
-    privateKeyPath,
-    outPath,
-    githubRead: createGitHubReadAdapter(),
-    authority: createFileEd25519AuthorityAdapter({
-      publicKey: readFileSync(publicKeyPath, 'utf8'), ledgerDir,
-    }),
-    execution: createAgentFactoryExecutionAdapter({
-      expectedRepository: repository, worktree, evidenceRoot,
-    }),
-    readPassphrase,
-    confirm: confirmAtTerminal,
-    ttlSeconds,
+  const timeoutMs = args['timeout-ms'] === undefined
+    ? 10 * 60_000
+    : boundedInteger(args['timeout-ms'], 'timeout-ms', 1_000, 30 * 60_000);
+  const progressFormat = args['progress-format'] ?? 'human';
+  if (!['human', 'jsonl'].includes(progressFormat)) {
+    throw new UsageError('--progress-format must be human or jsonl');
+  }
+  assertInteractive(isInteractive);
+  const progress = createCliProgress({
+    timeoutMs,
+    format: progressFormat,
+    write: writeProgress,
+    nowMs,
+    scheduler: progressScheduler,
+    heartbeatIntervalMs,
   });
+  progress.validating();
+
+  let receipt;
+  try {
+    const adapters = instrumentFactoryAdapters({
+      runWorker: (context) => runWorker(context, { timeoutMs }),
+      runReviewer: (context) => runReviewer(context, { timeoutMs }),
+      runRepair: (context) => runRepair(context, { timeoutMs }),
+      progress,
+    });
+    const baseExecution = createExecution({
+      expectedRepository: repository, worktree, evidenceRoot,
+      ...adapters,
+    });
+    const execution = Object.freeze({
+      execute: async (request) => {
+        progress.authorizedExecution();
+        return baseExecution.execute(request);
+      },
+    });
+
+    receipt = await runOperator({
+      portfolioPath,
+      repository,
+      privateKeyPath,
+      outPath,
+      githubRead: createGithubRead(),
+      authority: createAuthority({
+        publicKey: readFileSync(publicKeyPath, 'utf8'), ledgerDir,
+      }),
+      execution,
+      readPassphrase: readPassphraseFn,
+      confirm: confirmFn,
+      ttlSeconds,
+    });
+  } catch (error) {
+    progress.terminalOutcome('FAILED');
+    throw error;
+  }
 
   // Every terminal outcome of `runOperatorFactory` — returned or refused — has a receipt
   // behind it by now, and one place decides what to say about it and what to exit with.
-  const summary = summarizeOperatorReceipt(receipt, outPath);
-  process.stdout.write(summary.text);
+  const summary = summarize(receipt, outPath);
+  writeStdout(summary.text);
+  progress.terminalOutcome(receipt.status === 'AUTHORIZED'
+    ? receipt.transition?.status ?? 'UNKNOWN'
+    : receipt.status === 'REFUSED' ? 'REFUSED' : 'UNKNOWN');
   return summary.exitCode;
 }
 
-main().then((code) => {
-  process.exitCode = code;
-}).catch((error) => {
-  process.stderr.write(
-    `${error?.name ?? 'Error'}: ${error?.code ? `${error.code}: ` : ''}${error?.message ?? 'failed'}\n`,
-  );
-  // A throw means the command never got as far as owning a receipt, so it is reported as
-  // a usage failure rather than as an outcome.
-  process.exitCode = 2;
-});
+const directExecution = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (directExecution) {
+  runPortfolioOperatorCli(process.argv.slice(2)).then((code) => {
+    process.exitCode = code;
+  }).catch((error) => {
+    process.stderr.write(
+      `${error?.name ?? 'Error'}: ${error?.code ? `${error.code}: ` : ''}${error?.message ?? 'failed'}\n`,
+    );
+    // A throw means the command never got as far as owning a receipt, so it is reported as
+    // a usage failure rather than as an outcome.
+    process.exitCode = 2;
+  });
+}

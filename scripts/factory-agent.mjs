@@ -17,6 +17,7 @@ import {
   runClaudeWorker,
   runCodexReviewer,
 } from '../src/factory-agent.mjs';
+import { createCliProgress, instrumentFactoryAdapters } from '../src/cli-progress.mjs';
 
 class UsageError extends Error {}
 
@@ -39,11 +40,15 @@ function parseArgs(argv) {
   if (flags.reviewer && flags.reviewer !== 'codex') {
     throw new UsageError('v1 reviewer profile is exactly codex');
   }
+  const progressFormat = flags['progress-format'] ?? 'human';
+  if (!['human', 'jsonl'].includes(progressFormat)) {
+    throw new UsageError('--progress-format must be human or jsonl');
+  }
   const timeoutMs = flags['timeout-ms'] === undefined ? 10 * 60_000 : Number(flags['timeout-ms']);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 30 * 60_000) {
     throw new UsageError('--timeout-ms must be an integer from 1000 through 1800000');
   }
-  return { ...flags, timeoutMs };
+  return { ...flags, timeoutMs, progressFormat };
 }
 
 function inside(root, candidate) {
@@ -69,38 +74,62 @@ export async function runFactoryAgentCli(argv, {
   runWorker = runClaudeWorker,
   runReviewer = runCodexReviewer,
   runRepair = runClaudeRepair,
+  writeStdout = (chunk) => process.stdout.write(chunk),
+  writeProgress = (chunk) => process.stderr.write(chunk),
+  nowMs = () => Date.now(),
+  progressScheduler,
+  heartbeatIntervalMs = 10_000,
 } = {}) {
   const flags = parseArgs(argv);
+  const progress = createCliProgress({
+    timeoutMs: flags.timeoutMs,
+    format: flags.progressFormat,
+    write: writeProgress,
+    nowMs,
+    scheduler: progressScheduler,
+    heartbeatIntervalMs,
+  });
+  progress.validating();
   const worktree = resolve(flags.worktree);
   const output = resolve(flags.out);
   const evidenceDir = `${output}.evidence`;
-  if (existsSync(output)) throw new UsageError(`receipt already exists: ${output}`);
-  if (inside(worktree, output)) {
-    throw new UsageError('the receipt must be outside the candidate worktree');
+  try {
+    if (existsSync(output)) throw new UsageError(`receipt already exists: ${output}`);
+    if (inside(worktree, output)) {
+      throw new UsageError('the receipt must be outside the candidate worktree');
+    }
+
+    requirePhysicalOutside(worktree, output, 'receipt');
+    requirePhysicalOutside(worktree, evidenceDir, 'evidence directory');
+    mkdirSync(dirname(output), { recursive: true });
+    requirePhysicalOutside(worktree, output, 'receipt');
+    writeFileSync(output, serialize({
+      schema: 'gaia-agent-factory-run/1',
+      status: 'running',
+      worker: 'claude-subscription',
+      reviewer: 'codex-subscription',
+      repair: 'claude-subscription-bounded-once',
+      worktreeRole: 'caller-supplied-linked-worktree',
+      evidenceStore: evidenceDir,
+    }), { encoding: 'utf8', flag: 'wx' });
+  } catch (error) {
+    progress.terminalOutcome('FAILED');
+    throw error;
   }
 
-  requirePhysicalOutside(worktree, output, 'receipt');
-  requirePhysicalOutside(worktree, evidenceDir, 'evidence directory');
-  mkdirSync(dirname(output), { recursive: true });
-  requirePhysicalOutside(worktree, output, 'receipt');
-  writeFileSync(output, serialize({
-    schema: 'gaia-agent-factory-run/1',
-    status: 'running',
-    worker: 'claude-subscription',
-    reviewer: 'codex-subscription',
-    repair: 'claude-subscription-bounded-once',
-    worktreeRole: 'caller-supplied-linked-worktree',
-    evidenceStore: evidenceDir,
-  }), { encoding: 'utf8', flag: 'wx' });
-
   try {
+    progress.executionStarting();
+    const adapters = instrumentFactoryAdapters({
+      runWorker: (context) => runWorker(context, { timeoutMs: flags.timeoutMs }),
+      runReviewer: (context) => runReviewer(context, { timeoutMs: flags.timeoutMs }),
+      runRepair: (context) => runRepair(context, { timeoutMs: flags.timeoutMs }),
+      progress,
+    });
     const receipt = await executeFactory({
       worktree,
       evidenceDir,
       task: flags.task,
-      runWorker: (context) => runWorker(context, { timeoutMs: flags.timeoutMs }),
-      runReviewer: (context) => runReviewer(context, { timeoutMs: flags.timeoutMs }),
-      runRepair: (context) => runRepair(context, { timeoutMs: flags.timeoutMs }),
+      ...adapters,
     });
     const completed = serialize({
       schema: 'gaia-agent-factory-run/1',
@@ -111,10 +140,14 @@ export async function runFactoryAgentCli(argv, {
       result: receipt,
     });
     writeFileSync(output, completed, 'utf8');
-    process.stdout.write(completed);
+    writeStdout(completed);
+    progress.terminalOutcome(receipt.status === 'completed'
+      ? 'COMPLETED'
+      : receipt.status === 'rejected' ? 'REJECTED' : 'UNKNOWN');
     if (receipt.status === 'rejected') process.exitCode = 3;
     return receipt;
   } catch (error) {
+    progress.terminalOutcome('FAILED');
     const failed = serialize({
       schema: 'gaia-agent-factory-run/1',
       status: 'failed',

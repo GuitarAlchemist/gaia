@@ -78,6 +78,32 @@ profile explicitly. Worker, repair, and each reviewer invocation receive the sam
 caller-bounded timeout; importing its `runFactoryAgentCli` seam performs no command and
 allows the composition to be verified without spawning subscription providers.
 
+## CLI progress contract
+
+The public composition wraps the worker, reviewer, and repair adapters; the pure factory
+state machine has no progress callback. By default `stderr` receives redacted human
+lines for validation, `execution_starting`, worker start/completion, initial review
+start/verdict, optional repair start/completion, final review start/verdict, and terminal
+outcome. This direct CLI has no grant and never emits `authorized_execution`.
+`--progress-format jsonl` selects one closed `gaia-cli-progress/1` JSON object per line;
+the only other accepted value is the default `human`. `stdout` remains the final run JSON
+only.
+
+Every JSON record carries monotone elapsed milliseconds and
+`remainingProviderTimeUpperBoundMs`. The latter is `--timeout-ms` multiplied by the
+maximum number of provider invocations still reachable (four initially, then at most
+three, two, one, and zero). It is an upper bound on remaining provider time only, not a
+prediction or an end-to-end ETA; local Git inspection, evidence persistence, and receipt
+I/O are deliberately not assigned fictional deadlines. Human lines render both durations
+in seconds/minutes/hours and label the bound `(not an ETA)`. While a provider is running,
+an unreferenced 10-second timer refreshes its stage, elapsed time, and bound; it is stopped
+on completion or failure. Each callback also carries an active generation token, so a
+timer retained by a failed `stop` or `unref` cannot emit after cleanup or terminal
+outcome. Records use closed stage, verdict, and outcome values and never
+interpolate task text, paths, secrets, provider identity, or provider output. Clock,
+writer, and timer failures degrade observability only and cannot change execution or
+receipts.
+
 ## Provider boundaries
 
 - Claude runs non-interactively as the host user with a prompt-requested
