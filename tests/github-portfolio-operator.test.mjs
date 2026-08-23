@@ -968,6 +968,105 @@ test('the whole command composes locally: real key, real ledger, real worktree, 
   }
 });
 
+test('one operator grant covers one repair and one fresh final review', async () => {
+  const dir = caseDir('composition-repair');
+  const local = disposableWorktree('composition-repair-worktree');
+  const keys = await operatorKeypair(dir);
+  const authority = realAuthority(dir, keys.publicKey, () => new Date('2026-08-20T17:00:30.000Z'));
+  const github = fakeGitHub();
+  const { portfolioPath } = await pinnedPortfolio(caseDir('composition-repair-pin'), github.adapter);
+  const seen = { worker: 0, reviewer: 0, repair: 0 };
+  const execution = createAgentFactoryExecutionAdapter({
+    expectedRepository: REPOSITORY,
+    worktree: local.worktree,
+    evidenceRoot: local.evidenceRoot,
+    runWorker: async ({ cwd }) => {
+      seen.worker += 1;
+      writeFileSync(join(cwd, 'candidate.txt'), 'incorrect\n', 'utf8');
+      return { provider: 'fixture-worker', output: 'initial worker' };
+    },
+    runReviewer: async () => {
+      seen.reviewer += 1;
+      return seen.reviewer === 1
+        ? { provider: 'fixture-reviewer-1', verdict: 'REQUEST_CHANGES', output: 'B01 exact' }
+        : { provider: 'fixture-reviewer-2', verdict: 'APPROVE', output: 'approved repair' };
+    },
+    runRepair: async ({ cwd, findings }) => {
+      seen.repair += 1;
+      assert.equal(findings, 'B01 exact');
+      writeFileSync(join(cwd, 'candidate.txt'), 'correct\n', 'utf8');
+      return { provider: 'fixture-repair', output: 'repair' };
+    },
+  });
+
+  const receipt = await runOperatorFactory({
+    portfolioPath,
+    repository: REPOSITORY,
+    privateKeyPath: keys.privateKeyPath,
+    outPath: join(dir, 'operator-receipt.json'),
+    githubRead: github.adapter,
+    authority: authority.adapter,
+    execution,
+    readPassphrase: async () => 'operator passphrase',
+    confirm: async ({ intent }) => intent.intentRevision,
+    now: () => new Date('2026-08-20T17:00:00.000Z'),
+    grantId: () => 'grant-composition-repair',
+    ttlSeconds: 120,
+  });
+
+  assert.equal(receipt.status, 'AUTHORIZED');
+  assert.equal(receipt.transition.status, 'CANDIDATE_READY');
+  assert.deepEqual(seen, { worker: 1, reviewer: 2, repair: 1 });
+  assert.equal(authority.claims().length, 1, 'repair consumes no second grant');
+  assert.match(receipt.transition.execution.idempotencyKey, /^[a-f0-9]{64}$/u);
+  assert.equal(receipt.transition.execution.receipt.reviewer.verdict, 'APPROVE');
+  assert.equal(receipt.transition.execution.receipt.reviews.initial.verdict, 'REQUEST_CHANGES');
+});
+
+test('a typed repair failure becomes EXECUTION_FAILED after the one grant is spent', async () => {
+  const dir = caseDir('composition-repair-failure');
+  const local = disposableWorktree('composition-repair-failure-worktree');
+  const keys = await operatorKeypair(dir);
+  const authority = realAuthority(dir, keys.publicKey, () => new Date('2026-08-20T17:00:30.000Z'));
+  const github = fakeGitHub();
+  const { portfolioPath } = await pinnedPortfolio(
+    caseDir('composition-repair-failure-pin'), github.adapter,
+  );
+  const execution = createAgentFactoryExecutionAdapter({
+    expectedRepository: REPOSITORY,
+    worktree: local.worktree,
+    evidenceRoot: local.evidenceRoot,
+    runWorker: async ({ cwd }) => {
+      writeFileSync(join(cwd, 'candidate.txt'), 'incorrect\n', 'utf8');
+      return { provider: 'fixture-worker', output: 'initial worker' };
+    },
+    runReviewer: async () => ({
+      provider: 'fixture-reviewer', verdict: 'REQUEST_CHANGES', output: 'B01 exact',
+    }),
+    runRepair: async () => ({ provider: 'fixture-repair', output: 'no bytes changed' }),
+  });
+
+  const receipt = await runOperatorFactory({
+    portfolioPath,
+    repository: REPOSITORY,
+    privateKeyPath: keys.privateKeyPath,
+    outPath: join(dir, 'operator-receipt.json'),
+    githubRead: github.adapter,
+    authority: authority.adapter,
+    execution,
+    readPassphrase: async () => 'operator passphrase',
+    confirm: async ({ intent }) => intent.intentRevision,
+    now: () => new Date('2026-08-20T17:00:00.000Z'),
+    grantId: () => 'grant-composition-repair-failure',
+    ttlSeconds: 120,
+  });
+
+  assert.equal(receipt.status, 'AUTHORIZED');
+  assert.equal(receipt.transition.status, 'EXECUTION_FAILED');
+  assert.equal(receipt.transition.execution.error.code, 'RepairNoChange');
+  assert.equal(authority.claims().length, 1);
+});
+
 // ---------------------------------------------------------------------------
 // the process interface
 // ---------------------------------------------------------------------------
