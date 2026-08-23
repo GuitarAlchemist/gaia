@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createPrivateKey, createPublicKey, verify } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync,
   writeFileSync,
@@ -25,6 +26,8 @@ import {
   PortfolioOperatorError,
   initOperatorKeypair,
   readConfirmationFromTerminal,
+  readSecretForPlatform,
+  readSecretFromWindowsDialog,
   readSecretFromTerminal,
   runOperatorFactory,
   summarizeOperatorReceipt,
@@ -1262,6 +1265,140 @@ test('the passphrase reader hides the secret, settles totally, and restores raw 
     ['close', closed]]) {
     assert.deepEqual(reader.terminal.rawModes, [true, false], `${name} restores raw mode`);
   }
+});
+
+test('Windows passphrases use a bounded masked dialog result rather than terminal raw mode', async () => {
+  const spawned = [];
+  const spawnProcess = (command, args, options) => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    spawned.push({ command, args, options, child });
+    queueMicrotask(() => {
+      child.stdout.end(Buffer.from('dialog secret', 'utf8').toString('base64'));
+      child.emit('close', 0);
+    });
+    return child;
+  };
+
+  assert.equal(await readSecretFromWindowsDialog({
+    prompt: 'Operator key passphrase: ', spawnProcess, scriptPath: 'prompt.ps1',
+  }), 'dialog secret');
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].command, 'powershell.exe');
+  assert.deepEqual(spawned[0].options.stdio, ['ignore', 'pipe', 'ignore']);
+  assert.equal(spawned[0].options.windowsHide, false);
+  assert.ok(!spawned[0].args.includes('dialog secret'));
+  assert.ok(!JSON.stringify(spawned[0]).includes('dialog secret'));
+
+  let terminalTouched = false;
+  assert.equal(await readSecretForPlatform({
+    platform: 'win32',
+    prompt: 'secret: ',
+    input: { resume: () => { terminalTouched = true; } },
+    output: { write: () => { terminalTouched = true; } },
+    windowsReader: async () => 'from dialog',
+  }), 'from dialog');
+  assert.equal(terminalTouched, false, 'Windows never enters terminal raw mode');
+
+  const nonWindows = fakeTerminal();
+  let dialogTouched = false;
+  const nonWindowsRead = readSecretForPlatform({
+    platform: 'linux',
+    prompt: 'secret: ',
+    input: nonWindows.input,
+    output: nonWindows.output,
+    windowsReader: async () => { dialogTouched = true; return 'wrong reader'; },
+  });
+  nonWindows.input.write('from terminal\r');
+  assert.equal(await nonWindowsRead, 'from terminal');
+  assert.equal(dialogTouched, false, 'non-Windows platforms retain the terminal reader');
+});
+
+test('Windows secret dialog cancellation and malformed output fail closed', async () => {
+  const attempt = ({ code, output = '' }) => readSecretFromWindowsDialog({
+    prompt: 'secret: ',
+    scriptPath: 'prompt.ps1',
+    spawnProcess: () => {
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      queueMicrotask(() => {
+        child.stdout.end(output);
+        child.emit('close', code);
+      });
+      return child;
+    },
+  });
+
+  await assert.rejects(attempt({ code: 3 }), (error) =>
+    error instanceof PortfolioOperatorError && error.code === 'PassphraseCancelled');
+  await assert.rejects(attempt({ code: 0, output: 'not base64!' }), (error) =>
+    error instanceof PortfolioOperatorError && error.code === 'PassphraseUnreadable');
+  await assert.rejects(attempt({ code: 2 }), (error) =>
+    error instanceof PortfolioOperatorError && error.code === 'PassphraseUnreadable');
+});
+
+test('Windows secret dialog terminates an overflowing helper without waiting for close', async () => {
+  let killed = 0;
+  const pending = readSecretFromWindowsDialog({
+    prompt: 'secret: ',
+    scriptPath: 'prompt.ps1',
+    spawnProcess: () => {
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.kill = () => { killed += 1; return true; };
+      queueMicrotask(() => child.stdout.write('A'.repeat(32_769)));
+      return child;
+    },
+  });
+  const result = settlement(pending);
+
+  await new Promise((resolvePromise) => setImmediate(resolvePromise));
+  assert.equal(killed, 1, 'the overflowing helper is terminated immediately');
+  const outcome = await result;
+  assert.equal(outcome.settled, true);
+  assert.equal(outcome.error.code, 'PassphraseUnreadable');
+});
+
+test('Windows secret dialog treats a broken child stdout as a typed refusal', async () => {
+  let killed = 0;
+  const pending = readSecretFromWindowsDialog({
+    prompt: 'secret: ',
+    scriptPath: 'prompt.ps1',
+    spawnProcess: () => {
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stdout.on('error', () => {}); // Keep the test process alive for the missing-handler mutant.
+      child.kill = () => { killed += 1; return true; };
+      queueMicrotask(() => {
+        child.stdout.emit('error', Object.assign(new Error('EPIPE secret-leak'), { code: 'EPIPE' }));
+        child.emit('close', 0);
+      });
+      return child;
+    },
+  });
+
+  await assert.rejects(pending, (error) =>
+    error instanceof PortfolioOperatorError
+      && error.code === 'PassphraseUnreadable'
+      && !error.message.includes('secret-leak'));
+  assert.equal(killed, 1, 'the broken helper is terminated');
+});
+
+test('the shipped Windows prompt is masked, cancellable, and wired into the CLI', () => {
+  const cli = readFileSync(fileURLToPath(
+    new URL('../scripts/github-portfolio-operator.mjs', import.meta.url),
+  ), 'utf8');
+  const dialog = readFileSync(fileURLToPath(
+    new URL('../scripts/windows-secret-prompt.ps1', import.meta.url),
+  ), 'utf8');
+
+  assert.match(cli, /const readPassphrase = \(\{ prompt \}\) => readSecretForPlatform\(\{/u,
+    'the shipped init/run seam selects the platform reader');
+  assert.match(dialog, /UseSystemPasswordChar\s*=\s*\$true/u,
+    'the shipped text box masks the passphrase');
+  assert.match(dialog, /ShowDialog\(\)\s*-ne\s*\[System\.Windows\.Forms\.DialogResult\]::OK/u,
+    'Cancel and window close both refuse');
+  assert.match(dialog, /exit 3/u, 'dialog refusal has the typed child exit code');
 });
 
 // A run whose observation is bounded at the *run* level rather than at a single reader.

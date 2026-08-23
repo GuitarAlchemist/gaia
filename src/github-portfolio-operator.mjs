@@ -17,9 +17,11 @@
  */
 
 import { createHash, createPrivateKey, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
 import { createPortfolioFactory } from './github-portfolio.mjs';
 import { portfolioGrantPreimage } from './github-portfolio-authority.mjs';
@@ -62,9 +64,9 @@ function reserveNewPath(supplied, field) {
   return supplied;
 }
 
-// The passphrase is read from the caller's terminal reader and compared. It is never a
-// parameter of these functions, so there is no argument list, environment variable, or
-// repository file it could have arrived in.
+// The passphrase is read from the caller's interactive secret reader and compared. It is
+// never a parameter of these functions, so there is no argument list, environment
+// variable, or repository file it could have arrived in.
 async function readSecret(readPassphrase, prompt) {
   if (typeof readPassphrase !== 'function') {
     throw new PortfolioOperatorError('InvalidArgument', 'readPassphrase must be a function');
@@ -440,6 +442,98 @@ export async function runOperatorFactory({
 // message would defeat the point of not echoing it in the first place.
 const terminalDiagnostic = (what, error) =>
   `the ${what} could not be read from the terminal: ${refusalCode(error, 'unknown')}`;
+
+const WINDOWS_SECRET_PROMPT = fileURLToPath(
+  new URL('../scripts/windows-secret-prompt.ps1', import.meta.url),
+);
+
+export function readSecretFromWindowsDialog({
+  prompt,
+  spawnProcess = spawn,
+  scriptPath = WINDOWS_SECRET_PROMPT,
+}) {
+  return new Promise((answer, refuse) => {
+    let child;
+    try {
+      child = spawnProcess('powershell.exe', [
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-File', scriptPath,
+        '-PromptBase64', Buffer.from(prompt, 'utf8').toString('base64'),
+      ], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: false,
+      });
+    } catch (error) {
+      refuse(new PortfolioOperatorError(
+        'PassphraseUnreadable', terminalDiagnostic('Windows secret prompt', error),
+      ));
+      return;
+    }
+
+    let encoded = '';
+    let settled = false;
+    const settle = (callback) => {
+      if (settled) return false;
+      settled = true;
+      callback();
+      return true;
+    };
+    const terminateAndRefuse = (error) => {
+      if (!settle(() => refuse(error))) return;
+      try { child.kill(); } catch { /* the typed refusal is already authoritative */ }
+    };
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      if (settled) return;
+      encoded += chunk;
+      if (encoded.length > 32_768) {
+        terminateAndRefuse(new PortfolioOperatorError(
+          'PassphraseUnreadable', 'the Windows passphrase prompt returned no valid answer',
+        ));
+      }
+    });
+    child.stdout.on('error', (error) => terminateAndRefuse(new PortfolioOperatorError(
+      'PassphraseUnreadable', terminalDiagnostic('Windows secret prompt', error),
+    )));
+    child.on('error', (error) => settle(() => refuse(new PortfolioOperatorError(
+      'PassphraseUnreadable', terminalDiagnostic('Windows secret prompt', error),
+    ))));
+    child.on('close', (code) => {
+      if (settled) return;
+      if (code === 3) {
+        settle(() => refuse(new PortfolioOperatorError(
+          'PassphraseCancelled', 'the Windows passphrase prompt was cancelled',
+        )));
+        return;
+      }
+      if (code !== 0 || encoded.includes('\r') || encoded.includes('\n')) {
+        settle(() => refuse(new PortfolioOperatorError(
+          'PassphraseUnreadable', 'the Windows passphrase prompt returned no valid answer',
+        )));
+        return;
+      }
+      try {
+        const bytes = Buffer.from(encoded, 'base64');
+        if (bytes.toString('base64') !== encoded) throw new Error('non-canonical base64');
+        settle(() => answer(bytes.toString('utf8')));
+      } catch {
+        settle(() => refuse(new PortfolioOperatorError(
+          'PassphraseUnreadable', 'the Windows passphrase prompt returned no valid answer',
+        )));
+      }
+    });
+  });
+}
+
+export function readSecretForPlatform({
+  platform = process.platform,
+  prompt,
+  input,
+  output,
+  windowsReader = readSecretFromWindowsDialog,
+}) {
+  if (platform === 'win32') return windowsReader({ prompt });
+  return readSecretFromTerminal({ prompt, input, output });
+}
 
 export function readSecretFromTerminal({ prompt, input, output }) {
   output.write(prompt);

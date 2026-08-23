@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 import {
   initOperatorKeypair,
   readConfirmationFromTerminal,
-  readSecretFromTerminal,
+  readSecretForPlatform,
   runOperatorFactory,
   summarizeOperatorReceipt,
 } from '../src/github-portfolio-operator.mjs';
@@ -39,8 +39,9 @@ const USAGE = `usage:
       --private-key FILE --public-key FILE --ledger DIR --worktree DIR
       --evidence-root DIR --out NEW_FILE [--ttl-seconds 120]
 
-Both commands read their passphrase, and run reads its confirmation, from an interactive
-terminal only. There is no option, environment variable, or file that supplies either.`;
+Both commands require an interactive session. Windows reads the passphrase from a masked
+OS dialog; other platforms use the terminal. Run reads its confirmation from the
+terminal. There is no option, environment variable, or file that supplies either.`;
 
 // The option list is closed. An option this command does not know is refused rather than
 // ignored, which is what keeps `--passphrase` from being a thing someone can try.
@@ -91,17 +92,16 @@ function boundedInteger(value, name, minimum, maximum) {
 function assertInteractive() {
   if (!process.stdin.isTTY) {
     throw new UsageError(
-      'this command reads its passphrase and confirmation from an interactive terminal, and stdin is not one',
+      'this command requires an interactive terminal for operator presence and confirmation, and stdin is not one',
     );
   }
 }
 
-// The one thing about the terminal this script still owns: which streams it is. Prompts
-// and secrets go to stderr, so stdout carries only the command's result and a redirected
-// stdout never becomes a place a passphrase could land. What the readers *do* with those
-// streams — including how they answer end of input and Ctrl-C — is the module's, and is
-// gated there.
-const readPassphrase = ({ prompt }) => readSecretFromTerminal({
+// The one thing about the interaction this script still owns: which platform and streams
+// it binds. On Windows the secret reader opens a masked OS dialog. Elsewhere prompts and
+// secrets use stderr, so stdout carries only the command's result. What the readers do —
+// including how they answer cancellation — is the module's, and is gated there.
+const readPassphrase = ({ prompt }) => readSecretForPlatform({
   prompt, input: process.stdin, output: process.stderr,
 });
 
