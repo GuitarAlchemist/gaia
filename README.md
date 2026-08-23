@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 423 gates
+node --test                                   # 430 gates
 ```
 
 ### Functional factory tracer
@@ -55,7 +55,8 @@ the same command permits one bounded Claude repair and one fresh Codex review:
 npm run factory:agent -- \
   --worktree ../my-project-gaia-run \
   --task "Implement the bounded change and its focused tests" \
-  --out ../state/gaia-agent-run.json
+  --out ../state/gaia-agent-run.json \
+  --timeout-ms 600000
 ```
 
 The v1 profile is deliberately closed: Claude is a host-user worker and, at most
@@ -79,6 +80,15 @@ runs with host-user authority: prompt policy and post-hoc Git/worktree checks do
 not prove that it avoided network, writes elsewhere, or a transient Git action
 whose final observable state was restored. A second `REQUEST_CHANGES` is retained
 verbatim, starts no loop, and exits fail-closed with code `3`.
+
+While a run is active, the CLI emits redacted `gaia-cli-progress/1` JSON Lines to
+`stderr`: validation, authorized execution, worker start/completion, each review
+start/verdict, the optional repair start/completion, and the terminal outcome. Each
+record includes elapsed milliseconds and `remainingProviderTimeUpperBoundMs`. That
+number is the caller timeout multiplied by the maximum provider invocations still
+possible; it is a conservative provider-time budget, not a predictive ETA, and it does
+not bound local Git or receipt work. Task text, paths, secrets, and provider output never
+enter progress records. `stdout` remains exactly the final JSON result.
 
 ### Read-only GitHub portfolio survey
 
@@ -119,7 +129,8 @@ npm run portfolio:operator -- run \
   --ledger        ../state/gaia-operator-ledger \
   --worktree      ../candidate-worktree \
   --evidence-root ../state/gaia-operator-evidence \
-  --out           ../state/gaia-operator-receipt.json
+  --out           ../state/gaia-operator-receipt.json \
+  --timeout-ms    600000
 ```
 
 `run` re-reads GitHub, materializes the one `AWAITING_AUTHORITY` intent, shows every
@@ -137,6 +148,10 @@ receipt there — including walking away from a prompt, which is a refusal that 
 itself and exits `1`, never a silent success. What protects the private key on every
 platform is its PKCS#8 passphrase; on Windows the file mode is not an access control and
 placement is the operator's.
+After confirmation and grant consumption, `run` uses the same redacted stderr progress
+stream as `factory:agent`; refusals and execution failures also end with a terminal
+outcome record. Progress writer failures are ignored and cannot affect grant
+consumption, execution, receipts, final stdout, or exit status.
 See [`docs/github-portfolio-operator.md`](docs/github-portfolio-operator.md).
 
 ### Dry-run candidate publication intent
@@ -191,6 +206,7 @@ by **absence**, not by a check that could be bypassed.
 | `src/inventory.mjs` | The `inventory-digest/1` tree fixed point: walk, manifest, digest. Reads only. |
 | `src/lineage-receipt.mjs` | `gaia-lineage-receipt/1`: one open receipt returned, one sealed cross-revision manifest handed to a caller-supplied sink and never returned. Reads only. |
 | `src/reporting-context.mjs` | Structural two-channel finalizer for official inventory-routed reports; sealed details cross one captured write capability and only canonical commitments return. |
+| `src/cli-progress.mjs` | Best-effort redacted JSONL progress and caller-timeout-derived remaining provider-time bounds for the two execution CLIs; never an authority or result dependency. |
 | `src/factory-agent.mjs` | Deep module for clean linked-worktree admission, exact candidate identity, bounded subscription-agent invocation, sensitive output evidence, and reviewer non-mutation checks. |
 | `src/github-portfolio.mjs` | Deterministic portfolio revision, conservative classification, bounded scheduling, and one-step authority intent. |
 | `src/github-portfolio-authority.mjs` | Exact Ed25519 grant verification plus an atomic, one-use file ledger; prompts and bus text confer no authority. |
@@ -210,7 +226,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 423 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 430 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
