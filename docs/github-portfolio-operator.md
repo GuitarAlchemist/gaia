@@ -27,7 +27,7 @@ Ed25519 signature still verifies, the ledger still records exactly one use, and 
 control in `github-portfolio-authority.mjs` still passes, while having certified nothing.
 The signature would attest that the process signed the payload, which was never in doubt.
 Splitting `init` from `run` is what makes the key a thing a human holds: `init` is the
-only writer of key material, it demands a passphrase from a terminal, and `run` cannot
+only writer of key material, it demands a passphrase from an interactive secret prompt, and `run` cannot
 produce a key it was not given. The separation also makes the passphrase meaningful — a
 key minted inside the executing command has no moment at which a human must be present.
 
@@ -68,7 +68,8 @@ part that is dangerous to reimplement per call site:
 - **The digest is measured, not typed.** The intent revision the operator confirms is the
   one `advance()` just computed from a fresh GitHub read. In (b) it would be an argument.
 - **Authority is bound to a human at the only moment it matters.** The passphrase is read
-  from a terminal, between the display of the intent and the signature. No argv, no
+  from a masked Windows dialog or a hidden terminal reader on other platforms, between
+  the display of the intent and the signature. No caller stdin pipe, no argv, no
   environment, no file. An agent driving the CLI with piped stdin cannot get past it.
 - **The receipt is a mechanism.** `run` reserves the caller-named output path exclusively
   before it consumes authority, and from that point every path on which it returns —
@@ -94,8 +95,9 @@ node scripts/github-portfolio-operator.mjs init \
 ```
 
 Generates a dedicated Ed25519 keypair. The private key is written as encrypted PKCS#8 PEM
-(`aes-256-cbc`); the public key is SPKI PEM. The passphrase is read twice from the
-terminal and must match. Both output paths must not exist, and the keypair is published
+(`aes-256-cbc`); the public key is SPKI PEM. The passphrase is read twice from a masked
+dialog hosted by built-in Windows PowerShell on Windows, or from the hidden terminal
+reader on other platforms, and must match. Both output paths must not exist, and the keypair is published
 all-or-nothing: if the public key cannot be written, the private key file is removed, so a
 half-published keypair is never left behind.
 
@@ -123,6 +125,11 @@ nothing measurable, because there was nothing there to widen.
 
 The passphrase is never accepted from `argv`, from the environment, from prompt text, or
 from a file in the repository. `init` refuses when stdin is not an interactive terminal.
+On Windows the CLI opens a masked, top-most OS dialog through built-in Windows PowerShell
+and receives one bounded canonical base64 response over a private child stdout pipe; the
+child has no stdin. Cancel, window close, helper failure, and output overflow all settle as
+typed refusals; overflow terminates the helper instead of waiting for it. On other
+platforms the existing raw terminal reader remains in use.
 
 ### `run`
 
@@ -163,10 +170,11 @@ the revision of a different intent — refuses.
 
 ### Leaving the prompt without answering it
 
-End of input (Ctrl-D, or Ctrl-Z + Enter at a Windows console) and Ctrl-C are **explicit
-refusals**, at both the confirmation and the passphrase prompt, and so is the terminal
-stream breaking underneath either one. Each settles the read, each leaves a structured
-receipt naming which of them happened, each spends no authority, and each exits `1`.
+End of input and Ctrl-C are **explicit refusals** at the terminal confirmation prompt.
+The non-Windows terminal passphrase reader treats Ctrl-D and Ctrl-C likewise; the Windows
+dialog has explicit OK and Cancel paths, and closing it is Cancel. A broken interactive
+reader also refuses. Each path settles the read, leaves a structured receipt naming what
+happened, spends no authority, and exits `1`.
 Neither reader has a timeout and neither may grow one: waiting for a person is not a
 failure, and a deadline at these prompts would be a way for the command to decide
 something the operator did not.
@@ -210,9 +218,9 @@ happened rather than blaming the key for a decision the operator made:
 | `confirm` | `ConfirmationClosed` | the prompt reached end of input before an answer |
 | `confirm` | `ConfirmationCancelled` | Ctrl-C at the prompt |
 | `confirm` | `ConfirmationUnreadable` | the terminal stream broke under the read |
-| `key` | `PassphraseCancelled` | Ctrl-C at the passphrase prompt |
-| `key` | `PassphraseClosed` | the passphrase prompt reached end of input |
-| `key` | `PassphraseUnreadable` | the terminal stream broke under the read |
+| `key` | `PassphraseCancelled` | Ctrl-C at a non-Windows terminal prompt, or Cancel/window close in the Windows dialog |
+| `key` | `PassphraseClosed` | the non-Windows terminal prompt reached end of input |
+| `key` | `PassphraseUnreadable` | the terminal stream or Windows dialog helper broke, overflowed, or returned malformed output |
 | `key` | `PrivateKeyUnreadable` | the passphrase was answered and did not open the key |
 
 The scope of "every exit leaves a receipt" is exact: every path on which

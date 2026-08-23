@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 402 gates
+node --test                                   # 407 gates
 ```
 
 ### Functional factory tracer
@@ -123,10 +123,12 @@ npm run portfolio:operator -- run \
 GitHub-derived field of it through one display control that strips terminal control and
 bidirectional characters and bounds the line, and requires the operator to type that
 intent's full revision. Only then does it read the encrypted key, mint a short-lived grant
-in memory, spend it exactly once, and execute. The passphrase and the confirmation come
-from an interactive terminal and from nowhere else: there is no option, environment
-variable, or file that supplies either, so a session driving this process with a pipe
-cannot authorize anything. The grant is never written down, the receipt path is claimed
+in memory, spend it exactly once, and execute. Confirmation comes from the interactive
+terminal. On Windows the passphrase comes from a masked dialog hosted by built-in Windows
+PowerShell; on other platforms it comes from the hidden terminal reader. There is no
+option, environment variable, or file that supplies either. A
+session driving this process with a pipe cannot authorize anything. The grant is never
+written down, the receipt path is claimed
 before authority is spent, and every path that returns after that claim leaves a redacted
 receipt there — including walking away from a prompt, which is a refusal that names
 itself and exits `1`, never a silent success. What protects the private key on every
@@ -192,7 +194,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 402 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 407 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
