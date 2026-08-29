@@ -352,3 +352,54 @@ test('a blocked portfolio names the dominant blocker instead of pretending there
     label: '2 items need missing evidence before Gaia can schedule them.',
   });
 });
+
+test('fog of war distinguishes known, partial and unobserved work without inventing confidence', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ itemId: 'issue-known', sourceState: 'AWAITING_HUMAN', drainState: 'BLOCKED_HUMAN' }),
+      item({ itemId: 'issue-partial', sourceState: 'CHECKS_AND_REVIEW_UNKNOWN', drainState: 'BLOCKED_EVIDENCE' }),
+      item({ itemId: 'issue-ready-unknown', sourceState: 'READY_WITH_UNKNOWN', drainState: 'BLOCKED_UNKNOWN' }),
+      item({ itemId: 'issue-unobserved', sourceState: 'EVIDENCE_UNKNOWN', drainState: 'BLOCKED_EVIDENCE' }),
+      item({ itemId: 'issue-missing', sourceState: 'MISSING_FROM_OPEN_SNAPSHOT', drainState: 'RECONCILE_REQUIRED' }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+
+  assert.deepEqual(snapshot.knowledgeCoverage, {
+    known: 1,
+    partial: 2,
+    unobserved: 2,
+    total: 5,
+    knownPercentage: 20,
+    label: '20% currently classified from sufficient evidence (1/5).',
+    caveat: 'Evidence coverage only — not completion, correctness or model confidence.',
+    frontier: {
+      kind: 'RECONNOITER_UNKNOWN_EVIDENCE',
+      count: 4,
+      label: 'Investigate 4 partially observed or unobserved items.',
+    },
+  });
+  assert.deepEqual(snapshot.items.map(({ knowledgeState }) => knowledgeState), [
+    'KNOWN', 'PARTIAL', 'PARTIAL', 'UNOBSERVED', 'UNOBSERVED',
+  ]);
+
+  const html = renderControlRoomHtml(snapshot);
+  assert.match(html, /Fog of war/u);
+  assert.match(html, /20% currently classified from sufficient evidence \(1\/5\)/u);
+  assert.match(html, /Known.*1.*Partial.*2.*Unobserved.*2/us);
+  assert.match(html, /Evidence coverage only — not completion, correctness or model confidence/u);
+  assert.match(html, /Investigate 4 partially observed or unobserved items/u);
+});
+
+test('fog of war fails closed when a future source state is not yet understood', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ sourceState: 'FUTURE_UNRECOGNIZED_STATE', drainState: 'BLOCKED_UNKNOWN' }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+
+  assert.equal(snapshot.items[0].knowledgeState, 'UNOBSERVED');
+  assert.equal(snapshot.knowledgeCoverage.knownPercentage, 0);
+  assert.equal(snapshot.knowledgeCoverage.frontier.count, 1);
+});
