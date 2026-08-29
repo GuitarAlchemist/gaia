@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 463 gates
+node --test                                   # 476 gates
 ```
 
 ### Functional factory tracer
@@ -95,6 +95,19 @@ Build a content-addressed local index and query it in one command:
 npm run search:hybrid -- \
   --corpus ./corpus.json \
   --query ./query.json \
+  --index-out ./state/search/index.json \
+  --out ./state/search/result.json
+```
+
+When documents and the query do not already carry embeddings, use IX's optional
+local-only binary. Both paths are explicit and IX refuses an incomplete model cache:
+
+```bash
+npm run search:hybrid -- \
+  --corpus ./corpus-without-vectors.json \
+  --query ./query-without-vector.json \
+  --ix-embed ../ix/target/release/ix-embed \
+  --model-cache ../ix/.fastembed_cache \
   --index-out ./state/search/index.json \
   --out ./state/search/result.json
 ```
@@ -277,6 +290,7 @@ by **absence**, not by a check that could be bypassed.
 | `src/factory-tracing.mjs` | Optional loopback-only OTLP/HTTP cycle and provider-phase spans with fixed zero-cost/no-authority attributes; telemetry failure never affects execution. |
 | `src/factory-agent.mjs` | Deep module for clean linked-worktree admission, exact candidate identity, bounded subscription-agent invocation, sensitive output evidence, and reviewer non-mutation checks. |
 | `src/hybrid-search.mjs` | Deterministic BM25 + exact-cosine + RRF retrieval over provenance-bound local embeddings; returns cited matches or honest `UNKNOWN`, never authority. |
+| `src/ix-local-embedding.mjs` | Capability-free adapter for IX's cached local embedder; strips provider API keys and verifies model, revision, text hashes, dimensions, and vectors before returning them. |
 | `src/github-portfolio.mjs` | Deterministic portfolio revision, conservative classification, bounded scheduling, and one-step authority intent. |
 | `src/github-portfolio-authority.mjs` | Exact Ed25519 grant verification plus an atomic, one-use file ledger; prompts and bus text confer no authority. |
 | `src/github-portfolio-execution.mjs` | Binds one authorized portfolio intent to one local factory-agent run, linked worktree, and external evidence directory; proves the worktree's measured Git identity is the bound repository before it can be constructed. |
@@ -298,7 +312,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 463 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 476 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

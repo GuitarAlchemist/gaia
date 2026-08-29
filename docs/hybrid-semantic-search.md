@@ -42,9 +42,17 @@ The corpus uses `gaia-search-corpus/1`; the query uses `gaia-search-query/1`. Em
 are supplied as JSON number arrays. Both output paths must be new, and the command refuses
 to overwrite either one.
 
+For a vector-free corpus and query, add `--ix-embed <executable>` and
+`--model-cache <directory>`. Gaia sends passage and query requests separately because BGE
+uses a query instruction only for queries. The adapter removes provider API keys from the
+child environment and accepts only the exact `Xenova/bge-base-en-v1.5` local-only response
+contract. It verifies the cached model revision, item order, text SHA-256, dimension, and
+every finite vector before the search engine can consume them. IX performs no implicit
+model download; a missing cache is a refusal, not a fallback.
+
 ## Architectural boundary
 
-- IX may generate or accelerate embeddings and exact vector ranking.
+- IX generates cached local embeddings; Gaia still owns exact vector ranking.
 - DuckDB may inspect persisted indexes, results, drift, latency, and retrieval quality.
 - Gaia owns content addressing, freshness policy, citation shape, and receipts.
 - The WorkGraph may filter or rerank cited revisions, but a search result cannot mutate it.
