@@ -61,7 +61,7 @@ test('an idle portfolio is plainly paused and never gets a spinner or invented E
   assert.deepEqual(snapshot.headline, {
     state: 'PAUSED',
     label: 'Paused',
-    detail: 'No Gaia work is moving right now.',
+    detail: 'No tracked factory run is moving right now.',
   });
   assert.equal(snapshot.activeCount, 0);
   assert.equal(snapshot.showSpinner, false);
@@ -323,13 +323,13 @@ test('the optional French renderer translates operator guidance, not only headin
   });
   const html = renderControlRoomHtml(snapshot, { language: 'fr' });
 
-  assert.match(html, /Aucun travail Gaia ne progresse actuellement/u);
+  assert.match(html, /Aucune exécution suivie de la factory ne progresse actuellement/u);
   assert.match(html, /éléments nécessitent des preuves manquantes/u);
   assert.match(html, /Résoudre le blocage nommé avant de mesurer l’avancement/u);
   assert.match(html, /Rythme inconnu/u);
   assert.match(html, /snapshot content-addressed/u);
   assert.doesNotMatch(html, /signed snapshot|snapshot signé/u);
-  assert.doesNotMatch(html, /No Gaia work|items need missing evidence|Resolve the named blocker/u);
+  assert.doesNotMatch(html, /No Gaia work|Aucun travail Gaia|items need missing evidence|Resolve the named blocker/u);
 });
 
 test('a blocked portfolio names the dominant blocker instead of pretending there is no next action', () => {

@@ -315,7 +315,7 @@ export function buildControlRoomSnapshot({
       ? {
         state: 'PAUSED',
         label: 'Paused',
-        detail: 'No Gaia work is moving right now.',
+        detail: 'No tracked factory run is moving right now.',
       }
       : state === 'ACTIVE' ? {
         state: 'ACTIVE',
@@ -399,7 +399,7 @@ const RENDER_COPY = Object.freeze({
 function localizedHeadline(snapshot, language) {
   if (language === 'en') return snapshot.headline;
   const details = {
-    PAUSED: 'Aucun travail Gaia ne progresse actuellement.',
+    PAUSED: 'Aucune exécution suivie de la factory ne progresse actuellement.',
     ACTIVE: `${snapshot.activeCount} exécution${snapshot.activeCount === 1 ? '' : 's'} Gaia en cours.`,
     STALE: `${snapshot.staleCount} exécution${snapshot.staleCount === 1 ? '' : 's'} sans heartbeat récent.`,
   };
