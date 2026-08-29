@@ -237,12 +237,20 @@ test('the projection revision is verified and the content-addressed snapshot is 
 
 test('the selected dashboard seam is bound by a replayable Decision Receipt', () => {
   const design = readFileSync(new URL('../docs/factory-control-room.md', import.meta.url), 'utf8');
-  const body = JSON.parse(design.match(/Canonical receipt body:\s*```json\s*([^\n]+)\s*```/u)[1]);
-  const digest = createHash('sha256').update(canonicalJson(body)).digest('hex');
+  const bodies = [...design.matchAll(/Canonical receipt body:\s*```json\s*([^\n]+)\s*```/gu)]
+    .map((match) => JSON.parse(match[1]));
+  assert.equal(bodies.length, 2);
+  const [body, fogBody] = bodies;
 
   assert.equal(body.selectedDesign, 'pure-content-addressed-control-room-read-model');
   assert.equal(body.reversibility, 'freely-reversible');
-  assert.equal(design.includes(`Receipt SHA-256:\n\`${digest}\``), true);
+  assert.equal(fogBody.selectedDesign, 'snapshot-bound-fog-of-war-projection');
+  assert.equal(fogBody.baseCommit, 'a17392d3cf967bf2d7906d2cbd77dbc01f5f3c87');
+  assert.equal(fogBody.reversibility, 'freely-reversible');
+  for (const receipt of bodies) {
+    const digest = createHash('sha256').update(canonicalJson(receipt)).digest('hex');
+    assert.equal(design.includes(`Receipt SHA-256:\n\`${digest}\``), true);
+  }
 });
 
 test('the standalone dashboard spends its default view only on operator questions and evidence', () => {
@@ -402,4 +410,39 @@ test('fog of war fails closed when a future source state is not yet understood',
   assert.equal(snapshot.items[0].knowledgeState, 'UNOBSERVED');
   assert.equal(snapshot.knowledgeCoverage.knownPercentage, 0);
   assert.equal(snapshot.knowledgeCoverage.frontier.count, 1);
+});
+
+test('the renderer refuses fog-of-war content that moved under an unchanged revision', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({
+      sourceState: 'EVIDENCE_UNKNOWN', drainState: 'BLOCKED_EVIDENCE',
+    })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+  const tampered = structuredClone(snapshot);
+  tampered.knowledgeCoverage.known = 1;
+  tampered.knowledgeCoverage.unobserved = 0;
+  tampered.knowledgeCoverage.knownPercentage = 100;
+  tampered.knowledgeCoverage.label = '100% currently classified from sufficient evidence (1/1).';
+
+  assert.throws(
+    () => renderControlRoomHtml(tampered),
+    (error) => error?.name === 'ControlRoomError' && error.code === 'InvalidSnapshot',
+  );
+});
+
+test('the renderer gives a typed refusal for a legacy snapshot without fog-of-war evidence', () => {
+  const snapshot = structuredClone(buildControlRoomSnapshot({
+    drainProjection: projection([item()]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  }));
+  delete snapshot.knowledgeCoverage;
+  for (const workItem of snapshot.items) delete workItem.knowledgeState;
+  const { revision: ignored, ...body } = snapshot;
+  snapshot.revision = createHash('sha256').update(canonicalJson(body)).digest('hex');
+
+  assert.throws(
+    () => renderControlRoomHtml(snapshot),
+    (error) => error?.name === 'ControlRoomError' && error.code === 'InvalidSnapshot',
+  );
 });

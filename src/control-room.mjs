@@ -277,6 +277,27 @@ function measureKnowledgeCoverage(items) {
   };
 }
 
+function requireControlRoomSnapshot(value) {
+  if (!value || value.schema !== CONTROL_ROOM_SCHEMA
+      || value.effect !== 'NONE' || value.authority !== 'NONE'
+      || !Array.isArray(value.items) || typeof value.revision !== 'string') {
+    throw new ControlRoomError('InvalidSnapshot', 'a content-addressed Gaia control-room snapshot is required');
+  }
+  const { revision, ...body } = value;
+  const expectedRevision = createHash('sha256').update(canonicalJson(body)).digest('hex');
+  if (revision !== expectedRevision) {
+    throw new ControlRoomError('InvalidSnapshot', 'the control-room snapshot revision does not match its content');
+  }
+  if (value.items.some((item) => item?.knowledgeState !== knowledgeState(item?.sourceState))) {
+    throw new ControlRoomError('InvalidSnapshot', 'the control-room snapshot knowledge states are invalid');
+  }
+  const expectedCoverage = measureKnowledgeCoverage(value.items);
+  if (canonicalJson(value.knowledgeCoverage) !== canonicalJson(expectedCoverage)) {
+    throw new ControlRoomError('InvalidSnapshot', 'the control-room snapshot knowledge coverage is invalid');
+  }
+  return value;
+}
+
 function blockerAction(blocker) {
   const labels = {
     BLOCKED_EVIDENCE: `${blocker.count} items need missing evidence before Gaia can schedule them.`,
@@ -556,10 +577,8 @@ function headlinePresentation(state) {
 }
 
 /** Render one dependency-free, shareable operator artifact. */
-export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
-  if (!snapshot || snapshot.schema !== CONTROL_ROOM_SCHEMA) {
-    throw new ControlRoomError('InvalidSnapshot', 'a Gaia control-room snapshot is required');
-  }
+export function renderControlRoomHtml(candidate, { language = 'en' } = {}) {
+  const snapshot = requireControlRoomSnapshot(candidate);
   const copy = RENDER_COPY[language];
   if (!copy) throw new ControlRoomError('InvalidLanguage', 'language must be en or fr');
   const prioritized = [...snapshot.items].sort((left, right) => {
