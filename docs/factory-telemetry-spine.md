@@ -192,6 +192,111 @@ log propagates, because an infrastructure failure is not a bounded no-op.
 The arm launches no worker, calls no provider, retries nothing, publishes nothing, routes
 nothing and adds no bus verb. The six bus verbs are untouched.
 
+## R1 — the phase sensor, so a run can actually be observed moving
+
+R0 shipped a correct mechanism with an unreachable state. Every sensor it had recorded a whole
+run inside one process, so the durable log never held a live run, and a separately invoked
+dashboard could only ever see a settled one. `ACTIVE` and `STALE` were real behaviours of the
+projection, reachable only by replaying a truncated event prefix at a chosen instant in the
+same process that wrote it. That is a unit demonstration of the freshness rule, not an
+observation, and both independent reviews blocked on exactly that.
+
+### Design It Twice
+
+**A. Make the existing step CLI long-running.** Give `factory-telemetry-step.mjs` a
+`--hold-ms` that keeps the process alive between the heartbeat and the terminal event, beating
+on a timer. *Cost:* one flag. *Fatal problem:* the sensor becomes a clock. A process that beats
+because a timer fired is asserting liveness it never measured — precisely the decorative-timer
+failure the spine exists to refuse — and a crash mid-hold leaves the arm unable to record
+anything at all. It also makes every test that touches the seam wall-clock bound.
+
+**B. A seam that accepts one closed fact and returns — selected.** `recordFactoryTelemetryPhase`
+takes one phase, appends one event under the existing CAS and single-writer protocol, and
+returns. The run stays open on disk because nothing closed it, not because something is holding
+it open. Liveness is asserted only by whoever actually did the work, one `heartbeat` at a time.
+Any process, at any later moment, can add the next phase or read the log. The observer decides
+freshness against its own clock, exactly as before.
+
+### The seam
+
+Seven phases, one per existing event kind, and the map is a bijection:
+
+```text
+start        -> run.started        heartbeat -> run.heartbeat
+gate-entered -> gate.entered       gate-passed -> gate.passed
+gate-failed  -> gate.failed        finish -> run.completed
+block        -> run.blocked
+```
+
+No event kind, field or schema is added. The subject is bound exactly once, at `start`, and
+every later phase reads it back out of the durable log; a phase that supplies a disagreeing
+subject is refused as `PhaseSubjectSubstituted` rather than silently rebinding the run. An
+unknown phase, an unstarted run, an already-started run, an impossible transition, a lost
+update and an unavailable lock all fail closed and write nothing. A re-delivered phase — the
+same fact from a sensor that crashed before acknowledging its own append — is recognised by
+rebuilding the log head against its own predecessor and comparing content addresses, so it is
+an idempotent no-op with `effect: NONE`.
+
+### The wmux/Claude bridge
+
+`observeWmuxClaudeTask` is a thin wrapper over that seam and imports nothing else. It opens the
+run, hands the caller's bounded task a `beat()` it may call whenever it is genuinely still
+working, and closes the run on the task's own closed outcome (`COMPLETED`, or `BLOCKED` with a
+canonical blocker token). It launches nothing, drives no wmux surface, reads no screen, prompt,
+reasoning trace or terminal output, and consumes no authority. A task that throws is re-thrown
+untouched rather than recorded as a named blockage, because an infrastructure failure means the
+task was never evaluated; the run stays open and truthfully expires as
+`TELEMETRY_HEARTBEAT_EXPIRED`. An unreadable outcome fails closed the same way.
+
+The wrapper is deliberately generic in mechanism: what makes it the wmux/Claude bridge is the
+identity it binds (`lane`, `agent`) and the operator protocol below, not code that controls
+wmux. That is the boundary the issue asks for — a file-backed ingress with a wmux/Claude
+consumer — and not a second control plane.
+
+### Observing one run move, expire and settle
+
+Each command is a separate process. Between them the run is open on disk.
+
+```bash
+T=../state/gaia-telemetry
+D="node scripts/factory-dashboard.mjs --portfolio ../state/gaia-portfolio.json --telemetry $T"
+
+node scripts/factory-telemetry-phase.mjs --telemetry-dir $T --run-id run-27-alpha \
+  --phase start --repository GuitarAlchemist/gaia --item issue-27 --item-number 27 \
+  --lane WMUX_LANE_A --agent CLAUDE_CODE
+node scripts/factory-telemetry-phase.mjs --telemetry-dir $T --run-id run-27-alpha \
+  --phase heartbeat
+node scripts/factory-telemetry-phase.mjs --telemetry-dir $T --run-id run-27-alpha \
+  --phase gate-entered --gate CLAIMED
+
+$D --snapshot-out ../state/cr-active.json --html-out ../state/cr-active.html
+# ACTIVE, showSpinner true, one heartbeat-pulse span, stage CLAIMED
+
+sleep 31
+
+$D --snapshot-out ../state/cr-stale.json --html-out ../state/cr-stale.html
+# STALE, showSpinner false, no pulse, TELEMETRY_HEARTBEAT_EXPIRED, next CHECK_STALE_RUN
+
+node scripts/factory-telemetry-phase.mjs --telemetry-dir $T --run-id run-27-alpha \
+  --phase gate-passed --gate CLAIMED
+node scripts/factory-telemetry-phase.mjs --telemetry-dir $T --run-id run-27-alpha \
+  --phase finish
+
+$D --snapshot-out ../state/cr-settled.json --html-out ../state/cr-settled.html
+# PAUSED, activity IDLE, runState COMPLETED, no blockers
+```
+
+Wrapping a real visible wmux/Claude task is the same three opening commands, then the task in a
+pane the operator can watch, then the two closing ones — with one `--phase heartbeat` for each
+point at which the task is observed still working:
+
+```bash
+wmux browser open https://github.com/GuitarAlchemist/gaia/issues/27
+claude -p "Summarise issue 27 acceptance criteria in five bullets"
+```
+
+Nothing in the spine launches either command. The operator does, and records what was observed.
+
 ## Boundaries
 
 - The JSONL log is the portable evidence boundary for R0. A DuckDB projection, if it is ever
@@ -208,5 +313,8 @@ node --test tests/factory-telemetry-log.test.mjs
 node --test tests/factory-drain-telemetry.test.mjs
 node --test tests/control-room.test.mjs
 node --test tests/factory-telemetry-step-cli.test.mjs
+node --test tests/factory-telemetry-phase.test.mjs
+node --test tests/factory-telemetry-phase-cli.test.mjs
+node --test tests/wmux-claude-telemetry-bridge.test.mjs
 node --test
 ```
