@@ -199,6 +199,83 @@ test('Windows case aliases cannot collapse the three outputs into one file', {
   }), /portfolio, snapshot, and HTML outputs must differ/u);
 });
 
+test('Windows admin-share aliases cannot collapse outputs onto one filesystem object', {
+  skip: process.platform !== 'win32',
+}, async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-unc-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const localArtifact = join(scratch, 'artifact.json');
+  const adminShareArtifact = `\\\\localhost\\${localArtifact[0]}$${localArtifact.slice(2)}`;
+
+  await assert.rejects(runFactoryDashboardRefreshCli([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', localArtifact,
+    '--snapshot-out', adminShareArtifact,
+    '--html-out', join(scratch, 'control-room.html'),
+  ], {
+    surveyPortfolio: async () => portfolio([]),
+  }), /portfolio, snapshot, and HTML outputs must differ/u);
+});
+
+test('a pre-aborted watch performs no GitHub survey and publishes nothing', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-pre-abort-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const controller = new AbortController();
+  controller.abort();
+  let surveys = 0;
+
+  await runFactoryDashboardRefreshLoop([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', join(scratch, 'portfolio.json'),
+    '--snapshot-out', join(scratch, 'control-room.json'),
+    '--html-out', join(scratch, 'control-room.html'),
+    '--watch-ms', '10000',
+  ], {
+    signal: controller.signal,
+    surveyPortfolio: async () => { surveys += 1; return portfolio([]); },
+    writeStdout: () => {},
+  });
+
+  assert.equal(surveys, 0);
+  assert.throws(() => readFileSync(join(scratch, 'control-room.html')), /ENOENT/u);
+});
+
+test('aborting an active survey returns promptly and cannot publish its late result', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-survey-abort-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const controller = new AbortController();
+  let surveyStarted;
+  const started = new Promise((resolveStarted) => { surveyStarted = resolveStarted; });
+  const startedAt = Date.now();
+
+  const run = runFactoryDashboardRefreshLoop([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', join(scratch, 'portfolio.json'),
+    '--snapshot-out', join(scratch, 'control-room.json'),
+    '--html-out', join(scratch, 'control-room.html'),
+    '--watch-ms', '10000',
+  ], {
+    signal: controller.signal,
+    surveyPortfolio: async () => {
+      surveyStarted();
+      await new Promise((resolveSurvey) => { setTimeout(resolveSurvey, 350); });
+      return portfolio([]);
+    },
+    writeStdout: () => {},
+  });
+  await started;
+  controller.abort();
+  await run;
+
+  assert.ok(Date.now() - startedAt < 200, 'abort should interrupt an active survey');
+  assert.throws(() => readFileSync(join(scratch, 'control-room.html')), /ENOENT/u);
+  await new Promise((resolveDelay) => { setTimeout(resolveDelay, 400); });
+  assert.throws(() => readFileSync(join(scratch, 'control-room.html')), /ENOENT/u);
+});
+
 test('aborting a real watch wait stops promptly instead of sleeping through the interval', async (t) => {
   const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-abort-'));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));

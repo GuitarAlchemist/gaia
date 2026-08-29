@@ -102,7 +102,9 @@ the same drain Module, prepares portfolio/snapshot/HTML artifacts off-path, then
 three caller-owned outputs with the self-contained HTML last. The default is one tick, suitable
 for a scheduler. `--watch-ms 30000` enables a visible sequential watch from 10 through 300
 seconds: ticks never overlap, a failed tick is reported and retried, and the last valid HTML is
-left in place. The Adapter grants no authority and performs no GitHub mutation.
+left in place. Cancellation stops before a pre-aborted tick, interrupts the default `gh`
+subprocesses during an active survey, and prevents a late survey result from being published.
+The Adapter grants no authority and performs no GitHub mutation.
 
 ```powershell
 npm run factory:dashboard:refresh -- `
@@ -121,8 +123,10 @@ complete page or the new complete page. A crash during evidence-file replacement
 leave JSON ahead of HTML; the next successful tick repairs it. Consumers requiring a single
 atomic identity must use the content-addressed snapshot revision embedded in the HTML rather
 than assume directory-wide atomicity. Before surveying GitHub, the Adapter canonicalizes the
-nearest existing ancestor of every path and refuses output aliases, Windows case aliases, and
-any output that aliases the receipts, holds, progress or history evidence it will read.
+nearest existing ancestor of every path, compares its filesystem volume/file identity plus the
+remaining path segments, and refuses output aliases (including admin-share UNC spellings),
+Windows case aliases, and any output that aliases the receipts, holds, progress or history
+evidence it will read.
 
 Raw `gaia-cli-progress/1` JSONL is accepted only when exactly one drain item is active. With
 more than one raw line, or with multiple active items, each line must use the explicit

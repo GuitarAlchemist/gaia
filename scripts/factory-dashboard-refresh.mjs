@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
-  mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
+  mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -25,9 +25,10 @@ function pathIdentity(path) {
   const tail = [];
   for (let depth = 0; depth < MAX_PATH_DEPTH; depth += 1) {
     try {
-      const physical = realpathSync.native(cursor);
-      const canonical = tail.length > 0 ? join(physical, ...tail.reverse()) : physical;
-      return CASE_INSENSITIVE_PATHS ? canonical.toLowerCase() : canonical;
+      const physical = statSync(cursor, { bigint: true });
+      const suffix = tail.reverse().join('/');
+      const canonicalSuffix = CASE_INSENSITIVE_PATHS ? suffix.toLowerCase() : suffix;
+      return `${physical.dev}:${physical.ino}:${canonicalSuffix}`;
     } catch {
       const parent = dirname(cursor);
       if (parent === cursor) break;
@@ -36,6 +37,25 @@ function pathIdentity(path) {
     }
   }
   return CASE_INSENSITIVE_PATHS ? supplied.toLowerCase() : supplied;
+}
+
+function abortReason(signal) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error('operation aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
+function abortable(operation, signal) {
+  if (!signal) return operation;
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise((resolvePromise, rejectPromise) => {
+    const abort = () => { rejectPromise(abortReason(signal)); };
+    signal.addEventListener('abort', abort, { once: true });
+    Promise.resolve(operation).then(resolvePromise, rejectPromise).finally(() => {
+      signal.removeEventListener('abort', abort);
+    });
+  });
 }
 
 function parseArgs(argv) {
@@ -99,6 +119,7 @@ function dashboardArgs(flags, portfolioPath, snapshotPath, htmlPath) {
 /** Survey GitHub once and publish one complete control-room view. */
 export async function runFactoryDashboardRefreshCli(argv, {
   now = () => new Date(),
+  signal,
   surveyPortfolio = defaultSurveyPortfolio,
   writeStdout = (chunk) => process.stdout.write(chunk),
 } = {}) {
@@ -117,10 +138,14 @@ export async function runFactoryDashboardRefreshCli(argv, {
     throw new UsageError('an output path aliases an input evidence path');
   }
 
-  const portfolio = await surveyPortfolio({
+  if (signal?.aborted) throw abortReason(signal);
+  const request = {
     organization: flags.organization,
     policyRevision: flags['policy-revision'],
-  });
+    ...(signal === undefined ? {} : { signal }),
+  };
+  const portfolio = await abortable(surveyPortfolio(request), signal);
+  if (signal?.aborted) throw abortReason(signal);
   const staging = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-'));
   try {
     const stagedPortfolio = join(staging, 'portfolio.json');
@@ -172,9 +197,11 @@ export async function runFactoryDashboardRefreshLoop(argv, {
   const interval = flags['watch-ms'] === undefined ? null : Number(flags['watch-ms']);
 
   do {
+    if (signal?.aborted) break;
     try {
-      await runFactoryDashboardRefreshCli(argv, refreshDependencies);
+      await runFactoryDashboardRefreshCli(argv, { ...refreshDependencies, signal });
     } catch (error) {
+      if (signal?.aborted && error?.name === 'AbortError') break;
       if (interval === null) throw error;
       writeError(error);
     }
