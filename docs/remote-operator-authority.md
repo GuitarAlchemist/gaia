@@ -111,6 +111,12 @@ ExactIntentAuthority.consumeExactIntent({
 executor thumbprint, method, approval/consumption/expiry times and a broker receipt signature.
 It contains no assertion, credential material or reusable grant.
 
+The Adapter accepts only canonical SPKI Ed25519 public-key PEM and derives the executor
+thumbprint from its DER bytes; private-key PEM is refused before the approval Adapter. After human
+approval it issues a closed, domain-separated challenge binding the approval, request, intent,
+nonce and derived thumbprint. A key-holder callback returns only an Ed25519 signature; the
+prototype verifies it before consumption. The private key never crosses this Interface.
+
 ## Remote Adapter protocol
 
 1. The operator freshly materializes the exact intent and creates an ephemeral executor keypair
@@ -129,7 +135,9 @@ It contains no assertion, credential material or reusable grant.
 8. Gaia verifies the broker receipt, derives its deterministic idempotency identity and starts
    execution. Provider progress remains redacted and non-authoritative.
 
-The claim TTL starts after human approval. Waiting for the operator is not itself a refusal.
+The claim TTL starts after human approval, is bounded to five minutes, and is validated with one
+clock observation satisfying `approvedAt <= consumedAt < expiresAt`. Waiting for the operator is
+not itself a refusal.
 
 ## Dependency categories and Adapters
 
@@ -148,6 +156,9 @@ Refusals are closed, typed and redacted: `PortfolioRevisionMismatch`, `IntentMis
 `ApprovalCancelled`, `ChallengeMismatch`, `OriginMismatch`, `RpIdMismatch`, `AssertionInvalid`,
 `ExecutorBindingMismatch`, `AlreadyConsumed`, `ConcurrentConsume`, `LedgerUnavailable`,
 `AuthorityUnavailable` and `ResponseInvalid`.
+
+`ApprovalWindowInvalid` additionally refuses future-dated, inverted or longer-than-five-minute
+approval windows. It is distinct from `RequestExpired`, where a valid window has elapsed.
 
 After consumption, execution or local-receipt ambiguity is never reported as `REFUSED`. It is
 `EXECUTION_FAILED` or `RECONCILE_REQUIRED` because the one-use authority has already been spent.

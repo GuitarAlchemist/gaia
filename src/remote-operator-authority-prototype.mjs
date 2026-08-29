@@ -6,7 +6,7 @@
  * effect=NONE, authority=NONE and executionAuthorized=false.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, createPublicKey, verify } from 'node:crypto';
 
 export class RemoteAuthorityPrototypeError extends Error {
   constructor(code, message) {
@@ -25,6 +25,7 @@ const APPROVAL_KEYS = [
   'approvalId', 'approvedAt', 'authorityMethod', 'executorThumbprint', 'expiresAt',
   'intentRevision', 'requestRevision', 'schema', 'status',
 ];
+const MAX_APPROVAL_TTL_MS = 5 * 60 * 1000;
 
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -116,12 +117,41 @@ function ownBinding(input) {
   if (!/^[A-Za-z0-9_-]{32,128}$/u.test(nonce)) {
     throw new RemoteAuthorityPrototypeError('InvalidSchema', 'nonce must be bounded base64url');
   }
+  const publicKeyText = text(input.publicKey, 'publicKey');
+  let publicKey;
+  try {
+    publicKey = createPublicKey(publicKeyText);
+  } catch {
+    throw new RemoteAuthorityPrototypeError(
+      'InvalidSchema', 'publicKey must be an Ed25519 public key',
+    );
+  }
+  if (publicKey.asymmetricKeyType !== 'ed25519') {
+    throw new RemoteAuthorityPrototypeError(
+      'InvalidSchema', 'publicKey must be an Ed25519 public key',
+    );
+  }
+  const canonicalPublicKey = publicKey.export({ format: 'pem', type: 'spki' }).toString().trim();
+  if (publicKeyText !== canonicalPublicKey) {
+    throw new RemoteAuthorityPrototypeError(
+      'InvalidSchema', 'publicKey must be canonical SPKI public-key PEM',
+    );
+  }
+  const derivedThumbprint = sha256(publicKey.export({ format: 'der', type: 'spki' }));
+  if (digest(input.thumbprint, 'thumbprint') !== derivedThumbprint) {
+    throw new RemoteAuthorityPrototypeError(
+      'ExecutorBindingMismatch', 'executor thumbprint does not identify its public key',
+    );
+  }
   return {
-    schema: input.schema,
-    algorithm: input.algorithm,
-    publicKey: text(input.publicKey, 'publicKey'),
-    thumbprint: digest(input.thumbprint, 'thumbprint'),
-    nonce,
+    binding: {
+      schema: input.schema,
+      algorithm: input.algorithm,
+      publicKey: publicKeyText,
+      thumbprint: derivedThumbprint,
+      nonce,
+    },
+    publicKey,
   };
 }
 
@@ -162,11 +192,13 @@ function deepFreeze(value) {
  * Build the authority-free in-memory Adapter used to test the selected remote Seam.
  */
 export function createRemoteExactIntentAuthorityPrototype({
-  remeasureIntent, requestHumanApproval, now = () => new Date(),
+  remeasureIntent, requestHumanApproval, proveExecutorPossession, now = () => new Date(),
 } = {}) {
   if (typeof remeasureIntent !== 'function' || typeof requestHumanApproval !== 'function'
-      || typeof now !== 'function') {
-    throw new TypeError('remeasureIntent, requestHumanApproval, and now must be functions');
+      || typeof proveExecutorPossession !== 'function' || typeof now !== 'function') {
+    throw new TypeError(
+      'remeasureIntent, requestHumanApproval, proveExecutorPossession, and now must be functions',
+    );
   }
   const consumedApprovalIds = new Set();
 
@@ -174,7 +206,9 @@ export function createRemoteExactIntentAuthorityPrototype({
     async consumeExactIntent(input) {
       exactObject(input, ['executionBinding', 'measurement'], 'consumeExactIntent input');
       const measured = ownMeasurement(input.measurement);
-      const executor = ownBinding(input.executionBinding);
+      const { binding: executor, publicKey: executorPublicKey } = ownBinding(
+        input.executionBinding,
+      );
       const independentlyMeasured = ownMeasurement(await remeasureIntent({
         portfolioRevision: measured.portfolioRevision,
         repository: measured.repository,
@@ -208,8 +242,40 @@ export function createRemoteExactIntentAuthorityPrototype({
           'ExecutorBindingMismatch', 'approval names another executor',
         );
       }
-      if (Date.parse(approval.approvedAt) >= Date.parse(approval.expiresAt)
-          || validNow(now).valueOf() >= Date.parse(approval.expiresAt)) {
+
+      const proofChallenge = deepFreeze({
+        schema: 'gaia-ephemeral-executor-proof-challenge/1',
+        approvalIdHash: sha256(approval.approvalId),
+        requestRevision: request.revision,
+        intentRevision: measured.intentRevision,
+        executorThumbprint: executor.thumbprint,
+        nonce: executor.nonce,
+      });
+      const proofText = text(
+        await proveExecutorPossession(proofChallenge), 'executorProof',
+      );
+      if (!/^[A-Za-z0-9_-]{86}$/u.test(proofText)
+          || !verify(
+            null,
+            Buffer.from(canonicalJson(proofChallenge)),
+            executorPublicKey,
+            Buffer.from(proofText, 'base64url'),
+          )) {
+        throw new RemoteAuthorityPrototypeError(
+          'ExecutorBindingMismatch', 'executor did not prove possession of its private key',
+        );
+      }
+
+      const observedNow = validNow(now);
+      const approvedAt = Date.parse(approval.approvedAt);
+      const expiresAt = Date.parse(approval.expiresAt);
+      if (approvedAt >= expiresAt || expiresAt - approvedAt > MAX_APPROVAL_TTL_MS
+          || observedNow.valueOf() < approvedAt) {
+        throw new RemoteAuthorityPrototypeError(
+          'ApprovalWindowInvalid', 'approval time window is invalid',
+        );
+      }
+      if (observedNow.valueOf() >= expiresAt) {
         throw new RemoteAuthorityPrototypeError('RequestExpired', 'approval has expired');
       }
 
@@ -233,7 +299,7 @@ export function createRemoteExactIntentAuthorityPrototype({
         executorThumbprint: executor.thumbprint,
         authorityMethod: approval.authorityMethod,
         approvedAt: approval.approvedAt,
-        consumedAt: validNow(now).toISOString(),
+        consumedAt: observedNow.toISOString(),
         expiresAt: approval.expiresAt,
       };
       return deepFreeze({
@@ -242,4 +308,3 @@ export function createRemoteExactIntentAuthorityPrototype({
     },
   });
 }
-
