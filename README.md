@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 524 gates
+node --test                                   # 539 gates
 ```
 
 ### Functional factory tracer
@@ -323,6 +323,7 @@ by **absence**, not by a check that could be bypassed.
 | `src/github-portfolio-publish.mjs` | Pure dry-run projection from one exact `CANDIDATE_READY` transition plus inert caller-observed Git data to a closed, deterministic advisory publication intent with `effect: NONE`; it accepts no callback or effect capability. |
 | `src/github-portfolio-publication.mjs` | Authorized publication controller: consumes one exact publish grant and sequences only observe, commit, leased push, and pull-request creation; typed redaction and no merge capability. |
 | `src/portfolio-drain.mjs` | Pure portfolio drain state machine: reconciles exact GitHub observations with content-addressed receipts and restrictive policy holds, then proposes bounded authority-free pump decisions. |
+| `src/portfolio-drain-ledger.mjs` | Append-only, CAS-protected receipt ledger and read-only idempotent drain `tick`; binds an exact machine/rules version and performs no worker or GitHub effect. |
 | `src/control-room.mjs` | Pure, content-addressed operator read model plus dependency-free HTML renderer; fresh real heartbeats are the only animated signal, and open-ended progress or ETA remains explicitly unknown. |
 | `src/git-gh-publication-effects.mjs` | Concrete local Git and `gh` publication effects with repeated identity checks, explicit remote-branch leases, and exact pull-request reuse. |
 | `src/github-read-adapter.mjs` | Read-only `gh` ingestion adapter with fail-closed query-cap detection. |
@@ -340,7 +341,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 524 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 539 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
