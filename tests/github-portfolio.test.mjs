@@ -484,6 +484,7 @@ test('the gh adapter blocks exact declared dependencies from issue bodies', asyn
 });
 
 test('explicitly dependency-free ready work enters the portfolio pump', async () => {
+  let issueBody = 'Depends-On: NONE\nDuplicate-Of: NONE';
   const run = async (args) => {
     const metadata = searchMetadata(args, { issues: 1 });
     if (metadata) return metadata;
@@ -495,7 +496,7 @@ test('explicitly dependency-free ready work enters the portfolio pump', async ()
       id: 'issue-gaia-18', number: 18,
       title: 'Pump: admit explicitly dependency-free ready work',
       updatedAt: '2026-08-29T19:10:00Z',
-      body: 'Depends-On: NONE\nDuplicate-Of: NONE',
+      body: issueBody,
       labels: [{ name: 'ready-for-agent' }],
       repository: { nameWithOwner: 'GuitarAlchemist/gaia' },
     }];
@@ -517,12 +518,18 @@ test('explicitly dependency-free ready work enters the portfolio pump', async ()
   assert.equal(drain.items[0].drainState, 'QUEUED');
   assert.equal(drain.decisions[0].action, 'CLAIM_FACTORY_RUN');
   assert.equal(drain.decisions[0].itemId, 'issue-gaia-18');
+
+  issueBody = 'Blocked-By: NONE\nDuplicate-Of: NONE';
+  await assert.rejects(factory.survey({
+    organization: 'GuitarAlchemist', policyRevision: 'sha256:portfolio-policy-v1',
+  }), /NONE is supported only for Depends-On and Duplicate-Of/u);
 });
 
 test('the gh adapter refuses NONE combined with a concrete relationship', async () => {
   for (const body of [
     'Depends-On: NONE\nDepends-On: GuitarAlchemist/ix#7\nDuplicate-Of: NONE',
     'Depends-On: NONE\nDuplicate-Of: NONE\nDuplicate-Of: GuitarAlchemist/gaia#2',
+    'Depends-On: NONE\nDuplicate-Of: GuitarAlchemist/gaia#2\nDuplicate-Of: GuitarAlchemist/gaia#3',
   ]) {
     const run = async (args) => {
       const metadata = searchMetadata(args, { issues: 1 });
