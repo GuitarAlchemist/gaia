@@ -305,7 +305,14 @@ it is bound into the result so a reviewer can see exactly how long was observed.
 ```
 
 `NONE` carries an empty `affectedItemIds`, `affectedCount: 0` and `recovery: null`. Every other
-state carries at least one affected item and exactly one bounded recovery action.
+state carries exactly one bounded recovery action.
+
+Correction, recorded during implementation rather than silently applied: the design first said
+every non-`NONE` state also carries at least one affected item. `NO_ELIGIBLE_WORK` is the one
+exception, and it has to be. An empty drain over an empty portfolio has no item to name, so its
+`affectedItemIds` is `[]` — naming nothing is the truthful answer, and inventing a placeholder
+item to satisfy a shape rule would be worse than the exception. Its recovery label still states
+how many recorded items ended, so the count an operator needs is not lost.
 
 ## Reversibility
 
