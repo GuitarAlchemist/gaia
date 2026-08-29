@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 481 gates
+node --test                                   # 490 gates
 ```
 
 ### Functional factory tracer
@@ -223,6 +223,30 @@ terminal outcome. Progress writer and timer failures are ignored and cannot affe
 consumption, execution, receipts, final stdout, or exit status.
 See [`docs/github-portfolio-operator.md`](docs/github-portfolio-operator.md).
 
+### Factory control room
+
+Generate a self-contained, read-only dashboard directly from the pinned portfolio and
+Gaia's append-only drain receipts:
+
+```bash
+npm run factory:dashboard -- \
+  --portfolio     ../state/gaia-github-portfolio.json \
+  --receipts      ../state/gaia-drain-receipts.json \
+  --html-out      ../state/gaia-control-room.html \
+  --snapshot-out  ../state/gaia-control-room.json \
+  --watch-ms      5000
+```
+
+The default view answers only five operator questions: what is moving now, what changed,
+what blocks it, what happens next, and which source revisions support those claims. A pulse
+is rendered only for a fresh, explicit `gaia-cli-progress/1` heartbeat. Stored `RUNNING`
+state without a fresh heartbeat is shown as stale. Each bounded lifecycle exposes named
+gates and a percentage; the open-ended portfolio itself deliberately has no fabricated
+completion percentage. ETA remains `UNKNOWN` until at least five comparable completed runs
+exist, then reports an interquartile range and sample size. The HTML has no remote assets and
+can be opened in wmux or shared as a standalone artifact. See
+[`docs/factory-control-room.md`](docs/factory-control-room.md).
+
 ### Candidate publication
 
 `buildGitHubCandidatePublishIntent({ transition, gitObservation })` accepts only an exact,
@@ -298,11 +322,13 @@ by **absence**, not by a check that could be bypassed.
 | `src/github-portfolio-publish.mjs` | Pure dry-run projection from one exact `CANDIDATE_READY` transition plus inert caller-observed Git data to a closed, deterministic advisory publication intent with `effect: NONE`; it accepts no callback or effect capability. |
 | `src/github-portfolio-publication.mjs` | Authorized publication controller: consumes one exact publish grant and sequences only observe, commit, leased push, and pull-request creation; typed redaction and no merge capability. |
 | `src/portfolio-drain.mjs` | Pure portfolio drain state machine: reconciles exact GitHub observations with content-addressed receipts and restrictive policy holds, then proposes bounded authority-free pump decisions. |
+| `src/control-room.mjs` | Pure, content-addressed operator read model plus dependency-free HTML renderer; fresh real heartbeats are the only animated signal, and open-ended progress or ETA remains explicitly unknown. |
 | `src/git-gh-publication-effects.mjs` | Concrete local Git and `gh` publication effects with repeated identity checks, explicit remote-branch leases, and exact pull-request reuse. |
 | `src/github-read-adapter.mjs` | Read-only `gh` ingestion adapter with fail-closed query-cap detection. |
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
 | `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
 | `scripts/factory-agent.mjs` | Real Claude worker → Codex read-only review → optional one Claude repair → fresh Codex review tracer. Produces a fail-closed, content-addressed run receipt; never commits or publishes. |
+| `scripts/factory-dashboard.mjs` | One-command portfolio/drain projection → control-room snapshot + standalone HTML adapter, with optional bounded polling and no listener or authority. |
 | `scripts/hybrid-search.mjs` | One-command local corpus → content-addressed hybrid index → cited result tracer; reserves new outputs and never contacts a provider. |
 | `scripts/github-portfolio.mjs` | One-command read-only organization survey; writes only a caller-named new local report. |
 | `scripts/github-portfolio-operator.mjs` | Two operator verbs, `init` and `run`. Parses a closed argument list, proves stdin is a terminal, names which streams the terminal is, and composes the existing adapters. Decides nothing about authority. |
@@ -313,7 +339,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 481 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 490 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
