@@ -14,7 +14,8 @@ class UsageError extends Error {}
 
 const ALLOWED_OPTIONS = new Set([
   'organization', 'policy-revision', 'portfolio-out', 'snapshot-out', 'html-out',
-  'receipts', 'holds', 'progress', 'history', 'capacity', 'language', 'watch-ms',
+  'receipts', 'holds', 'progress', 'history', 'telemetry', 'capacity', 'language',
+  'watch-ms',
 ]);
 const CASE_INSENSITIVE_PATHS = process.platform === 'win32' || process.platform === 'darwin';
 const MAX_PATH_DEPTH = 256;
@@ -110,7 +111,9 @@ function dashboardArgs(flags, portfolioPath, snapshotPath, htmlPath) {
     '--snapshot-out', snapshotPath,
     '--html-out', htmlPath,
   ];
-  for (const name of ['receipts', 'holds', 'progress', 'history', 'capacity', 'language']) {
+  for (const name of [
+    'receipts', 'holds', 'progress', 'history', 'telemetry', 'capacity', 'language',
+  ]) {
     if (flags[name] !== undefined) result.push(`--${name}`, flags[name]);
   }
   return result;
@@ -121,7 +124,7 @@ function assertPathConstraints(flags, outputPaths) {
   if (new Set(outputIdentities).size !== outputPaths.length) {
     throw new UsageError('portfolio, snapshot, and HTML outputs must differ');
   }
-  const inputIdentities = ['receipts', 'holds', 'progress', 'history']
+  const inputIdentities = ['receipts', 'holds', 'progress', 'history', 'telemetry']
     .filter((name) => flags[name] !== undefined)
     .map((name) => pathIdentity(flags[name]));
   if (outputIdentities.some((identity) => inputIdentities.includes(identity))) {

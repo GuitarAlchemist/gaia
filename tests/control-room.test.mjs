@@ -4,6 +4,10 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { buildControlRoomSnapshot, renderControlRoomHtml } from '../src/control-room.mjs';
+import {
+  buildFactoryTelemetryEvent,
+  replayFactoryTelemetry,
+} from '../src/factory-telemetry.mjs';
 
 const SHA = 'a'.repeat(64);
 
@@ -445,4 +449,260 @@ test('the renderer gives a typed refusal for a legacy snapshot without fog-of-wa
     () => renderControlRoomHtml(snapshot),
     (error) => error?.name === 'ControlRoomError' && error.code === 'InvalidSnapshot',
   );
+});
+
+// ---------------------------------------------------------------------------
+// passive factory telemetry spine
+// ---------------------------------------------------------------------------
+
+const TELEMETRY_SUBJECT = Object.freeze({
+  repository: 'GuitarAlchemist/gaia',
+  itemId: 'issue-17',
+  itemNumber: 17,
+  lane: 'LANE_A',
+  agent: 'CLAUDE_WORKER',
+  itemRevision: 'a'.repeat(64),
+});
+
+/** Replay a real telemetry run through the public kernel, never a hand-written stub. */
+function telemetry(steps, { subject = TELEMETRY_SUBJECT, runId = 'run-17-alpha' } = {}) {
+  let previous = null;
+  const events = steps.map((step) => {
+    previous = buildFactoryTelemetryEvent({ runId, subject, previous, ...step });
+    return previous;
+  });
+  return replayFactoryTelemetry({ events });
+}
+
+const OPEN_RUN = [
+  { event: 'run.started', observedAt: '2026-08-29T18:39:00.000Z' },
+  { event: 'gate.entered', gate: 'CLAIMED', observedAt: '2026-08-29T18:39:05.000Z' },
+  { event: 'run.heartbeat', observedAt: '2026-08-29T18:40:10.000Z' },
+];
+
+test('a fresh telemetry heartbeat animates the control room while the drain queue is idle', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    telemetryProjection: telemetry(OPEN_RUN),
+  });
+
+  assert.equal(snapshot.headline.state, 'ACTIVE');
+  assert.equal(snapshot.activeCount, 1);
+  assert.equal(snapshot.showSpinner, true);
+  assert.equal(snapshot.nextAction.kind, 'OBSERVE_ACTIVE_RUN');
+  const [only] = snapshot.items;
+  assert.equal(only.activity.state, 'ACTIVE');
+  assert.equal(only.activity.showPulse, true);
+  assert.equal(only.activity.stage, 'CLAIMED');
+  assert.equal(only.activity.lastHeartbeatAt, '2026-08-29T18:40:10.000Z');
+  assert.equal(only.telemetry.runId, 'run-17-alpha');
+  assert.equal(only.telemetry.lane, 'LANE_A');
+  assert.equal(only.telemetry.agent, 'CLAUDE_WORKER');
+  assert.equal(only.telemetry.runState, 'IN_GATE');
+  assert.equal(only.telemetry.currentGate, 'CLAIMED');
+  assert.equal(only.telemetry.blocker, null);
+  assert.equal(only.telemetry.heartbeatFresh, true);
+  assert.equal(only.telemetry.freshnessWindowMs, 30_000);
+  assert.equal(only.telemetry.evidenceAgeMs, 10_000);
+  assert.deepEqual(only.telemetry.lastTransition, {
+    event: 'gate.entered',
+    gate: 'CLAIMED',
+    sequence: 1,
+    observedAt: '2026-08-29T18:39:05.000Z',
+    evidenceRevision: 'UNKNOWN',
+  });
+  assert.deepEqual(snapshot.telemetry, {
+    observedRuns: 1,
+    activeRuns: 1,
+    staleRuns: 0,
+    blockedRuns: 0,
+    unmatchedRuns: 0,
+    freshnessWindowMs: 30_000,
+    projectionRevision: telemetry(OPEN_RUN).revision,
+  });
+});
+
+test('NEGATIVE CONTROL: an expired heartbeat becomes a named blockage and stops animating', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'RUNNING' })]),
+    observedAt: '2026-08-29T18:40:40.001Z',
+    telemetryProjection: telemetry(OPEN_RUN),
+  });
+
+  assert.equal(snapshot.headline.state, 'STALE');
+  assert.equal(snapshot.activeCount, 0);
+  assert.equal(snapshot.staleCount, 1);
+  assert.equal(snapshot.showSpinner, false);
+  assert.equal(snapshot.nextAction.kind, 'CHECK_STALE_RUN');
+  const [only] = snapshot.items;
+  assert.equal(only.activity.state, 'STALE');
+  assert.equal(only.activity.showPulse, false);
+  assert.equal(only.activity.lastHeartbeatAt, null);
+  assert.equal(only.telemetry.heartbeatFresh, false);
+  assert.equal(only.telemetry.evidenceAgeMs, 30_001);
+  assert.deepEqual(
+    snapshot.blockers.find(({ state }) => state === 'TELEMETRY_HEARTBEAT_EXPIRED'),
+    { state: 'TELEMETRY_HEARTBEAT_EXPIRED', count: 1 },
+  );
+  assert.equal(snapshot.eta.state, 'UNKNOWN');
+  assert.doesNotMatch(renderControlRoomHtml(snapshot), /class="heartbeat-pulse"/u);
+});
+
+test('NEGATIVE CONTROL: a started run with no heartbeat at all never animates', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'RUNNING' })]),
+    observedAt: '2026-08-29T18:39:10.000Z',
+    telemetryProjection: telemetry(OPEN_RUN.slice(0, 2)),
+  });
+
+  assert.equal(snapshot.headline.state, 'STALE');
+  assert.equal(snapshot.showSpinner, false);
+  assert.equal(snapshot.items[0].activity.state, 'STALE');
+  assert.equal(snapshot.items[0].telemetry.lastHeartbeatAt, null);
+  assert.equal(snapshot.items[0].telemetry.heartbeatFresh, false);
+});
+
+test('NEGATIVE CONTROL: telemetry observed after the snapshot instant fails closed', () => {
+  assert.throws(
+    () => buildControlRoomSnapshot({
+      drainProjection: projection([item()]),
+      observedAt: '2026-08-29T18:39:04.000Z',
+      telemetryProjection: telemetry(OPEN_RUN),
+    }),
+    (error) => error?.name === 'ControlRoomError' && error.code === 'InvalidTelemetry',
+  );
+});
+
+test('NEGATIVE CONTROL: a tampered telemetry projection fails closed', () => {
+  const tampered = structuredClone(telemetry(OPEN_RUN));
+  tampered.runs[0].lastHeartbeatAt = '2026-08-29T18:40:19.000Z';
+
+  assert.throws(
+    () => buildControlRoomSnapshot({
+      drainProjection: projection([item()]),
+      observedAt: '2026-08-29T18:40:20.000Z',
+      telemetryProjection: tampered,
+    }),
+    (error) => error?.name === 'ControlRoomError' && error.code === 'InvalidTelemetry',
+  );
+
+  const wrongEffect = structuredClone(telemetry(OPEN_RUN));
+  wrongEffect.effect = 'FACTORY_RUN';
+  assert.throws(
+    () => buildControlRoomSnapshot({
+      drainProjection: projection([item()]),
+      observedAt: '2026-08-29T18:40:20.000Z',
+      telemetryProjection: wrongEffect,
+    }),
+    (error) => error?.name === 'ControlRoomError' && error.code === 'InvalidTelemetry',
+  );
+});
+
+test('NEGATIVE CONTROL: a heartbeat recorded against another item cannot animate this one', () => {
+  const copied = telemetry(OPEN_RUN, {
+    subject: { ...TELEMETRY_SUBJECT, itemId: 'issue-99', itemNumber: 99 },
+    runId: 'run-99-alpha',
+  });
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    telemetryProjection: copied,
+  });
+
+  assert.equal(snapshot.headline.state, 'PAUSED');
+  assert.equal(snapshot.showSpinner, false);
+  assert.equal(snapshot.items[0].telemetry, null);
+  assert.equal(snapshot.telemetry.unmatchedRuns, 1);
+  assert.equal(snapshot.telemetry.activeRuns, 0);
+});
+
+test('a blocked telemetry run is a named blocker and never keeps spinning', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'RUNNING' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    telemetryProjection: telemetry([
+      ...OPEN_RUN,
+      { event: 'gate.failed', gate: 'CLAIMED', observedAt: '2026-08-29T18:40:12.000Z' },
+      {
+        event: 'run.blocked',
+        blocker: 'TRANSITION_NOT_PERMITTED',
+        observedAt: '2026-08-29T18:40:13.000Z',
+      },
+    ]),
+  });
+
+  assert.equal(snapshot.headline.state, 'PAUSED');
+  assert.equal(snapshot.showSpinner, false);
+  assert.equal(snapshot.items[0].activity.state, 'IDLE');
+  assert.equal(snapshot.items[0].telemetry.runState, 'BLOCKED');
+  assert.equal(snapshot.items[0].telemetry.blocker, 'TRANSITION_NOT_PERMITTED');
+  assert.deepEqual(
+    snapshot.blockers.find(({ state }) => state === 'TELEMETRY_TRANSITION_NOT_PERMITTED'),
+    { state: 'TELEMETRY_TRANSITION_NOT_PERMITTED', count: 1 },
+  );
+  assert.equal(snapshot.telemetry.blockedRuns, 1);
+  const html = renderControlRoomHtml(snapshot);
+  assert.match(html, /<article class="work-item" data-severity="blocked">/u);
+  assert.match(html, /TRANSITION_NOT_PERMITTED/u);
+  assert.doesNotMatch(html, /class="heartbeat-pulse"/u);
+});
+
+test('a completed telemetry run truthfully stops moving and expires', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'CANDIDATE_READY' })]),
+    observedAt: '2026-08-29T18:41:20.000Z',
+    telemetryProjection: telemetry([
+      ...OPEN_RUN,
+      { event: 'gate.passed', gate: 'CLAIMED', observedAt: '2026-08-29T18:40:12.000Z' },
+      {
+        event: 'run.completed',
+        observedAt: '2026-08-29T18:40:13.000Z',
+        evidenceRevision: 'c'.repeat(64),
+      },
+    ]),
+  });
+
+  assert.equal(snapshot.headline.state, 'PAUSED');
+  assert.equal(snapshot.showSpinner, false);
+  assert.equal(snapshot.items[0].activity.state, 'IDLE');
+  assert.equal(snapshot.items[0].telemetry.runState, 'COMPLETED');
+  assert.equal(snapshot.items[0].telemetry.lastTransition.event, 'run.completed');
+  assert.equal(snapshot.items[0].telemetry.lastTransition.evidenceRevision, 'c'.repeat(64));
+  assert.equal(snapshot.telemetry.activeRuns, 0);
+  assert.equal(snapshot.telemetry.staleRuns, 0);
+});
+
+test('the rendered control room shows run, gate, last verified transition and evidence age', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'RUNNING' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    telemetryProjection: telemetry(OPEN_RUN),
+  });
+  const html = renderControlRoomHtml(snapshot);
+
+  assert.match(html, /run-17-alpha/u);
+  assert.match(html, /gate\.entered/u);
+  assert.match(html, /CLAIMED/u);
+  assert.match(html, /Evidence age/u);
+  assert.match(html, /class="heartbeat-pulse"/u);
+  assert.match(renderControlRoomHtml(snapshot, { language: 'fr' }), /run-17-alpha/u);
+});
+
+test('a snapshot with no telemetry keeps its existing shape and reports an empty spine', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item()]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+
+  assert.equal(snapshot.items[0].telemetry, null);
+  assert.deepEqual(snapshot.telemetry, {
+    observedRuns: 0,
+    activeRuns: 0,
+    staleRuns: 0,
+    blockedRuns: 0,
+    unmatchedRuns: 0,
+    freshnessWindowMs: 30_000,
+    projectionRevision: null,
+  });
 });

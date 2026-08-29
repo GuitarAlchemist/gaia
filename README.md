@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 539 gates
+node --test                                   # 612 gates
 ```
 
 ### Functional factory tracer
@@ -247,6 +247,69 @@ exist, then reports an interquartile range and sample size. The HTML has no remo
 can be opened in wmux or shared as a standalone artifact. See
 [`docs/factory-control-room.md`](docs/factory-control-room.md).
 
+### Passive factory telemetry spine
+
+The control room truthfully reported `PAUSED` while real work was happening, because the
+only run evidence it had was best-effort CLI progress. The telemetry spine is the missing
+sensor, not more orchestration.
+
+A sensor records one of exactly seven bounded facts - `run.started`, `run.heartbeat`,
+`gate.entered`, `gate.passed`, `gate.failed`, `run.blocked`, `run.completed` - into one
+append-only, content-addressed JSONL log under a single-writer lock. Every field is a typed
+identity or a canonical token, so a prompt, a reasoning trace, a credential, a screen
+capture, a source fragment or an arbitrary log line has nowhere to live; where evidence is
+absent the record says `UNKNOWN`. Replay is a pure function of the event set: duplicate
+delivery is idempotent, and gaps, reordering, identity substitution, impossible transitions,
+unknown future event types, invalid or future timestamps and corrupted history all fail
+closed with typed diagnostics.
+
+Run one real local transition end to end:
+
+```bash
+npm run factory:telemetry -- \
+  --portfolio      ../state/gaia-portfolio.json \
+  --ledger-dir     ../state/gaia-drain \
+  --telemetry-dir  ../state/gaia-telemetry \
+  --item           issue-27 \
+  --event          CLAIMED \
+  --lane           LANE_A \
+  --agent          CLAUDE_WORKER \
+  --out            ../state/gaia-telemetry-step.json
+```
+
+That step records a whole run inside one process, so the report it writes is a unit
+demonstration of the freshness rule at three explicit instants over a recorded prefix, not
+three observations of the durable log. It is a settled run by the time any dashboard can
+read it.
+
+To watch a run actually move and expire, record its phases one at a time. Each call returns,
+so the run stays open on disk between them:
+
+```bash
+npm run factory:telemetry:phase -- --telemetry-dir ../state/gaia-telemetry \
+  --run-id run-27-alpha --phase start \
+  --repository GuitarAlchemist/gaia --item issue-27 --item-number 27 \
+  --lane WMUX_LANE_A --agent CLAUDE_CODE
+npm run factory:telemetry:phase -- --telemetry-dir ../state/gaia-telemetry \
+  --run-id run-27-alpha --phase heartbeat
+npm run factory:telemetry:phase -- --telemetry-dir ../state/gaia-telemetry \
+  --run-id run-27-alpha --phase gate-entered --gate CLAIMED
+```
+
+`scripts/factory-dashboard.mjs --telemetry <dir>` now renders `ACTIVE` with a pulse and the
+truthful current gate. Wait past the 30 s freshness window without another `heartbeat` and
+the same log renders `STALE` with the named blockage `TELEMETRY_HEARTBEAT_EXPIRED`, its
+evidence age, and `CHECK_STALE_RUN` as the next action. `--phase gate-passed --gate CLAIMED`
+then `--phase finish` closes it, and it settles to `PAUSED` for good. A fact recorded after
+the rendered instant is refused rather than shown.
+
+The seven phases - `start`, `heartbeat`, `gate-entered`, `gate-passed`, `gate-failed`,
+`finish`, `block` - are exactly the seven event kinds under operator-facing names; the seam
+adds no event, field or schema. `observeWmuxClaudeTask` is a thin wrapper over that same
+seam for one bounded wmux/Claude task: it launches nothing, reads no screen or prompt, and
+takes one closed outcome from the task itself. See
+[`docs/factory-telemetry-spine.md`](docs/factory-telemetry-spine.md).
+
 ### Candidate publication
 
 `buildGitHubCandidatePublishIntent({ transition, gitObservation })` accepts only an exact,
@@ -327,10 +390,14 @@ by **absence**, not by a check that could be bypassed.
 | `src/control-room.mjs` | Pure, content-addressed operator read model plus dependency-free HTML renderer; fresh real heartbeats are the only animated signal, and open-ended progress or ETA remains explicitly unknown. |
 | `src/git-gh-publication-effects.mjs` | Concrete local Git and `gh` publication effects with repeated identity checks, explicit remote-branch leases, and exact pull-request reuse. |
 | `src/github-read-adapter.mjs` | Read-only `gh` ingestion adapter with fail-closed query-cap detection. |
+| `src/factory-telemetry-phase.mjs` | The generic file-backed phase sensor: accepts one closed lifecycle fact and returns, so a run stays open on disk and a separately invoked reader observes it moving, expiring and settling. Binds the subject once, at start. |
+| `src/wmux-claude-telemetry-bridge.mjs` | Thin wrapper binding one bounded, caller-supplied wmux/Claude task to the phase seam. Launches nothing, reads no screen or prompt, accepts one closed outcome, and re-throws infrastructure failures rather than recording them as blocked runs. |
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
 | `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
 | `scripts/factory-agent.mjs` | Real Claude worker → Codex read-only review → optional one Claude repair → fresh Codex review tracer. Produces a fail-closed, content-addressed run receipt; never commits or publishes. |
 | `scripts/factory-dashboard.mjs` | One-command portfolio/drain projection → control-room snapshot + standalone HTML adapter, with optional bounded polling and no listener or authority. |
+| `scripts/factory-telemetry-step.mjs` | One real, bounded, instrumented portfolio-drain transition: reads the ledger, records the closed telemetry arc, attempts exactly one compare-and-swap receipt, and publishes the three control-room views. No provider, no worker, no authority. |
+| `scripts/factory-telemetry-phase.mjs` | Records exactly one lifecycle phase of one run, then exits. The operator-facing half of the phase sensor; refuses to rebind a run's subject or to overwrite a durable evidence log. |
 | `scripts/hybrid-search.mjs` | One-command local corpus → content-addressed hybrid index → cited result tracer; reserves new outputs and never contacts a provider. |
 | `scripts/github-portfolio.mjs` | One-command read-only organization survey; writes only a caller-named new local report. |
 | `scripts/github-portfolio-operator.mjs` | Two operator verbs, `init` and `run`. Parses a closed argument list, proves stdin is a terminal, names which streams the terminal is, and composes the existing adapters. Decides nothing about authority. |
@@ -341,7 +408,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 539 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 612 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
