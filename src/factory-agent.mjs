@@ -434,6 +434,13 @@ function changeSet(worktree, head) {
   return { ...value, identity: sha256(canonical(value)) };
 }
 
+// Public read-only measurement seam shared by the publication Adapter. Keeping the
+// recipe here prevents a post-review publisher from inventing a second candidate
+// identity for the same worktree bytes.
+export function measureAgentFactoryChangeSet(worktree, head) {
+  return structuredClone(changeSet(worktree, head));
+}
+
 function workspaceTree(worktree) {
   const entries = [];
   const visit = (directory, prefix = '') => {
