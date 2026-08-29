@@ -74,9 +74,10 @@ typed errors. The portfolio layer records those failures as `EXECUTION_FAILED` a
 the existing one-use grant is spent. Repair receives no second grant or idempotency key.
 
 The public `scripts/factory-agent.mjs` composition wires the closed Claude repair
-profile explicitly. Worker, repair, and each reviewer invocation receive the same
-caller-bounded timeout; importing its `runFactoryAgentCli` seam performs no command and
-allows the composition to be verified without spawning subscription providers.
+profile explicitly and selects either the default Codex reviewer or the optional Pi
+reviewer with `--reviewer pi`. Worker, repair, and each reviewer invocation receive the
+same caller-bounded timeout; importing its `runFactoryAgentCli` seam performs no command
+and allows the composition to be verified without spawning subscription providers.
 
 ## CLI progress contract
 
@@ -119,7 +120,11 @@ receipts.
   observes only the candidate worktree and Git controls.
 - Codex runs ephemerally with requested `read-only` sandboxing. Gaia additionally
   verifies the complete candidate tree and Git controls after review.
-- Both profiles receive a minimal OS environment allowlist. API keys, provider
+- Pi is an alternative reviewer only. It must report ready `openai-codex` OAuth before
+  model launch, receives a digest-checked patch capped at 1 MiB, runs without a session,
+  project-local approval, extensions, skills, or implicit context, and exposes only
+  `read`, `grep`, `find`, and `ls`. It has no writer or shell tool.
+- All provider profiles receive a minimal OS environment allowlist. API keys, provider
   auth-token overrides, cloud-routing flags, custom endpoints, and unrelated
   host secrets are not inherited; the installed subscription logins remain in
   their normal user-profile stores.

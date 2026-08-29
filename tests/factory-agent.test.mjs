@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
@@ -11,9 +12,11 @@ import {
   buildClaudeRepairInvocation,
   buildClaudeWorkerInvocation,
   buildCodexReviewerInvocation,
+  buildPiReviewerInvocation,
   FactoryAgentError,
   executeAgentFactory,
   runBoundedInvocation,
+  runPiReviewer,
 } from '../src/factory-agent.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-factory-agent-'));
@@ -316,6 +319,142 @@ test('Codex reviewer profile is ephemeral, read-only, and strips API routes', ()
   assert.match(invocation.args.at(-1), /VERDICT: APPROVE/);
   assert.match(invocation.args.at(-1), /aaaaaaaa/);
   assert.deepEqual(Object.keys(invocation.env).sort(), ['PATH', 'USERPROFILE']);
+});
+
+test('Pi reviewer profile is an ephemeral read-only Codex subscription invocation', () => {
+  const invocation = buildPiReviewerInvocation({
+    cwd: 'C:\\fixture worktree',
+    task: 'change candidate.txt',
+    changeSet: { identity: 'c'.repeat(64), files: [{ path: 'candidate.txt' }] },
+    env: {
+      PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture',
+      OPENAI_API_KEY: 'must-not-leak', ANTHROPIC_API_KEY: 'must-not-leak',
+      PI_TELEMETRY: '1',
+    },
+  });
+
+  assert.equal(invocation.command, 'pi');
+  assert.equal(invocation.cwd, 'C:\\fixture worktree');
+  assert.equal(invocation.shell, false);
+  assert.deepEqual(invocation.env, {
+    PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture', PI_TELEMETRY: '0',
+  });
+  assert.deepEqual(invocation.args.slice(0, 10), [
+    '--provider', 'openai-codex', '--model', 'gpt-5.6-luna', '--thinking', 'medium',
+    '--print', '--no-session', '--no-context-files', '--no-extensions',
+  ]);
+  assert.ok(invocation.args.includes('--no-skills'));
+  assert.ok(invocation.args.includes('--no-approve'));
+  assert.equal(invocation.args.includes('--approve'), false);
+  assert.deepEqual(invocation.args.slice(
+    invocation.args.indexOf('--tools'), invocation.args.indexOf('--tools') + 2,
+  ), ['--tools', 'read,grep,find,ls']);
+  assert.match(invocation.args.at(-1), /VERDICT: APPROVE/u);
+  assert.match(invocation.args.at(-1), /cccccccc/u);
+});
+
+test('Pi reviewer proves OAuth readiness before accepting an exact verdict', async () => {
+  const invocations = [];
+  const patch = 'diff --git a/candidate.txt b/candidate.txt\n+review this exact patch\n';
+  const patchSha256 = createHash('sha256').update(patch).digest('hex');
+  const result = await runPiReviewer({
+    cwd: 'C:\\fixture worktree',
+    task: 'change candidate.txt',
+    baseHead: 'e'.repeat(40),
+    changeSet: {
+      identity: 'd'.repeat(64), files: [{ path: 'candidate.txt' }],
+      patchBytes: Buffer.byteLength(patch), patchSha256,
+    },
+    env: { PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture' },
+  }, {
+    timeoutMs: 4321,
+    readPatch: () => patch,
+    runInvocation: async (invocation, options) => {
+      invocations.push({ invocation, options });
+      if (invocation.args[0] === 'auth') {
+        return {
+          code: 0, signal: null,
+          stdout: '{"status":"ready","provider":"openai-codex","authType":"oauth"}\n',
+          stderr: '',
+        };
+      }
+      return {
+        code: 0, signal: null,
+        stdout: 'Reviewed the candidate.\nVERDICT: APPROVE\n', stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.provider, 'pi-openai-codex-subscription');
+  assert.equal(result.verdict, 'APPROVE');
+  assert.equal(invocations.length, 2);
+  assert.deepEqual(invocations[0].invocation.args, [
+    'auth', 'check', '--provider', 'openai-codex', '--json',
+  ]);
+  assert.equal(invocations[0].invocation.cwd, 'C:\\Users\\fixture');
+  assert.equal(invocations[1].invocation.command, 'pi');
+  assert.match(invocations[1].invocation.args.at(-1), /review this exact patch/u);
+  assert.deepEqual(invocations.map(({ options }) => options), [
+    { timeoutMs: 4321 }, { timeoutMs: 4321 },
+  ]);
+});
+
+test('Pi reviewer refuses API-key readiness before launching a model', async () => {
+  const patch = 'diff --git a/candidate.txt b/candidate.txt\n';
+  let calls = 0;
+  await assert.rejects(runPiReviewer({
+    cwd: 'C:\\fixture worktree', task: 'review', baseHead: 'e'.repeat(40),
+    changeSet: {
+      identity: 'd'.repeat(64), files: [{ path: 'candidate.txt' }],
+      patchBytes: Buffer.byteLength(patch),
+      patchSha256: createHash('sha256').update(patch).digest('hex'),
+    },
+  }, {
+    readPatch: () => patch,
+    runInvocation: async () => {
+      calls += 1;
+      return {
+        code: 0, signal: null, stderr: '',
+        stdout: '{"status":"ready","provider":"openai-codex","authType":"api_key"}\n',
+      };
+    },
+  }), (error) => error instanceof FactoryAgentError
+    && error.code === 'SubscriptionAuthRequired');
+  assert.equal(calls, 1, 'the model invocation must never follow non-OAuth readiness');
+});
+
+test('Pi reviewer refuses a patch that does not match the measured candidate', async () => {
+  let called = false;
+  await assert.rejects(runPiReviewer({
+    cwd: 'C:\\fixture worktree', task: 'review', baseHead: 'e'.repeat(40),
+    changeSet: {
+      identity: 'd'.repeat(64), files: [{ path: 'candidate.txt' }],
+      patchBytes: 5, patchSha256: 'a'.repeat(64),
+    },
+  }, {
+    readPatch: () => 'other',
+    runInvocation: async () => { called = true; },
+  }), (error) => error instanceof FactoryAgentError
+    && error.code === 'ReviewerInputMismatch');
+  assert.equal(called, false);
+});
+
+test('Pi reviewer refuses an oversized patch before authentication or model use', async () => {
+  const patch = 'x'.repeat(1_048_577);
+  let called = false;
+  await assert.rejects(runPiReviewer({
+    cwd: 'C:\\fixture worktree', task: 'review', baseHead: 'e'.repeat(40),
+    changeSet: {
+      identity: 'd'.repeat(64), files: [{ path: 'candidate.txt' }],
+      patchBytes: Buffer.byteLength(patch),
+      patchSha256: createHash('sha256').update(patch).digest('hex'),
+    },
+  }, {
+    readPatch: () => patch,
+    runInvocation: async () => { called = true; },
+  }), (error) => error instanceof FactoryAgentError
+    && error.code === 'ReviewerInputLimit');
+  assert.equal(called, false);
 });
 
 test('fails closed when a worker changes HEAD or the Git index', async () => {

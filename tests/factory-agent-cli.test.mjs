@@ -129,6 +129,44 @@ test('the public CLI emits one loopback OTLP trace for the cycle and its provide
   assert.equal(cycle.status, 'OK');
 });
 
+test('the public CLI selects the Pi OAuth reviewer without changing the worker profile', async () => {
+  const worktree = join(scratch, 'pi-reviewer-worktree');
+  const out = join(scratch, 'pi-reviewer-receipt.json');
+  mkdirSync(worktree);
+  let piCalls = 0;
+
+  await runFactoryAgentCli([
+    '--worktree', worktree,
+    '--task', 'review through Pi',
+    '--out', out,
+    '--reviewer', 'pi',
+  ], {
+    executeFactory: async ({ runWorker, runReviewer }) => {
+      await runWorker({ role: 'worker' });
+      const review = await runReviewer({ role: 'initial-review' });
+      assert.equal(review.provider, 'pi-openai-codex-subscription');
+      return {
+        schema: 'gaia-agent-factory-receipt/1',
+        status: 'completed',
+        task: 'review through Pi',
+      };
+    },
+    runWorker: async () => ({ provider: 'fixture-worker', output: 'worker' }),
+    runReviewer: async () => { throw new Error('Codex reviewer must not run'); },
+    runPiReview: async () => {
+      piCalls += 1;
+      return {
+        provider: 'pi-openai-codex-subscription', verdict: 'APPROVE', output: 'approve',
+      };
+    },
+  });
+
+  assert.equal(piCalls, 1);
+  const envelope = JSON.parse(readFileSync(out, 'utf8'));
+  assert.equal(envelope.workerProfile, 'claude-subscription');
+  assert.equal(envelope.reviewerProfile, 'pi-openai-codex-subscription-read-only');
+});
+
 test('refuses a receipt path inside the candidate before launching an agent', () => {
   const result = spawnSync(process.execPath, [
     SCRIPT,

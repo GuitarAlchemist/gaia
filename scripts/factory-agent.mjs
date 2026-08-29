@@ -16,6 +16,7 @@ import {
   runClaudeRepair,
   runClaudeWorker,
   runCodexReviewer,
+  runPiReviewer,
 } from '../src/factory-agent.mjs';
 import { createCliProgress, instrumentFactoryAdapters } from '../src/cli-progress.mjs';
 import {
@@ -42,8 +43,8 @@ function parseArgs(argv) {
   if (flags.worker && flags.worker !== 'claude') {
     throw new UsageError('v1 worker profile is exactly claude');
   }
-  if (flags.reviewer && flags.reviewer !== 'codex') {
-    throw new UsageError('v1 reviewer profile is exactly codex');
+  if (flags.reviewer && !['codex', 'pi'].includes(flags.reviewer)) {
+    throw new UsageError('--reviewer must be codex or pi');
   }
   const progressFormat = flags['progress-format'] ?? 'human';
   if (!['human', 'jsonl'].includes(progressFormat)) {
@@ -78,6 +79,7 @@ export async function runFactoryAgentCli(argv, {
   executeFactory = executeAgentFactory,
   runWorker = runClaudeWorker,
   runReviewer = runCodexReviewer,
+  runPiReview = runPiReviewer,
   runRepair = runClaudeRepair,
   writeStdout = (chunk) => process.stdout.write(chunk),
   writeProgress = (chunk) => process.stderr.write(chunk),
@@ -99,6 +101,10 @@ export async function runFactoryAgentCli(argv, {
   const worktree = resolve(flags.worktree);
   const output = resolve(flags.out);
   const evidenceDir = `${output}.evidence`;
+  const reviewerProfile = flags.reviewer === 'pi'
+    ? 'pi-openai-codex-subscription-read-only'
+    : 'codex-subscription-read-only';
+  const selectedReviewer = flags.reviewer === 'pi' ? runPiReview : runReviewer;
   let traceSink;
   try {
     traceSink = flags['otel-endpoint']
@@ -117,7 +123,7 @@ export async function runFactoryAgentCli(argv, {
       schema: 'gaia-agent-factory-run/1',
       status: 'running',
       worker: 'claude-subscription',
-      reviewer: 'codex-subscription',
+      reviewer: reviewerProfile,
       repair: 'claude-subscription-bounded-once',
       worktreeRole: 'caller-supplied-linked-worktree',
       evidenceStore: evidenceDir,
@@ -131,7 +137,7 @@ export async function runFactoryAgentCli(argv, {
     progress.executionStarting();
     const progressAdapters = instrumentFactoryAdapters({
       runWorker: (context) => runWorker(context, { timeoutMs: flags.timeoutMs }),
-      runReviewer: (context) => runReviewer(context, { timeoutMs: flags.timeoutMs }),
+      runReviewer: (context) => selectedReviewer(context, { timeoutMs: flags.timeoutMs }),
       runRepair: (context) => runRepair(context, { timeoutMs: flags.timeoutMs }),
       progress,
     });
@@ -154,7 +160,7 @@ export async function runFactoryAgentCli(argv, {
       schema: 'gaia-agent-factory-run/1',
       status: receipt.status,
       workerProfile: 'claude-subscription',
-      reviewerProfile: 'codex-subscription-read-only',
+      reviewerProfile,
       repairProfile: 'claude-subscription-bounded-once',
       result: receipt,
     });
@@ -171,7 +177,7 @@ export async function runFactoryAgentCli(argv, {
       schema: 'gaia-agent-factory-run/1',
       status: 'failed',
       workerProfile: 'claude-subscription',
-      reviewerProfile: 'codex-subscription-read-only',
+      reviewerProfile,
       error: {
         name: error.name,
         code: error.code ?? 'UnhandledFailure',

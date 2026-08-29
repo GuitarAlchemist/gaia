@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 448 gates
+node --test                                   # 454 gates
 ```
 
 ### Functional factory tracer
@@ -58,6 +58,13 @@ npm run factory:agent -- \
   --out ../state/gaia-agent-run.json \
   --timeout-ms 600000
 ```
+
+Use `--reviewer pi` to replace only the Codex CLI reviewer with Pi over the existing
+OpenAI Codex OAuth subscription. This profile first proves `authType: oauth`, rejects
+API-key readiness, preloads only the digest-bound patch (maximum 1 MiB), disables
+project-local configuration, sessions, extensions, skills, and implicit context, and
+enables only Pi's `read`, `grep`, `find`, and `ls` tools for surrounding candidate-tree
+context. The Claude worker and bounded repair remain unchanged.
 
 An optional local OpenTelemetry Collector can receive redacted cycle and provider-phase
 spans with `--otel-endpoint http://127.0.0.1:4318/v1/traces`. The endpoint is restricted
@@ -249,7 +256,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 448 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 454 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
