@@ -116,6 +116,20 @@ function dashboardArgs(flags, portfolioPath, snapshotPath, htmlPath) {
   return result;
 }
 
+function assertPathConstraints(flags, outputPaths) {
+  const outputIdentities = outputPaths.map(pathIdentity);
+  if (new Set(outputIdentities).size !== outputPaths.length) {
+    throw new UsageError('portfolio, snapshot, and HTML outputs must differ');
+  }
+  const inputIdentities = ['receipts', 'holds', 'progress', 'history']
+    .filter((name) => flags[name] !== undefined)
+    .map((name) => pathIdentity(flags[name]));
+  if (outputIdentities.some((identity) => inputIdentities.includes(identity))) {
+    throw new UsageError('an output path aliases an input evidence path');
+  }
+  return JSON.stringify({ inputIdentities, outputIdentities });
+}
+
 /** Survey GitHub once and publish one complete control-room view. */
 export async function runFactoryDashboardRefreshCli(argv, {
   now = () => new Date(),
@@ -127,16 +141,8 @@ export async function runFactoryDashboardRefreshCli(argv, {
   const portfolioPath = resolve(flags['portfolio-out']);
   const snapshotPath = resolve(flags['snapshot-out']);
   const htmlPath = resolve(flags['html-out']);
-  const outputIdentities = [portfolioPath, snapshotPath, htmlPath].map(pathIdentity);
-  if (new Set(outputIdentities).size !== 3) {
-    throw new UsageError('portfolio, snapshot, and HTML outputs must differ');
-  }
-  const inputIdentities = ['receipts', 'holds', 'progress', 'history']
-    .filter((name) => flags[name] !== undefined)
-    .map((name) => pathIdentity(flags[name]));
-  if (outputIdentities.some((identity) => inputIdentities.includes(identity))) {
-    throw new UsageError('an output path aliases an input evidence path');
-  }
+  const outputPaths = [portfolioPath, snapshotPath, htmlPath];
+  const openingPathIdentities = assertPathConstraints(flags, outputPaths);
 
   if (signal?.aborted) throw abortReason(signal);
   const request = {
@@ -146,6 +152,10 @@ export async function runFactoryDashboardRefreshCli(argv, {
   };
   const portfolio = await abortable(surveyPortfolio(request), signal);
   if (signal?.aborted) throw abortReason(signal);
+  const closingPathIdentities = assertPathConstraints(flags, outputPaths);
+  if (closingPathIdentities !== openingPathIdentities) {
+    throw new UsageError('path identities changed during survey');
+  }
   const staging = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-'));
   try {
     const stagedPortfolio = join(staging, 'portfolio.json');

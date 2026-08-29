@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
-  mkdtempSync, readFileSync, rmSync, writeFileSync,
+  mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -216,6 +216,39 @@ test('Windows admin-share aliases cannot collapse outputs onto one filesystem ob
   ], {
     surveyPortfolio: async () => portfolio([]),
   }), /portfolio, snapshot, and HTML outputs must differ/u);
+});
+
+test('a path identity changed during survey refuses before any publication', {
+  skip: process.platform !== 'win32',
+}, async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-swap-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const portfolioDirectory = join(scratch, 'portfolio');
+  const snapshotDirectory = join(scratch, 'snapshot');
+  const htmlDirectory = join(scratch, 'html');
+  mkdirSync(portfolioDirectory);
+  mkdirSync(snapshotDirectory);
+  mkdirSync(htmlDirectory);
+  const portfolioPath = join(portfolioDirectory, 'artifact.json');
+  const snapshotPath = join(snapshotDirectory, 'artifact.json');
+  const htmlPath = join(htmlDirectory, 'control-room.html');
+
+  await assert.rejects(runFactoryDashboardRefreshCli([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', portfolioPath,
+    '--snapshot-out', snapshotPath,
+    '--html-out', htmlPath,
+  ], {
+    surveyPortfolio: async () => {
+      rmSync(snapshotDirectory, { recursive: true });
+      symlinkSync(portfolioDirectory, snapshotDirectory, 'junction');
+      return portfolio([]);
+    },
+  }), /path identities changed during survey|outputs must differ/u);
+
+  assert.throws(() => readFileSync(portfolioPath), /ENOENT/u);
+  assert.throws(() => readFileSync(htmlPath), /ENOENT/u);
 });
 
 test('a pre-aborted watch performs no GitHub survey and publishes nothing', async (t) => {
