@@ -372,6 +372,9 @@ const RENDER_COPY = Object.freeze({
 
 function renderProgress(item, copy) {
   const { progress, activity } = item;
+  const severity = activity.showPulse ? 'healthy'
+    : activity.state === 'STALE' ? 'warning'
+      : BLOCKED_STATES.has(item.drainState) ? 'blocked' : 'neutral';
   const heartbeat = activity.showPulse
     ? `<span class="heartbeat-pulse" data-heartbeat-at="${escapeHtml(activity.lastHeartbeatAt)}"`
       + ` role="status">${copy.realHeartbeat}</span>`
@@ -382,7 +385,7 @@ function renderProgress(item, copy) {
     ? `<span class="not-measurable">${copy.notMeasurable}</span>`
     : `<progress max="100" value="${progress.percentage}">${progress.percentage}%</progress>`
       + `<strong>${progress.percentage}%</strong>`;
-  return `<article class="work-item">
+  return `<article class="work-item" data-severity="${severity}">
     <div class="item-heading">
       <div><span class="repo">${escapeHtml(item.repository)}</span>
         <h3>${escapeHtml(item.title)}</h3></div>
@@ -399,6 +402,14 @@ function etaExplanation(snapshot) {
     return `${snapshot.eta.label} · ${snapshot.eta.sampleSize} comparable runs · interquartile range`;
   }
   return `${snapshot.eta.label} · ${snapshot.eta.reason}`;
+}
+
+function headlinePresentation(state) {
+  return {
+    ACTIVE: { severity: 'healthy', symbol: '●' },
+    STALE: { severity: 'warning', symbol: '▲' },
+    PAUSED: { severity: 'neutral', symbol: '○' },
+  }[state];
 }
 
 /** Render one dependency-free, shareable operator artifact. */
@@ -422,7 +433,7 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
   const remaining = Math.max(0, snapshot.items.length - visible.length);
   const blockers = snapshot.blockers.length > 0
     ? `<div class="blocker-list">${snapshot.blockers.slice(0, 5).map(({ state, count }) => (
-      `<div><code>${escapeHtml(state)}</code><strong>${count}</strong></div>`
+      `<div data-severity="blocked"><span><span class="semantic-symbol" aria-hidden="true">■</span><code>${escapeHtml(state)}</code></span><strong>${count}</strong></div>`
     )).join('')}</div>`
     : '<p class="empty">No blockers recorded.</p>';
   const pulseCss = snapshot.showSpinner
@@ -431,6 +442,9 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
       .heartbeat-pulse { animation: heartbeat 1.2s step-end infinite; }
       @media (prefers-reduced-motion: reduce) { .heartbeat-pulse { animation: none; } }`
     : '';
+  const headline = headlinePresentation(snapshot.headline.state);
+  const nextSeverity = snapshot.nextAction.kind === 'NONE' ? 'neutral'
+    : snapshot.nextAction.kind === 'OBSERVE_ACTIVE_RUN' ? 'healthy' : 'warning';
   return `<!doctype html>
 <html lang="${language}">
 <head>
@@ -439,7 +453,7 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
   <meta http-equiv="refresh" content="5">
   <title>${copy.title}</title>
   <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; --bg: #07101c; --panel: #0d1928; --panel-2: #101f31; --line: #253750; --muted: #8fa3bd; --text: #f3f7fc; --green: #54dc91; --amber: #ffbd59; --blue: #6ea8fe; }
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; --bg: #07101c; --panel: #0d1928; --panel-2: #101f31; --line: #253750; --muted: #8fa3bd; --text: #f3f7fc; --green: #54dc91; --amber: #ffbd59; --red: #ff6b78; --blue: #6ea8fe; }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--text); }
     main { max-width: 1180px; margin: 0 auto; padding: 30px; }
@@ -451,23 +465,26 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
     p { line-height: 1.45; }
     .as-of, .evidence-line, .repo { color: var(--muted); font-size: 12px; }
     .status-chip { border: 1px solid var(--line); font-size: 12px; font-weight: 750; padding: 8px 11px; text-transform: uppercase; }
-    .status-chip.ACTIVE { border-color: var(--green); color: var(--green); }
-    .status-chip.STALE { border-color: var(--amber); color: var(--amber); }
-    .status-chip.PAUSED { color: #c8d2df; }
+    [data-severity="healthy"] { --semantic: var(--green); }
+    [data-severity="warning"] { --semantic: var(--amber); }
+    [data-severity="blocked"] { --semantic: var(--red); }
+    [data-severity="neutral"] { --semantic: #c8d2df; }
+    .semantic-symbol { color: var(--semantic); font-weight: 900; margin-right: 5px; }
+    .status-chip { border-color: var(--semantic); color: var(--semantic); }
     .hero { display: grid; gap: 14px; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); }
     .now, .next { background: var(--panel); border: 1px solid var(--line); min-height: 150px; padding: 20px; }
-    .next { border-left: 4px solid var(--blue); }
+    .next { border-left: 4px solid var(--semantic, var(--blue)); }
     .next code { display: block; margin-bottom: 12px; }
     .state { font-size: 32px; font-weight: 800; letter-spacing: -.03em; }
     .state.ACTIVE { color: var(--green); } .state.STALE { color: var(--amber); } .state.PAUSED { color: #c8d2df; }
     .metrics { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .metric { background: var(--panel-2); border: 1px solid var(--line); padding: 14px; }
+    .metric { background: var(--panel-2); border: 1px solid var(--line); border-top: 2px solid var(--semantic, var(--line)); padding: 14px; }
     .metric span { color: var(--muted); display: block; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
     .metric strong { display: block; font-size: 27px; margin-top: 5px; }
     .section-panel { background: var(--panel); border: 1px solid var(--line); padding: 18px; }
     .section-heading { align-items: baseline; display: flex; justify-content: space-between; }
     .work-list { display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .work-item { background: var(--panel-2); border: 1px solid var(--line); padding: 15px; }
+    .work-item { background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--semantic, var(--line)); padding: 15px; }
     .item-heading { align-items: start; display: flex; gap: 12px; justify-content: space-between; }
     .heartbeat-pulse, .signal { border: 1px solid var(--green); color: var(--green); font-size: 10px; outline: 2px solid var(--green); outline-offset: 2px; padding: 4px 6px; white-space: nowrap; }
     .signal { border-color: #40516a; color: var(--muted); outline: 0; } .signal.stale { border-color: var(--amber); color: var(--amber); }
@@ -492,7 +509,7 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
   <header>
     <div><h1>${copy.title}</h1>
     <div class="as-of">${copy.checked} <time>${escapeHtml(snapshot.observedAt)}</time> · ${copy.changed} <time>${escapeHtml(snapshot.sourceChangedAt)}</time> · ${copy.age} <span id="snapshot-age">…</span></div></div>
-    <div class="status-chip ${escapeHtml(snapshot.headline.state)}">${copy.state[snapshot.headline.state]}</div>
+    <div class="status-chip" data-severity="${headline.severity}"><span class="semantic-symbol" aria-hidden="true">${headline.symbol}</span>${copy.state[snapshot.headline.state]}</div>
   </header>
   <section class="hero">
     <div class="now">
@@ -500,17 +517,17 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
       <div class="state ${escapeHtml(snapshot.headline.state)}">${escapeHtml(snapshot.headline.label)}</div>
       <p>${escapeHtml(snapshot.headline.detail)}</p>
     </div>
-    <div class="next">
+    <div class="next" data-severity="${nextSeverity}">
       <h2>${copy.next}</h2>
       <code>${escapeHtml(snapshot.nextAction.kind)}</code>
       <div>${escapeHtml(snapshot.nextAction.label)}</div>
     </div>
   </section>
   <section class="metrics" aria-label="Portfolio facts">
-    <div class="metric"><span>${copy.moving}</span><strong>${snapshot.activeCount}</strong></div>
-    <div class="metric"><span>${copy.stale}</span><strong>${snapshot.staleCount}</strong></div>
-    <div class="metric"><span>${copy.blocked}</span><strong>${snapshot.blockedCount}</strong></div>
-    <div class="metric"><span>${copy.slots}</span><strong>${snapshot.capacity.available}/${snapshot.capacity.occupied + snapshot.capacity.available}</strong></div>
+    <div class="metric" data-severity="healthy"><span><span class="semantic-symbol" aria-hidden="true">●</span>${copy.moving}</span><strong>${snapshot.activeCount}</strong></div>
+    <div class="metric" data-severity="warning"><span><span class="semantic-symbol" aria-hidden="true">▲</span>${copy.stale}</span><strong>${snapshot.staleCount}</strong></div>
+    <div class="metric" data-severity="blocked"><span><span class="semantic-symbol" aria-hidden="true">■</span>${copy.blocked}</span><strong>${snapshot.blockedCount}</strong></div>
+    <div class="metric" data-severity="neutral"><span><span class="semantic-symbol" aria-hidden="true">○</span>${copy.slots}</span><strong>${snapshot.capacity.available}/${snapshot.capacity.occupied + snapshot.capacity.available}</strong></div>
   </section>
   <section class="section-panel">
     <div class="section-heading"><h2>${copy.progress}</h2><span class="as-of">${snapshot.totalItems} items</span></div>

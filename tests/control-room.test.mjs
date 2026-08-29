@@ -220,6 +220,29 @@ test('the dashboard pulse is present only when the snapshot carries a fresh real
   assert.match(html, /Real heartbeat received/u);
 });
 
+test('status meaning is carried by words and symbols, never colour alone', () => {
+  const blocked = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'BLOCKED_EVIDENCE' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+  const active = buildControlRoomSnapshot({
+    drainProjection: projection([item()]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    progressObservations: [{
+      itemId: 'issue-17', capturedAt: '2026-08-29T18:40:15.000Z',
+      record: {
+        schema: 'gaia-cli-progress/1', stage: 'worker_running', elapsedMs: 35_000,
+        remainingProviderInvocations: 4, remainingProviderTimeUpperBoundMs: 2_400_000,
+        heartbeat: true,
+      },
+    }],
+  });
+
+  assert.match(renderControlRoomHtml(blocked), /data-severity="blocked"[^>]*>.*■.*Blocked/us);
+  assert.match(renderControlRoomHtml(blocked), /data-severity="warning"[^>]*>.*▲/us);
+  assert.match(renderControlRoomHtml(active), /data-severity="healthy"[^>]*>.*●.*Active/us);
+});
+
 test('a blocked portfolio names the dominant blocker instead of pretending there is no next action', () => {
   const snapshot = buildControlRoomSnapshot({
     drainProjection: projection([
