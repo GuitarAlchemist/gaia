@@ -14,6 +14,7 @@
     "handshake": "node src/mcp-client.mjs",
     "factory:smoke": "node scripts/factory-smoke.mjs",
     "factory:agent": "node scripts/factory-agent.mjs",
+    "prototype:pi-writer": "node prototypes/pi-writer-containment/tui.mjs",
     "portfolio:survey": "node scripts/github-portfolio.mjs",
     "portfolio:operator": "node scripts/github-portfolio-operator.mjs"
   }
