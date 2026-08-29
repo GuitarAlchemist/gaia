@@ -96,6 +96,32 @@ drain projection or a portfolio plus optional receipt and hold arrays, writes re
 derived JSON/HTML outputs and can poll the input files from 1 through 60 seconds. It opens no
 network listener. English is the default; `--language fr` selects the optional French renderer.
 
+`npm run factory:dashboard:refresh -- ...` is the explicit GitHub refresh Adapter. Each tick
+performs one fresh, read-only organization survey, reconciles the resulting portfolio through
+the same drain Module, prepares portfolio/snapshot/HTML artifacts off-path, then replaces the
+three caller-owned outputs with the self-contained HTML last. The default is one tick, suitable
+for a scheduler. `--watch-ms 30000` enables a visible sequential watch from 10 through 300
+seconds: ticks never overlap, a failed tick is reported and retried, and the last valid HTML is
+left in place. The Adapter grants no authority and performs no GitHub mutation.
+
+```powershell
+npm run factory:dashboard:refresh -- `
+  --organization GuitarAlchemist `
+  --policy-revision sha256:portfolio-policy-v1 `
+  --portfolio-out C:\state\gaia-portfolio.json `
+  --snapshot-out C:\site\gaia-control-room.json `
+  --html-out C:\site\gaia-control-room.html `
+  --language en `
+  --watch-ms 30000
+```
+
+The three outputs cannot be replaced as one filesystem transaction. Preparing all content
+first and publishing the self-contained HTML last ensures the browser sees either the previous
+complete page or the new complete page. A crash during evidence-file replacement can briefly
+leave JSON ahead of HTML; the next successful tick repairs it. Consumers requiring a single
+atomic identity must use the content-addressed snapshot revision embedded in the HTML rather
+than assume directory-wide atomicity.
+
 Raw `gaia-cli-progress/1` JSONL is accepted only when exactly one drain item is active. With
 more than one raw line, or with multiple active items, each line must use the explicit
 `gaia-control-room-progress-observation/1` envelope carrying `itemId`, `capturedAt` and the
