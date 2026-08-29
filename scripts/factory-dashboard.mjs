@@ -1,10 +1,13 @@
 import {
-  readFileSync, statSync, writeFileSync,
+  existsSync, readFileSync, statSync, writeFileSync,
 } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { buildControlRoomSnapshot, renderControlRoomHtml } from '../src/control-room.mjs';
+import {
+  factoryTelemetryLogPath, projectFactoryTelemetryLog,
+} from '../src/factory-telemetry-log.mjs';
 import { reconcilePortfolioDrain } from '../src/portfolio-drain.mjs';
 
 class UsageError extends Error {}
@@ -100,6 +103,7 @@ export function runFactoryDashboardCli(argv, {
   const holdsPath = flags.holds ? resolve(flags.holds) : null;
   const progressPath = flags.progress ? resolve(flags.progress) : null;
   const historyPath = flags.history ? resolve(flags.history) : null;
+  const telemetryPath = flags.telemetry ? resolve(flags.telemetry) : null;
   const htmlPath = resolve(flags['html-out']);
   const snapshotPath = resolve(flags['snapshot-out']);
   if (htmlPath === snapshotPath) throw new UsageError('HTML and snapshot outputs must differ');
@@ -114,13 +118,25 @@ export function runFactoryDashboardCli(argv, {
     });
   const progressObservations = readProgress(progressPath, projection);
   const completedRuns = historyPath ? readJson(historyPath, 'history') : [];
+  const observedAt = now().toISOString();
+  // The spine is replayed at this exact instant, so a fact recorded after it fails closed
+  // instead of quietly animating a dashboard that has already been rendered.
+  const telemetryLogPath = telemetryPath === null
+    || !existsSync(factoryTelemetryLogPath(telemetryPath))
+    ? null
+    : factoryTelemetryLogPath(telemetryPath);
+  const telemetryProjection = telemetryPath === null
+    ? null
+    : projectFactoryTelemetryLog({ directory: telemetryPath, notAfter: observedAt }).projection;
   const snapshot = buildControlRoomSnapshot({
     drainProjection: projection,
     progressObservations,
     completedRuns,
-    observedAt: now().toISOString(),
+    telemetryProjection,
+    observedAt,
     sourceChangedAt: newestMtime([
       projectionPath, portfolioPath, receiptsPath, holdsPath, progressPath, historyPath,
+      telemetryLogPath,
     ]),
   });
   writeFileSync(snapshotPath, serialize(snapshot), 'utf8');

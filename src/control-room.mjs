@@ -8,9 +8,12 @@
 
 import { createHash } from 'node:crypto';
 
+import { FACTORY_TELEMETRY_PROJECTION_SCHEMA } from './factory-telemetry.mjs';
+
 export const CONTROL_ROOM_SCHEMA = 'gaia-control-room/1';
 
 const HEARTBEAT_FRESH_MS = 30_000;
+const LIVE_TELEMETRY_RUN_STATES = new Set(['RUNNING', 'IN_GATE']);
 const RUNNING_STAGES = new Set([
   'worker_running', 'initial_review_running', 'repair_running', 'final_review_running',
 ]);
@@ -118,6 +121,84 @@ function latestProgressByItem(observations) {
   return latest;
 }
 
+/**
+ * The telemetry projection is evidence, so it is verified rather than trusted: an
+ * unsupported schema, a claimed authority, a selected run that is absent, or content that
+ * moved under an unchanged revision all fail closed instead of animating the operator view.
+ */
+function requireTelemetryProjection(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'object' || Array.isArray(value)
+      || value.schema !== FACTORY_TELEMETRY_PROJECTION_SCHEMA
+      || value.effect !== 'NONE' || value.authority !== 'NONE'
+      || !Array.isArray(value.runs) || !Array.isArray(value.items)
+      || typeof value.revision !== 'string') {
+    throw new ControlRoomError(
+      'InvalidTelemetry', 'a content-addressed factory telemetry projection is required',
+    );
+  }
+  const { revision, ...body } = value;
+  if (createHash('sha256').update(canonicalJson(body)).digest('hex') !== revision) {
+    throw new ControlRoomError(
+      'InvalidTelemetry', 'the telemetry projection revision does not match its content',
+    );
+  }
+  return value;
+}
+
+/**
+ * Resolve the one run the spine selected per item, and refuse any run observed after this
+ * snapshot instant. A fact from the future is a forged or misconfigured sensor, never news.
+ */
+function selectTelemetryRuns(projection, observedAtMs) {
+  if (projection === null) return new Map();
+  const runs = new Map();
+  for (const run of projection.runs) {
+    const lastEventMs = Date.parse(run?.lastEventAt);
+    if (!Number.isFinite(lastEventMs) || lastEventMs > observedAtMs) {
+      throw new ControlRoomError(
+        'InvalidTelemetry', 'a telemetry run reports evidence after the snapshot instant',
+      );
+    }
+    runs.set(run.runId, run);
+  }
+  const selected = new Map();
+  for (const { itemId, runId } of projection.items) {
+    const run = runs.get(runId);
+    if (!run || run.itemId !== itemId) {
+      throw new ControlRoomError(
+        'InvalidTelemetry', 'the telemetry projection selects a run it does not carry',
+      );
+    }
+    selected.set(itemId, run);
+  }
+  return selected;
+}
+
+/** Freshness is decided here, against this observer's clock and one explicit window. */
+function itemTelemetry(run, observedAtMs) {
+  if (!run) return null;
+  const heartbeatMs = run.lastHeartbeatAt === null
+    ? Number.NaN : Date.parse(run.lastHeartbeatAt);
+  return {
+    runId: run.runId,
+    lane: run.lane,
+    agent: run.agent,
+    itemRevision: run.itemRevision,
+    runState: run.runState,
+    currentGate: run.currentGate,
+    blocker: run.blocker,
+    lastTransition: run.lastTransition,
+    lastHeartbeatAt: run.lastHeartbeatAt,
+    heartbeatFresh: Number.isFinite(heartbeatMs)
+      && observedAtMs >= heartbeatMs
+      && observedAtMs - heartbeatMs <= HEARTBEAT_FRESH_MS,
+    freshnessWindowMs: HEARTBEAT_FRESH_MS,
+    evidenceAgeMs: observedAtMs - Date.parse(run.lastEventAt),
+    elapsedMs: run.elapsedMs,
+  };
+}
+
 function itemProgress(drainState) {
   const value = LIFECYCLE_PROGRESS[drainState];
   if (!value) {
@@ -136,7 +217,20 @@ function itemProgress(drainState) {
   };
 }
 
-function itemActivity(item, observation, observedAtMs) {
+function itemActivity(item, observation, observedAtMs, telemetry) {
+  // Telemetry is the stronger evidence: it is a verified transition chain rather than a
+  // best-effort CLI line, so when a run is observed it decides the animation outright.
+  if (telemetry !== null) {
+    const live = LIVE_TELEMETRY_RUN_STATES.has(telemetry.runState);
+    const moving = live && telemetry.heartbeatFresh;
+    return {
+      state: live ? (moving ? 'ACTIVE' : 'STALE') : 'IDLE',
+      stage: telemetry.currentGate,
+      elapsedMs: Number.isSafeInteger(telemetry.elapsedMs) ? telemetry.elapsedMs : null,
+      lastHeartbeatAt: moving ? telemetry.lastHeartbeatAt : null,
+      showPulse: moving,
+    };
+  }
   if (!['CLAIMED', 'RUNNING'].includes(item.drainState)) {
     return {
       state: 'IDLE', stage: null, elapsedMs: null, lastHeartbeatAt: null, showPulse: false,
@@ -236,10 +330,14 @@ function forecastEta({ activeItems, pace, durations }) {
 
 function blockerSummary(items) {
   const counts = new Map();
-  for (const { drainState } of items) {
-    if (BLOCKED_STATES.has(drainState)) {
-      counts.set(drainState, (counts.get(drainState) ?? 0) + 1);
-    }
+  const record = (state) => counts.set(state, (counts.get(state) ?? 0) + 1);
+  for (const item of items) {
+    if (BLOCKED_STATES.has(item.drainState)) record(item.drainState);
+    if (item.telemetry === null) continue;
+    // An observed run never simply stops being reported: it is either blocked by a named
+    // token or its evidence expired, and both are blockages an operator can act on.
+    if (item.telemetry.runState === 'BLOCKED') record(`TELEMETRY_${item.telemetry.blocker}`);
+    else if (item.activity.state === 'STALE') record('TELEMETRY_HEARTBEAT_EXPIRED');
   }
   return [...counts.entries()]
     .map(([state, count]) => ({ state, count }))
@@ -346,19 +444,26 @@ function nextActionFor(items, decisions, blockers) {
 
 export function buildControlRoomSnapshot({
   drainProjection, observedAt, sourceChangedAt = observedAt,
-  progressObservations = [], completedRuns = [],
+  progressObservations = [], completedRuns = [], telemetryProjection = null,
 }) {
   const projection = requireProjection(drainProjection);
   const at = requireTimestamp(observedAt);
   const changedAt = requireTimestamp(sourceChangedAt);
   const observedAtMs = Date.parse(at);
   const latest = latestProgressByItem(progressObservations);
-  const items = structuredClone(projection.items).map((item) => ({
-    ...item,
-    knowledgeState: knowledgeState(item.sourceState),
-    progress: itemProgress(item.drainState),
-    activity: itemActivity(item, latest.get(item.itemId), observedAtMs),
-  }));
+  const spine = requireTelemetryProjection(telemetryProjection);
+  const selectedRuns = selectTelemetryRuns(spine, observedAtMs);
+  const items = structuredClone(projection.items).map((item) => {
+    const telemetry = itemTelemetry(selectedRuns.get(item.itemId) ?? null, observedAtMs);
+    return {
+      ...item,
+      knowledgeState: knowledgeState(item.sourceState),
+      progress: itemProgress(item.drainState),
+      telemetry,
+      activity: itemActivity(item, latest.get(item.itemId), observedAtMs, telemetry),
+    };
+  });
+  const observedItemIds = new Set(items.map(({ itemId }) => itemId));
   const activeCount = items.filter(({ activity }) => activity.state === 'ACTIVE').length;
   const staleCount = items.filter(({ activity }) => activity.state === 'STALE').length;
   const blockers = blockerSummary(items);
@@ -416,6 +521,23 @@ export function buildControlRoomSnapshot({
       reason: 'The portfolio is an open queue; it has no truthful global completion percentage.',
     },
     knowledgeCoverage: measureKnowledgeCoverage(items),
+    telemetry: {
+      observedRuns: spine === null ? 0 : spine.runs.length,
+      activeRuns: items.filter(
+        ({ telemetry, activity }) => telemetry !== null && activity.state === 'ACTIVE',
+      ).length,
+      staleRuns: items.filter(
+        ({ telemetry, activity }) => telemetry !== null && activity.state === 'STALE',
+      ).length,
+      blockedRuns: items.filter(
+        ({ telemetry }) => telemetry !== null && telemetry.runState === 'BLOCKED',
+      ).length,
+      unmatchedRuns: spine === null ? 0 : spine.items.filter(
+        ({ itemId }) => !observedItemIds.has(itemId),
+      ).length,
+      freshnessWindowMs: HEARTBEAT_FRESH_MS,
+      projectionRevision: spine === null ? null : spine.revision,
+    },
     nextAction: nextActionFor(items, projection.decisions, blockers),
     items,
   };
@@ -447,6 +569,7 @@ const RENDER_COPY = Object.freeze({
     more: 'more items remain in the content-addressed snapshot', noItems: 'No work items in this snapshot.',
     items: 'items', noBlockers: 'No blockers recorded.',
     readOnly: 'Read-only dashboard: effect=NONE and authority=NONE.', technical: 'Technical identities',
+    run: 'Run', transition: 'Last verified transition', evidenceAge: 'Evidence age',
     state: { ACTIVE: 'Active', STALE: 'Needs attention', PAUSED: 'Paused' },
   }),
   fr: Object.freeze({
@@ -461,6 +584,7 @@ const RENDER_COPY = Object.freeze({
     more: 'autres éléments restent dans le snapshot content-addressed', noItems: 'Aucun élément dans ce snapshot.',
     items: 'éléments', noBlockers: 'Aucun blocage enregistré.',
     readOnly: 'Dashboard read-only : effect=NONE et authority=NONE.', technical: 'Identités techniques',
+    run: 'Exécution', transition: 'Dernière transition vérifiée', evidenceAge: 'Âge de la preuve',
     state: { ACTIVE: 'En cours', STALE: 'À vérifier', PAUSED: 'En pause' },
   }),
 });
@@ -534,11 +658,29 @@ function localizedEta(snapshot, language) {
   return `Inconnue · ${reasons[snapshot.eta.reason] ?? 'Preuve insuffisante.'}`;
 }
 
+/** Show the observed run itself: who, which gate, the last verified transition, its age. */
+function renderTelemetry(item, copy) {
+  const { telemetry } = item;
+  if (!telemetry) return '';
+  const gate = telemetry.currentGate ?? telemetry.lastTransition.gate;
+  return `<p class="evidence-line telemetry-line">`
+    + `<strong>${copy.run}:</strong> <code>${escapeHtml(telemetry.runId)}</code>`
+    + ` · <code>${escapeHtml(telemetry.lane)}</code>/<code>${escapeHtml(telemetry.agent)}</code>`
+    + (gate === null ? '' : ` · <strong>${copy.currentGate}:</strong> <code>${escapeHtml(gate)}</code>`)
+    + ` · <strong>${copy.transition}:</strong> <code>${escapeHtml(telemetry.lastTransition.event)}</code>`
+    + ` · <strong>${copy.evidenceAge}:</strong> ${escapeHtml(formatDuration(telemetry.evidenceAgeMs))}`
+    + (telemetry.blocker === null
+      ? ''
+      : ` · <strong>${copy.blocked}:</strong> <code>${escapeHtml(telemetry.blocker)}</code>`)
+    + `</p>`;
+}
+
 function renderProgress(item, copy, language) {
   const { progress, activity } = item;
   const severity = activity.showPulse ? 'healthy'
     : activity.state === 'STALE' ? 'warning'
-      : BLOCKED_STATES.has(item.drainState) ? 'blocked' : 'neutral';
+      : BLOCKED_STATES.has(item.drainState) || item.telemetry?.runState === 'BLOCKED'
+        ? 'blocked' : 'neutral';
   const heartbeat = activity.showPulse
     ? `<span class="heartbeat-pulse" data-heartbeat-at="${escapeHtml(activity.lastHeartbeatAt)}"`
       + ` role="status">${copy.realHeartbeat}</span>`
@@ -558,6 +700,7 @@ function renderProgress(item, copy, language) {
     <div class="meter">${meter}</div>
     <p><strong>${copy.currentGate}:</strong> ${escapeHtml(localizedGate(item, language))}</p>
     <p class="evidence-line"><code>${escapeHtml(item.drainState)}</code> · ${escapeHtml(item.itemKind)} #${item.itemNumber}</p>
+    ${renderTelemetry(item, copy)}
   </article>`;
 }
 

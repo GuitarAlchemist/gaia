@@ -16,6 +16,7 @@
     "factory:agent": "node scripts/factory-agent.mjs",
     "factory:dashboard": "node scripts/factory-dashboard.mjs",
     "factory:dashboard:refresh": "node scripts/factory-dashboard-refresh.mjs",
+    "factory:telemetry": "node scripts/factory-telemetry-step.mjs",
     "search:hybrid": "node scripts/hybrid-search.mjs",
     "portfolio:survey": "node scripts/github-portfolio.mjs",
     "portfolio:operator": "node scripts/github-portfolio-operator.mjs"
