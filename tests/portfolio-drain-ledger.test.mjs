@@ -8,6 +8,7 @@ import test from 'node:test';
 
 import {
   EMPTY_PORTFOLIO_DRAIN_LEDGER_REVISION,
+  PORTFOLIO_DRAIN_LEDGER_RECORD_SCHEMA,
   PortfolioDrainLedgerError,
   appendPortfolioDrainReceipt,
   portfolioDrainLedgerPath,
@@ -15,7 +16,11 @@ import {
   readPortfolioDrainLedger,
   tickPortfolioDrain,
 } from '../src/portfolio-drain-ledger.mjs';
-import { buildPortfolioDrainReceipt } from '../src/portfolio-drain.mjs';
+import {
+  PORTFOLIO_DRAIN_MACHINE,
+  buildPortfolioDrainReceipt,
+} from '../src/portfolio-drain.mjs';
+import { CorruptLogError } from '../src/event-log.mjs';
 
 const ROOT = mkdtempSync(join(tmpdir(), 'gaia-portfolio-drain-ledger-test-'));
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
@@ -52,6 +57,46 @@ function claimed(portfolio) {
 }
 
 function dir(name) { return join(ROOT, name); }
+
+/**
+ * Build one durable ledger line exactly as the writer would, so a read-path gate
+ * discriminates the mutation under test rather than a merely malformed file.
+ *
+ * Omitting `revision` re-hashes the mutated body, which is what makes a machine-binding or
+ * chain-position mutant survive the record self-hash check and reach the gate it targets.
+ */
+function ledgerLine({
+  receipt, ordinal = 0, previousRevision = null,
+  machine = PORTFOLIO_DRAIN_MACHINE, revision,
+}) {
+  const body = {
+    type: 'portfolio-drain.receipt',
+    schema: PORTFOLIO_DRAIN_LEDGER_RECORD_SCHEMA,
+    ...machine,
+    ordinal,
+    previousRevision,
+    receipt,
+  };
+  return `${canonicalJson({ ...body, revision: revision ?? sha256(canonicalJson(body)) })}\n`;
+}
+
+function writtenLedger(name, line) {
+  const directory = dir(name);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(portfolioDrainLedgerPath(directory), line, 'utf8');
+  return directory;
+}
+
+function assertSelfHashed(line) {
+  const { revision, ...body } = JSON.parse(line);
+  assert.equal(revision, sha256(canonicalJson(body)));
+}
+
+function corruptLogRefusal(reason) {
+  return (error) => error instanceof CorruptLogError
+    && error.code === 'GAIA_LOG_CORRUPT'
+    && reason.test(error.message);
+}
 
 test.after(() => rmSync(ROOT, { recursive: true, force: true }));
 
@@ -216,6 +261,77 @@ test('a corrupt or torn ledger fails closed and is never repaired', () => {
 
     assert.throws(() => readPortfolioDrainLedger({ directory }));
     assert.equal(readFileSync(portfolioDrainLedgerPath(directory), 'utf8'), body);
+  }
+});
+
+test('a hand-written well-formed ledger record is read back unchanged', () => {
+  const portfolio = observedPortfolio([issue()]);
+  const receipt = claimed(portfolio);
+  const line = ledgerLine({ receipt });
+  const directory = writtenLedger('read-control', line);
+
+  const ledger = readPortfolioDrainLedger({ directory });
+
+  assert.equal(ledger.count, 1);
+  assert.deepEqual(ledger.receipts, [receipt]);
+  assert.equal(ledger.revision, JSON.parse(line).revision);
+  assert.equal(readFileSync(portfolioDrainLedgerPath(directory), 'utf8'), line);
+});
+
+test('a ledger record whose revision does not match its body is refused on read', () => {
+  const portfolio = observedPortfolio([issue()]);
+  const receipt = claimed(portfolio);
+  const honest = JSON.parse(ledgerLine({ receipt }));
+  // Swap the evidence the receipt points at and keep the record's original revision.
+  const line = `${canonicalJson({
+    ...honest, receipt: { ...receipt, evidenceRevision: 'd'.repeat(64) },
+  })}\n`;
+  const directory = writtenLedger('read-forged-body', line);
+
+  assert.throws(
+    () => readPortfolioDrainLedger({ directory }),
+    corruptLogRefusal(/record revision does not match its content/u),
+  );
+  assert.equal(readFileSync(portfolioDrainLedgerPath(directory), 'utf8'), line);
+});
+
+test('a rehashed ledger record bound to another machine is refused on read', () => {
+  const portfolio = observedPortfolio([issue()]);
+  const receipt = claimed(portfolio);
+
+  for (const [name, machine] of [
+    ['read-machine-version', { ...PORTFOLIO_DRAIN_MACHINE, machineVersion: 2 }],
+    ['read-rules-revision', { ...PORTFOLIO_DRAIN_MACHINE, rulesRevision: 'e'.repeat(64) }],
+  ]) {
+    const line = ledgerLine({ receipt, machine });
+    assertSelfHashed(line);
+    const directory = writtenLedger(name, line);
+
+    assert.throws(
+      () => readPortfolioDrainLedger({ directory }),
+      corruptLogRefusal(/binds an unsupported machine/u),
+    );
+    assert.equal(readFileSync(portfolioDrainLedgerPath(directory), 'utf8'), line);
+  }
+});
+
+test('a rehashed ledger record at a broken chain position is refused on read', () => {
+  const portfolio = observedPortfolio([issue()]);
+  const receipt = claimed(portfolio);
+
+  for (const [name, position] of [
+    ['read-ordinal-gap', { ordinal: 1, previousRevision: null }],
+    ['read-forged-previous', { ordinal: 0, previousRevision: 'a'.repeat(64) }],
+  ]) {
+    const line = ledgerLine({ receipt, ...position });
+    assertSelfHashed(line);
+    const directory = writtenLedger(name, line);
+
+    assert.throws(
+      () => readPortfolioDrainLedger({ directory }),
+      corruptLogRefusal(/chain is not contiguous/u),
+    );
+    assert.equal(readFileSync(portfolioDrainLedgerPath(directory), 'utf8'), line);
   }
 });
 
