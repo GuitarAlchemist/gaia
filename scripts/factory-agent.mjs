@@ -16,6 +16,7 @@ import {
   runClaudeRepair,
   runClaudeWorker,
   runCodexReviewer,
+  runPiWorker,
   runPiReviewer,
 } from '../src/factory-agent.mjs';
 import { createCliProgress, instrumentFactoryAdapters } from '../src/cli-progress.mjs';
@@ -35,13 +36,25 @@ function parseArgs(argv) {
     if (!name?.startsWith('--') || value === undefined) {
       throw new UsageError('expected --worktree <path> --task <text> --out <path>');
     }
-    flags[name.slice(2)] = value;
+    const key = name.slice(2);
+    if (key === 'allow-write') {
+      flags[key] ??= [];
+      flags[key].push(value);
+    } else {
+      flags[key] = value;
+    }
   }
   for (const required of ['worktree', 'task', 'out']) {
     if (!flags[required]) throw new UsageError(`missing --${required}`);
   }
-  if (flags.worker && flags.worker !== 'claude') {
-    throw new UsageError('v1 worker profile is exactly claude');
+  if (flags.worker && !['claude', 'pi'].includes(flags.worker)) {
+    throw new UsageError('--worker must be claude or pi');
+  }
+  if (flags.worker === 'pi' && !flags['allow-write']?.length) {
+    throw new UsageError('--worker pi requires at least one --allow-write path');
+  }
+  if (flags.worker !== 'pi' && flags['allow-write']?.length) {
+    throw new UsageError('--allow-write is available only with --worker pi');
   }
   if (flags.reviewer && !['codex', 'pi'].includes(flags.reviewer)) {
     throw new UsageError('--reviewer must be codex or pi');
@@ -78,6 +91,7 @@ function requirePhysicalOutside(worktree, candidate, label) {
 export async function runFactoryAgentCli(argv, {
   executeFactory = executeAgentFactory,
   runWorker = runClaudeWorker,
+  runPiWrite = runPiWorker,
   runReviewer = runCodexReviewer,
   runPiReview = runPiReviewer,
   runRepair = runClaudeRepair,
@@ -101,10 +115,25 @@ export async function runFactoryAgentCli(argv, {
   const worktree = resolve(flags.worktree);
   const output = resolve(flags.out);
   const evidenceDir = `${output}.evidence`;
+  const allowedWritePaths = flags['allow-write'] ?? [];
+  const workerProfile = flags.worker === 'pi'
+    ? 'pi-openai-codex-subscription-bounded-writer'
+    : 'claude-subscription';
+  const repairProfile = flags.worker === 'pi'
+    ? 'disabled-for-pi-writer-v0'
+    : 'claude-subscription-bounded-once';
   const reviewerProfile = flags.reviewer === 'pi'
     ? 'pi-openai-codex-subscription-read-only'
     : 'codex-subscription-read-only';
   const selectedReviewer = flags.reviewer === 'pi' ? runPiReview : runReviewer;
+  const selectedWorker = flags.worker === 'pi'
+    ? (context, options) => runPiWrite({
+      ...context,
+      allowedPaths: allowedWritePaths,
+      baseline: { head: context.baseHead },
+    }, options)
+    : runWorker;
+  const selectedRepair = flags.worker === 'pi' ? undefined : runRepair;
   let traceSink;
   try {
     traceSink = flags['otel-endpoint']
@@ -122,9 +151,10 @@ export async function runFactoryAgentCli(argv, {
     writeFileSync(output, serialize({
       schema: 'gaia-agent-factory-run/1',
       status: 'running',
-      worker: 'claude-subscription',
+      worker: workerProfile,
+      allowedWritePaths,
       reviewer: reviewerProfile,
-      repair: 'claude-subscription-bounded-once',
+      repair: repairProfile,
       worktreeRole: 'caller-supplied-linked-worktree',
       evidenceStore: evidenceDir,
     }), { encoding: 'utf8', flag: 'wx' });
@@ -136,9 +166,11 @@ export async function runFactoryAgentCli(argv, {
   try {
     progress.executionStarting();
     const progressAdapters = instrumentFactoryAdapters({
-      runWorker: (context) => runWorker(context, { timeoutMs: flags.timeoutMs }),
+      runWorker: (context) => selectedWorker(context, { timeoutMs: flags.timeoutMs }),
       runReviewer: (context) => selectedReviewer(context, { timeoutMs: flags.timeoutMs }),
-      runRepair: (context) => runRepair(context, { timeoutMs: flags.timeoutMs }),
+      runRepair: selectedRepair === undefined
+        ? undefined
+        : (context) => selectedRepair(context, { timeoutMs: flags.timeoutMs }),
       progress,
     });
     const tracer = createFactoryTracer({ sink: traceSink });
@@ -159,9 +191,10 @@ export async function runFactoryAgentCli(argv, {
     const completed = serialize({
       schema: 'gaia-agent-factory-run/1',
       status: receipt.status,
-      workerProfile: 'claude-subscription',
+      workerProfile,
+      allowedWritePaths,
       reviewerProfile,
-      repairProfile: 'claude-subscription-bounded-once',
+      repairProfile,
       result: receipt,
     });
     writeFileSync(output, completed, 'utf8');
@@ -176,8 +209,10 @@ export async function runFactoryAgentCli(argv, {
     const failed = serialize({
       schema: 'gaia-agent-factory-run/1',
       status: 'failed',
-      workerProfile: 'claude-subscription',
+      workerProfile,
+      allowedWritePaths,
       reviewerProfile,
+      repairProfile,
       error: {
         name: error.name,
         code: error.code ?? 'UnhandledFailure',

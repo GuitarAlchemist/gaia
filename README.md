@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 454 gates
+node --test                                   # 463 gates
 ```
 
 ### Functional factory tracer
@@ -65,6 +65,46 @@ API-key readiness, preloads only the digest-bound patch (maximum 1 MiB), disable
 project-local configuration, sessions, extensions, skills, and implicit context, and
 enables only Pi's `read`, `grep`, `find`, and `ls` tools for surrounding candidate-tree
 context. The Claude worker and bounded repair remain unchanged.
+
+Use `--worker pi` with one or more repeated `--allow-write` arguments to replace the
+Claude worker with the experimental bounded Pi patch proposer:
+
+```bash
+npm run factory:agent -- \
+  --worktree ../my-project-gaia-run \
+  --task "Change only the two declared files" \
+  --out ../state/gaia-pi-agent-run.json \
+  --worker pi \
+  --allow-write src/module.mjs \
+  --allow-write tests/module.test.mjs
+```
+
+Pi remains read-only and receives no shell, edit, or write tool. It returns one typed
+JSON patch proposal through the OpenAI Codex OAuth subscription. Gaia rejects unsafe
+path syntax, non-text or rename patches, targets outside the exact allowlist, malformed
+protocol output, direct worktree mutation, HEAD/index drift, and empty changes. Gaia
+then asks Git to check and apply the patch and independently remeasures the result.
+Automatic repair is disabled for this v0 profile: a rejected candidate requires a new
+explicit run and allowlist. The profile never commits, pushes, publishes, or merges.
+
+### Local hybrid semantic search
+
+Build a content-addressed local index and query it in one command:
+
+```bash
+npm run search:hybrid -- \
+  --corpus ./corpus.json \
+  --query ./query.json \
+  --index-out ./state/search/index.json \
+  --out ./state/search/result.json
+```
+
+The zero-dependency engine combines BM25 and exact cosine ranking with RRF. Inputs carry
+caller-supplied local embeddings plus URI/line/digest provenance claims. Gaia validates
+their shape but does not independently read the source to prove those claims. Results are
+`RETRIEVAL_MATCH` observations with `authority: NONE`, never facts or approvals. Stale-only
+evidence returns `UNKNOWN` by default. See
+[`docs/hybrid-semantic-search.md`](docs/hybrid-semantic-search.md).
 
 An optional local OpenTelemetry Collector can receive redacted cycle and provider-phase
 spans with `--otel-endpoint http://127.0.0.1:4318/v1/traces`. The endpoint is restricted
@@ -236,6 +276,7 @@ by **absence**, not by a check that could be bypassed.
 | `src/cli-progress.mjs` | Best-effort redacted human/JSONL progress, bounded liveness heartbeats, and caller-timeout-derived provider-time bounds for the two execution CLIs; never an authority or result dependency. |
 | `src/factory-tracing.mjs` | Optional loopback-only OTLP/HTTP cycle and provider-phase spans with fixed zero-cost/no-authority attributes; telemetry failure never affects execution. |
 | `src/factory-agent.mjs` | Deep module for clean linked-worktree admission, exact candidate identity, bounded subscription-agent invocation, sensitive output evidence, and reviewer non-mutation checks. |
+| `src/hybrid-search.mjs` | Deterministic BM25 + exact-cosine + RRF retrieval over provenance-bound local embeddings; returns cited matches or honest `UNKNOWN`, never authority. |
 | `src/github-portfolio.mjs` | Deterministic portfolio revision, conservative classification, bounded scheduling, and one-step authority intent. |
 | `src/github-portfolio-authority.mjs` | Exact Ed25519 grant verification plus an atomic, one-use file ledger; prompts and bus text confer no authority. |
 | `src/github-portfolio-execution.mjs` | Binds one authorized portfolio intent to one local factory-agent run, linked worktree, and external evidence directory; proves the worktree's measured Git identity is the bound repository before it can be constructed. |
@@ -247,6 +288,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
 | `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
 | `scripts/factory-agent.mjs` | Real Claude worker → Codex read-only review → optional one Claude repair → fresh Codex review tracer. Produces a fail-closed, content-addressed run receipt; never commits or publishes. |
+| `scripts/hybrid-search.mjs` | One-command local corpus → content-addressed hybrid index → cited result tracer; reserves new outputs and never contacts a provider. |
 | `scripts/github-portfolio.mjs` | One-command read-only organization survey; writes only a caller-named new local report. |
 | `scripts/github-portfolio-operator.mjs` | Two operator verbs, `init` and `run`. Parses a closed argument list, proves stdin is a terminal, names which streams the terminal is, and composes the existing adapters. Decides nothing about authority. |
 | `scripts/bus-cli.mjs` | The low-level six-verb CLI the control script wraps. |
@@ -256,7 +298,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 454 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 463 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

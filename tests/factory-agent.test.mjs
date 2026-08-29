@@ -12,10 +12,12 @@ import {
   buildClaudeRepairInvocation,
   buildClaudeWorkerInvocation,
   buildCodexReviewerInvocation,
+  buildPiWorkerInvocation,
   buildPiReviewerInvocation,
   FactoryAgentError,
   executeAgentFactory,
   runBoundedInvocation,
+  runPiWorker,
   runPiReviewer,
 } from '../src/factory-agent.mjs';
 
@@ -351,6 +353,181 @@ test('Pi reviewer profile is an ephemeral read-only Codex subscription invocatio
   ), ['--tools', 'read,grep,find,ls']);
   assert.match(invocation.args.at(-1), /VERDICT: APPROVE/u);
   assert.match(invocation.args.at(-1), /cccccccc/u);
+});
+
+test('Pi worker profile is read-only and requests one machine-validated patch proposal', () => {
+  const invocation = buildPiWorkerInvocation({
+    cwd: 'C:\\fixture worktree',
+    task: 'change the bounded files',
+    allowedPaths: ['src/allowed.mjs', 'tests/allowed.test.mjs'],
+    env: {
+      PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture',
+      OPENAI_API_KEY: 'must-not-leak', ANTHROPIC_API_KEY: 'must-not-leak',
+      PI_TELEMETRY: '1',
+    },
+  });
+
+  assert.equal(invocation.command, 'pi');
+  assert.equal(invocation.cwd, 'C:\\fixture worktree');
+  assert.equal(invocation.shell, false);
+  assert.deepEqual(invocation.env, {
+    PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture', PI_TELEMETRY: '0',
+  });
+  assert.ok(invocation.args.includes('--no-session'));
+  assert.ok(invocation.args.includes('--no-context-files'));
+  assert.ok(invocation.args.includes('--no-extensions'));
+  assert.ok(invocation.args.includes('--no-skills'));
+  assert.ok(invocation.args.includes('--no-approve'));
+  assert.equal(invocation.args.includes('--approve'), false);
+  assert.deepEqual(invocation.args.slice(
+    invocation.args.indexOf('--tools'), invocation.args.indexOf('--tools') + 2,
+  ), ['--tools', 'read,grep,find,ls']);
+  assert.match(invocation.args.at(-1), /src\/allowed\.mjs/u);
+  assert.match(invocation.args.at(-1), /tests\/allowed\.test\.mjs/u);
+  assert.match(invocation.args.at(-1), /Do not commit, push, install/u);
+  assert.match(invocation.args.at(-1), /gaia-pi-patch\/1/u);
+  assert.match(invocation.args.at(-1), /JSON document/u);
+  assert.match(invocation.args.at(-1), /Do not modify files/u);
+});
+
+test('Pi worker proves OAuth readiness and applies one exact allowed patch proposal', async () => {
+  const { worktree } = fixture('pi-worker-allowed');
+  const head = git(worktree, 'rev-parse', 'HEAD');
+  const invocations = [];
+
+  const result = await runPiWorker({
+    cwd: worktree,
+    task: 'change candidate.txt',
+    allowedPaths: ['candidate.txt'],
+    baseline: { head },
+    env: { PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture' },
+  }, {
+    timeoutMs: 4321,
+    runInvocation: async (invocation, options) => {
+      invocations.push({ invocation, options });
+      if (invocation.args[0] === 'auth') {
+        return {
+          code: 0, signal: null, stderr: '',
+          stdout: '{"status":"ready","provider":"openai-codex","authType":"oauth"}\n',
+        };
+      }
+      const patch = [
+        'diff --git a/candidate.txt b/candidate.txt',
+        '--- a/candidate.txt',
+        '+++ b/candidate.txt',
+        '@@ -1 +1 @@',
+        '-before',
+        '+after',
+        '',
+      ].join('\n');
+      return {
+        code: 0, signal: null, stderr: '',
+        stdout: `${JSON.stringify({ schema: 'gaia-pi-patch/1', patch })}\n`,
+      };
+    },
+  });
+
+  assert.equal(result.provider, 'pi-openai-codex-subscription');
+  assert.match(result.output, /gaia-pi-patch\/1/u);
+  assert.deepEqual(result.observedPaths, ['candidate.txt']);
+  assert.equal(
+    readFileSync(join(worktree, 'candidate.txt'), 'utf8').replaceAll('\r\n', '\n'),
+    'after\n',
+  );
+  assert.equal(invocations.length, 2);
+  assert.deepEqual(invocations[0].invocation.args, [
+    'auth', 'check', '--provider', 'openai-codex', '--json',
+  ]);
+  assert.equal(invocations[0].invocation.cwd, 'C:\\Users\\fixture');
+  assert.deepEqual(invocations.map(({ options }) => options), [
+    { timeoutMs: 4321 }, { timeoutMs: 4321 },
+  ]);
+});
+
+test('Pi worker refuses an NTFS alternate-data-stream path before authentication', async () => {
+  const { worktree } = fixture('pi-worker-ads-refusal');
+  const head = git(worktree, 'rev-parse', 'HEAD');
+  let called = false;
+
+  await assert.rejects(runPiWorker({
+    cwd: worktree,
+    task: 'write an invisible stream',
+    allowedPaths: ['candidate.txt:gaia-hidden'],
+    baseline: { head },
+  }, {
+    runInvocation: async () => { called = true; },
+  }), (error) => error instanceof FactoryAgentError && error.code === 'WorkerScopeInvalid');
+
+  assert.equal(called, false);
+});
+
+test('Pi worker refuses an out-of-scope patch before Git creates its target', async () => {
+  const { worktree } = fixture('pi-worker-patch-scope');
+  const head = git(worktree, 'rev-parse', 'HEAD');
+  const patch = [
+    'diff --git a/outside.txt b/outside.txt',
+    'new file mode 100644',
+    '--- /dev/null',
+    '+++ b/outside.txt',
+    '@@ -0,0 +1 @@',
+    '+outside',
+    '',
+  ].join('\n');
+  let calls = 0;
+
+  await assert.rejects(runPiWorker({
+    cwd: worktree,
+    task: 'try an undeclared file',
+    allowedPaths: ['candidate.txt'],
+    baseline: { head },
+    env: { PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture' },
+  }, {
+    runInvocation: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          code: 0, signal: null, stderr: '',
+          stdout: '{"status":"ready","provider":"openai-codex","authType":"oauth"}\n',
+        };
+      }
+      return {
+        code: 0, signal: null, stderr: '',
+        stdout: `${JSON.stringify({ schema: 'gaia-pi-patch/1', patch })}\n`,
+      };
+    },
+  }), (error) => error instanceof FactoryAgentError && error.code === 'WorkerScopeViolation');
+
+  assert.equal(existsSync(join(worktree, 'outside.txt')), false);
+  assert.equal(git(worktree, 'status', '--porcelain'), '');
+});
+
+test('Pi worker refuses a direct worktree mutation before considering its proposal', async () => {
+  const { worktree } = fixture('pi-worker-direct-mutation');
+  const head = git(worktree, 'rev-parse', 'HEAD');
+  let calls = 0;
+
+  await assert.rejects(runPiWorker({
+    cwd: worktree,
+    task: 'must remain a proposal',
+    allowedPaths: ['candidate.txt'],
+    baseline: { head },
+    env: { PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture' },
+  }, {
+    runInvocation: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          code: 0, signal: null, stderr: '',
+          stdout: '{"status":"ready","provider":"openai-codex","authType":"oauth"}\n',
+        };
+      }
+      writeFileSync(join(worktree, 'candidate.txt'), 'mutated directly\n', 'utf8');
+      return {
+        code: 0, signal: null, stderr: '',
+        stdout: '{"schema":"gaia-pi-patch/1","patch":""}\n',
+      };
+    },
+  }), (error) => error instanceof FactoryAgentError && error.code === 'WorkerMutation');
 });
 
 test('Pi reviewer proves OAuth readiness before accepting an exact verdict', async () => {
