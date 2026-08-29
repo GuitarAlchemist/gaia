@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import { ADVISORY_AUTHORITY } from '../src/advisory-policy.mjs';
 import {
   auditPlanClaim,
   encodePlanContradictionAudit,
@@ -84,6 +85,7 @@ test('detects one non-deferred open item without collapsing either claim', () =>
   assert.equal(first.authority.sourceMutationAuthorized, false);
   assert.equal(first.authority.executionAuthorized, false);
   assert.deepEqual(first.authority.requestedAuthority, []);
+  assert.strictEqual(first.authority, ADVISORY_AUTHORITY);
   assert.equal(encodePlanContradictionAudit(first), encodePlanContradictionAudit(second));
 });
 

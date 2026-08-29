@@ -7,6 +7,28 @@ for visible wmux lanes.
 Windows-first. Zero dependencies. No network listener, no remote execution, no shell
 transport, no privileged verb.
 
+## Agentic microkernel
+
+Gaia is an **agentic microkernel**, not a general-purpose operating system. Its small
+trusted core defines content-addressed contracts, exact verifiers, immutable policy,
+six non-privileged coordination verbs, explicit effect boundaries, and replayable
+receipts. Providers, planners, storage engines, dashboards, IX/IXQL pipelines, and
+other capabilities are replaceable adapters around that core.
+
+The architectural rule is **two perspectives for decisions, one authority for
+effects**. Framing and design may be challenged independently; claims may be verified
+through separate Standards and Spec/adversarial axes. An actual mutation still has one
+named owner, one bounded capability, one idempotency boundary, and one receipt. An
+extension may narrow policy, but it cannot redefine the kernel's zero-effect authority
+or hard safety ceilings.
+
+Cross-module invariants live in `src/advisory-policy.mjs`. Framing-specific rules live
+in `src/framing-execution-contract.mjs`; contradiction-specific rules remain in
+`src/plan-contradiction-audit.mjs`; effect adapters retain their own concrete preflight
+and remeasurement rules. This centralizes shared invariants without collapsing every
+domain into a generic rules engine. Gaia does not claim OS process isolation, consensus,
+hard-real-time scheduling, or safety-controller authority.
+
 ---
 
 ## Install status
@@ -22,7 +44,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 489 gates
+node --test                                   # 496 gates
 ```
 
 ### Functional factory tracer
@@ -134,6 +156,24 @@ controls, immutable evidence references, expiry, and explicit zero-cost limits. 
 outputs are content-addressed and retain `effect: NONE`, `sourceMutationAuthorized: false`,
 and `executionAuthorized: false`. DuckDB or another registry may supply observations, but
 it is an adapter rather than an authority; Gaia never edits a plan through this seam.
+
+### Bounded execution framing
+
+Materialize a complete request as an immutable, zero-effect contract before a planner
+or agent sees it:
+
+```bash
+npm run requests:frame -- --input ./bounded-request.json
+```
+
+The pure seam records the intended consumer and observable outcome, explicit in/out
+scope, assumptions, evidence gates, success criteria, anti-metrics, falsifiers,
+rejection criteria, resource ceilings, and stop conditions. A complete request becomes
+a deterministic `FRAMED` contract. Missing or contradictory framing becomes one ordered
+`NEEDS_CLARIFICATION` result with no partial contract. Malformed input, mutable revision
+aliases, caller-supplied authority, paid cost, fanout, execution, and source mutation
+fail closed. The seam does not plan, schedule, invoke a model, query a database, or
+authorize an effect.
 
 An optional local OpenTelemetry Collector can receive redacted cycle and provider-phase
 spans with `--otel-endpoint http://127.0.0.1:4318/v1/traces`. The endpoint is restricted
@@ -329,7 +369,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 489 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 496 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

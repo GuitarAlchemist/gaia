@@ -7,6 +7,11 @@
 
 import { createHash } from 'node:crypto';
 
+import {
+  advisoryAuthority,
+  ADVISORY_HARD_LIMITS,
+  isAdvisoryAuthority,
+} from './advisory-policy.mjs';
 import { canonicalJson } from './epistemic-research.mjs';
 
 export const PLAN_CONTRADICTION_AUDIT_SCHEMA = 'urn:gaia:plan-contradiction-audit:v0.1';
@@ -88,16 +93,6 @@ function requireCount(value, path) {
     reject('INVALID_COUNT', `${path} must be a non-negative integer`);
   }
   return value;
-}
-
-function authorityBoundary() {
-  return {
-    mode: 'advisory',
-    effect: 'NONE',
-    sourceMutationAuthorized: false,
-    executionAuthorized: false,
-    requestedAuthority: [],
-  };
 }
 
 function digestOf(value) {
@@ -210,7 +205,7 @@ export function auditPlanClaim(value) {
     ruleId,
     input,
     contradiction,
-    authority: authorityBoundary(),
+    authority: advisoryAuthority(),
   };
   const digest = digestOf(body);
   return deepFreeze({
@@ -267,21 +262,27 @@ function hypothesisSet(values) {
 }
 
 function boundedBudget(value) {
-  if (value?.maxIncrementalPaidUsd !== 0) {
+  if (value?.maxIncrementalPaidUsd !== ADVISORY_HARD_LIMITS.maxIncrementalPaidUsd) {
     reject('PAID_BUDGET_REQUESTED', 'repair requires zero incremental paid cost');
   }
   if (!Number.isInteger(value.maxInputArtifacts)
       || value.maxInputArtifacts < 1
-      || value.maxInputArtifacts > 1_024) {
-    reject('UNBOUNDED_BUDGET', 'budget.maxInputArtifacts must be an integer from 1 to 1024');
+      || value.maxInputArtifacts > ADVISORY_HARD_LIMITS.maxInputArtifacts) {
+    reject(
+      'UNBOUNDED_BUDGET',
+      `budget.maxInputArtifacts must be an integer from 1 to ${ADVISORY_HARD_LIMITS.maxInputArtifacts}`,
+    );
   }
   if (!Number.isInteger(value.maxDurationMs)
       || value.maxDurationMs < 1
-      || value.maxDurationMs > 86_400_000) {
-    reject('UNBOUNDED_BUDGET', 'budget.maxDurationMs must be an integer from 1 to 86400000');
+      || value.maxDurationMs > ADVISORY_HARD_LIMITS.maxDurationMs) {
+    reject(
+      'UNBOUNDED_BUDGET',
+      `budget.maxDurationMs must be an integer from 1 to ${ADVISORY_HARD_LIMITS.maxDurationMs}`,
+    );
   }
   return {
-    maxIncrementalPaidUsd: 0,
+    maxIncrementalPaidUsd: ADVISORY_HARD_LIMITS.maxIncrementalPaidUsd,
     maxInputArtifacts: value.maxInputArtifacts,
     maxDurationMs: value.maxDurationMs,
   };
@@ -310,7 +311,7 @@ function materializeRepairBody(input, contradictionRevision) {
   if (Number.isNaN(expires) || expires <= created) {
     reject('INVALID_TIME', 'expiresAt must be later than createdAt');
   }
-  if (expires - created > 7 * 86_400_000) {
+  if (expires - created > ADVISORY_HARD_LIMITS.maxExpiryMs) {
     reject('UNBOUNDED_EXPIRY', 'repair proposal expiry cannot exceed seven days');
   }
   if (Object.hasOwn(input, 'authority')) {
@@ -355,7 +356,7 @@ function materializeRepairBody(input, contradictionRevision) {
       class: 'UNKNOWN',
       rationale: requireText(input.uncertainty.rationale, 'uncertainty.rationale'),
     },
-    authority: authorityBoundary(),
+    authority: advisoryAuthority(),
   };
 }
 
@@ -390,12 +391,7 @@ export function verifyContradictionRepair(proposal) {
   if (revision?.algorithm !== 'sha256' || revision.digest !== digest || repairId !== `crp-${digest}`) {
     reject('DIGEST_MISMATCH', 'repair proposal digest or repairId does not match its body');
   }
-  if (body.authority?.mode !== 'advisory'
-      || body.authority.effect !== 'NONE'
-      || body.authority.sourceMutationAuthorized !== false
-      || body.authority.executionAuthorized !== false
-      || !Array.isArray(body.authority.requestedAuthority)
-      || body.authority.requestedAuthority.length !== 0) {
+  if (!isAdvisoryAuthority(body.authority)) {
     reject('AUTHORITY_WIDENING', 'repair proposal authority boundary was widened');
   }
   const { authority: _authority, ...inputBody } = body;
