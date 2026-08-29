@@ -3,10 +3,11 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
-async function runGh(args) {
+async function runGh(args, { signal } = {}) {
   const { stdout } = await execFileAsync('gh', args, {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
+    signal,
     windowsHide: true,
   });
   const trimmed = stdout.trim();
@@ -90,25 +91,26 @@ export function createGitHubReadAdapter({ run = runGh, resultLimit = 1000 } = {}
   }
 
   return Object.freeze({
-    async read({ organization }) {
+    async read({ organization, signal }) {
+      const read = (args) => run(args, { signal });
       const [repositoryRows, issueRows, pullRequestRows, issueMetadata, pullRequestMetadata]
         = await Promise.all([
-        run([
+        read([
           'repo', 'list', organization, '--limit', String(resultLimit),
           '--json', 'id,nameWithOwner,isArchived,defaultBranchRef',
         ]),
-        run([
+        read([
           'search', 'issues', '--owner', organization, '--state', 'open',
           '--limit', String(resultLimit),
           '--json', 'id,number,title,updatedAt,body,labels,repository',
         ]),
-        run([
+        read([
           'search', 'prs', '--owner', organization, '--state', 'open',
           '--limit', String(resultLimit),
           '--json', 'id,number,title,updatedAt,body,isDraft,labels,repository',
         ]),
-        run(['api', searchMetadataPath(organization, 'issue'), '--method', 'GET']),
-        run(['api', searchMetadataPath(organization, 'pr'), '--method', 'GET']),
+        read(['api', searchMetadataPath(organization, 'issue'), '--method', 'GET']),
+        read(['api', searchMetadataPath(organization, 'pr'), '--method', 'GET']),
       ]);
       if (!Array.isArray(repositoryRows) || !Array.isArray(issueRows)
           || !Array.isArray(pullRequestRows)) {
@@ -118,7 +120,7 @@ export function createGitHubReadAdapter({ run = runGh, resultLimit = 1000 } = {}
       const repositories = await Promise.all(repositoryRows.map(async (repository) => {
         const branch = repository.defaultBranchRef?.name;
         const defaultBranchOid = typeof branch === 'string'
-          ? await run([
+          ? await read([
             'api', `repos/${repository.nameWithOwner}/commits/${encodeURIComponent(branch)}`,
             '--jq', '.sha',
           ])
