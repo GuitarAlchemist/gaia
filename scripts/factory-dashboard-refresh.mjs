@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
-  mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync,
+  mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -12,6 +12,32 @@ import { runFactoryDashboardCli } from './factory-dashboard.mjs';
 
 class UsageError extends Error {}
 
+const ALLOWED_OPTIONS = new Set([
+  'organization', 'policy-revision', 'portfolio-out', 'snapshot-out', 'html-out',
+  'receipts', 'holds', 'progress', 'history', 'capacity', 'language', 'watch-ms',
+]);
+const CASE_INSENSITIVE_PATHS = process.platform === 'win32' || process.platform === 'darwin';
+const MAX_PATH_DEPTH = 256;
+
+function pathIdentity(path) {
+  const supplied = resolve(path);
+  let cursor = supplied;
+  const tail = [];
+  for (let depth = 0; depth < MAX_PATH_DEPTH; depth += 1) {
+    try {
+      const physical = realpathSync.native(cursor);
+      const canonical = tail.length > 0 ? join(physical, ...tail.reverse()) : physical;
+      return CASE_INSENSITIVE_PATHS ? canonical.toLowerCase() : canonical;
+    } catch {
+      const parent = dirname(cursor);
+      if (parent === cursor) break;
+      tail.push(basename(cursor));
+      cursor = parent;
+    }
+  }
+  return CASE_INSENSITIVE_PATHS ? supplied.toLowerCase() : supplied;
+}
+
 function parseArgs(argv) {
   const flags = {};
   for (let index = 0; index < argv.length; index += 2) {
@@ -21,6 +47,7 @@ function parseArgs(argv) {
       throw new UsageError('expected paired --name value arguments');
     }
     const key = name.slice(2);
+    if (!ALLOWED_OPTIONS.has(key)) throw new UsageError(`unknown option: ${name}`);
     if (Object.hasOwn(flags, key)) throw new UsageError(`duplicate option: ${name}`);
     flags[key] = value;
   }
@@ -79,8 +106,15 @@ export async function runFactoryDashboardRefreshCli(argv, {
   const portfolioPath = resolve(flags['portfolio-out']);
   const snapshotPath = resolve(flags['snapshot-out']);
   const htmlPath = resolve(flags['html-out']);
-  if (new Set([portfolioPath, snapshotPath, htmlPath]).size !== 3) {
+  const outputIdentities = [portfolioPath, snapshotPath, htmlPath].map(pathIdentity);
+  if (new Set(outputIdentities).size !== 3) {
     throw new UsageError('portfolio, snapshot, and HTML outputs must differ');
+  }
+  const inputIdentities = ['receipts', 'holds', 'progress', 'history']
+    .filter((name) => flags[name] !== undefined)
+    .map((name) => pathIdentity(flags[name]));
+  if (outputIdentities.some((identity) => inputIdentities.includes(identity))) {
+    throw new UsageError('an output path aliases an input evidence path');
   }
 
   const portfolio = await surveyPortfolio({
@@ -111,8 +145,18 @@ export async function runFactoryDashboardRefreshCli(argv, {
   }
 }
 
-function delay(milliseconds) {
-  return new Promise((resolvePromise) => { setTimeout(resolvePromise, milliseconds); });
+function delay(milliseconds, signal) {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolvePromise) => {
+    let handle;
+    const finish = () => {
+      clearTimeout(handle);
+      signal?.removeEventListener('abort', finish);
+      resolvePromise();
+    };
+    handle = setTimeout(finish, milliseconds);
+    signal?.addEventListener('abort', finish, { once: true });
+  });
 }
 
 /** Run sequential refresh ticks. A failed watch tick is observable and retried. */
@@ -134,7 +178,7 @@ export async function runFactoryDashboardRefreshLoop(argv, {
       if (interval === null) throw error;
       writeError(error);
     }
-    if (interval !== null && !signal?.aborted) await wait(interval);
+    if (interval !== null && !signal?.aborted) await wait(interval, signal);
   } while (interval !== null && !signal?.aborted);
 }
 

@@ -145,3 +145,80 @@ test('watch retries after failure and never overlaps GitHub surveys', async (t) 
   assert.deepEqual(errors, ['transient GitHub failure']);
   assert.equal(JSON.parse(readFileSync(join(scratch, 'portfolio.json'), 'utf8')).workItems.length, 0);
 });
+
+test('refresh refuses an unknown option instead of silently choosing a default', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-option-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  await assert.rejects(runFactoryDashboardRefreshCli([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', join(scratch, 'portfolio.json'),
+    '--snapshot-out', join(scratch, 'control-room.json'),
+    '--html-out', join(scratch, 'control-room.html'),
+    '--langauge', 'fr',
+  ], {
+    surveyPortfolio: async () => portfolio([]),
+  }), /unknown option: --langauge/u);
+});
+
+test('refresh refuses to replace any source evidence path', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-source-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const receiptsPath = join(scratch, 'receipts.json');
+  writeFileSync(receiptsPath, '[]\n', 'utf8');
+
+  await assert.rejects(runFactoryDashboardRefreshCli([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', receiptsPath,
+    '--snapshot-out', join(scratch, 'control-room.json'),
+    '--html-out', join(scratch, 'control-room.html'),
+    '--receipts', receiptsPath,
+  ], {
+    surveyPortfolio: async () => portfolio([]),
+  }), /output path aliases an input evidence path/u);
+
+  assert.equal(readFileSync(receiptsPath, 'utf8'), '[]\n');
+});
+
+test('Windows case aliases cannot collapse the three outputs into one file', {
+  skip: process.platform !== 'win32',
+}, async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-case-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const artifact = join(scratch, 'artifact');
+
+  await assert.rejects(runFactoryDashboardRefreshCli([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', artifact.toLowerCase(),
+    '--snapshot-out', artifact.toUpperCase(),
+    '--html-out', artifact,
+  ], {
+    surveyPortfolio: async () => portfolio([]),
+  }), /portfolio, snapshot, and HTML outputs must differ/u);
+});
+
+test('aborting a real watch wait stops promptly instead of sleeping through the interval', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-abort-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  const handle = setTimeout(() => controller.abort(), 25);
+
+  await runFactoryDashboardRefreshLoop([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', join(scratch, 'portfolio.json'),
+    '--snapshot-out', join(scratch, 'control-room.json'),
+    '--html-out', join(scratch, 'control-room.html'),
+    '--watch-ms', '10000',
+  ], {
+    signal: controller.signal,
+    surveyPortfolio: async () => portfolio([]),
+    writeStdout: () => {},
+  });
+  clearTimeout(handle);
+
+  assert.ok(Date.now() - startedAt < 1_000, 'abort should interrupt the 10-second wait');
+});

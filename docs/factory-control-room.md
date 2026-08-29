@@ -120,7 +120,9 @@ first and publishing the self-contained HTML last ensures the browser sees eithe
 complete page or the new complete page. A crash during evidence-file replacement can briefly
 leave JSON ahead of HTML; the next successful tick repairs it. Consumers requiring a single
 atomic identity must use the content-addressed snapshot revision embedded in the HTML rather
-than assume directory-wide atomicity.
+than assume directory-wide atomicity. Before surveying GitHub, the Adapter canonicalizes the
+nearest existing ancestor of every path and refuses output aliases, Windows case aliases, and
+any output that aliases the receipts, holds, progress or history evidence it will read.
 
 Raw `gaia-cli-progress/1` JSONL is accepted only when exactly one drain item is active. With
 more than one raw line, or with multiple active items, each line must use the explicit
