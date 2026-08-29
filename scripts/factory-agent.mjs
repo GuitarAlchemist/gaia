@@ -18,6 +18,11 @@ import {
   runCodexReviewer,
 } from '../src/factory-agent.mjs';
 import { createCliProgress, instrumentFactoryAdapters } from '../src/cli-progress.mjs';
+import {
+  createFactoryTracer,
+  createLoopbackOtlpTraceSink,
+  instrumentFactoryTraceAdapters,
+} from '../src/factory-tracing.mjs';
 
 class UsageError extends Error {}
 
@@ -79,6 +84,7 @@ export async function runFactoryAgentCli(argv, {
   nowMs = () => Date.now(),
   progressScheduler,
   heartbeatIntervalMs = 10_000,
+  createTraceSink = createLoopbackOtlpTraceSink,
 } = {}) {
   const flags = parseArgs(argv);
   const progress = createCliProgress({
@@ -93,7 +99,11 @@ export async function runFactoryAgentCli(argv, {
   const worktree = resolve(flags.worktree);
   const output = resolve(flags.out);
   const evidenceDir = `${output}.evidence`;
+  let traceSink;
   try {
+    traceSink = flags['otel-endpoint']
+      ? createTraceSink({ endpoint: flags['otel-endpoint'] })
+      : undefined;
     if (existsSync(output)) throw new UsageError(`receipt already exists: ${output}`);
     if (inside(worktree, output)) {
       throw new UsageError('the receipt must be outside the candidate worktree');
@@ -119,17 +129,26 @@ export async function runFactoryAgentCli(argv, {
 
   try {
     progress.executionStarting();
-    const adapters = instrumentFactoryAdapters({
+    const progressAdapters = instrumentFactoryAdapters({
       runWorker: (context) => runWorker(context, { timeoutMs: flags.timeoutMs }),
       runReviewer: (context) => runReviewer(context, { timeoutMs: flags.timeoutMs }),
       runRepair: (context) => runRepair(context, { timeoutMs: flags.timeoutMs }),
       progress,
     });
-    const receipt = await executeFactory({
-      worktree,
-      evidenceDir,
-      task: flags.task,
-      ...adapters,
+    const tracer = createFactoryTracer({ sink: traceSink });
+    const receipt = await tracer.span('gaia.factory.cycle', {
+      'gaia.phase': 'cycle',
+    }, async (cycleTracer) => {
+      const adapters = instrumentFactoryTraceAdapters({
+        ...progressAdapters,
+        tracer: cycleTracer,
+      });
+      return executeFactory({
+        worktree,
+        evidenceDir,
+        task: flags.task,
+        ...adapters,
+      });
     });
     const completed = serialize({
       schema: 'gaia-agent-factory-run/1',

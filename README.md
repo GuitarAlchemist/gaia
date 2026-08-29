@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 443 gates
+node --test                                   # 448 gates
 ```
 
 ### Functional factory tracer
@@ -58,6 +58,12 @@ npm run factory:agent -- \
   --out ../state/gaia-agent-run.json \
   --timeout-ms 600000
 ```
+
+An optional local OpenTelemetry Collector can receive redacted cycle and provider-phase
+spans with `--otel-endpoint http://127.0.0.1:4318/v1/traces`. The endpoint is restricted
+to HTTP loopback addresses: Gaia cannot use this option to contact a hosted or billable
+telemetry backend. Telemetry carries no task, path, prompt, provider output, authority,
+or secret and cannot change execution success or failure.
 
 The v1 profile is deliberately closed: Claude is a host-user worker and, at most
 once, repairer instructed to stay in the linked worktree; Codex is an ephemeral,
@@ -221,6 +227,7 @@ by **absence**, not by a check that could be bypassed.
 | `src/lineage-receipt.mjs` | `gaia-lineage-receipt/1`: one open receipt returned, one sealed cross-revision manifest handed to a caller-supplied sink and never returned. Reads only. |
 | `src/reporting-context.mjs` | Structural two-channel finalizer for official inventory-routed reports; sealed details cross one captured write capability and only canonical commitments return. |
 | `src/cli-progress.mjs` | Best-effort redacted human/JSONL progress, bounded liveness heartbeats, and caller-timeout-derived provider-time bounds for the two execution CLIs; never an authority or result dependency. |
+| `src/factory-tracing.mjs` | Optional loopback-only OTLP/HTTP cycle and provider-phase spans with fixed zero-cost/no-authority attributes; telemetry failure never affects execution. |
 | `src/factory-agent.mjs` | Deep module for clean linked-worktree admission, exact candidate identity, bounded subscription-agent invocation, sensitive output evidence, and reviewer non-mutation checks. |
 | `src/github-portfolio.mjs` | Deterministic portfolio revision, conservative classification, bounded scheduling, and one-step authority intent. |
 | `src/github-portfolio-authority.mjs` | Exact Ed25519 grant verification plus an atomic, one-use file ledger; prompts and bus text confer no authority. |
@@ -242,7 +249,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 443 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 448 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

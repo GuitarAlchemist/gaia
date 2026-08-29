@@ -89,6 +89,13 @@ outcome. This direct CLI has no grant and never emits `authorized_execution`.
 the only other accepted value is the default `human`. `stdout` remains the final run JSON
 only.
 
+The optional `--otel-endpoint` seam exports one cycle span and child spans for the
+worker, each review, and the bounded repair. The endpoint parser accepts only explicit
+HTTP loopback addresses. Span attributes are closed to phase, the fixed
+`ZERO_ADDITIONAL_DOLLARS` cost policy, and `authority_effect: NONE`; caller text,
+paths, prompts, provider output, and evidence never enter telemetry. Export failures
+are swallowed because observation must never change execution outcome or authority.
+
 Every JSON record carries monotone elapsed milliseconds and
 `remainingProviderTimeUpperBoundMs`. The latter is `--timeout-ms` multiplied by the
 maximum number of provider invocations still reachable (four initially, then at most
