@@ -65,7 +65,8 @@ test('an idle portfolio is plainly paused and never gets a spinner or invented E
   assert.deepEqual(snapshot.headline, {
     state: 'PAUSED',
     label: 'Paused',
-    detail: 'No tracked factory run is moving right now.',
+    detail: 'No tracked factory run is moving. '
+      + 'The drain is empty: no work item is eligible to move.',
   });
   assert.equal(snapshot.activeCount, 0);
   assert.equal(snapshot.showSpinner, false);
@@ -335,7 +336,8 @@ test('the optional French renderer translates operator guidance, not only headin
   });
   const html = renderControlRoomHtml(snapshot, { language: 'fr' });
 
-  assert.match(html, /Aucune exécution suivie de la factory ne progresse actuellement/u);
+  assert.match(html, /Aucune exécution suivie de la factory ne progresse\./u);
+  assert.match(html, /4 éléments bloqués en attente de preuves que Gaia ne détient pas/u);
   assert.match(html, /éléments nécessitent des preuves manquantes/u);
   assert.match(html, /Résoudre le blocage nommé avant de mesurer l’avancement/u);
   assert.match(html, /Rythme inconnu/u);
@@ -705,4 +707,221 @@ test('a snapshot with no telemetry keeps its existing shape and reports an empty
     freshnessWindowMs: 30_000,
     projectionRevision: null,
   });
+});
+
+test('a paused empty drain and a paused blocked drain no longer look the same', () => {
+  const emptyDrain = buildControlRoomSnapshot({
+    drainProjection: projection(),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+  const blockedDrain = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ itemId: 'issue-17', drainState: 'BLOCKED_EVIDENCE', sourceState: 'CHECKS_UNKNOWN' }),
+      item({
+        itemId: 'issue-18', itemNumber: 18, drainState: 'BLOCKED_EVIDENCE',
+        sourceState: 'CHECKS_UNKNOWN',
+      }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+
+  assert.equal(emptyDrain.headline.state, 'PAUSED');
+  assert.equal(blockedDrain.headline.state, 'PAUSED');
+  assert.equal(emptyDrain.obstruction.state, 'NO_ELIGIBLE_WORK');
+  assert.equal(blockedDrain.obstruction.state, 'EVIDENCE_STARVATION');
+  assert.notEqual(
+    emptyDrain.headline.detail, blockedDrain.headline.detail,
+    'the two opposite pauses must not share one sentence',
+  );
+  assert.deepEqual(blockedDrain.obstruction.affectedItemIds, ['issue-17', 'issue-18']);
+  assert.equal(blockedDrain.obstruction.recovery.kind, 'COLLECT_MISSING_EVIDENCE');
+  assert.equal(blockedDrain.obstruction.recovery.effect, 'NONE');
+  assert.equal(blockedDrain.obstruction.recovery.authority, 'NONE');
+  assert.equal(blockedDrain.obstruction.evidenceRevision, blockedDrain.sourceRevision);
+});
+
+test('the obstruction is bound by the snapshot revision it is displayed with', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'BLOCKED_REVIEW' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+
+  const { revision, ...body } = snapshot;
+  assert.equal(revision, createHash('sha256').update(canonicalJson(body)).digest('hex'));
+  const { revision: obstructionRevision, ...obstructionBody } = snapshot.obstruction;
+  assert.equal(
+    obstructionRevision,
+    createHash('sha256').update(canonicalJson(obstructionBody)).digest('hex'),
+  );
+  assert.equal(snapshot.obstruction.state, 'REVIEW_STARVATION');
+});
+
+test('the observation window is measured from the pinned evidence, not invented', () => {
+  const stalled = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const justChanged = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:40:00.000Z',
+  });
+
+  assert.equal(stalled.obstruction.state, 'THROUGHPUT_STALL');
+  assert.deepEqual(stalled.obstruction.observationWindow, {
+    startedAt: '2026-08-29T18:30:20.000Z',
+    endedAt: '2026-08-29T18:40:20.000Z',
+    durationMs: 600_000,
+  });
+  assert.equal(justChanged.obstruction.state, 'NONE');
+  assert.equal(justChanged.obstruction.recovery, null);
+});
+
+test('NEGATIVE CONTROL: a live heartbeat on long-running work is never an obstruction', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item()]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:20:20.000Z',
+    progressObservations: [{
+      itemId: 'issue-17',
+      capturedAt: '2026-08-29T18:40:15.000Z',
+      record: {
+        schema: 'gaia-cli-progress/1', stage: 'worker_running', elapsedMs: 3_600_000,
+        heartbeat: true,
+      },
+    }],
+  });
+
+  assert.equal(snapshot.headline.state, 'ACTIVE');
+  assert.equal(snapshot.items[0].activity.elapsedMs, 3_600_000);
+  assert.equal(snapshot.obstruction.state, 'NONE');
+  assert.equal(snapshot.obstruction.recovery, null);
+});
+
+test('NEGATIVE CONTROL: the same run with an expired heartbeat is a named stale lane', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item()]),
+    observedAt: '2026-08-29T18:45:20.000Z',
+    sourceChangedAt: '2026-08-29T18:20:20.000Z',
+    progressObservations: [{
+      itemId: 'issue-17',
+      capturedAt: '2026-08-29T18:40:15.000Z',
+      record: {
+        schema: 'gaia-cli-progress/1', stage: 'worker_running', elapsedMs: 3_600_000,
+        heartbeat: true,
+      },
+    }],
+  });
+
+  assert.equal(snapshot.headline.state, 'STALE');
+  assert.equal(snapshot.obstruction.state, 'LANE_STALE');
+  assert.deepEqual(snapshot.obstruction.affectedItemIds, ['issue-17']);
+  assert.equal(snapshot.obstruction.recovery.kind, 'CHECK_STALE_LANE');
+});
+
+test('a declared dependency cycle reaches the control room; identical prose alone does not', () => {
+  const drainProjection = projection([
+    item({ itemId: 'issue-17', drainState: 'QUEUED', title: 'Blocked by issue-18' }),
+    item({
+      itemId: 'issue-18', itemNumber: 18, drainState: 'QUEUED', title: 'Blocked by issue-17',
+    }),
+  ]);
+  const shared = {
+    drainProjection,
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  };
+
+  const declared = buildControlRoomSnapshot({
+    ...shared,
+    dependencies: {
+      evidenceRevision: 'b'.repeat(64),
+      edges: [
+        { itemId: 'issue-17', dependsOnItemId: 'issue-18' },
+        { itemId: 'issue-18', dependsOnItemId: 'issue-17' },
+      ],
+    },
+  });
+  const proseOnly = buildControlRoomSnapshot(shared);
+
+  assert.equal(declared.obstruction.state, 'DEPENDENCY_DEADLOCK');
+  assert.equal(declared.obstruction.dependencyEvidenceRevision, 'b'.repeat(64));
+  assert.equal(proseOnly.obstruction.state, 'THROUGHPUT_STALL');
+});
+
+test('the default English view states the obstruction, its evidence age and one bounded recovery', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ drainState: 'BLOCKED_EVIDENCE', sourceState: 'CHECKS_UNKNOWN' }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const html = renderControlRoomHtml(snapshot);
+
+  assert.match(html, /Why the drain is not moving/u);
+  assert.match(html, /EVIDENCE_STARVATION/u);
+  assert.match(html, /Bounded recovery/u);
+  assert.match(html, /COLLECT_MISSING_EVIDENCE/u);
+  assert.match(html, /Collect the missing check or review evidence/u);
+  assert.match(html, /Evidence age/u);
+  assert.match(html, /10m/u);
+  assert.equal(snapshot.showSpinner, false);
+  assert.doesNotMatch(html, /class="heartbeat-pulse"/u);
+  assert.doesNotMatch(html, /@keyframes/u);
+});
+
+test('the optional French view translates the obstruction and its bounded recovery', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ drainState: 'BLOCKED_EVIDENCE', sourceState: 'CHECKS_UNKNOWN' }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const html = renderControlRoomHtml(snapshot, { language: 'fr' });
+
+  assert.match(html, /Pourquoi le drain n/u);
+  assert.match(html, /Preuves manquantes/u);
+  assert.match(html, /Reprise born/u);
+  assert.match(html, /Collecter les preuves manquantes/u);
+  assert.doesNotMatch(html, /Collect the missing check/u);
+});
+
+test('an obstruction edited after the snapshot was built is refused, not displayed', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ drainState: 'BLOCKED_EVIDENCE', sourceState: 'CHECKS_UNKNOWN' }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const withoutRevision = ({ revision, ...body }) => body;
+  const reseal = (body) => ({
+    ...body, revision: createHash('sha256').update(canonicalJson(body)).digest('hex'),
+  });
+
+  const digestBroken = reseal({
+    ...withoutRevision(snapshot),
+    obstruction: { ...snapshot.obstruction, state: 'NONE' },
+  });
+  const semanticsBroken = reseal({
+    ...withoutRevision(snapshot),
+    obstruction: reseal({ ...withoutRevision(snapshot.obstruction), recovery: null }),
+  });
+
+  assert.throws(() => renderControlRoomHtml(digestBroken), /obstruction/u);
+  assert.throws(() => renderControlRoomHtml(semanticsBroken), /obstruction/u);
+});
+
+test('evidence newer than the observation shortens the window instead of claiming a stall', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:50:20.000Z',
+  });
+
+  assert.equal(snapshot.obstruction.observationWindow.durationMs, 0);
+  assert.equal(snapshot.obstruction.state, 'NONE');
 });

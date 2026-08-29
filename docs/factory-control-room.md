@@ -89,16 +89,85 @@ This receipt grants no execution, publication, model-training or merge authority
 The requirements below name the selected candidate. They were recorded before its implementation
 and are independently reviewable against the exact input identities above.
 
+### Obstruction detection — Design It Twice
+
+R2 answers the question `PAUSED` could not: **why** is nothing moving. An empty drain and a
+systemically blocked drain were emitting one identical sentence. Three seams were compared before
+implementation, and the full decision — assumptions, the strongest counterargument, hidden costs,
+the simpler ten-line alternative, two falsifiers and the rejection criterion — is recorded in
+[`portfolio-drain-obstruction-design.md`](portfolio-drain-obstruction-design.md).
+
+1. **Pure obstruction Module over the exact drain projection — selected.**
+   `classifyPortfolioDrainObstruction` reads one verified projection plus decided lane liveness,
+   a measured observation window and optional declared dependency evidence, and returns one
+   content-addressed `gaia-portfolio-drain-obstruction/1` value. The control room nests it inside
+   its own snapshot revision.
+2. **Emit obstruction from `reconcilePortfolioDrain` — rejected.** The interpreter's
+   `rulesRevision` is a digest of its own rules, so adding obstruction rules there requires a new
+   `machineVersion` and a migration of every persisted receipt. A read-only display improvement
+   must not become a one-way door on durable evidence.
+3. **Compute it privately inside `buildControlRoomSnapshot` — rejected.** The smallest diff, and
+   the strongest competitor, but the classification rules would then be testable only through the
+   whole snapshot builder and reachable by no other consumer.
+
+The selected design is freely reversible. Its deliberate costs are a closed vocabulary that reads
+an unknown future drain state as an evidence gap, and a fixed precedence that reports one cause
+while carrying the full breakdown beside it.
+
+## Obstruction truth rules
+
+- Exactly one state is reported, from a closed vocabulary of nine: `NONE`, `NO_ELIGIBLE_WORK`,
+  `EVIDENCE_STARVATION`, `LANE_STALE`, `DEPENDENCY_DEADLOCK`, `REVIEW_STARVATION`,
+  `AUTHORITY_STARVATION`, `RECONCILE_REQUIRED`, `THROUGHPUT_STALL`.
+- Precedence is fixed, not ranked by count: reconcile, stale lane, live motion, declared
+  deadlock, measured stall, empty drain, then authority, review and evidence starvation — nearest
+  the exit first. The per-cause `breakdown` is carried alongside so no contributing cause is
+  hidden by the one that is reported.
+- Every non-`NONE` state binds the exact drain-projection revision, the measured observation
+  window, the affected item ids and their count, and exactly one bounded advisory recovery action
+  with `effect: NONE`, `authority: NONE` and `advisory: true`. `NO_ELIGIBLE_WORK` over an empty
+  portfolio is the one state whose affected list is legitimately empty — there is no item to name.
+- The observation window is `[sourceChangedAt, observedAt]`: the interval over which the pinned
+  evidence has not changed, which is also the age of that evidence. Evidence newer than the
+  observation instant clamps the window to zero rather than being refused; that is a file-mtime
+  race, and a zero-length window can never claim a stall.
+- `THROUGHPUT_STALL` requires eligible work, free capacity, no live lane and at least
+  `THROUGHPUT_STALL_WINDOW_MS` (300 000 ms) of unchanged evidence. The threshold is a fixed
+  exported constant, never a parameter: a configurable threshold would make the state mean
+  something different depending on the arguments it was produced with.
+- A dependency cycle is derived **only** from explicitly declared edges carrying their own
+  SHA-256 evidence revision. Prose, labels and model output are never read as dependencies, and an
+  edge naming an item outside the projection is a typed refusal.
+- Fail-closed, never to health: an occupied lane with no liveness evidence is `LANE_STALE`; an
+  unrecognised drain state is an evidence gap; a source state that merely claims a dependency is
+  an evidence gap; an undecided liveness token, an incoherent window and a projection whose
+  revision does not match its content are typed refusals.
+- The renderer re-verifies the nested obstruction two ways — its own digest against its own
+  content, and its invariants — and refuses a snapshot whose obstruction was edited after it was
+  built. There is no animation in this section: an obstruction is a standing fact, and a spinner
+  would suggest something is happening about it.
+- The Module owns no clock, provider, network call, filesystem access or retry loop, adds no bus
+  verb, and leaves `src/portfolio-drain.mjs` untouched, so `machineId`, `machineVersion` and
+  `rulesRevision` are unchanged and every persisted receipt replays exactly as before.
+
+`--dependencies <path>` on `npm run factory:dashboard` supplies that declared evidence as
+`{ "evidenceRevision": "<sha256>", "edges": [{ "itemId": "…", "dependsOnItemId": "…" }] }`.
+Without it, no deadlock can ever be reported.
+
+
 ## Default view
 
 Every visible element answers one operator question:
 
 1. **Now** — active, stale or paused. Stored `RUNNING` state alone is insufficient.
 2. **Next action** — one closed action from the drain projection, or a stale-run check.
-3. **Verifiable progress** — named gates for each bounded lifecycle.
-4. **Pace and ETA** — measured evidence, its sample size, or an explicit unknown.
-5. **Fog of war** — known, partial and unobserved evidence plus the next reconnaissance frontier.
-6. **Proof** — the content-addressed control-room snapshot and source projection revision.
+3. **Why the drain is not moving** — one named obstruction, the age of the evidence that named
+   it, the items it affects and one bounded advisory recovery. An empty drain and a blocked drain
+   never share a sentence.
+4. **Verifiable progress** — named gates for each bounded lifecycle.
+5. **Pace and ETA** — measured evidence, its sample size, or an explicit unknown.
+6. **Fog of war** — known, partial and unobserved evidence plus the next reconnaissance frontier.
+7. **Proof** — the content-addressed control-room snapshot and source projection revision.
 
 The graph, Gantt and full state remain optional detail views. They are not required to
 understand the default page.
@@ -129,8 +198,13 @@ understand the default page.
 ## Interfaces
 
 `buildControlRoomSnapshot({ drainProjection, observedAt, sourceChangedAt,
-progressObservations, completedRuns })` is pure. It returns one content-addressed
-`gaia-control-room/1` value.
+progressObservations, completedRuns, telemetryProjection, dependencies })` is pure. It returns
+one content-addressed `gaia-control-room/1` value carrying a nested, separately content-addressed
+`gaia-portfolio-drain-obstruction/1`.
+
+`classifyPortfolioDrainObstruction({ drainProjection, observedAt, windowStartedAt, liveness,
+dependencies })` in `src/portfolio-drain-obstruction.mjs` is the obstruction truth Module. It is
+pure, imports only `node:crypto`, and is usable without the control room.
 
 `renderControlRoomHtml(snapshot)` returns one dependency-free HTML document. It embeds no
 remote resource. Browser-side code only ages the already displayed snapshot and stops a pulse
@@ -140,6 +214,9 @@ when its heartbeat expires.
 drain projection or a portfolio plus optional receipt and hold arrays, writes replaceable
 derived JSON/HTML outputs and can poll the input files from 1 through 60 seconds. It opens no
 network listener. English is the default; `--language fr` selects the optional French renderer.
+`--dependencies <path>` supplies explicit declared dependency evidence; without it no dependency
+deadlock can ever be reported. Its one stdout line now names the obstruction beside the headline
+state and the next action.
 
 `npm run factory:dashboard:refresh -- ...` is the explicit GitHub refresh Adapter. Each tick
 performs one fresh, read-only organization survey, reconciles the resulting portfolio through

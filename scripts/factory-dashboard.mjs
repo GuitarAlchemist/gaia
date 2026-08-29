@@ -101,6 +101,7 @@ export function runFactoryDashboardCli(argv, {
   const portfolioPath = flags.portfolio ? resolve(flags.portfolio) : null;
   const receiptsPath = flags.receipts ? resolve(flags.receipts) : null;
   const holdsPath = flags.holds ? resolve(flags.holds) : null;
+  const dependenciesPath = flags.dependencies ? resolve(flags.dependencies) : null;
   const progressPath = flags.progress ? resolve(flags.progress) : null;
   const historyPath = flags.history ? resolve(flags.history) : null;
   const telemetryPath = flags.telemetry ? resolve(flags.telemetry) : null;
@@ -133,10 +134,15 @@ export function runFactoryDashboardCli(argv, {
     progressObservations,
     completedRuns,
     telemetryProjection,
+    // Declared edges only. This adapter reads a file of explicit dependency evidence; it
+    // never derives an edge from an issue title, body, label or model output.
+    dependencies: dependenciesPath === null
+      ? null
+      : readJson(dependenciesPath, 'dependencies'),
     observedAt,
     sourceChangedAt: newestMtime([
       projectionPath, portfolioPath, receiptsPath, holdsPath, progressPath, historyPath,
-      telemetryLogPath,
+      telemetryLogPath, dependenciesPath,
     ]),
   });
   writeFileSync(snapshotPath, serialize(snapshot), 'utf8');
@@ -144,6 +150,7 @@ export function runFactoryDashboardCli(argv, {
     language: flags.language ?? 'en',
   }), 'utf8');
   writeStdout(`Gaia dashboard checked: ${snapshot.headline.state}`
+    + ` | obstruction ${snapshot.obstruction.state}`
     + ` | next ${snapshot.nextAction.kind} | source ${snapshot.sourceRevision}\n`);
   return snapshot;
 }

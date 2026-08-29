@@ -136,3 +136,128 @@ test('the dashboard CLI can reconcile a real Gaia portfolio without a hand-made 
   assert.equal(snapshot.nextAction.kind, 'CLAIM_FACTORY_RUN');
   assert.match(stdout, /CLAIM_FACTORY_RUN/u);
 });
+
+test('the dashboard CLI says why a paused drain is not moving, and offers one bounded recovery', () => {
+  const portfolioPath = join(scratch, 'blocked-portfolio.json');
+  const htmlPath = join(scratch, 'blocked-control-room.html');
+  const snapshotPath = join(scratch, 'blocked-control-room.json');
+  writeFileSync(portfolioPath, `${JSON.stringify(portfolio([{
+    repository: 'GuitarAlchemist/ix', itemKind: 'PULL_REQUEST', itemId: 'pr-41',
+    itemNumber: 41, title: 'Awaiting check evidence', state: 'CHECKS_UNKNOWN',
+    updatedAt: '2026-08-29T18:00:00.000Z',
+  }]))}\n`, 'utf8');
+  const changedAt = new Date('2026-08-29T18:30:00.000Z');
+  utimesSync(portfolioPath, changedAt, changedAt);
+  let stdout = '';
+
+  const snapshot = runFactoryDashboardCli([
+    '--portfolio', portfolioPath,
+    '--html-out', htmlPath,
+    '--snapshot-out', snapshotPath,
+  ], {
+    now: () => new Date('2026-08-29T18:40:20.000Z'),
+    writeStdout: (chunk) => { stdout += chunk; },
+  });
+
+  assert.equal(snapshot.headline.state, 'PAUSED');
+  assert.equal(snapshot.obstruction.state, 'EVIDENCE_STARVATION');
+  assert.deepEqual(snapshot.obstruction.affectedItemIds, ['pr-41']);
+  assert.equal(snapshot.obstruction.recovery.kind, 'COLLECT_MISSING_EVIDENCE');
+  assert.equal(snapshot.obstruction.observationWindow.durationMs, 620_000);
+  assert.match(stdout, /EVIDENCE_STARVATION/u);
+  assert.match(readFileSync(htmlPath, 'utf8'), /Why the drain is not moving/u);
+});
+
+test('the dashboard CLI distinguishes an empty drain from a blocked one', () => {
+  const portfolioPath = join(scratch, 'empty-portfolio.json');
+  const htmlPath = join(scratch, 'empty-control-room.html');
+  const snapshotPath = join(scratch, 'empty-control-room.json');
+  writeFileSync(portfolioPath, `${JSON.stringify(portfolio([]))}\n`, 'utf8');
+  let stdout = '';
+
+  const snapshot = runFactoryDashboardCli([
+    '--portfolio', portfolioPath,
+    '--html-out', htmlPath,
+    '--snapshot-out', snapshotPath,
+  ], {
+    now: () => new Date('2026-08-29T18:40:20.000Z'),
+    writeStdout: (chunk) => { stdout += chunk; },
+  });
+
+  assert.equal(snapshot.headline.state, 'PAUSED');
+  assert.equal(snapshot.obstruction.state, 'NO_ELIGIBLE_WORK');
+  assert.equal(snapshot.obstruction.recovery.kind, 'SURVEY_PORTFOLIO_FOR_NEW_WORK');
+  assert.match(stdout, /NO_ELIGIBLE_WORK/u);
+});
+
+test('the dashboard CLI reports a deadlock only from a declared dependency file', () => {
+  const portfolioPath = join(scratch, 'cycle-portfolio.json');
+  const dependenciesPath = join(scratch, 'cycle-dependencies.json');
+  const htmlPath = join(scratch, 'cycle-control-room.html');
+  const snapshotPath = join(scratch, 'cycle-control-room.json');
+  writeFileSync(portfolioPath, `${JSON.stringify(portfolio([
+    {
+      repository: 'GuitarAlchemist/ix', itemKind: 'ISSUE', itemId: 'issue-1', itemNumber: 1,
+      title: 'Blocked by issue-2', state: 'READY', updatedAt: '2026-08-29T18:00:00.000Z',
+    },
+    {
+      repository: 'GuitarAlchemist/gaia', itemKind: 'ISSUE', itemId: 'issue-2', itemNumber: 2,
+      title: 'Blocked by issue-1', state: 'READY', updatedAt: '2026-08-29T18:00:00.000Z',
+    },
+  ]))}\n`, 'utf8');
+  writeFileSync(dependenciesPath, `${JSON.stringify({
+    evidenceRevision: 'b'.repeat(64),
+    edges: [
+      { itemId: 'issue-1', dependsOnItemId: 'issue-2' },
+      { itemId: 'issue-2', dependsOnItemId: 'issue-1' },
+    ],
+  })}\n`, 'utf8');
+  const changedAt = new Date('2026-08-29T18:30:00.000Z');
+  utimesSync(portfolioPath, changedAt, changedAt);
+  utimesSync(dependenciesPath, changedAt, changedAt);
+  const options = {
+    now: () => new Date('2026-08-29T18:40:20.000Z'),
+    writeStdout: () => {},
+  };
+
+  const declared = runFactoryDashboardCli([
+    '--portfolio', portfolioPath,
+    '--dependencies', dependenciesPath,
+    '--html-out', htmlPath,
+    '--snapshot-out', snapshotPath,
+  ], options);
+  const proseOnly = runFactoryDashboardCli([
+    '--portfolio', portfolioPath,
+    '--html-out', htmlPath,
+    '--snapshot-out', snapshotPath,
+  ], options);
+
+  assert.equal(declared.obstruction.state, 'DEPENDENCY_DEADLOCK');
+  assert.deepEqual(declared.obstruction.affectedItemIds, ['issue-1', 'issue-2']);
+  assert.equal(declared.obstruction.dependencyEvidenceRevision, 'b'.repeat(64));
+  assert.equal(
+    proseOnly.obstruction.state, 'THROUGHPUT_STALL',
+    'the identical titles are never read as dependencies',
+  );
+});
+
+test('the dashboard CLI refuses declared edges that name an item the portfolio does not carry', () => {
+  const portfolioPath = join(scratch, 'absent-portfolio.json');
+  const dependenciesPath = join(scratch, 'absent-dependencies.json');
+  writeFileSync(portfolioPath, `${JSON.stringify(portfolio([{
+    repository: 'GuitarAlchemist/ix', itemKind: 'ISSUE', itemId: 'issue-1', itemNumber: 1,
+    title: 'Repair a ready issue', state: 'READY', updatedAt: '2026-08-29T18:00:00.000Z',
+  }]))}\n`, 'utf8');
+  writeFileSync(dependenciesPath, `${JSON.stringify({
+    evidenceRevision: 'b'.repeat(64),
+    edges: [{ itemId: 'issue-1', dependsOnItemId: 'issue-absent' }],
+  })}\n`, 'utf8');
+
+  assert.throws(() => runFactoryDashboardCli([
+    '--portfolio', portfolioPath,
+    '--dependencies', dependenciesPath,
+    '--html-out', join(scratch, 'absent-control-room.html'),
+    '--snapshot-out', join(scratch, 'absent-control-room.json'),
+  ], { now: () => new Date('2026-08-29T18:40:20.000Z'), writeStdout: () => {} }),
+  /does not carry/u);
+});

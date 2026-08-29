@@ -71,7 +71,13 @@ test('refresh surveys once and publishes a coherent English control room artifac
   assert.deepEqual(JSON.parse(readFileSync(portfolioPath, 'utf8')), surveyed);
   assert.deepEqual(JSON.parse(readFileSync(snapshotPath, 'utf8')), snapshot);
   assert.equal(snapshot.nextAction.kind, 'CLAIM_FACTORY_RUN');
+  // The obstruction reaches the published artifact through the real GitHub refresh Adapter,
+  // not only through the hand-fed dashboard path.
+  assert.equal(snapshot.obstruction.schema, 'gaia-portfolio-drain-obstruction/1');
+  assert.equal(snapshot.obstruction.effect, 'NONE');
+  assert.equal(snapshot.obstruction.authority, 'NONE');
   assert.match(readFileSync(htmlPath, 'utf8'), /Gaia — real status/u);
+  assert.match(readFileSync(htmlPath, 'utf8'), /Why the drain is not moving/u);
   assert.match(stdout, /Gaia control room refreshed/u);
   assert.match(stdout, /CLAIM_FACTORY_RUN/u);
 });
