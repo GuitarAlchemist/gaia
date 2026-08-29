@@ -5,6 +5,7 @@ import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { buildGaiaSearchIndex, searchGaiaIndex } from '../src/hybrid-search.mjs';
+import { embedWithIxLocal } from '../src/ix-local-embedding.mjs';
 
 class UsageError extends Error {}
 
@@ -36,6 +37,7 @@ function readJson(path, label) {
 
 export function runHybridSearchCli(argv, {
   writeStdout = (chunk) => process.stdout.write(chunk),
+  embedLocal = embedWithIxLocal,
 } = {}) {
   const flags = parseArgs(argv);
   const corpusPath = resolve(flags.corpus);
@@ -54,10 +56,41 @@ export function runHybridSearchCli(argv, {
   if (query.schema !== 'gaia-search-query/1') {
     throw new UsageError('query must use gaia-search-query/1');
   }
-  const index = buildGaiaSearchIndex({ documents: corpus.documents });
+  const ixEmbed = flags['ix-embed'];
+  const modelCache = flags['model-cache'];
+  if ((ixEmbed === undefined) !== (modelCache === undefined)) {
+    throw new UsageError('--ix-embed and --model-cache must be supplied together');
+  }
+  let documents = corpus.documents;
+  let queryEmbedding = query.embedding;
+  let embeddingModel;
+  let queryEmbeddingModel;
+  if (ixEmbed !== undefined) {
+    const passage = embedLocal({
+      executable: ixEmbed,
+      modelCache,
+      mode: 'passage',
+      items: documents.map(({ id, text }) => ({ id, text })),
+    });
+    const embeddedQuery = embedLocal({
+      executable: ixEmbed,
+      modelCache,
+      mode: 'query',
+      items: [{ id: 'gaia-query', text: query.text }],
+    });
+    documents = documents.map((document, index) => ({
+      ...document,
+      embedding: passage.items[index].embedding,
+    }));
+    queryEmbedding = embeddedQuery.items[0].embedding;
+    embeddingModel = passage.model;
+    queryEmbeddingModel = embeddedQuery.model;
+  }
+  const index = buildGaiaSearchIndex({ documents, embeddingModel });
   const result = searchGaiaIndex(index, {
     text: query.text,
-    embedding: query.embedding,
+    embedding: queryEmbedding,
+    embeddingModel: queryEmbeddingModel,
     limit: query.limit,
     freshness: query.freshness,
   });

@@ -37,7 +37,7 @@ function validateSource(source) {
   }
 }
 
-export function buildGaiaSearchIndex({ documents }) {
+export function buildGaiaSearchIndex({ documents, embeddingModel }) {
   if (!Array.isArray(documents) || documents.length === 0) {
     throw new TypeError('documents must be a non-empty array');
   }
@@ -77,6 +77,7 @@ export function buildGaiaSearchIndex({ documents }) {
   const material = {
     schema: GAIA_SEARCH_INDEX_SCHEMA,
     dimensions,
+    ...(embeddingModel === undefined ? {} : { embeddingModel: structuredClone(embeddingModel) }),
     documents: indexed,
     documentFrequency: Object.fromEntries([...documentFrequency].sort()),
   };
@@ -103,7 +104,7 @@ function bm25(index, document, queryTokens) {
 const dot = (left, right) => left.reduce((sum, value, index) => sum + value * right[index], 0);
 
 export function searchGaiaIndex(index, {
-  text, embedding, limit = 10, freshness = 'FRESH_ONLY',
+  text, embedding, embeddingModel, limit = 10, freshness = 'FRESH_ONLY',
 }) {
   if (index?.schema !== GAIA_SEARCH_INDEX_SCHEMA || typeof text !== 'string') {
     throw new TypeError('a Gaia search index and query text are required');
@@ -116,6 +117,10 @@ export function searchGaiaIndex(index, {
   }
   const queryVector = normalized(embedding);
   if (queryVector.length !== index.dimensions) throw new TypeError('query dimensions must match');
+  if (index.embeddingModel !== undefined
+      && canonical(index.embeddingModel) !== canonical(embeddingModel)) {
+    throw new TypeError('query embedding model must match the indexed model identity');
+  }
   const candidates = index.documents.filter(
     (document) => freshness === 'ALL' || document.freshness === 'FRESH',
   );
@@ -166,6 +171,8 @@ export function searchGaiaIndex(index, {
       vector: 'EXACT_COSINE',
       fusion: 'RRF_K60',
       embeddingDimensions: index.dimensions,
+      ...(index.embeddingModel === undefined
+        ? {} : { embeddingModel: structuredClone(index.embeddingModel) }),
     },
     hits,
   });
