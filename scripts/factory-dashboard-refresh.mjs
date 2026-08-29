@@ -152,10 +152,6 @@ export async function runFactoryDashboardRefreshCli(argv, {
   };
   const portfolio = await abortable(surveyPortfolio(request), signal);
   if (signal?.aborted) throw abortReason(signal);
-  const closingPathIdentities = assertPathConstraints(flags, outputPaths);
-  if (closingPathIdentities !== openingPathIdentities) {
-    throw new UsageError('path identities changed during survey');
-  }
   const staging = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-'));
   try {
     const stagedPortfolio = join(staging, 'portfolio.json');
@@ -166,6 +162,10 @@ export async function runFactoryDashboardRefreshCli(argv, {
       dashboardArgs(flags, stagedPortfolio, stagedSnapshot, stagedHtml),
       { now, writeStdout: () => {} },
     );
+    const publicationPathIdentities = assertPathConstraints(flags, outputPaths);
+    if (publicationPathIdentities !== openingPathIdentities) {
+      throw new UsageError('path identities changed before publication');
+    }
 
     // Publish the self-contained HTML last. A failed tick therefore never exposes a partial
     // HTML document, and the next tick repairs any evidence file that could not be replaced.

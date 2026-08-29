@@ -245,9 +245,50 @@ test('a path identity changed during survey refuses before any publication', {
       symlinkSync(portfolioDirectory, snapshotDirectory, 'junction');
       return portfolio([]);
     },
-  }), /path identities changed during survey|outputs must differ/u);
+  }), /path identities changed before publication|outputs must differ/u);
 
   assert.throws(() => readFileSync(portfolioPath), /ENOENT/u);
+  assert.throws(() => readFileSync(htmlPath), /ENOENT/u);
+});
+
+test('a path identity changed by the clock callback cannot overwrite source evidence', {
+  skip: process.platform !== 'win32',
+}, async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-clock-swap-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const receiptsDirectory = join(scratch, 'receipts');
+  const portfolioDirectory = join(scratch, 'portfolio');
+  const outputDirectory = join(scratch, 'output');
+  mkdirSync(receiptsDirectory);
+  mkdirSync(portfolioDirectory);
+  mkdirSync(outputDirectory);
+  const receiptsPath = join(receiptsDirectory, 'receipts.json');
+  const portfolioPath = join(portfolioDirectory, 'receipts.json');
+  const snapshotPath = join(outputDirectory, 'control-room.json');
+  const htmlPath = join(outputDirectory, 'control-room.html');
+  writeFileSync(receiptsPath, '[]\n', 'utf8');
+  let changed = false;
+
+  await assert.rejects(runFactoryDashboardRefreshCli([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', portfolioPath,
+    '--snapshot-out', snapshotPath,
+    '--html-out', htmlPath,
+    '--receipts', receiptsPath,
+  ], {
+    surveyPortfolio: async () => portfolio([]),
+    now: () => {
+      if (!changed) {
+        changed = true;
+        rmSync(portfolioDirectory, { recursive: true });
+        symlinkSync(receiptsDirectory, portfolioDirectory, 'junction');
+      }
+      return new Date('2026-08-29T20:00:00.000Z');
+    },
+  }), /path identities changed before publication|aliases an input evidence path/u);
+
+  assert.equal(readFileSync(receiptsPath, 'utf8'), '[]\n');
   assert.throws(() => readFileSync(htmlPath), /ENOENT/u);
 });
 
