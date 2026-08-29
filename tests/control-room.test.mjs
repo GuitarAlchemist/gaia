@@ -316,7 +316,9 @@ test('status meaning is carried by words and symbols, never colour alone', () =>
 
 test('the optional French renderer translates operator guidance, not only headings', () => {
   const snapshot = buildControlRoomSnapshot({
-    drainProjection: projection([item({ drainState: 'BLOCKED_EVIDENCE' })]),
+    drainProjection: projection([17, 18, 19, 20].map((itemNumber) => item({
+      itemId: `issue-${itemNumber}`, itemNumber, drainState: 'BLOCKED_EVIDENCE',
+    }))),
     observedAt: '2026-08-29T18:40:20.000Z',
   });
   const html = renderControlRoomHtml(snapshot, { language: 'fr' });
@@ -325,6 +327,8 @@ test('the optional French renderer translates operator guidance, not only headin
   assert.match(html, /éléments nécessitent des preuves manquantes/u);
   assert.match(html, /Résoudre le blocage nommé avant de mesurer l’avancement/u);
   assert.match(html, /Rythme inconnu/u);
+  assert.match(html, /snapshot content-addressed/u);
+  assert.doesNotMatch(html, /signed snapshot|snapshot signé/u);
   assert.doesNotMatch(html, /No Gaia work|items need missing evidence|Resolve the named blocker/u);
 });
 
