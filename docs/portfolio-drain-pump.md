@@ -73,7 +73,21 @@ R0 is the state truth and decision mechanism, not yet an actuator. It does not p
 claim a lease, start a worker, request review, publish, merge, close, assign or label anything.
 It does not infer structured dependencies or portfolio holds from issue prose or model output.
 
-The next tracer bullet is one append-only local ledger adapter with compare-and-swap append and a
-single `tick` composition root. Only after crash/replay and concurrent-writer tests pass may an
-execution adapter consume a `CLAIM_FACTORY_RUN` decision. Merge remains behind a separate,
-explicit authority seam.
+## Durable ledger and evolution
+
+`portfolio-drain-ledger.mjs` persists receipts as a hash-chained JSONL ledger. Every append holds
+an exclusive lock, re-reads the complete ledger, compares the caller's expected head, replays the
+candidate transition, writes one complete record and calls `fsync`. A stale writer, corrupt or
+torn record, unsupported machine version, changed observation or semantic transition error writes
+nothing. `tickPortfolioDrain` reads one coherent head and returns the pure projection without
+writing, starting a worker or consuming authority.
+
+Every receipt and ledger record binds `machineId`, `machineVersion` and `rulesRevision`. A change
+to triggers, actions, rules or transitions must add a new immutable interpreter version and retain
+the previous interpreter for historical replay. Existing instances are never reinterpreted in
+place. Moving one instance to a new version requires an explicit, content-addressed migration
+receipt and independent review; that migration seam is intentionally not part of R1.
+
+The next tracer bullet may consume one `CLAIM_FACTORY_RUN` decision only by first appending its
+`CLAIMED` receipt through CAS. The execution adapter remains separate, and merge remains behind a
+distinct explicit authority seam.
