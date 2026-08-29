@@ -118,7 +118,7 @@ export function instrumentFactoryTraceAdapters({
   runWorker, runReviewer, runRepair, tracer,
 }) {
   let reviewRound = 0;
-  return Object.freeze({
+  const adapters = {
     runWorker: (...args) => tracer.span(
       'gaia.factory.worker', { 'gaia.phase': 'worker' }, () => runWorker(...args),
     ),
@@ -129,8 +129,11 @@ export function instrumentFactoryTraceAdapters({
         `gaia.factory.${phase}`, { 'gaia.phase': phase }, () => runReviewer(...args),
       );
     },
-    runRepair: (...args) => tracer.span(
+  };
+  if (typeof runRepair === 'function') {
+    adapters.runRepair = (...args) => tracer.span(
       'gaia.factory.repair', { 'gaia.phase': 'repair' }, () => runRepair(...args),
-    ),
-  });
+    );
+  }
+  return Object.freeze(adapters);
 }

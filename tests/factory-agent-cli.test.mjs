@@ -167,6 +167,53 @@ test('the public CLI selects the Pi OAuth reviewer without changing the worker p
   assert.equal(envelope.reviewerProfile, 'pi-openai-codex-subscription-read-only');
 });
 
+test('the public CLI selects the Pi writer with repeated exact allowed paths', async () => {
+  const worktree = join(scratch, 'pi-writer-worktree');
+  const out = join(scratch, 'pi-writer-receipt.json');
+  mkdirSync(worktree);
+  let seen;
+
+  await runFactoryAgentCli([
+    '--worktree', worktree,
+    '--task', 'write only the bounded files',
+    '--out', out,
+    '--worker', 'pi',
+    '--allow-write', 'src/allowed.mjs',
+    '--allow-write', 'tests/allowed.test.mjs',
+  ], {
+    executeFactory: async ({ runWorker, runRepair }) => {
+      assert.equal(runRepair, undefined, 'Pi writer v0 must not inherit the Claude repair lane');
+      const worker = await runWorker({
+        cwd: worktree, task: 'write only the bounded files', baseHead: 'a'.repeat(40),
+      });
+      assert.equal(worker.provider, 'pi-openai-codex-subscription');
+      return {
+        schema: 'gaia-agent-factory-receipt/1',
+        status: 'completed',
+        task: 'write only the bounded files',
+      };
+    },
+    runWorker: async () => { throw new Error('Claude worker must not run'); },
+    runPiWrite: async (context) => {
+      seen = structuredClone(context);
+      return { provider: 'pi-openai-codex-subscription', output: 'WORKER: COMPLETE\n' };
+    },
+    runReviewer: async () => ({
+      provider: 'fixture-reviewer', verdict: 'APPROVE', output: 'approve',
+    }),
+  });
+
+  assert.deepEqual(seen.allowedPaths, ['src/allowed.mjs', 'tests/allowed.test.mjs']);
+  assert.deepEqual(seen.baseline, { head: 'a'.repeat(40) });
+  const envelope = JSON.parse(readFileSync(out, 'utf8'));
+  assert.equal(envelope.workerProfile, 'pi-openai-codex-subscription-bounded-writer');
+  assert.equal(envelope.repairProfile, 'disabled-for-pi-writer-v0');
+  assert.deepEqual(envelope.allowedWritePaths, [
+    'src/allowed.mjs', 'tests/allowed.test.mjs',
+  ]);
+  assert.equal(envelope.reviewerProfile, 'codex-subscription-read-only');
+});
+
 test('refuses a receipt path inside the candidate before launching an agent', () => {
   const result = spawnSync(process.execPath, [
     SCRIPT,

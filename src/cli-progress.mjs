@@ -201,7 +201,7 @@ export function createCliProgress({
 
 export function instrumentFactoryAdapters({ runWorker, runReviewer, runRepair, progress }) {
   let reviewRound = 0;
-  return Object.freeze({
+  const adapters = {
     runWorker: async (...args) => {
       progress.workerRunning();
       let result;
@@ -230,7 +230,9 @@ export function instrumentFactoryAdapters({ runWorker, runReviewer, runRepair, p
       else progress.finalReviewVerdict(result?.verdict);
       return result;
     },
-    runRepair: async (...args) => {
+  };
+  if (typeof runRepair === 'function') {
+    adapters.runRepair = async (...args) => {
       progress.repairRunning();
       let result;
       try {
@@ -241,6 +243,7 @@ export function instrumentFactoryAdapters({ runWorker, runReviewer, runRepair, p
       }
       progress.repairCompleted();
       return result;
-    },
-  });
+    };
+  }
+  return Object.freeze(adapters);
 }
