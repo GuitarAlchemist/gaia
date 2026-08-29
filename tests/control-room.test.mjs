@@ -237,12 +237,20 @@ test('the projection revision is verified and the content-addressed snapshot is 
 
 test('the selected dashboard seam is bound by a replayable Decision Receipt', () => {
   const design = readFileSync(new URL('../docs/factory-control-room.md', import.meta.url), 'utf8');
-  const body = JSON.parse(design.match(/Canonical receipt body:\s*```json\s*([^\n]+)\s*```/u)[1]);
-  const digest = createHash('sha256').update(canonicalJson(body)).digest('hex');
+  const bodies = [...design.matchAll(/Canonical receipt body:\s*```json\s*([^\n]+)\s*```/gu)]
+    .map((match) => JSON.parse(match[1]));
+  assert.equal(bodies.length, 2);
+  const [body, fogBody] = bodies;
 
   assert.equal(body.selectedDesign, 'pure-content-addressed-control-room-read-model');
   assert.equal(body.reversibility, 'freely-reversible');
-  assert.equal(design.includes(`Receipt SHA-256:\n\`${digest}\``), true);
+  assert.equal(fogBody.selectedDesign, 'snapshot-bound-fog-of-war-projection');
+  assert.equal(fogBody.baseCommit, 'a17392d3cf967bf2d7906d2cbd77dbc01f5f3c87');
+  assert.equal(fogBody.reversibility, 'freely-reversible');
+  for (const receipt of bodies) {
+    const digest = createHash('sha256').update(canonicalJson(receipt)).digest('hex');
+    assert.equal(design.includes(`Receipt SHA-256:\n\`${digest}\``), true);
+  }
 });
 
 test('the standalone dashboard spends its default view only on operator questions and evidence', () => {
@@ -351,4 +359,90 @@ test('a blocked portfolio names the dominant blocker instead of pretending there
     itemId: null,
     label: '2 items need missing evidence before Gaia can schedule them.',
   });
+});
+
+test('fog of war distinguishes known, partial and unobserved work without inventing confidence', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ itemId: 'issue-known', sourceState: 'AWAITING_HUMAN', drainState: 'BLOCKED_HUMAN' }),
+      item({ itemId: 'issue-partial', sourceState: 'CHECKS_AND_REVIEW_UNKNOWN', drainState: 'BLOCKED_EVIDENCE' }),
+      item({ itemId: 'issue-ready-unknown', sourceState: 'READY_WITH_UNKNOWN', drainState: 'BLOCKED_UNKNOWN' }),
+      item({ itemId: 'issue-unobserved', sourceState: 'EVIDENCE_UNKNOWN', drainState: 'BLOCKED_EVIDENCE' }),
+      item({ itemId: 'issue-missing', sourceState: 'MISSING_FROM_OPEN_SNAPSHOT', drainState: 'RECONCILE_REQUIRED' }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+
+  assert.deepEqual(snapshot.knowledgeCoverage, {
+    known: 1,
+    partial: 2,
+    unobserved: 2,
+    total: 5,
+    knownPercentage: 20,
+    label: '20% currently classified from sufficient evidence (1/5).',
+    caveat: 'Evidence coverage only — not completion, correctness or model confidence.',
+    frontier: {
+      kind: 'RECONNOITER_UNKNOWN_EVIDENCE',
+      count: 4,
+      label: 'Investigate 4 partially observed or unobserved items.',
+    },
+  });
+  assert.deepEqual(snapshot.items.map(({ knowledgeState }) => knowledgeState), [
+    'KNOWN', 'PARTIAL', 'PARTIAL', 'UNOBSERVED', 'UNOBSERVED',
+  ]);
+
+  const html = renderControlRoomHtml(snapshot);
+  assert.match(html, /Fog of war/u);
+  assert.match(html, /20% currently classified from sufficient evidence \(1\/5\)/u);
+  assert.match(html, /Known.*1.*Partial.*2.*Unobserved.*2/us);
+  assert.match(html, /Evidence coverage only — not completion, correctness or model confidence/u);
+  assert.match(html, /Investigate 4 partially observed or unobserved items/u);
+});
+
+test('fog of war fails closed when a future source state is not yet understood', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ sourceState: 'FUTURE_UNRECOGNIZED_STATE', drainState: 'BLOCKED_UNKNOWN' }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+
+  assert.equal(snapshot.items[0].knowledgeState, 'UNOBSERVED');
+  assert.equal(snapshot.knowledgeCoverage.knownPercentage, 0);
+  assert.equal(snapshot.knowledgeCoverage.frontier.count, 1);
+});
+
+test('the renderer refuses fog-of-war content that moved under an unchanged revision', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({
+      sourceState: 'EVIDENCE_UNKNOWN', drainState: 'BLOCKED_EVIDENCE',
+    })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+  const tampered = structuredClone(snapshot);
+  tampered.knowledgeCoverage.known = 1;
+  tampered.knowledgeCoverage.unobserved = 0;
+  tampered.knowledgeCoverage.knownPercentage = 100;
+  tampered.knowledgeCoverage.label = '100% currently classified from sufficient evidence (1/1).';
+
+  assert.throws(
+    () => renderControlRoomHtml(tampered),
+    (error) => error?.name === 'ControlRoomError' && error.code === 'InvalidSnapshot',
+  );
+});
+
+test('the renderer gives a typed refusal for a legacy snapshot without fog-of-war evidence', () => {
+  const snapshot = structuredClone(buildControlRoomSnapshot({
+    drainProjection: projection([item()]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  }));
+  delete snapshot.knowledgeCoverage;
+  for (const workItem of snapshot.items) delete workItem.knowledgeState;
+  const { revision: ignored, ...body } = snapshot;
+  snapshot.revision = createHash('sha256').update(canonicalJson(body)).digest('hex');
+
+  assert.throws(
+    () => renderControlRoomHtml(snapshot),
+    (error) => error?.name === 'ControlRoomError' && error.code === 'InvalidSnapshot',
+  );
 });

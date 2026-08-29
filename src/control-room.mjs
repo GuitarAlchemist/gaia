@@ -29,6 +29,17 @@ const BLOCKED_STATES = new Set([
   'BLOCKED_POLICY', 'BLOCKED_REVIEW', 'BLOCKED_TRIAGE', 'BLOCKED_UNKNOWN',
   'FAILED_AUTHORITY_CONSUMED', 'RECONCILE_REQUIRED',
 ]);
+const PARTIAL_KNOWLEDGE_STATES = new Set([
+  'READY_WITH_UNKNOWN', 'CHECKS_UNKNOWN', 'REVIEW_UNKNOWN',
+  'CHECKS_AND_REVIEW_UNKNOWN',
+]);
+const KNOWN_KNOWLEDGE_STATES = new Set([
+  'READY', 'BLOCKED_DEPENDENCY', 'AWAITING_HUMAN', 'DRAFT', 'BLOCKED_REVIEW',
+  'DUPLICATE', 'ARCHIVED', 'NEEDS_TRIAGE',
+]);
+const UNOBSERVED_KNOWLEDGE_STATES = new Set([
+  'EVIDENCE_UNKNOWN', 'MISSING_FROM_OPEN_SNAPSHOT',
+]);
 
 export class ControlRoomError extends Error {
   constructor(code, message) {
@@ -235,6 +246,58 @@ function blockerSummary(items) {
     .sort((left, right) => right.count - left.count || left.state.localeCompare(right.state));
 }
 
+function knowledgeState(sourceState) {
+  if (KNOWN_KNOWLEDGE_STATES.has(sourceState)) return 'KNOWN';
+  if (PARTIAL_KNOWLEDGE_STATES.has(sourceState)) return 'PARTIAL';
+  if (UNOBSERVED_KNOWLEDGE_STATES.has(sourceState)) return 'UNOBSERVED';
+  return 'UNOBSERVED';
+}
+
+function measureKnowledgeCoverage(items) {
+  const coverage = { known: 0, partial: 0, unobserved: 0 };
+  for (const item of items) {
+    coverage[item.knowledgeState.toLowerCase()] += 1;
+  }
+  const total = items.length;
+  const knownPercentage = total === 0 ? null : Math.round((coverage.known / total) * 100);
+  const frontierCount = coverage.partial + coverage.unobserved;
+  return {
+    ...coverage,
+    total,
+    knownPercentage,
+    label: total === 0
+      ? 'No portfolio items are available to classify.'
+      : `${knownPercentage}% currently classified from sufficient evidence (${coverage.known}/${total}).`,
+    caveat: 'Evidence coverage only — not completion, correctness or model confidence.',
+    frontier: {
+      kind: 'RECONNOITER_UNKNOWN_EVIDENCE',
+      count: frontierCount,
+      label: `Investigate ${frontierCount} partially observed or unobserved items.`,
+    },
+  };
+}
+
+function requireControlRoomSnapshot(value) {
+  if (!value || value.schema !== CONTROL_ROOM_SCHEMA
+      || value.effect !== 'NONE' || value.authority !== 'NONE'
+      || !Array.isArray(value.items) || typeof value.revision !== 'string') {
+    throw new ControlRoomError('InvalidSnapshot', 'a content-addressed Gaia control-room snapshot is required');
+  }
+  const { revision, ...body } = value;
+  const expectedRevision = createHash('sha256').update(canonicalJson(body)).digest('hex');
+  if (revision !== expectedRevision) {
+    throw new ControlRoomError('InvalidSnapshot', 'the control-room snapshot revision does not match its content');
+  }
+  if (value.items.some((item) => item?.knowledgeState !== knowledgeState(item?.sourceState))) {
+    throw new ControlRoomError('InvalidSnapshot', 'the control-room snapshot knowledge states are invalid');
+  }
+  const expectedCoverage = measureKnowledgeCoverage(value.items);
+  if (canonicalJson(value.knowledgeCoverage) !== canonicalJson(expectedCoverage)) {
+    throw new ControlRoomError('InvalidSnapshot', 'the control-room snapshot knowledge coverage is invalid');
+  }
+  return value;
+}
+
 function blockerAction(blocker) {
   const labels = {
     BLOCKED_EVIDENCE: `${blocker.count} items need missing evidence before Gaia can schedule them.`,
@@ -292,6 +355,7 @@ export function buildControlRoomSnapshot({
   const latest = latestProgressByItem(progressObservations);
   const items = structuredClone(projection.items).map((item) => ({
     ...item,
+    knowledgeState: knowledgeState(item.sourceState),
     progress: itemProgress(item.drainState),
     activity: itemActivity(item, latest.get(item.itemId), observedAtMs),
   }));
@@ -351,6 +415,7 @@ export function buildControlRoomSnapshot({
       percentage: null,
       reason: 'The portfolio is an open queue; it has no truthful global completion percentage.',
     },
+    knowledgeCoverage: measureKnowledgeCoverage(items),
     nextAction: nextActionFor(items, projection.decisions, blockers),
     items,
   };
@@ -377,6 +442,8 @@ const RENDER_COPY = Object.freeze({
     blocked: 'Blocked', slots: 'Free slots', currentGate: 'Current gate', noHeartbeat: 'No active heartbeat',
     staleHeartbeat: 'Stale heartbeat', realHeartbeat: 'Real heartbeat received', notMeasurable: 'Not measurable while blocked',
     pace: 'Pace', eta: 'ETA', blockerMix: 'Why work is blocked', topWork: 'Highest-priority work',
+    fog: 'Fog of war', known: 'Known', partial: 'Partial', unobserved: 'Unobserved',
+    frontier: 'Reconnaissance frontier',
     more: 'more items remain in the content-addressed snapshot', noItems: 'No work items in this snapshot.',
     items: 'items', noBlockers: 'No blockers recorded.',
     readOnly: 'Read-only dashboard: effect=NONE and authority=NONE.', technical: 'Technical identities',
@@ -389,6 +456,8 @@ const RENDER_COPY = Object.freeze({
     blocked: 'Bloqué', slots: 'Lanes libres', currentGate: 'Gate actuelle', noHeartbeat: 'Aucun heartbeat actif',
     staleHeartbeat: 'Heartbeat périmé', realHeartbeat: 'Heartbeat réel reçu', notMeasurable: 'Non mesurable tant que bloqué',
     pace: 'Rythme', eta: 'ETA', blockerMix: 'Pourquoi le travail est bloqué', topWork: 'Travail prioritaire',
+    fog: 'Brouillard de connaissance', known: 'Connu', partial: 'Partiel', unobserved: 'Non observé',
+    frontier: 'Frontière de reconnaissance',
     more: 'autres éléments restent dans le snapshot content-addressed', noItems: 'Aucun élément dans ce snapshot.',
     items: 'éléments', noBlockers: 'Aucun blocage enregistré.',
     readOnly: 'Dashboard read-only : effect=NONE et authority=NONE.', technical: 'Identités techniques',
@@ -508,10 +577,8 @@ function headlinePresentation(state) {
 }
 
 /** Render one dependency-free, shareable operator artifact. */
-export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
-  if (!snapshot || snapshot.schema !== CONTROL_ROOM_SCHEMA) {
-    throw new ControlRoomError('InvalidSnapshot', 'a Gaia control-room snapshot is required');
-  }
+export function renderControlRoomHtml(candidate, { language = 'en' } = {}) {
+  const snapshot = requireControlRoomSnapshot(candidate);
   const copy = RENDER_COPY[language];
   if (!copy) throw new ControlRoomError('InvalidLanguage', 'language must be en or fr');
   const prioritized = [...snapshot.items].sort((left, right) => {
@@ -531,6 +598,22 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
       `<div data-severity="blocked"><span><span class="semantic-symbol" aria-hidden="true">■</span><code>${escapeHtml(state)}</code></span><strong>${count}</strong></div>`
     )).join('')}</div>`
     : `<p class="empty">${copy.noBlockers}</p>`;
+  const coverage = snapshot.knowledgeCoverage;
+  const coverageLabel = language === 'fr'
+    ? coverage.total === 0
+      ? 'Aucun élément du portfolio à classifier.'
+      : `${coverage.knownPercentage}% actuellement classifié avec des preuves suffisantes (${coverage.known}/${coverage.total}).`
+    : coverage.label;
+  const coverageCaveat = language === 'fr'
+    ? 'Couverture des preuves uniquement — ni avancement, ni exactitude, ni confiance du modèle.'
+    : coverage.caveat;
+  const frontierLabel = language === 'fr'
+    ? `Examiner ${coverage.frontier.count} éléments partiellement observés ou non observés.`
+    : coverage.frontier.label;
+  const denominator = Math.max(coverage.total, 1);
+  const knownWidth = (coverage.known / denominator) * 100;
+  const partialWidth = (coverage.partial / denominator) * 100;
+  const unobservedWidth = (coverage.unobserved / denominator) * 100;
   const pulseCss = snapshot.showSpinner
     ? `
       @keyframes heartbeat { 50% { outline-color: transparent; } }
@@ -587,6 +670,15 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
     .meter { align-items: center; display: grid; gap: 12px; grid-template-columns: minmax(120px, 1fr) auto; margin-top: 16px; }
     progress { accent-color: var(--green); height: 10px; width: 100%; } .not-measurable { color: var(--amber); }
     .lower-grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .fog-grid { display: grid; gap: 16px; grid-template-columns: minmax(220px, .8fr) minmax(0, 1.2fr); }
+    .fog-meter { background: #050a12; border: 1px solid var(--line); display: flex; height: 18px; overflow: hidden; }
+    .fog-meter span { display: block; min-width: 0; }
+    .fog-known { background: var(--green); } .fog-partial { background: var(--amber); } .fog-unobserved { background: #35435a; }
+    .fog-counts { display: grid; gap: 8px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 12px; }
+    .fog-counts div { background: var(--panel-2); border: 1px solid var(--line); padding: 10px; }
+    .fog-counts span { color: var(--muted); display: block; font-size: 11px; text-transform: uppercase; }
+    .fog-counts strong { display: block; font-size: 22px; margin-top: 3px; }
+    .fog-frontier { border-left: 3px solid var(--amber); margin: 0; padding-left: 14px; }
     .facts { display: grid; gap: 10px; }
     .fact { background: var(--panel-2); border-left: 3px solid var(--blue); padding: 13px; }
     .fact strong { display: block; font-size: 17px; line-height: 1.35; margin-top: 4px; }
@@ -595,7 +687,7 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
     .blocker-list strong { font-size: 20px; }
     .evidence { align-items: start; display: grid; gap: 14px; grid-template-columns: 1fr 1fr; }
     code { color: #bdd2f2; overflow-wrap: anywhere; } .empty { color: var(--muted); }
-    @media (max-width: 850px) { .hero, .lower-grid, .evidence { grid-template-columns: 1fr; } .work-list { grid-template-columns: 1fr; } }
+    @media (max-width: 850px) { .hero, .lower-grid, .evidence, .fog-grid { grid-template-columns: 1fr; } .work-list { grid-template-columns: 1fr; } }
     @media (max-width: 600px) { .metrics { grid-template-columns: repeat(2, 1fr); } main { padding: 16px; } header { align-items: start; gap: 12px; } }
     ${pulseCss}
   </style>
@@ -624,6 +716,28 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
     <div class="metric" data-severity="warning"><span><span class="semantic-symbol" aria-hidden="true">▲</span>${copy.stale}</span><strong>${snapshot.staleCount}</strong></div>
     <div class="metric" data-severity="blocked"><span><span class="semantic-symbol" aria-hidden="true">■</span>${copy.blocked}</span><strong>${snapshot.blockedCount}</strong></div>
     <div class="metric" data-severity="neutral"><span><span class="semantic-symbol" aria-hidden="true">○</span>${copy.slots}</span><strong>${snapshot.capacity.available}/${snapshot.capacity.occupied + snapshot.capacity.available}</strong></div>
+  </section>
+  <section class="section-panel">
+    <h2>${copy.fog}</h2>
+    <div class="fog-grid">
+      <div>
+        <h3>${escapeHtml(coverageLabel)}</h3>
+        <div class="fog-meter" role="img" aria-label="${escapeHtml(`${copy.known} ${coverage.known}, ${copy.partial} ${coverage.partial}, ${copy.unobserved} ${coverage.unobserved}`)}">
+          <span class="fog-known" style="width:${knownWidth}%"></span>
+          <span class="fog-partial" style="width:${partialWidth}%"></span>
+          <span class="fog-unobserved" style="width:${unobservedWidth}%"></span>
+        </div>
+        <div class="fog-counts">
+          <div><span>● ${copy.known}</span><strong>${coverage.known}</strong></div>
+          <div><span>▲ ${copy.partial}</span><strong>${coverage.partial}</strong></div>
+          <div><span>○ ${copy.unobserved}</span><strong>${coverage.unobserved}</strong></div>
+        </div>
+      </div>
+      <div>
+        <p class="fog-frontier"><strong>${copy.frontier}</strong><br>${escapeHtml(frontierLabel)}</p>
+        <p class="evidence-line">${escapeHtml(coverageCaveat)}</p>
+      </div>
+    </div>
   </section>
   <section class="section-panel">
     <div class="section-heading"><h2>${copy.progress}</h2><span class="as-of">${snapshot.totalItems} ${copy.items}</span></div>
