@@ -67,6 +67,32 @@ operation and keeps protocol change Locality inside the authority implementation
 The current encrypted-file Adapter remains available as a legacy local Adapter. It is not the
 strict remote profile because its private key is a file even though the passphrase is not.
 
+### Decision receipt
+
+The compared alternatives are bound by design commit
+`06b3e386af7bba4e09346e1c94122e7d6f2d7fb0`, over base revision
+`57a7775bce97fa570987fbee9a72941a177b4dad`. This receipt is the explicit
+permission-to-implement artifact. Its `revision` is SHA-256 of canonical JSON for every
+preceding field in the object.
+
+```json
+{
+  "schema": "gaia-architecture-decision/1",
+  "baseRevision": "57a7775bce97fa570987fbee9a72941a177b4dad",
+  "designArtifactCommit": "06b3e386af7bba4e09346e1c94122e7d6f2d7fb0",
+  "alternatives": [
+    "A: one deep run",
+    "B: transport-neutral authority seam",
+    "C: browser workflow interface"
+  ],
+  "selected": "A externally, B internally",
+  "reversibility": "FREELY_REVERSIBLE_PROTOTYPE",
+  "rollback": "remove the prototype module, focused tests, inventory row, and this document",
+  "revisitTrigger": "select a stable HTTPS WebAuthn RP origin, credential recovery, and transactional CAS store",
+  "revision": "83180d77adc39e8eed936cc846d1fc19a5f441d6074f412234d94d61375830a3"
+}
+```
+
 ## Selected Interface
 
 ```text
@@ -145,3 +171,7 @@ Gaia has an explicitly selected stable HTTPS relying-party origin, protected cre
 enrollment/recovery and a transactional store. Those are one-way-door operational decisions;
 they must not be inferred from a localhost prototype.
 
+R0 is freely reversible: remove the prototype Module, its focused tests, the README inventory
+row and this design artifact. It owns no listener, credential, durable state, migration or live
+authority. Revisit a production Adapter only after all three named operational inputs exist;
+until then, additional protocol surface is rejected rather than simulated.
