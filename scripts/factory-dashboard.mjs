@@ -60,6 +60,12 @@ function readProgress(path, projection) {
     throw new UsageError('progress must be readable JSON Lines');
   }
   const capturedAt = statSync(path).mtime.toISOString();
+  const rawRecords = records.filter(({ schema } = {}) => schema !== 'gaia-control-room-progress-observation/1');
+  if (rawRecords.length > 0 && records.length > 1) {
+    throw new UsageError(
+      'multiple raw progress records are ambiguous; use explicit progress observation envelopes',
+    );
+  }
   const active = projection.items.filter(
     ({ drainState }) => drainState === 'CLAIMED' || drainState === 'RUNNING',
   );

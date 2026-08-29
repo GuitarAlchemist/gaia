@@ -10,6 +10,46 @@ whether a percentage or ETA is grounded in comparable evidence.
 The control room is a read model over those existing contracts. It is not another workflow
 engine, database, authority surface or source of truth.
 
+## Design It Twice
+
+The load-bearing seam is the conversion of an immutable drain projection into operator-facing
+status. Three designs were compared before selecting R0:
+
+1. **Pure content-addressed read model — selected.** One pure Module verifies the projection
+   revision, derives an immutable snapshot and renders a dependency-free artifact. The small
+   interface hides heartbeat freshness, gate progress, blocker ranking and ETA policy. Failures
+   are typed refusals. The filesystem CLI is a separate replaceable Adapter.
+2. **Embedded dashboard server — rejected.** A listener would simplify navigation, but would
+   mix transport lifetime, port ownership and browser delivery into the truth Module. It also
+   creates a larger operational and security surface without improving status accuracy.
+3. **Mutable dashboard database — rejected.** Persisted materialized status could support richer
+   history, but would create a second source of truth, migration obligations and stale-write
+   failure modes. R0 instead accepts explicit completed-run evidence from its caller.
+
+The selected design optimizes for locality, fail-closed verification and testability. Its cost is
+that a separate static host or file viewer must display the artifact and a caller must retain any
+history used for pace estimates.
+
+## Decision Receipt
+
+The decision is bound to Gaia base commit
+`77461d277f187766bc7d1989fc3b155c524e52ac`, Git blob
+`92a0bf249bd7d973c030261219704583709ba09b` for `src/portfolio-drain.mjs`, and Git blob
+`4b4c3f0f8a8aaa2047d9284ffc279868b23d3479` for
+`docs/engineering-and-research-principles.md`.
+
+Canonical receipt body:
+
+```json
+{"baseCommit":"77461d277f187766bc7d1989fc3b155c524e52ac","inputBlobs":{"engineeringPrinciples":"4b4c3f0f8a8aaa2047d9284ffc279868b23d3479","portfolioDrain":"92a0bf249bd7d973c030261219704583709ba09b"},"reversibility":"freely-reversible","schema":"gaia-decision-receipt/1","selectedDesign":"pure-content-addressed-control-room-read-model","status":"SELECTED"}
+```
+
+Receipt SHA-256:
+`914eaebe1f5703c7faa9271486cd049284b24355badf998ec3cca56a385ab668`.
+
+This receipt selects an implementation candidate; it grants no runtime, publication or merge
+authority and is not independent approval.
+
 ## Default view
 
 Every visible element answers one operator question:
@@ -33,7 +73,11 @@ understand the default page.
 - The portfolio is an open queue. Its global completion percentage is always `null`.
 - ETA is `UNKNOWN` below five comparable completed `portfolio-factory-run` samples. At five or
   more samples, the estimate is the remaining historical interquartile range after subtracting
-  the current run's elapsed time. The UI always displays the sample size and method.
+  the current run's elapsed time. More than one active run makes the single dashboard ETA
+  `UNKNOWN`; per-run forecasts are not invented. The UI always displays the sample size and
+  method.
+- The source projection revision is recomputed before any status is derived. The returned
+  snapshot is deeply immutable, so displayed content cannot move under one revision.
 - `effect` and `authority` are both `NONE`. This module cannot start a lane, spend a grant,
   publish, merge, assign, label or mutate GitHub.
 
@@ -53,9 +97,19 @@ derived JSON/HTML outputs and can poll the input files from 1 through 60 seconds
 network listener. English is the default; `--language fr` selects the optional French renderer.
 
 Raw `gaia-cli-progress/1` JSONL is accepted only when exactly one drain item is active. With
-multiple active items, each line must use the explicit
+more than one raw line, or with multiple active items, each line must use the explicit
 `gaia-control-room-progress-observation/1` envelope carrying `itemId`, `capturedAt` and the
 original `record`; otherwise the adapter refuses the ambiguous attribution.
+
+## Reversibility
+
+**Class: freely reversible.** R0 has no listener, persistent store, migration, bus export or
+privileged effect. Removing the Module, Adapter, tests, documentation and generated artifacts
+removes the behavior without transforming user data. Roll back if independent review finds that
+the read model can display a state not bound by its source revision, or if operating the Adapter
+requires hidden mutable state. Revisit a server only when a real remote consumer cannot use a
+static artifact; revisit persistence only after a measured history query cannot be served by an
+explicit caller-owned dataset.
 
 ## What R0 does not claim
 

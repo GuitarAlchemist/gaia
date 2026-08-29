@@ -30,12 +30,19 @@ function portfolio(workItems) {
   };
 }
 
+function projection(value) {
+  return {
+    ...value,
+    revision: createHash('sha256').update(canonicalJson(value)).digest('hex'),
+  };
+}
+
 test('the dashboard CLI turns the drain projection and real progress JSONL into shareable artifacts', () => {
   const projectionPath = join(scratch, 'projection.json');
   const progressPath = join(scratch, 'progress.jsonl');
   const htmlPath = join(scratch, 'control-room.html');
   const snapshotPath = join(scratch, 'control-room.json');
-  writeFileSync(projectionPath, `${JSON.stringify({
+  writeFileSync(projectionPath, `${JSON.stringify(projection({
     schema: 'gaia-portfolio-drain-projection/1',
     portfolioRevision: 'a'.repeat(64),
     effect: 'NONE', authority: 'NONE', capacity: 4,
@@ -45,8 +52,8 @@ test('the dashboard CLI turns the drain projection and real progress JSONL into 
       itemNumber: 17, title: 'Integrate the factory control room', sourceState: 'READY',
       observedPortfolioRevision: 'a'.repeat(64), drainState: 'RUNNING', hold: null,
     }],
-    decisions: [], revision: 'b'.repeat(64),
-  })}\n`, 'utf8');
+    decisions: [],
+  }))}\n`, 'utf8');
   writeFileSync(progressPath, `${JSON.stringify({
     schema: 'gaia-cli-progress/1', stage: 'worker_running', elapsedMs: 35_000,
     remainingProviderInvocations: 4, remainingProviderTimeUpperBoundMs: 2_400_000,
@@ -73,6 +80,35 @@ test('the dashboard CLI turns the drain projection and real progress JSONL into 
   assert.match(readFileSync(htmlPath, 'utf8'), /Real heartbeat received/u);
   assert.match(stdout, /ACTIVE/u);
   assert.match(stdout, /OBSERVE_ACTIVE_RUN/u);
+});
+
+test('the dashboard CLI refuses multiple raw progress lines with one shared file timestamp', () => {
+  const projectionPath = join(scratch, 'ambiguous-projection.json');
+  const progressPath = join(scratch, 'ambiguous-progress.jsonl');
+  const htmlPath = join(scratch, 'ambiguous-control-room.html');
+  const snapshotPath = join(scratch, 'ambiguous-control-room.json');
+  writeFileSync(projectionPath, `${JSON.stringify(projection({
+    schema: 'gaia-portfolio-drain-projection/1', portfolioRevision: 'a'.repeat(64),
+    effect: 'NONE', authority: 'NONE', capacity: 4,
+    counts: { occupied: 1, available: 3 },
+    items: [{
+      repository: 'GuitarAlchemist/gaia', itemKind: 'ISSUE', itemId: 'issue-17',
+      itemNumber: 17, title: 'Integrate the factory control room', sourceState: 'READY',
+      observedPortfolioRevision: 'a'.repeat(64), drainState: 'RUNNING', hold: null,
+    }],
+    decisions: [],
+  }))}\n`, 'utf8');
+  const record = {
+    schema: 'gaia-cli-progress/1', stage: 'worker_running', elapsedMs: 35_000, heartbeat: true,
+  };
+  writeFileSync(progressPath, `${JSON.stringify(record)}\n${JSON.stringify({
+    ...record, elapsedMs: 40_000,
+  })}\n`, 'utf8');
+
+  assert.throws(() => runFactoryDashboardCli([
+    '--projection', projectionPath, '--progress', progressPath,
+    '--html-out', htmlPath, '--snapshot-out', snapshotPath,
+  ]), /multiple raw progress records are ambiguous/u);
 });
 
 test('the dashboard CLI can reconcile a real Gaia portfolio without a hand-made projection', () => {

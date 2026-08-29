@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { buildControlRoomSnapshot, renderControlRoomHtml } from '../src/control-room.mjs';
@@ -17,7 +18,7 @@ function canonicalJson(value) {
 }
 
 function projection(items = [], decisions = []) {
-  return {
+  const body = {
     schema: 'gaia-portfolio-drain-projection/1',
     portfolioRevision: SHA,
     effect: 'NONE',
@@ -26,7 +27,10 @@ function projection(items = [], decisions = []) {
     counts: { occupied: 0, available: 4 },
     items,
     decisions,
-    revision: 'b'.repeat(64),
+  };
+  return {
+    ...body,
+    revision: createHash('sha256').update(canonicalJson(body)).digest('hex'),
   };
 }
 
@@ -141,6 +145,25 @@ test('a recorded RUNNING item without a fresh heartbeat is visibly stale, not an
   });
 });
 
+test('a fresh progress record without a real heartbeat is stale and never animates', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item()]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    progressObservations: [{
+      itemId: 'issue-17', capturedAt: '2026-08-29T18:40:15.000Z',
+      record: {
+        schema: 'gaia-cli-progress/1', stage: 'worker_running', elapsedMs: 35_000,
+        heartbeat: false,
+      },
+    }],
+  });
+
+  assert.equal(snapshot.headline.state, 'STALE');
+  assert.equal(snapshot.activeCount, 0);
+  assert.equal(snapshot.showSpinner, false);
+  assert.equal(snapshot.items[0].activity.state, 'STALE');
+});
+
 test('ETA appears only from at least five comparable completed runs and states its sample', () => {
   const snapshot = buildControlRoomSnapshot({
     drainProjection: projection([item()]),
@@ -172,6 +195,54 @@ test('ETA appears only from at least five comparable completed runs and states i
     sampleSize: 5,
     method: 'historical-interquartile-range',
   });
+});
+
+test('a portfolio with multiple active runs has no fabricated single-run ETA', () => {
+  const active = (itemId, elapsedMs) => ({
+    itemId, capturedAt: '2026-08-29T18:40:15.000Z',
+    record: { schema: 'gaia-cli-progress/1', stage: 'worker_running', elapsedMs, heartbeat: true },
+  });
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ itemId: 'issue-17' }), item({ itemId: 'issue-18', itemNumber: 18 }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    progressObservations: [active('issue-17', 35_000), active('issue-18', 50_000)],
+    completedRuns: [80_000, 100_000, 120_000, 140_000, 160_000].map((elapsedMs) => ({
+      workflow: 'portfolio-factory-run', outcome: 'COMPLETED', elapsedMs,
+    })),
+  });
+
+  assert.deepEqual(snapshot.eta, {
+    state: 'UNKNOWN', label: 'Unknown', reason: 'More than one run is active.',
+  });
+});
+
+test('the projection revision is verified and the content-addressed snapshot is deeply immutable', () => {
+  const input = projection([item()]);
+  assert.throws(() => buildControlRoomSnapshot({
+    drainProjection: { ...input, revision: '0'.repeat(64) },
+    observedAt: '2026-08-29T18:40:20.000Z',
+  }), (error) => error.code === 'InvalidProjection');
+
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: input,
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+  assert.equal(Object.isFrozen(snapshot.items), true);
+  assert.equal(Object.isFrozen(snapshot.items[0]), true);
+  assert.equal(Object.isFrozen(snapshot.items[0].progress), true);
+  assert.throws(() => { snapshot.items[0].title = 'mutated'; }, TypeError);
+});
+
+test('the selected dashboard seam is bound by a replayable Decision Receipt', () => {
+  const design = readFileSync(new URL('../docs/factory-control-room.md', import.meta.url), 'utf8');
+  const body = JSON.parse(design.match(/Canonical receipt body:\s*```json\s*([^\n]+)\s*```/u)[1]);
+  const digest = createHash('sha256').update(canonicalJson(body)).digest('hex');
+
+  assert.equal(body.selectedDesign, 'pure-content-addressed-control-room-read-model');
+  assert.equal(body.reversibility, 'freely-reversible');
+  assert.equal(design.includes(`Receipt SHA-256:\n\`${digest}\``), true);
 });
 
 test('the standalone dashboard spends its default view only on operator questions and evidence', () => {
@@ -241,6 +312,20 @@ test('status meaning is carried by words and symbols, never colour alone', () =>
   assert.match(renderControlRoomHtml(blocked), /data-severity="blocked"[^>]*>.*■.*Blocked/us);
   assert.match(renderControlRoomHtml(blocked), /data-severity="warning"[^>]*>.*▲/us);
   assert.match(renderControlRoomHtml(active), /data-severity="healthy"[^>]*>.*●.*Active/us);
+});
+
+test('the optional French renderer translates operator guidance, not only headings', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'BLOCKED_EVIDENCE' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+  const html = renderControlRoomHtml(snapshot, { language: 'fr' });
+
+  assert.match(html, /Aucun travail Gaia ne progresse actuellement/u);
+  assert.match(html, /éléments nécessitent des preuves manquantes/u);
+  assert.match(html, /Résoudre le blocage nommé avant de mesurer l’avancement/u);
+  assert.match(html, /Rythme inconnu/u);
+  assert.doesNotMatch(html, /No Gaia work|items need missing evidence|Resolve the named blocker/u);
 });
 
 test('a blocked portfolio names the dominant blocker instead of pretending there is no next action', () => {

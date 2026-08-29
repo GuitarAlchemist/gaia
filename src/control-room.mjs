@@ -56,7 +56,20 @@ function requireProjection(value) {
       'InvalidProjection', 'an authority-free Gaia portfolio-drain projection is required',
     );
   }
+  const { revision, ...body } = value;
+  const expectedRevision = createHash('sha256').update(canonicalJson(body)).digest('hex');
+  if (typeof revision !== 'string' || revision !== expectedRevision) {
+    throw new ControlRoomError(
+      'InvalidProjection', 'the portfolio-drain projection revision does not match its content',
+    );
+  }
   return value;
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value)) deepFreeze(nested);
+  return Object.freeze(value);
 }
 
 function requireTimestamp(value) {
@@ -79,7 +92,15 @@ function latestProgressByItem(observations) {
       throw new ControlRoomError('InvalidObservation', 'progress observation shape is invalid');
     }
     const previous = latest.get(observation.itemId);
-    if (!previous || Date.parse(previous.capturedAt) < Date.parse(observation.capturedAt)) {
+    const previousAt = previous ? Date.parse(previous.capturedAt) : Number.NEGATIVE_INFINITY;
+    const currentAt = Date.parse(observation.capturedAt);
+    if (previous && previousAt === currentAt
+        && canonicalJson(previous.record) !== canonicalJson(observation.record)) {
+      throw new ControlRoomError(
+        'InvalidObservation', 'conflicting progress observations share one item and timestamp',
+      );
+    }
+    if (!previous || previousAt < currentAt) {
       latest.set(observation.itemId, observation);
     }
   }
@@ -115,7 +136,7 @@ function itemActivity(item, observation, observedAtMs) {
   const fresh = Number.isFinite(capturedAtMs)
     && observedAtMs >= capturedAtMs
     && observedAtMs - capturedAtMs <= HEARTBEAT_FRESH_MS;
-  const running = fresh && RUNNING_STAGES.has(stage);
+  const running = fresh && observation.record.heartbeat === true && RUNNING_STAGES.has(stage);
   return {
     state: running ? 'ACTIVE' : 'STALE',
     stage,
@@ -175,6 +196,9 @@ function measurePace(completedRuns) {
 
 function forecastEta({ activeItems, pace, durations }) {
   if (activeItems.length === 0) return null;
+  if (activeItems.length > 1) {
+    return { state: 'UNKNOWN', label: 'Unknown', reason: 'More than one run is active.' };
+  }
   if (pace.state !== 'MEASURED') {
     return {
       state: 'UNKNOWN', label: 'Unknown', reason: 'Insufficient comparable history.',
@@ -266,7 +290,7 @@ export function buildControlRoomSnapshot({
   const changedAt = requireTimestamp(sourceChangedAt);
   const observedAtMs = Date.parse(at);
   const latest = latestProgressByItem(progressObservations);
-  const items = projection.items.map((item) => ({
+  const items = structuredClone(projection.items).map((item) => ({
     ...item,
     progress: itemProgress(item.drainState),
     activity: itemActivity(item, latest.get(item.itemId), observedAtMs),
@@ -306,7 +330,7 @@ export function buildControlRoomSnapshot({
     staleCount,
     blockedCount,
     totalItems: items.length,
-    capacity: projection.counts,
+    capacity: { ...projection.counts },
     blockers,
     showSpinner: items.some(({ activity }) => activity.showPulse),
     pace: measured.pace,
@@ -330,7 +354,7 @@ export function buildControlRoomSnapshot({
     nextAction: nextActionFor(items, projection.decisions, blockers),
     items,
   };
-  return Object.freeze({
+  return deepFreeze({
     ...body,
     revision: createHash('sha256').update(canonicalJson(body)).digest('hex'),
   });
@@ -354,6 +378,7 @@ const RENDER_COPY = Object.freeze({
     staleHeartbeat: 'Stale heartbeat', realHeartbeat: 'Real heartbeat received', notMeasurable: 'Not measurable while blocked',
     pace: 'Pace', eta: 'ETA', blockerMix: 'Why work is blocked', topWork: 'Highest-priority work',
     more: 'more items remain in the signed snapshot', noItems: 'No work items in this snapshot.',
+    items: 'items', noBlockers: 'No blockers recorded.',
     readOnly: 'Read-only dashboard: effect=NONE and authority=NONE.', technical: 'Technical identities',
     state: { ACTIVE: 'Active', STALE: 'Needs attention', PAUSED: 'Paused' },
   }),
@@ -365,12 +390,82 @@ const RENDER_COPY = Object.freeze({
     staleHeartbeat: 'Heartbeat périmé', realHeartbeat: 'Heartbeat réel reçu', notMeasurable: 'Non mesurable tant que bloqué',
     pace: 'Rythme', eta: 'ETA', blockerMix: 'Pourquoi le travail est bloqué', topWork: 'Travail prioritaire',
     more: 'autres items restent dans le snapshot signé', noItems: 'Aucun élément dans ce snapshot.',
+    items: 'éléments', noBlockers: 'Aucun blocage enregistré.',
     readOnly: 'Dashboard read-only : effect=NONE et authority=NONE.', technical: 'Identités techniques',
     state: { ACTIVE: 'En cours', STALE: 'À vérifier', PAUSED: 'En pause' },
   }),
 });
 
-function renderProgress(item, copy) {
+function localizedHeadline(snapshot, language) {
+  if (language === 'en') return snapshot.headline;
+  const details = {
+    PAUSED: 'Aucun travail Gaia ne progresse actuellement.',
+    ACTIVE: `${snapshot.activeCount} exécution${snapshot.activeCount === 1 ? '' : 's'} Gaia en cours.`,
+    STALE: `${snapshot.staleCount} exécution${snapshot.staleCount === 1 ? '' : 's'} sans heartbeat récent.`,
+  };
+  return {
+    state: snapshot.headline.state,
+    label: RENDER_COPY.fr.state[snapshot.headline.state],
+    detail: details[snapshot.headline.state],
+  };
+}
+
+function localizedNextAction(snapshot, language) {
+  if (language === 'en') return snapshot.nextAction.label;
+  const blockerCount = snapshot.blockers.find(
+    ({ state }) => `TRIAGE_${state}` === snapshot.nextAction.kind,
+  )?.count ?? 0;
+  const labels = {
+    CHECK_STALE_RUN: 'Vérifier l’exécution : son dernier heartbeat est périmé.',
+    OBSERVE_ACTIVE_RUN: 'Attendre le résultat du worker, puis lancer la review indépendante.',
+    CLAIM_FACTORY_RUN: 'Autoriser et réclamer la prochaine exécution bornée de la factory.',
+    PREPARE_PUBLICATION_INTENT: 'Préparer l’intention de publication sans autorité.',
+    TRIAGE_BLOCKED_EVIDENCE: `${blockerCount} éléments nécessitent des preuves manquantes avant leur planification.`,
+    TRIAGE_BLOCKED_HUMAN: `${blockerCount} éléments nécessitent une décision humaine.`,
+    NONE: 'Aucune prochaine action exécutable n’est disponible.',
+  };
+  return labels[snapshot.nextAction.kind]
+    ?? `${blockerCount} éléments nécessitent la résolution du blocage indiqué.`;
+}
+
+function localizedGate(item, language) {
+  if (language === 'en') return item.progress.currentGate;
+  return {
+    QUEUED: 'Réclamer une exécution bornée de la factory',
+    CLAIMED: 'Démarrer l’exécution autorisée de la factory',
+    RUNNING: 'Construire puis faire relire indépendamment le candidat',
+    CANDIDATE_READY: 'Publier le candidat relu',
+    AWAITING_MERGE_AUTHORITY: 'Obtenir une autorisation explicite de fusion',
+    PUBLISHED: 'Fusionner ou fermer la pull request publiée',
+    TERMINAL_MERGED: 'Terminé',
+    TERMINAL_CLOSED: 'Terminé',
+  }[item.drainState] ?? 'Résoudre le blocage nommé avant de mesurer l’avancement';
+}
+
+function localizedPace(snapshot, language) {
+  if (language === 'en') return snapshot.pace.label;
+  return snapshot.pace.state === 'MEASURED'
+    ? `Médiane historique : ${formatDuration(snapshot.pace.medianCycleMs)} par exécution comparable terminée.`
+    : `Rythme inconnu : ${snapshot.pace.sampleSize}/5 exécutions comparables terminées.`;
+}
+
+function localizedEta(snapshot, language) {
+  if (language === 'en') return etaExplanation(snapshot);
+  if (snapshot.eta.state === 'FORECAST') {
+    return `Entre ${formatDuration(snapshot.eta.remainingRangeMs[0])} et ${formatDuration(snapshot.eta.remainingRangeMs[1])}`
+      + ` · ${snapshot.eta.sampleSize} exécutions comparables · intervalle interquartile`;
+  }
+  const reasons = {
+    'Insufficient comparable history.': 'Historique comparable insuffisant.',
+    'Elapsed time is unavailable.': 'Temps écoulé indisponible.',
+    'More than one run is active.': 'Plusieurs exécutions sont actives.',
+    'The heartbeat is stale; no reliable ETA exists.': 'Le heartbeat est périmé ; aucune ETA fiable.',
+    'There is no active run to estimate.': 'Aucune exécution active à estimer.',
+  };
+  return `Inconnue · ${reasons[snapshot.eta.reason] ?? 'Preuve insuffisante.'}`;
+}
+
+function renderProgress(item, copy, language) {
   const { progress, activity } = item;
   const severity = activity.showPulse ? 'healthy'
     : activity.state === 'STALE' ? 'warning'
@@ -392,7 +487,7 @@ function renderProgress(item, copy) {
       ${heartbeat}
     </div>
     <div class="meter">${meter}</div>
-    <p><strong>${copy.currentGate}:</strong> ${escapeHtml(progress.currentGate)}</p>
+    <p><strong>${copy.currentGate}:</strong> ${escapeHtml(localizedGate(item, language))}</p>
     <p class="evidence-line"><code>${escapeHtml(item.drainState)}</code> · ${escapeHtml(item.itemKind)} #${item.itemNumber}</p>
   </article>`;
 }
@@ -428,14 +523,14 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
   });
   const visible = prioritized.slice(0, 3);
   const items = visible.length > 0
-    ? visible.map((item) => renderProgress(item, copy)).join('\n')
+    ? visible.map((item) => renderProgress(item, copy, language)).join('\n')
     : `<p class="empty">${copy.noItems}</p>`;
   const remaining = Math.max(0, snapshot.items.length - visible.length);
   const blockers = snapshot.blockers.length > 0
     ? `<div class="blocker-list">${snapshot.blockers.slice(0, 5).map(({ state, count }) => (
       `<div data-severity="blocked"><span><span class="semantic-symbol" aria-hidden="true">■</span><code>${escapeHtml(state)}</code></span><strong>${count}</strong></div>`
     )).join('')}</div>`
-    : '<p class="empty">No blockers recorded.</p>';
+    : `<p class="empty">${copy.noBlockers}</p>`;
   const pulseCss = snapshot.showSpinner
     ? `
       @keyframes heartbeat { 50% { outline-color: transparent; } }
@@ -443,6 +538,7 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
       @media (prefers-reduced-motion: reduce) { .heartbeat-pulse { animation: none; } }`
     : '';
   const headline = headlinePresentation(snapshot.headline.state);
+  const localizedHeadlineValue = localizedHeadline(snapshot, language);
   const nextSeverity = snapshot.nextAction.kind === 'NONE' ? 'neutral'
     : snapshot.nextAction.kind === 'OBSERVE_ACTIVE_RUN' ? 'healthy' : 'warning';
   return `<!doctype html>
@@ -514,13 +610,13 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
   <section class="hero">
     <div class="now">
       <h2>${copy.now}</h2>
-      <div class="state ${escapeHtml(snapshot.headline.state)}">${escapeHtml(snapshot.headline.label)}</div>
-      <p>${escapeHtml(snapshot.headline.detail)}</p>
+      <div class="state ${escapeHtml(snapshot.headline.state)}">${escapeHtml(localizedHeadlineValue.label)}</div>
+      <p>${escapeHtml(localizedHeadlineValue.detail)}</p>
     </div>
     <div class="next" data-severity="${nextSeverity}">
       <h2>${copy.next}</h2>
       <code>${escapeHtml(snapshot.nextAction.kind)}</code>
-      <div>${escapeHtml(snapshot.nextAction.label)}</div>
+      <div>${escapeHtml(localizedNextAction(snapshot, language))}</div>
     </div>
   </section>
   <section class="metrics" aria-label="Portfolio facts">
@@ -530,18 +626,20 @@ export function renderControlRoomHtml(snapshot, { language = 'en' } = {}) {
     <div class="metric" data-severity="neutral"><span><span class="semantic-symbol" aria-hidden="true">○</span>${copy.slots}</span><strong>${snapshot.capacity.available}/${snapshot.capacity.occupied + snapshot.capacity.available}</strong></div>
   </section>
   <section class="section-panel">
-    <div class="section-heading"><h2>${copy.progress}</h2><span class="as-of">${snapshot.totalItems} items</span></div>
+    <div class="section-heading"><h2>${copy.progress}</h2><span class="as-of">${snapshot.totalItems} ${copy.items}</span></div>
     <h3>${copy.topWork}</h3>
     <div class="work-list">${items}</div>
     ${remaining > 0 ? `<p class="evidence-line">+ ${remaining} ${copy.more}.</p>` : ''}
-    <p class="evidence-line">${escapeHtml(snapshot.portfolioCompletion.reason)}</p>
+    <p class="evidence-line">${language === 'fr'
+    ? 'Le portfolio est une file ouverte ; il n’a pas de pourcentage global d’achèvement fiable.'
+    : escapeHtml(snapshot.portfolioCompletion.reason)}</p>
   </section>
   <section class="lower-grid">
     <div class="section-panel">
       <h2>${copy.paceEta}</h2>
       <div class="facts">
-        <div class="fact">${copy.pace}<strong>${escapeHtml(snapshot.pace.label)}</strong></div>
-        <div class="fact">${copy.eta}<strong>${escapeHtml(etaExplanation(snapshot))}</strong></div>
+        <div class="fact">${copy.pace}<strong>${escapeHtml(localizedPace(snapshot, language))}</strong></div>
+        <div class="fact">${copy.eta}<strong>${escapeHtml(localizedEta(snapshot, language))}</strong></div>
       </div>
     </div>
     <div class="section-panel"><h2>${copy.blockerMix}</h2>${blockers}</div>
