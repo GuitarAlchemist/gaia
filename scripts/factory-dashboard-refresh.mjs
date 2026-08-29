@@ -166,6 +166,7 @@ export async function runFactoryDashboardRefreshCli(argv, {
     if (publicationPathIdentities !== openingPathIdentities) {
       throw new UsageError('path identities changed before publication');
     }
+    if (signal?.aborted) throw abortReason(signal);
 
     // Publish the self-contained HTML last. A failed tick therefore never exposes a partial
     // HTML document, and the next tick repairs any evidence file that could not be replaced.

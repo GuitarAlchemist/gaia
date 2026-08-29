@@ -292,6 +292,34 @@ test('a path identity changed by the clock callback cannot overwrite source evid
   assert.throws(() => readFileSync(htmlPath), /ENOENT/u);
 });
 
+test('an abort raised by the clock callback prevents every publication', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-clock-abort-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const controller = new AbortController();
+  const portfolioPath = join(scratch, 'portfolio.json');
+  const snapshotPath = join(scratch, 'control-room.json');
+  const htmlPath = join(scratch, 'control-room.html');
+
+  await assert.rejects(runFactoryDashboardRefreshCli([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', portfolioPath,
+    '--snapshot-out', snapshotPath,
+    '--html-out', htmlPath,
+  ], {
+    signal: controller.signal,
+    surveyPortfolio: async () => portfolio([]),
+    now: () => {
+      controller.abort();
+      return new Date('2026-08-29T20:00:00.000Z');
+    },
+  }), (error) => error?.name === 'AbortError');
+
+  assert.throws(() => readFileSync(portfolioPath), /ENOENT/u);
+  assert.throws(() => readFileSync(snapshotPath), /ENOENT/u);
+  assert.throws(() => readFileSync(htmlPath), /ENOENT/u);
+});
+
 test('a pre-aborted watch performs no GitHub survey and publishes nothing', async (t) => {
   const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-pre-abort-'));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));

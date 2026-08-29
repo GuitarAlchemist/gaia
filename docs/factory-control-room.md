@@ -128,7 +128,8 @@ remaining path segments, and refuses output aliases (including admin-share UNC s
 Windows case aliases, and any output that aliases the receipts, holds, progress or history
 evidence it will read. At the publication boundary—after the potentially long GitHub survey
 and all caller-injected rendering dependencies—it measures those identities again and refuses
-before the first replacement if any parent, junction or target identity changed.
+before the first replacement if any parent, junction or target identity changed. The same
+publication boundary rechecks cancellation, so an abort raised during rendering writes nothing.
 
 Raw `gaia-cli-progress/1` JSONL is accepted only when exactly one drain item is active. With
 more than one raw line, or with multiple active items, each line must use the explicit
