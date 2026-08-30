@@ -12,10 +12,26 @@
  *   plan -> durable INTENT -> authority -> one effect -> exact reconciliation -> one terminal
  *
  * The `INTENT` is durable BEFORE the request, so a crash between the request and its response is
- * distinguishable from a request that was never made. A later attempt that finds an `INTENT` with
- * a terminal asks GitHub what actually happened before it decides; it never blindly re-creates.
- * An `INTENT` with no terminal is a delivery still in flight, and a second caller fails closed
- * rather than racing it.
+ * distinguishable from a request that was never made. A later attempt that finds a prior `INTENT`
+ * asks GitHub what actually happened before it decides; it never blindly re-creates.
+ *
+ * THE LINEARIZATION POINT, AND WHY IT IS NOT A PROMISE OR A BARRIER
+ * ----------------------------------------------------------------
+ * Exactly one durable act orders this operation: the compare-and-swap append of the `INTENT`
+ * against the ledger head the caller observed. Two callers that both read the same head cannot
+ * both land, because each seals its own ownership token into its claim, so their two claims are
+ * different records and the second one is a lost update rather than a replay. The loser performs
+ * no effect and writes nothing at all. A process-local promise or a single-process barrier cannot
+ * carry this: the callers are separate operating-system processes, and the only thing they share
+ * is the file.
+ *
+ * OWNERSHIP IS BOUNDED, BECAUSE A DEAD OWNER CANNOT RELEASE ANYTHING
+ * -----------------------------------------------------------------
+ * A live caller and a process that was killed mid-delivery leave the SAME record: an `INTENT` with
+ * no terminal. What separates them is the bounded lease sealed into the claim. An unexpired lease
+ * is a live owner and a second caller fails closed rather than racing it; an expired one is an
+ * orphan, and the operation is reconciled against GitHub by exact repository, base, head and
+ * embedded operation identity instead of being wedged forever on a claim nobody holds.
  *
  * WHAT THIS MODULE CANNOT DO
  * --------------------------
@@ -36,7 +52,7 @@ import { execFileSync } from 'node:child_process';
 import {
   appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync,
 } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
 
 import {
@@ -58,10 +74,20 @@ export const FIRST_EVIDENCE_LEDGER_RECORD_SCHEMA = 'gaia-first-evidence-draft-pr
 export const FIRST_EVIDENCE_PROJECTION_SCHEMA = 'gaia-first-evidence-draft-pr-projection/1';
 
 export const FIRST_EVIDENCE_TRANSITION_FIELDS = Object.freeze([
-  'transition', 'operationIdentity', 'repository', 'task', 'baseBranch', 'baseOid', 'headBranch',
-  'headBranchGeneration', 'evidenceHeadOid', 'run', 'sourceRevision', 'recordedAt', 'pullRequest',
-  'refusal', 'revision',
+  'transition', 'operationIdentity', 'owner', 'leaseExpiresAt', 'repository', 'task', 'baseBranch',
+  'baseOid', 'headBranch', 'headBranchGeneration', 'evidenceHeadOid', 'run', 'sourceRevision',
+  'recordedAt', 'pullRequest', 'refusal', 'revision',
 ]);
+
+/**
+ * How long a claim is honoured before it is treated as an orphan. Closed hexadecimal ownership
+ * tokens carry no host name, process id or path, so nothing about the machine that made a claim
+ * can reach the durable record; the lease is the only liveness signal, and it is bounded.
+ */
+export const FIRST_EVIDENCE_LEASE_MS = 120_000;
+
+const MAX_LEASE_MS = 3_600_000;
+const OWNER = /^[a-f0-9]{32}$/u;
 
 const canonicalJson = (value) => {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -184,6 +210,12 @@ function sealTransition(body) {
   if (!isExactInstant(body.recordedAt)) {
     fail('TransitionInvalid', 'transition.recordedAt must be an exact instant');
   }
+  if (typeof body.owner !== 'string' || !OWNER.test(body.owner)) {
+    fail('TransitionInvalid', 'transition.owner must be a closed ownership token');
+  }
+  if (body.leaseExpiresAt !== null && !isExactInstant(body.leaseExpiresAt)) {
+    fail('TransitionInvalid', 'transition.leaseExpiresAt must be an exact instant or null');
+  }
   requireRevision(body.operationIdentity, 'transition.operationIdentity');
   return deepFreeze({ ...body, revision: sha256(body) });
 }
@@ -254,11 +286,13 @@ function appendRecord(directory, record) {
 }
 
 /**
- * Append one transition under compare-and-swap.
+ * Append one transition under compare-and-swap. This is the linearization point.
  *
- * Duplicate delivery of the identical content-addressed transition is a no-op regardless of the
- * head the caller observed, because a retried caller legitimately holds a stale head. Every other
- * divergence — a lost update, a concurrent writer — fails closed and writes nothing.
+ * A retried caller legitimately holds a stale head, so replaying the identical content-addressed
+ * transition is a no-op — but only from the head that caller observed when it wrote the record it
+ * is replaying. A caller that never observed that record is not retrying, it is a lost update, and
+ * it is refused rather than absorbed. That distinction is the whole difference between one Draft
+ * pull request and two.
  */
 export function appendFirstEvidenceTransition({
   directory, transition, expectedLedgerRevision, lockOptions,
@@ -269,11 +303,19 @@ export function appendFirstEvidenceTransition({
   return withLedgerLock(root, () => {
     const records = readRecordsUnlocked(root);
     const before = snapshot(records);
-    if (before.transitions.some((existing) => existing.revision === sealed.revision)) {
-      return deepFreeze({ duplicate: true, ledger: before });
-    }
-    if (before.revision !== expectedLedgerRevision) {
+    const divergent = before.revision !== expectedLedgerRevision;
+    const replayedAt = records.findIndex(
+      (entry) => entry.transition.revision === sealed.revision,
+    );
+    const observedWhenWritten = replayedAt <= 0
+      ? EMPTY_FIRST_EVIDENCE_LEDGER_REVISION
+      : records[replayedAt - 1].revision;
+    if (divergent
+        && (replayedAt === -1 || observedWhenWritten !== expectedLedgerRevision)) {
       fail('LedgerCasMismatch', 'the first-evidence ledger changed since the caller observed it');
+    }
+    if (replayedAt !== -1) {
+      return deepFreeze({ duplicate: true, ledger: before });
     }
     const body = {
       type: 'first-evidence-draft-pr.transition',
@@ -336,9 +378,13 @@ function refusalToken(value) {
   return REFUSAL_TOKEN.test(candidate) ? candidate : 'UNKNOWN';
 }
 
-const transitionBody = ({ verb, observed, operationIdentity, recordedAt, pullRequest, refusal }) => ({
+const transitionBody = ({
+  verb, observed, operationIdentity, owner, leaseExpiresAt, recordedAt, pullRequest, refusal,
+}) => ({
   transition: verb,
   operationIdentity,
+  owner,
+  leaseExpiresAt,
   repository: observed.repository,
   task: observed.task,
   baseBranch: observed.baseBranch,
@@ -378,12 +424,20 @@ const result = (body) => deepFreeze({ ...body, revision: sha256(body) });
  * even if a caller asks this function to run on every tick.
  */
 export async function deliverFirstEvidenceDraftPr({
-  directory, observation, grant, authority, effects, now = () => new Date(), lockOptions,
+  directory, observation, grant, authority, effects, now = () => new Date(),
+  owner = randomBytes(16).toString('hex'), leaseMs = FIRST_EVIDENCE_LEASE_MS, lockOptions,
 }) {
   const root = requireDirectory(directory);
+  if (typeof owner !== 'string' || !OWNER.test(owner)) {
+    fail('LedgerRequestInvalid', 'owner must be a closed ownership token');
+  }
+  if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > MAX_LEASE_MS) {
+    fail('LedgerRequestInvalid', 'leaseMs must be a bounded positive count of milliseconds');
+  }
   const observed = requireFirstEvidenceObservation(observation);
   const decided = planFirstEvidenceDraftPr({ observation });
   const recordedAt = now().toISOString();
+  const leaseExpiresAt = new Date(Date.parse(recordedAt) + leaseMs).toISOString();
 
   const reading = (outcome, pullRequest, effect, consumed, ledgerRevisionBefore, ledgerRevisionAfter) => result({
     schema: FIRST_EVIDENCE_DELIVERY_SCHEMA,
@@ -409,13 +463,15 @@ export async function deliverFirstEvidenceDraftPr({
   }
 
   const record = ({
-    transition, expectedLedgerRevision, pullRequest = null, refusal = null,
+    transition, expectedLedgerRevision, pullRequest = null, refusal = null, lease = null,
   }) => appendFirstEvidenceTransition({
     directory: root,
     transition: transitionBody({
       verb: transition,
       observed,
       operationIdentity: decided.operationIdentity,
+      owner,
+      leaseExpiresAt: lease,
       recordedAt,
       pullRequest,
       refusal,
@@ -423,6 +479,25 @@ export async function deliverFirstEvidenceDraftPr({
     expectedLedgerRevision,
     lockOptions,
   });
+
+  /**
+   * Claim this operation durably, under the compare-and-swap that orders it. A caller whose
+   * observed head moved under it loses here — before any authority is consumed and before any
+   * request is made — and writes nothing at all.
+   */
+  const recordIntent = (expectedLedgerRevision) => {
+    try {
+      return record({ transition: 'INTENT', expectedLedgerRevision, lease: leaseExpiresAt });
+    } catch (error) {
+      if (error instanceof FirstEvidenceDeliveryError && error.code === 'LedgerCasMismatch') {
+        fail(
+          'DeliveryRaceLost',
+          'another caller ordered this operation first; this caller performs no effect',
+        );
+      }
+      throw error;
+    }
+  };
 
   if (decided.action === 'REFUSE') {
     const before = readFirstEvidenceLedger({ directory: root, lockOptions }).revision;
@@ -449,16 +524,28 @@ export async function deliverFirstEvidenceDraftPr({
   if (settled) {
     return reading('REUSED', settled.pullRequest, 'NONE', 'NONE', before.revision, before.revision);
   }
-  const attempted = mine.some((entry) => entry.transition === 'INTENT');
   const terminated = mine.some((entry) => entry.transition === 'REFUSED');
-  if (attempted && !terminated) {
-    fail('DeliveryInFlight', 'another caller holds an unterminated intent for this operation');
+  const claims = mine.filter((entry) => entry.transition === 'INTENT');
+  // A live owner and a process that was killed mid-delivery leave the same record. The bounded
+  // lease is the only thing that separates them, because a dead owner releases nothing: its claim
+  // simply runs out. Treating every unterminated claim as live is what wedges an operation
+  // permanently after one crash, and never asks GitHub what actually happened. A caller's own
+  // claim is never a stranger's, so resuming one's own interrupted delivery reconciles rather
+  // than deadlocking against itself.
+  const heldByLiveOwner = !terminated && claims.some(
+    (entry) => entry.owner !== owner
+      && entry.leaseExpiresAt !== null
+      && Date.parse(entry.leaseExpiresAt) > Date.parse(recordedAt),
+  );
+  if (heldByLiveOwner) {
+    fail('DeliveryInFlight', 'a live owner holds an unexpired claim for this operation');
   }
+  const reconcilable = claims.length > 0;
 
   // A prior attempt reached, or may have reached, GitHub. Ask what is actually there before
   // deciding: a lost response is indistinguishable from a request that never arrived, and only
   // GitHub can tell the two apart.
-  if (attempted) {
+  if (reconcilable) {
     let found;
     try {
       found = await effects.findDraftPullRequest({
@@ -488,8 +575,9 @@ export async function deliverFirstEvidenceDraftPr({
     }
   }
 
-  // Durable before the request. A crash from here on is recoverable by the branch above.
-  const withIntent = record({ transition: 'INTENT', expectedLedgerRevision: before.revision });
+  // Durable BEFORE the request, and ordered by the compare-and-swap inside it. A crash from here
+  // on leaves a bounded claim the branch above reconciles once its lease runs out.
+  const withIntent = recordIntent(before.revision);
   const headAfterIntent = withIntent.ledger.revision;
 
   const abandon = (code, message) => {

@@ -1048,7 +1048,8 @@ test('E27: an orphaned INTENT whose request never arrived asks first, then creat
   assert.deepEqual(transitions(directory), ['INTENT', 'INTENT', 'CREATED']);
 
   // The claim this caller wrote is itself bounded, or the next crash wedges on it in turn.
-  const [, claimed] = transitions(directory);
+  const sealed = readFirstEvidenceLedger({ directory }).transitions;
+  const [, claimed] = sealed;
   assert.ok(
     Date.parse(claimed.leaseExpiresAt) > Date.parse(claimed.recordedAt),
     'an INTENT carries a lease that expires after it was recorded',
@@ -1057,7 +1058,9 @@ test('E27: an orphaned INTENT whose request never arrived asks first, then creat
     Date.parse(claimed.leaseExpiresAt) - Date.parse(claimed.recordedAt) <= MAX_LEASE_MS,
     'and the lease horizon is bounded, so no claim outlives its owner indefinitely',
   );
-  assert.equal(transitions(directory).at(-1).leaseExpiresAt, null, 'a terminal holds no lease');
+  assert.equal(claimed.owner, OWNER_B, 'the claim names the caller that made it');
+  assert.notEqual(claimed.owner, sealed[0].owner, 'and not the owner whose claim ran out');
+  assert.equal(sealed.at(-1).leaseExpiresAt, null, 'a terminal holds no lease');
 });
 
 test('E28: an INTENT whose bounded lease is still live is a live owner, not an orphan', async () => {
