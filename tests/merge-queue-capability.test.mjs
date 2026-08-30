@@ -572,6 +572,9 @@ test('M13: the planner accepts ABSENT and refuses every other state', () => {
   const refused = {
     AVAILABLE: { rulesets: [ruleset()] },
     MISCONFIGURED: { rulesets: [ruleset({ enforcement: 'evaluate' })] },
+    'MISCONFIGURED by two competing carriers': {
+      rulesets: [ruleset(), ruleset({ rulesetId: '4111', name: 'other' })],
+    },
     PERMISSION_DENIED: { rulesetsRead: 'FORBIDDEN' },
     UNKNOWN: { rulesetsRead: 'NOT_FOUND' },
   };
@@ -647,9 +650,9 @@ test('M15: the intent is additive and names everything it promises to preserve',
 
 test('M15: the refusal vocabulary is closed and every reason is reachable', () => {
   assert.deepEqual([...MERGE_QUEUE_REMEDIATION_REFUSALS].sort(), [
-    'AMBIGUOUS_CONFIGURATION', 'CAPABILITY_NOT_REMEDIABLE', 'DESTRUCTIVE_REPLACEMENT',
-    'INSUFFICIENT_AUTHORITY', 'PRECONDITION_CHANGED', 'UNKNOWN_RULE_PRESENT',
-  ]);
+    'CAPABILITY_NOT_REMEDIABLE', 'DESTRUCTIVE_REPLACEMENT', 'INSUFFICIENT_AUTHORITY',
+    'PRECONDITION_CHANGED', 'UNKNOWN_RULE_PRESENT',
+  ], 'there is no separate ambiguity refusal, because a competing carrier is already MISCONFIGURED');
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -792,7 +795,9 @@ test('M22: a failing effect leaves no partial configuration and issues no second
 
 test('M22: reconciliation issues no write in any branch', () => {
   const source = readFileSync(join(ROOT, 'src', 'merge-queue-capability.mjs'), 'utf8');
-  const reconciler = source.slice(source.indexOf('export function reconcileMergeQueueRemediation'));
+  const start = source.indexOf('export function reconcileMergeQueueRemediation');
+  const reconciler = source.slice(start, source.indexOf('\nexport ', start + 1));
+  assert.ok(reconciler.includes('function reconcileMergeQueueRemediation'), 'the slice found it');
   assert.equal(reconciler.includes('applyRuleset'), false,
     'the reconciler is a pure read and cannot reach the effect at all');
 });
