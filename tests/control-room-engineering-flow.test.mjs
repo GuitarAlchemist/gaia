@@ -12,7 +12,9 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -170,6 +172,9 @@ const readingOf = (cell) => {
   return match[1];
 };
 
+/** The cell's own opening tag, so a sub-cell's reason cannot be mistaken for the cell's. */
+const openTagOf = (cell) => cell.slice(0, cell.indexOf('>') + 1);
+
 const totalOf = (cell) => {
   const match = /<strong class="flow-total">(.*?)<\/strong>/su.exec(cell);
   assert.notEqual(match, null, 'the cell states its total');
@@ -315,7 +320,9 @@ test('C2: throughput and process liveness stay separate readings on the same pag
 // ---------------------------------------------------------------------------------------------
 
 test('C3: a resealed count its own events do not derive is refused', () => {
-  const snapshot = snapshotWith(flow());
+  // A partially complete artifact on purpose, so both directions of forgery are available: a
+  // MEASURED cell to inflate, and an UNKNOWN cell to claim was measured.
+  const snapshot = snapshotWith(partialFlow());
   const inflate = (mutate) => {
     const block = structuredClone(snapshot.engineeringFlow);
     mutate(block);
@@ -325,7 +332,15 @@ test('C3: a resealed count its own events do not derive is refused', () => {
   const refusals = [
     ['an inflated total', (block) => { block.families[0].windows[0].total = 99; }],
     ['an inflated rate', (block) => { block.families[0].windows[0].ratePerHour = 99; }],
-    ['a flipped state', (block) => { block.families[0].windows[1].state = 'MEASURED'; }],
+    // The dangerous direction: an unobserved window resealed as a measured one.
+    ['an unknown window claimed as measured', (block) => {
+      block.families[0].windows[1].state = 'MEASURED';
+      block.families[0].windows[1].reasonCode = null;
+      block.families[0].windows[1].total = 0;
+    }],
+    ['a measured window claimed as unknown', (block) => {
+      block.families[0].windows[0].state = 'UNKNOWN';
+    }],
     ['a forged outcome count', (block) => { block.families[0].windows[0].outcomes.CLOSED = 42; }],
     ['a forged net', (block) => { block.families[0].windows[0].queue.net = 12; }],
     ['a forged median', (block) => {
@@ -384,15 +399,17 @@ test('C4: a measured zero and an unknown window never share a rendering', () => 
   const html = render(snapshotWith(partialFlow()));
 
   const measured = cellOf(html, 'PULL_REQUEST', 'PT1H');
-  assert.match(measured, /data-state="MEASURED"/u);
-  assert.equal(measured.includes('data-reason='), false, 'a measured cell names no missing evidence');
+  assert.match(openTagOf(measured), /data-state="MEASURED"/u);
+  assert.equal(
+    openTagOf(measured).includes('data-reason'), false,
+    'a measured cell names no missing evidence of its own',
+  );
   assert.match(readingOf(measured), /0 observed in a complete window/u);
   assert.equal(readingOf(measured).includes('Unknown'), false, 'a measured zero never says unknown');
   assert.match(totalOf(measured), /<span class="semantic-symbol" aria-hidden="true">●<\/span>0$/u);
 
   const unknown = cellOf(html, 'PULL_REQUEST', 'P1D');
-  assert.match(unknown, /data-state="UNKNOWN"/u);
-  assert.match(unknown, /data-reason="WINDOW_INCOMPLETE"/u);
+  assert.match(openTagOf(unknown), /data-state="UNKNOWN" data-reason="WINDOW_INCOMPLETE"/u);
   assert.match(readingOf(unknown), /Unknown/u);
   assert.equal(
     readingOf(unknown).includes('observed in a complete window'), false,
@@ -641,6 +658,7 @@ test('C9: the rendered document fetches nothing and embeds no remote resource', 
 
 function cliFixture(name, events = HISTORY, overrides = {}) {
   const dir = join(scratch, name);
+  mkdirSync(dir, { recursive: true });
   const paths = {
     projection: join(dir, 'projection.json'),
     engineeringFlow: join(dir, 'flow.json'),
@@ -723,7 +741,7 @@ test('C10: the CLI refuses an artifact path that aliases an output', () => {
       '--html-out', paths.html,
       '--snapshot-out', paths.engineeringFlow,
     ], { now: () => new Date(AT), writeStdout: () => {} }),
-    /must differ|same file/u,
+    /aliases an input evidence path/u,
     'the artifact cannot be overwritten by an output',
   );
 });

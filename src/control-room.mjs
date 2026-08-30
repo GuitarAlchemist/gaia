@@ -12,6 +12,14 @@ import { FACTORY_TELEMETRY_PROJECTION_SCHEMA } from './factory-telemetry.mjs';
 import {
   compareControlRoomItems, requireControlRoomActivity, summarizeControlRoomActivity,
 } from './control-room-activity.mjs';
+import {
+  ENGINEERING_FLOW_SCHEMA,
+  ENGINEERING_FLOW_SOURCE,
+  deriveEngineeringFlowBlock,
+  engineeringFlowRevision,
+  requireEngineeringFlowArtifact,
+  summarizeEngineeringFlow,
+} from './engineering-flow.mjs';
 import { DEFAULT_MAX_LIVE_LANES } from './lanes.mjs';
 import {
   LOCAL_LANE_LABEL_STATES,
@@ -476,8 +484,75 @@ export function requireControlRoomSnapshot(value) {
   requireObstruction(value.obstruction, value);
   requireTelemetryVocabulary(value);
   const localLanes = requireLocalLanes(value);
+  requireEngineeringFlow(value);
   requireDerivedCounts(value, localLanes);
   return value;
+}
+
+/**
+ * Re-derive the engineering flow block instead of believing it.
+ *
+ * The block carries its own events verbatim precisely so this is possible: every count, rate,
+ * state, reason, queue figure and median is recomputed from those events and those instants, and
+ * a block that is not what its own evidence derives is refused rather than displayed.
+ *
+ * That matters more here than almost anywhere else on the page. `4 issues closed in the last
+ * hour` is a sentence an operator acts on, and the two most valuable forgeries are the obvious
+ * one — inflating a count — and the quiet one: resealing an UNKNOWN window as a measured zero, so
+ * that "we did not look" reads as "the queue is calm". Both are caught by the same comparison.
+ *
+ * Absent means the key is omitted. A present `null` is refused rather than read as absence,
+ * because that spelling canonicalises into the digest and would move every previously published
+ * snapshot revision for evidence that did not change.
+ */
+function requireEngineeringFlow(value) {
+  if (!Object.hasOwn(value, 'engineeringFlow')) return null;
+  const refuse = (message) => {
+    throw new ControlRoomError('InvalidSnapshot', message);
+  };
+  const block = value.engineeringFlow;
+  if (block === null) {
+    refuse('an absent engineering flow artifact omits the field entirely, and never publishes null');
+  }
+  if (!block || typeof block !== 'object' || Array.isArray(block)
+      || block.source !== ENGINEERING_FLOW_SOURCE || block.binding !== 'NONE'
+      || !Array.isArray(block.events)) {
+    refuse('the snapshot engineering flow block is not a Gaia engineering flow projection');
+  }
+  // Rebuilt from the block's own evidence and sealed with the schema's own recipe, rather than
+  // pattern-matched: sixty-four hex characters of the wrong evidence is still the wrong evidence.
+  const rebuilt = {
+    schema: ENGINEERING_FLOW_SCHEMA,
+    effect: 'NONE',
+    authority: 'NONE',
+    observedAt: block.observedAt,
+    windowStartedAt: block.windowStartedAt,
+    sequence: block.sequence,
+    events: block.events,
+    revision: engineeringFlowRevision({
+      observedAt: block.observedAt,
+      windowStartedAt: block.windowStartedAt,
+      sequence: block.sequence,
+      events: block.events,
+    }),
+  };
+  let artifact;
+  try {
+    artifact = requireEngineeringFlowArtifact(rebuilt);
+  } catch (error) {
+    refuse(
+      'the snapshot engineering flow block does not carry a verifiable artifact:'
+      + ` ${error?.message ?? 'unreadable'}`,
+    );
+  }
+  if (block.artifactRevision !== artifact.revision) {
+    refuse('the snapshot engineering flow block names an artifact revision its own events do not derive');
+  }
+  const expected = deriveEngineeringFlowBlock({ artifact, observedAt: value.observedAt });
+  if (canonicalJson(expected) !== canonicalJson(block)) {
+    refuse('the snapshot engineering flow block is not what its own events and instants derive');
+  }
+  return expected;
 }
 
 /**
@@ -764,6 +839,30 @@ function deriveLocalLanes({ lanes, observedAt, observationRevision, observationA
 }
 
 /**
+ * One verified engineering flow artifact, projected into the block the page publishes.
+ *
+ * The artifact is an EXPLICIT input, exactly like `telemetryProjection`, `dependencies` and
+ * `localLanes`. This module never discovers it, never fetches GitHub and never learns that a
+ * producer exists: who writes the artifact is out of scope, and the schema is the whole interface.
+ *
+ * Nothing derived here is allowed to reach the headline, the spinner, the next action or the
+ * obstruction. That separation is the entire point of the section: it answers a different question
+ * from the one the local-lane section answers, using evidence the local-lane section cannot
+ * produce, and a count that a running process could move would put both back where they started.
+ */
+function projectEngineeringFlow(candidate, observedAt, priorObservation) {
+  if (candidate === undefined || candidate === null) return null;
+  try {
+    return summarizeEngineeringFlow({ artifact: candidate, observedAt, priorObservation });
+  } catch (error) {
+    throw new ControlRoomError(
+      error?.code === 'IncoherentEngineeringFlow' ? 'IncoherentEvidence' : 'InvalidEngineeringFlow',
+      `the engineering flow artifact is not usable evidence: ${error?.message ?? 'unreadable'}`,
+    );
+  }
+}
+
+/**
  * The headline state, in one place, because the verify seam re-derives it.
  *
  * A fresh local lane is a live process on this machine. It is not a moving portfolio run, and the
@@ -834,6 +933,7 @@ export function buildControlRoomSnapshot({
   sourceChangedAtBasis = 'MEASURED',
   progressObservations = [], completedRuns = [], telemetryProjection = null,
   dependencies = null, localLanes = null,
+  engineeringFlow = null, priorEngineeringFlow = null,
 }) {
   const projection = requireProjection(drainProjection);
   const at = requireTimestamp(observedAt);
@@ -855,6 +955,10 @@ export function buildControlRoomSnapshot({
   });
   const observedItemIds = new Set(items.map(({ itemId }) => itemId));
   const localLaneBlock = projectLocalLanes(localLanes, at, observedAtMs);
+  // Deliberately NOT an input to anything below. It feeds no count, no headline, no spinner
+  // decision and no next action; it is derived here only so that it is sealed into the same
+  // revision as the evidence it sits beside.
+  const engineeringFlowBlock = projectEngineeringFlow(engineeringFlow, at, priorEngineeringFlow);
   const localLiveCount = localLaneBlock === null ? 0 : localLaneBlock.liveCount;
   const activeCount = items.filter(({ activity }) => activity.state === 'ACTIVE').length;
   const staleCount = items.filter(({ activity }) => activity.state === 'STALE').length;
@@ -981,6 +1085,10 @@ export function buildControlRoomSnapshot({
     // published revision for evidence that did not change, which is a migration this product has
     // already refused once by name.
     ...(localLaneBlock === null ? {} : { localLanes: localLaneBlock }),
+    // Omitted entirely when there is no artifact, for the same reason and with the same
+    // consequence as the lane block above: a present `null` canonicalises into the digest and
+    // would move every previously published snapshot revision for evidence that did not change.
+    ...(engineeringFlowBlock === null ? {} : { engineeringFlow: engineeringFlowBlock }),
   };
   return deepFreeze({
     ...body,
@@ -1046,6 +1154,44 @@ const RENDER_COPY = Object.freeze({
     laneState: { FRESH: 'Fresh observation', STALE: 'Stale observation' },
     laneLifecycle: { RUNNING: 'Running', EXITED: 'Exited', UNKNOWN: 'Unknown' },
     laneLabelState: { ABSENT: 'No label observed', WITHHELD_UNSAFE: 'Label withheld as unsafe' },
+    engineeringFlow: 'Engineering flow throughput',
+    flowCaveat: 'Discrete engineering events only. A heartbeat, a token, a byte of stdout, a'
+      + ' spinner or a live process proves activity, never throughput, and none of them has a name'
+      + ' in this vocabulary. Nothing here animates: a count over a closed window is a standing'
+      + ' fact, not something happening right now.',
+    flowAge: 'reading age',
+    flowSequence: 'sequence',
+    flowState: { FRESH: 'Fresh reading', STALE: 'Stale reading' },
+    flowStaleNote: (age, window) => `This reading was taken ${age} ago, past its ${window} window.`
+      + ' The counts below are still exactly what was measured; only their currency is in doubt.',
+    flowFamily: {
+      ISSUE: 'Issues', PULL_REQUEST: 'Pull requests', COMMIT: 'Commits',
+      FACTORY_RUN: 'Factory runs', EVIDENCE_REVIEW: 'Evidence reviews',
+    },
+    flowWindow: { PT1H: 'Last hour', P1D: 'Last 24 hours', P7D: 'Last 7 days' },
+    flowOutcome: {
+      OPENED: 'Opened', REOPENED: 'Reopened', CLOSED: 'Closed', MERGED: 'Merged',
+      CLOSED_WITHOUT_MERGE: 'Closed without merge',
+      PRODUCED_ON_WORK_BRANCH: 'Produced on a work branch',
+      INTEGRATED_INTO_DEFAULT_BRANCH: 'Integrated into the default branch',
+      COMPLETED: 'Completed', FAILED: 'Failed', APPROVED: 'Approved', REFUSED: 'Refused',
+    },
+    flowUnknown: 'Unknown',
+    // The sentence this whole section exists for. `0 observed in a complete window` and
+    // `the evidence does not cover this window` are opposite readings and never share wording.
+    flowCounted: (total) => `${total} observed in a complete window.`,
+    flowRate: (rate) => `${rate} per hour`,
+    flowQueue: 'Queue change',
+    flowQueueMeasured: (inflow, outflow, net) => `${inflow} in, ${outflow} out, net ${net}`,
+    flowCycleTime: 'Cycle time median',
+    flowCycleMeasured: (median, sample) => `${median} over ${sample} closing events`,
+    flowReason: {
+      WINDOW_INCOMPLETE: 'Unknown: the evidence does not cover this whole window.',
+      NO_OBSERVED_INFLOW: 'Unknown: this family has no observed inflow event, so no queue change'
+        + ' can be measured.',
+      NOT_ENOUGH_COMPARABLE_DURATIONS: 'Unknown: fewer than 5 comparable closing durations.',
+      INCOMPLETE_COMPARABLE_DURATIONS: 'Unknown: a closing event carries no comparable start.',
+    },
     state: { ACTIVE: 'Active', STALE: 'Needs attention', PAUSED: 'Paused' },
     evidenceState: { FRESH: 'Fresh', PARTIAL: 'Partial', STALE: 'Stale', UNKNOWN: 'Unknown' },
     bulletKind: { ACTION: 'Doing', RESULT: 'Produced', CHECKPOINT: 'Next', BLOCKER: 'Blocked' },
@@ -1109,6 +1255,48 @@ const RENDER_COPY = Object.freeze({
     laneLifecycle: { RUNNING: 'En cours', EXITED: 'Terminé', UNKNOWN: 'Inconnu' },
     laneLabelState: {
       ABSENT: 'Aucun libellé observé', WITHHELD_UNSAFE: 'Libellé retenu car non sûr',
+    },
+    engineeringFlow: 'Débit du flux d’ingénierie',
+    flowCaveat: 'Événements d’ingénierie discrets uniquement. Un heartbeat, un token, un octet de'
+      + ' stdout, un spinner ou un processus vivant prouvent une activité, jamais un débit, et'
+      + ' aucun d’eux n’a de nom dans ce vocabulaire. Rien n’est animé ici : un compte sur une'
+      + ' fenêtre fermée est un fait stable, pas quelque chose qui se produit maintenant.',
+    flowAge: 'âge de la lecture',
+    flowSequence: 'séquence',
+    flowState: { FRESH: 'Lecture fraîche', STALE: 'Lecture périmée' },
+    flowStaleNote: (age, window) => `Cette lecture date d’il y a ${age}, au-delà de sa fenêtre de`
+      + ` ${window}. Les comptes ci-dessous restent exactement ce qui a été mesuré ; seule leur`
+      + ' actualité est incertaine.',
+    flowFamily: {
+      ISSUE: 'Issues', PULL_REQUEST: 'Pull requests', COMMIT: 'Commits',
+      FACTORY_RUN: 'Exécutions de factory', EVIDENCE_REVIEW: 'Revues de preuve',
+    },
+    flowWindow: {
+      PT1H: 'Dernière heure', P1D: 'Dernières 24 heures', P7D: 'Derniers 7 jours',
+    },
+    flowOutcome: {
+      OPENED: 'Ouvertes', REOPENED: 'Rouvertes', CLOSED: 'Fermées', MERGED: 'Mergées',
+      CLOSED_WITHOUT_MERGE: 'Fermées sans merge',
+      PRODUCED_ON_WORK_BRANCH: 'Produits sur une branche de travail',
+      INTEGRATED_INTO_DEFAULT_BRANCH: 'Intégrés dans la branche par défaut',
+      COMPLETED: 'Terminées', FAILED: 'Échouées', APPROVED: 'Approuvées', REFUSED: 'Refusées',
+    },
+    flowUnknown: 'Inconnu',
+    flowCounted: (total) => `${total} ${total > 1 ? 'observés' : 'observé'} sur une fenêtre`
+      + ' complète.',
+    flowRate: (rate) => `${rate} par heure`,
+    flowQueue: 'Variation de la file',
+    flowQueueMeasured: (inflow, outflow, net) => `${inflow} entrées, ${outflow} sorties,`
+      + ` net ${net}`,
+    flowCycleTime: 'Médiane du temps de cycle',
+    flowCycleMeasured: (median, sample) => `${median} sur ${sample} événements de clôture`,
+    flowReason: {
+      WINDOW_INCOMPLETE: 'Inconnu : la preuve ne couvre pas toute cette fenêtre.',
+      NO_OBSERVED_INFLOW: 'Inconnu : cette famille n’a aucun événement d’entrée observé, donc'
+        + ' aucune variation de file ne peut être mesurée.',
+      NOT_ENOUGH_COMPARABLE_DURATIONS: 'Inconnu : moins de 5 durées de clôture comparables.',
+      INCOMPLETE_COMPARABLE_DURATIONS: 'Inconnu : un événement de clôture n’a pas de début'
+        + ' comparable.',
     },
     state: { ACTIVE: 'En cours', STALE: 'À vérifier', PAUSED: 'En pause' },
     evidenceState: { FRESH: 'Fraîche', PARTIAL: 'Partielle', STALE: 'Périmée', UNKNOWN: 'Inconnue' },
@@ -1565,6 +1753,96 @@ function renderLocalLanes(snapshot, copy) {
   </section>`;
 }
 
+/**
+ * The engineering flow matrix: five family rows, three window cells each.
+ *
+ * A matrix rather than a single velocity number, because messages, work items, commits, runs and
+ * reviews keep their own units and there is no calibrated normalization to collapse them with. A
+ * matrix rather than a sparkline, because a sparkline is a claim about a SHAPE over time and this
+ * evidence declares completeness for one window boundary only — drawing a curve through a window
+ * whose left half is unknown renders the unknown part as a line at zero.
+ *
+ * Every cell is independently `MEASURED` or `UNKNOWN`, and the two are carried by three separate
+ * signals: a different word, a different symbol and a different `data-state`. Colour is never the
+ * meaning. A measured count is neutral because it has no valence — nought issues closed is neither
+ * healthy nor bad — while missing evidence is the warning, because it is the one an operator can
+ * act on.
+ *
+ * Nothing here animates and nothing here is a live region. Throughput over a closed window is a
+ * standing measurement; a pulse would suggest something is happening about it right now, which is
+ * the exact conflation this product has already removed twice.
+ */
+function renderEngineeringFlow(snapshot, copy) {
+  const block = snapshot.engineeringFlow;
+  if (!block) return '';
+  const age = formatDuration(block.observationAgeMs);
+  const heading = block.state === 'FRESH'
+    ? { severity: 'healthy', symbol: '●' }
+    : { severity: 'warning', symbol: '▲' };
+  const shownState = (state) => (state === 'MEASURED'
+    ? { severity: 'neutral', symbol: '●' }
+    : { severity: 'warning', symbol: '○' });
+  const symbolFor = (state) => '<span class="semantic-symbol" aria-hidden="true">'
+    + `${shownState(state).symbol}</span>`;
+  // Omitted when there is nothing missing, so a cell's own reason is never confusable with a
+  // sub-cell's: a fully observed window can still hold too few comparable durations.
+  const reasonAttribute = (reasonCode) => (
+    reasonCode === null ? '' : ` data-reason="${escapeHtml(reasonCode)}"`
+  );
+  const subCell = (className, label, entry, measured) => (
+    `<div class="${className}" data-state="${escapeHtml(entry.state)}"`
+    + `${reasonAttribute(entry.reasonCode)}>${symbolFor(entry.state)}`
+    + `<span class="flow-sub-label">${label}</span>`
+    + `<span class="flow-sub-value">${escapeHtml(entry.state === 'MEASURED'
+      ? measured(entry) : copy.flowReason[entry.reasonCode])}</span></div>`
+  );
+  const renderCell = (family, cell) => {
+    const measured = cell.state === 'MEASURED';
+    return `<li class="flow-window" data-family="${escapeHtml(family)}"`
+      + ` data-window="${escapeHtml(cell.window)}"`
+      + ` data-state="${escapeHtml(cell.state)}"${reasonAttribute(cell.reasonCode)}`
+      + ` data-severity="${shownState(cell.state).severity}">`
+      + `<span class="flow-window-label">${copy.flowWindow[cell.window]}</span>`
+      + `<strong class="flow-total">${symbolFor(cell.state)}`
+      + `${measured ? cell.total : copy.flowUnknown}</strong>`
+      + `<span class="flow-reading">${escapeHtml(measured
+        ? copy.flowCounted(cell.total) : copy.flowReason[cell.reasonCode])}</span>`
+      + (measured
+        ? `<span class="flow-rate">${escapeHtml(copy.flowRate(cell.ratePerHour))}</span>` : '')
+      // An em dash where a count would be, so an unknown breakdown cannot be read as a row of
+      // zeroes by an operator skimming the numbers.
+      + `<div class="flow-outcomes">${Object.entries(cell.outcomes).map(
+        ([name, count]) => `<span><span class="flow-outcome-label">${copy.flowOutcome[name]}</span>`
+          + ` ${count === null ? '—' : count}</span>`,
+      ).join('')}</div>`
+      + subCell('flow-queue', copy.flowQueue, cell.queue,
+        ({ inflow, outflow, net }) => copy.flowQueueMeasured(inflow, outflow, net))
+      + subCell('flow-cycle-time', copy.flowCycleTime, cell.cycleTime,
+        ({ medianMs, sampleSize }) => copy.flowCycleMeasured(formatDuration(medianMs), sampleSize))
+      + '</li>';
+  };
+  const families = block.families.map(({ family, windows }) => (
+    `<li class="flow-family" data-flow-family="${escapeHtml(family)}">`
+    + `<h3>${copy.flowFamily[family]}</h3>`
+    + `<ol class="flow-window-list">${windows.map((cell) => renderCell(family, cell)).join('')}</ol>`
+    + '</li>'
+  )).join('');
+  return `<section class="section-panel engineering-flow" data-source="${escapeHtml(block.source)}"
+    data-state="${escapeHtml(block.state)}" data-severity="${heading.severity}"
+    aria-label="${escapeHtml(copy.engineeringFlow)}">
+    <div class="section-heading"><h2>${copy.engineeringFlow}</h2>
+      <span class="as-of"><code>${escapeHtml(block.source)}</code> · <span class="semantic-symbol" aria-hidden="true">${heading.symbol}</span>${copy.flowState[block.state]}
+        · <time>${escapeHtml(block.observedAt)}</time> · ${copy.flowAge} ${escapeHtml(age)}</span></div>
+    <p class="evidence-line">${copy.flowCaveat}</p>
+    ${block.state === 'STALE'
+    ? `<p class="evidence-line flow-stale"><span class="semantic-symbol" aria-hidden="true">▲</span>${
+      escapeHtml(copy.flowStaleNote(age, formatDuration(block.freshnessWindowMs)))}</p>` : ''}
+    <ol class="flow-family-list">${families}</ol>
+    <p class="evidence-line"><code>${escapeHtml(block.artifactRevision)}</code> · ${
+  copy.flowSequence} ${block.sequence} · binding=${escapeHtml(block.binding)} · effect=NONE · authority=NONE</p>
+  </section>`;
+}
+
 const fact = (label, value, extra = '', attributes = '') => (
   `<div class="fact"${attributes}><span class="fact-label">${label}</span>`
   + `<strong>${value}</strong>${extra}</div>`
@@ -1798,6 +2076,31 @@ export function renderControlRoomHtml(candidate, {
       .lane-pulse { animation: heartbeat 1.2s step-end infinite; }
       @media (prefers-reduced-motion: reduce) { .heartbeat-pulse { animation: none; } .lane-pulse { animation: none; } }`
     : '';
+  // Emitted only when the section is, exactly as the pulse block is, so removing the artifact
+  // leaves a document with no residue of this feature at all — not a stylesheet that quietly
+  // remembers it. Base layer declares no columns: one column is the default on a phone, not a
+  // rule, and nothing here can force a horizontal scroll at 320px.
+  const flowCss = snapshot.engineeringFlow ? `
+    .flow-family-list { display: grid; gap: 12px; list-style: none; margin: 14px 0 0; padding: 0; }
+    .flow-family { background: var(--panel-2); border: 1px solid var(--line); padding: 14px; }
+    .flow-family h3 { margin: 0 0 4px; }
+    .flow-window-list { display: grid; gap: 8px; list-style: none; margin: 10px 0 0; padding: 0; }
+    .flow-window { border-left: 3px solid var(--semantic, var(--line)); display: grid; gap: 4px; padding: 8px 0 8px 10px; }
+    .flow-window-label { color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+    .flow-total { font-size: 24px; line-height: 1.2; }
+    .flow-reading, .flow-rate { color: var(--muted); font-size: 12px; }
+    .flow-outcomes { color: var(--muted); display: grid; font-size: 12px; gap: 2px; margin-top: 4px; }
+    .flow-outcome-label { color: #c8d2df; }
+    .flow-queue, .flow-cycle-time { display: grid; font-size: 12px; margin-top: 6px; }
+    .flow-sub-label { color: var(--muted); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+    .flow-sub-value { line-height: 1.4; }
+    .flow-stale { color: var(--amber); }` : '';
+  const flowCss768 = snapshot.engineeringFlow ? `
+      .flow-window-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }` : '';
+  const flowCss1024 = snapshot.engineeringFlow ? `
+      .flow-family-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }` : '';
+  const flowCss1440 = snapshot.engineeringFlow ? `
+      .flow-family-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }` : '';
   const headline = headlinePresentation(snapshot.headline.state);
   const nextSeverity = snapshot.nextAction.kind === 'NONE' ? 'neutral'
     : snapshot.nextAction.kind === 'OBSERVE_ACTIVE_RUN' ? 'healthy' : 'warning';
@@ -1895,7 +2198,7 @@ export function renderControlRoomHtml(candidate, {
     .backlog-total { margin: 12px 0 4px; }
     .evidence { align-items: start; display: grid; gap: 14px; }
     .wide-scroll { overflow-x: auto; }
-    code { color: #bdd2f2; overflow-wrap: anywhere; } .empty { color: var(--muted); }
+    code { color: #bdd2f2; overflow-wrap: anywhere; } .empty { color: var(--muted); }${flowCss}
     @media (min-width: 768px) {
       main { max-width: 880px; padding: 22px; }
       header { align-items: end; display: flex; justify-content: space-between; }
@@ -1906,14 +2209,14 @@ export function renderControlRoomHtml(candidate, {
       .evidence { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .fog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .fog-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .local-lane-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .local-lane-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }${flowCss768}
     }
     @media (min-width: 1024px) {
       main { max-width: 1240px; padding: 26px 32px; }
       .hero { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
       .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
       .work-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .local-lane-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .local-lane-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }${flowCss1024}
     }
     @media (min-width: 1440px) {
       main { max-width: 1600px; padding: 30px 44px; }
@@ -1922,7 +2225,7 @@ export function renderControlRoomHtml(candidate, {
       .work-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .lower-grid { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
       .fog-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-      .local-lane-list { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .local-lane-list { grid-template-columns: repeat(4, minmax(0, 1fr)); }${flowCss1440}
     }
     ${pulseCss}
   </style>
@@ -1954,6 +2257,7 @@ export function renderControlRoomHtml(candidate, {
   </section>
   ${renderObstruction(snapshot, copy, language)}
   ${renderLocalLanes(snapshot, copy)}
+  ${renderEngineeringFlow(snapshot, copy)}
   <section class="section-panel">
     <div class="section-heading"><h2>${copy.progress}</h2><span class="as-of">${snapshot.totalItems} ${copy.items}</span></div>
     <h3>${copy.topWork}</h3>
