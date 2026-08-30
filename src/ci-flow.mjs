@@ -582,18 +582,23 @@ function deriveExecution(observation) {
 }
 
 /**
- * The setup share of the span, withheld whole when the decomposition exceeds what it decomposes.
+ * The setup time carried by the checks, withheld whole when a check contradicts ITSELF.
  *
- * The span itself stays MEASURED in that case: it is still evidence, and only the split is
- * incoherent. Refusing both would discard a good measurement because a worse one disagreed.
+ * Each check's setup is bounded by that check's OWN span, never by the run's. Jobs that ran at
+ * the same time legitimately sum past the wall clock they ran inside — four one-minute jobs with
+ * twenty seconds of setup each sum to eighty seconds inside a sixty-second run without anything
+ * being wrong — and reading the sum against one span calls a correct producer broken. That is the
+ * same wall-clock-versus-parallel error `deriveConsumedRunner` refuses for cost.
+ *
+ * The span itself stays MEASURED when a check is incoherent: it is still evidence, and only the
+ * split is broken. Refusing both would discard a good measurement because a worse one disagreed.
  */
 function deriveSetup(observation) {
   const { checks } = observation;
   if (checks.length === 0) return withheld('NOT_EXPOSED');
   if (checks.some((entry) => entry.setupMs === null)) return withheld('NOT_EXPOSED');
-  const total = checks.reduce((sum, entry) => sum + entry.setupMs, 0);
-  if (total > spanOf(observation)) return withheld('CORRUPT');
-  return measured(total);
+  if (checks.some((entry) => entry.setupMs > spanOf(entry))) return withheld('CORRUPT');
+  return measured(checks.reduce((sum, entry) => sum + entry.setupMs, 0));
 }
 
 /**
@@ -674,6 +679,15 @@ function deriveCriticalPath(observation) {
       state: 'UNKNOWN', reasonCode: 'NOT_EXPOSED', checkIds: [], durationMs: null,
     };
   }
+  // An edge set is verified as a DAG over the carried checks and nothing more: no rule requires
+  // an edge to imply temporal order, so two checks that in fact ran at the same time can be
+  // chained and both spans summed. A collector reading edges from the workflow definition and
+  // timings from the provider's API is reading two sources that routinely disagree — reporting
+  // granularity, reusable-workflow nesting, matrix legs — so this is the normal case, not the
+  // pathological one. The bounded contradiction is named, exactly as `deriveSetup` names its own.
+  if (path.durationMs > spanOf(observation)) {
+    return { state: 'UNKNOWN', reasonCode: 'CORRUPT', checkIds: [], durationMs: null };
+  }
   return {
     state: 'MEASURED', reasonCode: null, checkIds: path.checkIds, durationMs: path.durationMs,
   };
@@ -752,17 +766,40 @@ function deriveRetries(runs) {
 }
 
 /**
- * Provider-reported billable time, summed. Never derived from wall clock: a provider rounds each
- * job up to the whole minute and multiplies by an operating-system rate, and parallel jobs bill
- * concurrently, so a duration converted to cost is always wrong and always plausible.
+ * Provider-reported billable time, summed over EVERY observation in the window.
+ *
+ * Never derived from wall clock: a provider rounds each job up to the whole minute and multiplies
+ * by an operating-system rate, and parallel jobs bill concurrently, so a duration converted to
+ * cost is always wrong and always plausible.
+ *
+ * And never restricted to the comparable conclusions. `CI_FLOW_COMPARABLE_CONCLUSIONS` exists
+ * because a cancelled run's DURATION is truncated and a timed-out run's is a censored ceiling —
+ * reasoning about distributions that does not transfer to a bill. A cancelled run's billing is a
+ * complete, already-final fact: the runner ran and the account was charged. Dropping it would
+ * make `CANCEL_SUPERSEDED_RUNS` — a lever whose whole effect is to create more cancellations —
+ * appear to reduce cost by removing runs from the sum while real spend rose. That is the
+ * false-win generator MR5 guards on the duration axis, reproduced on the cost axis by exclusion.
+ *
+ * The sample is therefore the whole window, so `sampleSize` and `observationCount` agree and
+ * nothing leaves the sum unannounced.
  */
 function deriveConsumedRunner(observations) {
-  const comparable = observations.filter(isComparable);
-  const billed = comparable.filter((entry) => entry.billableMs !== null);
-  if (comparable.length === 0 || billed.length !== comparable.length) {
+  const billed = observations.filter((entry) => entry.billableMs !== null);
+  if (observations.length === 0 || billed.length !== observations.length) {
     return {
       state: 'UNKNOWN',
       reasonCode: 'BILLING_NOT_EXPOSED',
+      totalMs: null,
+      minutes: null,
+      sampleSize: billed.length,
+    };
+  }
+  // A partial read's billable figure is a partial read of the bill. Summing it publishes a
+  // charge the producer already said it could not see all of.
+  if (observations.some((entry) => !entry.complete)) {
+    return {
+      state: 'UNKNOWN',
+      reasonCode: 'OBSERVATION_INCOMPLETE',
       totalMs: null,
       minutes: null,
       sampleSize: billed.length,
@@ -819,7 +856,16 @@ export function deriveCiFlowBlock({ artifact, observedAt }) {
       || ordinal(ciFlowObservationIdentity(right), ciFlowObservationIdentity(left)),
   )[0];
 
-  const presentTenseReason = observations.length === 0 ? 'NO_OBSERVATIONS' : (fresh ? null : 'STALE');
+  // Three reasons the present tense cannot be spoken, in the order that makes each the right
+  // thing to say. The third is the one a collector is most likely to hit: every present-tense
+  // cell is derived from that ONE gate observation, so a producer that marked it a partial read
+  // has told us the gate, the four phases, the slowest check and the critical path are all
+  // derived from evidence it could not see the whole of. Publishing them as MEASURED would have
+  // the block contradict itself in its own fields, since `withheldCount` records the same
+  // observation as withheld from the distribution as untrustworthy.
+  const presentTenseReason = observations.length === 0
+    ? 'NO_OBSERVATIONS'
+    : (!fresh ? 'STALE' : (gateObservation.complete ? null : 'OBSERVATION_INCOMPLETE'));
 
   const gate = presentTenseReason !== null ? withheldGate(presentTenseReason) : {
     state: 'MEASURED',

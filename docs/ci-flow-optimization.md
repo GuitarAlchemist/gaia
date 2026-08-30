@@ -167,8 +167,9 @@ would be a lie of type, not merely a lie of degree.
 `CORRUPT` is deliberately not a display state for a whole artifact: an artifact that fails
 verification is *refused*, exactly as an incoherent flow artifact is. `CORRUPT` marks a single
 quantity within an otherwise coherent observation whose own internal evidence contradicts itself
-in a bounded, non-fatal way — for example a phase decomposition summing to more than the span it
-decomposes, which withholds the split while the span itself stays `MEASURED`.
+in a bounded, non-fatal way — a check claiming more setup than its own span, or a dependency chain
+summing to more than the run it lies inside — which withholds that one quantity while the span
+itself stays `MEASURED`.
 
 ## Identity, idempotency and the race
 
@@ -246,14 +247,15 @@ locale or timezone rendering; and a canonical JSON recipe with sorted keys for e
 | --- | --- | --- |
 | Queue latency | An **attempt-scoped** enqueue instant and a start instant are both carried. | `ATTEMPT_QUEUE_BASIS_NOT_EXPOSED` / `NOT_EXPOSED` |
 | Runner startup | A runner-acquired instant is carried between enqueue and start. | `NOT_EXPOSED` |
-| Setup duration | A phase decomposition is carried, names a setup phase, and fits inside its span. | `NOT_EXPOSED` / `CORRUPT` |
+| Setup duration | A phase decomposition is carried and **each check's** setup fits inside **that check's own** span. | `NOT_EXPOSED` / `CORRUPT` |
 | Execution duration | Start and completion instants are both carried and coherent. | `CORRUPT` |
-| Critical path | A dependency edge set is carried for the observation's checks. | `NO_PROVEN_DEPENDENCY_GRAPH` |
+| Critical path | A dependency edge set is carried, and the longest chain through it fits inside the run's span. | `NO_PROVEN_DEPENDENCY_GRAPH` / `CORRUPT` |
 | Retries | Every attempt from 1 to the highest held has been observed. | `ATTEMPT_HISTORY_NOT_COLLECTED` |
 | Cancellations | Always derivable from `conclusion`. | — |
 | Conclusion | Always carried; it is what makes the observation closed. | — |
-| Consumed runner time | A provider-reported billable figure exists for this exact run and attempt. | `BILLING_NOT_EXPOSED` |
+| Consumed runner time | A provider-reported billable figure exists for **every** observation held, whatever its conclusion, and none of them is a partial read. | `BILLING_NOT_EXPOSED` / `OBSERVATION_INCOMPLETE` |
 | p50 / p95 | At least `CI_FLOW_MIN_SAMPLE` **comparable** closed observations exist. | `INSUFFICIENT_HISTORY` |
+| Gate, phases, slowest check, critical path | The most recently closed run is fresh **and** the producer marked it a complete read. | `NO_OBSERVATIONS` / `STALE` / `OBSERVATION_INCOMPLETE` |
 
 Six of these have an available shortcut that would look right and be wrong, so the reasoning is
 written down rather than left to review.
@@ -295,6 +297,43 @@ whichever direction makes the report look good. There is no OS multiplier table 
 and a gate asserts its absence. Wall-clock span and provider-reported billable time are published
 under two distinct names and are never summed, reconciled, or asserted equal.
 
+**The bill is summed over every conclusion, and the comparable set does not govern it.** The
+reasoning above for `CI_FLOW_COMPARABLE_CONCLUSIONS` is about *durations*: a cancelled run's is
+truncated, a timed-out run's is a censored ceiling. None of it transfers to a sum of
+provider-reported billable minutes, where a cancelled run's billing is complete and already
+final — the runner ran and the account was charged. Restricting the sum to `SUCCESS` and `FAILURE`
+would mean `CANCEL_SUPERSEDED_RUNS`, whose entire effect is to create more cancellations, appeared
+to *reduce* measured cost by removing runs from the sum while real spend rose. That is the same
+false-win generator MR5 guards on the duration axis, arrived at from the other direction, and
+MR10 reverts it. The cost sample is therefore the whole window: `sampleSize` equals
+`observationCount`, so nothing can leave the sum unannounced, and one figure the provider has not
+reported withholds the cell by name rather than shrinking it quietly.
+
+**A decomposition is read against what it decomposes, never against one wall clock.** Two cells
+carry a decomposition of a run, and both have a shortcut that inflates by the fan-out factor. The
+setup cell sums each check's setup; the critical path sums the spans along a dependency chain.
+Comparing either sum against the run's single wall-clock span makes the numerator a sum and the
+denominator a maximum, which is wrong in both directions at once. Reading it as a *ratio* raises
+`INTRODUCE_CACHING` on four one-minute jobs that each spend ten seconds on setup — a true share of
+one sixth, published as two thirds — and sends a team to spend a week on caching. Reading it as a
+*bound* calls a perfectly coherent producer `CORRUPT`, whose operator action is "fix the producer",
+and silently removes the caching lever from exactly the heavily parallel workflows where caching is
+most likely to pay. So each check's setup is bounded by that check's own span, the caching share is
+evaluated per check and names the check that earns it, and the same argument the contract already
+makes for cost — *parallel jobs bill concurrently, so a duration converted against one wall clock
+is always wrong and always plausible* — is applied here rather than stated one section earlier and
+forgotten. MR9 reverts it.
+
+**A dependency chain may not outlast the run it lies inside.** An edge set is verified as a DAG
+over the carried checks and nothing more: no rule requires an edge to imply temporal order, so two
+checks that in fact ran at the same time can be chained and both spans summed, publishing a
+ten-minute critical path for a five-minute run. This is not an adversarial shape. The collector
+that will eventually supply edges reads them from the workflow definition while the timings come
+from the provider's API, and those two sources routinely disagree — reporting granularity,
+reusable-workflow nesting, matrix legs. A path longer than its run is therefore the existing
+bounded contradiction, `CORRUPT`, with the run's span left `MEASURED` exactly as the setup cell
+already does it. MR8 reverts it.
+
 **The critical path is not the slowest check.** The critical path is the longest chain through the
 dependency graph; the slowest check is a vertex. They coincide only when the graph is a single
 chain — so a five-minute job running fully in parallel can be the slowest check while contributing
@@ -303,11 +342,21 @@ precisely because "the longest job" sounds like the answer. This contract publis
 separate cells — `slowestCheck` is always derivable and `criticalPath` requires a carried edge set
 — so the easy number is never allowed to wear the important number's name. MR3 reverts it.
 
-**An incomplete observation is journalled but contributes to no aggregate.** A truncated job list,
-an absent phase array, an absent runner field and a not-yet-ready timing response are four
-different partial reads, and each contributes its named reason to the affected cell and nothing at
-all to any total. The count of contributors plus the count of withheld observations equals the
-count held, so no observation silently vanishes from a denominator.
+**An incomplete observation is journalled but contributes to no aggregate, and speaks in no
+present tense.** A truncated job list, an absent phase array, an absent runner field and a
+not-yet-ready timing response are four different partial reads, and each contributes its named
+reason to the affected cell and nothing at all to any total. The count of contributors plus the
+count of withheld observations equals the count held, so no observation silently vanishes from a
+denominator.
+
+This binds the present-tense cells specifically, because they are all derived from one
+observation — the most recently closed run — which is the single observation a collector is most
+likely to have caught mid-finalisation. When the producer marks that observation a partial read,
+the gate, the four phases, the slowest check and the critical path all read
+`OBSERVATION_INCOMPLETE`. Publishing them as `MEASURED` would have the block contradict itself in
+its own fields: `withheldCount` records that same observation as withheld from the distribution as
+untrustworthy, while every cell on the card is read off it. `OBSERVATION_INCOMPLETE` is a reason a
+derivation actually reaches, not a vocabulary entry with no emitter; MR7 reverts the guard.
 
 ## Binding, proven only
 
@@ -331,7 +380,7 @@ precondition that the observations can actually satisfy:
 | `CANCEL_SUPERSEDED_RUNS` | Two or more closed runs exist for the same branch with overlapping intervals, so a later push did not cancel an earlier run. |
 | `SAFE_JOB_PARALLELISM` | A carried dependency edge set contains checks with no path between them that nonetheless ran sequentially. |
 | `DEDUPLICATE_WORK` | Two or more checks in one run share an identical work digest. |
-| `INTRODUCE_CACHING` | Setup duration is `MEASURED` and is a published fraction of execution duration or more. |
+| `INTRODUCE_CACHING` | A check's own setup is a published fraction of **that check's own span** or more; the evidence names the run and the check inside it. |
 
 A candidate is advisory: it carries `effect: 'NONE'`, `authority: 'NONE'`, the lever, the
 evidence identifiers that support it, and no patch. Absence of a candidate is never an assertion
@@ -379,11 +428,11 @@ control-room integration gates `C1..Cn` plus the mechanism reverts in
 | K11 | Cancelled, skipped and timed-out runs contribute no duration to p50/p95; a skipped check reads `NOT_APPLICABLE`. |
 | K12 | A missing pull-request binding reads `PR_NOT_PROVEN`; no code path derives a binding from the branch. |
 | K13 | A future instant, or a start after a completion, is refused or named — never clamped, and no `Math.max(0, …)` guards a duration. |
-| K14 | A phase decomposition exceeding its span withholds the split as `CORRUPT` while the span stays `MEASURED`. |
-| K15 | A partial observation missing runner or phase evidence reads `NOT_EXPOSED`, never `0`. |
+| K14 | A check claiming more setup than its own span withholds the split as `CORRUPT` while the span stays `MEASURED`; checks that ran at the same time may sum past the wall clock without contradicting it. |
+| K15 | A partial observation missing runner or phase evidence reads `NOT_EXPOSED`, never `0`; a gate observation the producer marked incomplete withholds every present-tense cell as `OBSERVATION_INCOMPLETE`. |
 | K16 | Fewer than `CI_FLOW_MIN_SAMPLE` comparable durations reads `INSUFFICIENT_HISTORY`, never a percentile. |
-| K17 | No OS multiplier table exists in the source; billable time and wall-clock span are never reconciled. |
-| K18 | `criticalPath` requires a carried edge set; the slowest check alone never populates it, and both may coexist. |
+| K17 | No OS multiplier table exists in the source; billable time and wall-clock span are never reconciled; every billed conclusion is in the sum, so cancelling more runs cannot make measured cost fall. |
+| K18 | `criticalPath` requires a carried edge set; the slowest check alone never populates it, and both may coexist; a chain longer than its run reads `CORRUPT`. |
 | K19 | A repository rename changes the label and no derived number, because identity carries `repositoryId`. |
 | K20 | A genuine measured zero is still published as `MEASURED`, so the lattice is not "everything is unknown". |
 | J1 | Byte-identical redelivery of one identity changes no projected byte and reports the duplicate. |
@@ -394,7 +443,7 @@ control-room integration gates `C1..Cn` plus the mechanism reverts in
 | J6 | The projection is identical under a hostile `TZ` and `LANG`; it holds no clock and reads nothing. |
 | J7 | The projected relation is flat, column-ordered, integer-valued and newline-delimited. |
 | O1 | An advisory candidate names its supporting evidence and carries no patch field. |
-| O2 | Each lever is emitted only when its own evidence precondition holds, and withheld otherwise. |
+| O2 | Each lever is emitted only when its own evidence precondition holds, and withheld otherwise; the caching share is per check, so jobs that ran at the same time neither inflate it nor suppress it. |
 | O3 | A comparison names exactly one lever. |
 | O4 | A comparison refuses an observation identity already claimed by another comparison; claim sets are pairwise disjoint. |
 | O5 | The regression guard is inside the comparison digest; loosening it changes the revision. |
@@ -412,6 +461,10 @@ control-room integration gates `C1..Cn` plus the mechanism reverts in
 | MR4 | Mechanism revert: dropping the claimed-identity set is what would let one observation close two comparisons. |
 | MR5 | Mechanism revert: widening the comparable conclusion set to admit `CANCELLED` is what would turn a cancellation lever into a false win. |
 | MR6 | Mechanism revert: allowing a `RUN_CREATION` enqueue basis on a re-run is what would publish days of human latency as queue latency. |
+| MR7 | Mechanism revert: dropping the completeness guard on the gate observation is what would publish a partial read as the current state of the pipeline. |
+| MR8 | Mechanism revert: dropping the span bound on the dependency chain is what would publish a critical path outlasting the run it lies inside. |
+| MR9 | Mechanism revert: reading the setup share against one wall clock is what would fire `INTRODUCE_CACHING` on parallel jobs whose evidence does not support it. |
+| MR10 | Mechanism revert: excluding cancelled runs from the bill is what would make a cancellation lever look cheaper while real spend rose. |
 
 ## Reversibility
 
@@ -430,6 +483,8 @@ The design is wrong if any of these turns out to be true:
   alongside it. Then the artifact is a claim, not evidence, and gate C2 is the check that fails.
 - A cancellation-increasing lever produces a `KEEP` verdict. Then the comparable set leaked and
   MR5 did not bite.
+- A cancellation-increasing lever makes `consumedRunner` fall while the provider's invoice rises.
+  Then the bill is being read through the comparable set again and MR10 did not bite.
 - Two comparisons report effects supported by the same run. Then claim exclusivity leaked and MR4
   did not bite.
 - A projection digest differs between two hosts reading the same journal. Then determinism is a

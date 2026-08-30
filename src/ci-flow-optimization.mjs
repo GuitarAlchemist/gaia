@@ -191,23 +191,41 @@ function duplicateWork(observations) {
   );
 }
 
-/** A measured setup that is a real share of the span it sits inside. */
+/**
+ * A check whose own setup is a real share of its OWN span.
+ *
+ * The share is measured per check, and this is the whole mechanism. Summing the setup of jobs
+ * that ran at the same time and dividing by one wall-clock span makes the numerator a sum and the
+ * denominator a maximum, so the share is inflated by the fan-out: four one-minute jobs each
+ * spending ten seconds on setup — a true share of one sixth — read as two thirds and raise this
+ * lever on evidence that does not support it. That is the same error the contract already refuses
+ * for cost, and the consequence is the week of somebody's engineering time this module exists to
+ * protect. Naming the check rather than the run is also the more useful answer: it says which job
+ * to cache instead of leaving an operator to read four logs to find out.
+ */
 function caching(observations) {
   const { numerator, denominator } = CI_FLOW_CACHING_SETUP_SHARE;
   const evidence = [];
   for (const entry of observations) {
     const { setupMs, executionMs } = deriveCiFlowObservationMeasures(entry);
-    // An unexposed setup is not a small setup. A cell that is UNKNOWN supports no candidate.
+    // An unexposed setup is not a small setup, and an incoherent one is not evidence at all. A
+    // cell that is UNKNOWN supports no candidate, so both are consulted as coherence gates only.
     if (setupMs.state !== 'MEASURED' || executionMs.state !== 'MEASURED') continue;
-    if (setupMs.value * denominator >= executionMs.value * numerator) {
-      evidence.push(ciFlowObservationIdentity(entry));
+    const share = (item) => [item.setupMs, spanOf(item)];
+    for (const item of entry.checks) {
+      const [setup, span] = share(item);
+      // A check with no span has no share to be a fraction of; zero over zero is not a quarter.
+      if (span > 0 && setup * denominator >= span * numerator) {
+        evidence.push(`${ciFlowObservationIdentity(entry)}\u0000${item.checkId}`);
+      }
     }
   }
   if (evidence.length === 0) return null;
   return candidate(
     'INTRODUCE_CACHING',
-    `setup is at least one ${denominator}th of the run it sits inside, so work that could be`
-    + ' restored instead of rebuilt is being rebuilt',
+    `at least one check spent one ${denominator}th or more of its own span on setup, so work that`
+    + ' could be restored instead of rebuilt is being rebuilt; the evidence names the run and the'
+    + ' check inside it, separated by NUL',
     evidence,
   );
 }
