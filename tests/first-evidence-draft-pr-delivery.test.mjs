@@ -143,14 +143,18 @@ const fakeAuthority = (result = { status: 'AUTHORIZED', grantId: 'grant-1' }) =>
   };
 };
 
+// `...over` must NOT come last: it carries a PARTIAL `observation` override, and spreading it
+// over a fully-built observation would replace the whole observation with those few fields, so
+// every such test would die on the contract's exact-field check before reaching its assertion.
+// The built observation is therefore applied after the spread; `over` still overrides the rest.
 const deliver = (directory, over = {}, options = {}) => deliverFirstEvidenceDraftPr({
   directory,
-  observation: observation(over.observation ?? {}),
   grant: { grantId: 'grant-1' },
   authority: (options.authority ?? fakeAuthority()).port,
   effects: (options.effects ?? fakeEffects()).port,
   now,
   ...over,
+  observation: observation(over.observation ?? {}),
 });
 
 const refusalCode = async (fn) => {
@@ -582,15 +586,24 @@ test('E20: no existing durable machine is invalidated by this feature', () => {
   assert.notEqual(FIRST_EVIDENCE_DELIVERY_MACHINE.machineId, PORTFOLIO_DRAIN_MACHINE.machineId);
 });
 
-test('E21: the effect surface is closed, and cannot push, merge or mark ready', () => {
+test('E21: the effect surface is closed, and cannot publish, integrate or mark ready', () => {
   const source = deliverySource();
+  // Argv-shaped, not substring-shaped. This module legitimately asks `merge-base --is-ancestor`,
+  // which is a read-only question about the commit graph; what must be unreachable is the set of
+  // argv tokens by which this codebase would actually spell an integrating or publishing effect.
   for (const forbidden of [
-    'push', 'merge', "'pr', 'ready'", 'pr ready', '--admin', 'squash', 'rebase', 'deploy',
+    "'push'", "'merge'", "'ready'", "'switch'", "'commit'", "'add'",
+    '--force-with-lease', '--admin', '--squash', '--rebase', '--auto', 'deploy',
   ]) {
     assert.equal(
       source.includes(forbidden), false, `${forbidden} must be unreachable from this module`,
     );
   }
+  // The injected effect port has exactly two methods: one question and one creation.
+  const portMethods = [...source.matchAll(/effects\.([a-zA-Z]+)/gu)].map(([, name]) => name);
+  assert.deepEqual([...new Set(portMethods)].sort(), [
+    'findDraftPullRequest', 'openDraftPullRequest',
+  ]);
   for (const forbidden of [
     /\bcreateServer\s*\(/u, /\bnode:(net|http|https|dgram|tls)\b/u, /\bnew\s+WebSocket\b/u,
     /\bshell\s*:\s*true\b/u, /\bexecSync\s*\(/u,
