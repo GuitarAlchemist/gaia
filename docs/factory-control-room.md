@@ -853,3 +853,116 @@ room grows a second implementation of the observation digest recipe.
 **Rejection criterion.** Revert R1.2 if re-derivation ever refuses an observation the sensor
 itself sealed — that would mean the two implementations had drifted, which is exactly the failure
 this repair is shaped to make impossible.
+
+# R2 — the blocker an independent review reproduced in the shipped R1.2 seam
+
+Entry commit `e609461ca34f492bb61bc4eeb2cd12907b1d00cc`. R1.2 closed `observationRevision` and said
+so in this document. One field of the same block was left standing, and this section was written
+before a line of repair.
+
+The scope is that one finding and nothing else. No bus verb, authority, effect, network call,
+retry, clock source, provider, install or configuration surface is added, widened or renamed, and
+the LOCAL_WMUX sensor stays separated from the GitHub portfolio exactly as U8 left it.
+
+## R2.1 — `localLanes.observedAt` is provenance, and must be an exact instant
+
+*The successor of R1.2, which closed the field beside this one.*
+
+**What was actually wrong.** R1.2's repair made `observationRevision` a derived value: the control
+room now recomputes it from `block.observedAt` and `block.lanes`. That closed the field it names,
+and it moved the whole trust of the block onto its two inputs. `block.lanes` is checked
+exhaustively — four bounded identities, a closed lifecycle vocabulary, a closed label-state
+vocabulary, a human-safe label pattern and a strict ordering. `block.observedAt` was checked for
+`typeof value === 'string'` and a finite `Date.parse`.
+
+`Date.parse` is not a validator. V8's fallback parser reads a trailing parenthetical as a time-zone
+comment and accepts whatever it contains, so
+
+```
+Sat Aug 30 2026 03:45:00 GMT+0000 (This run is 87% complete and will finish in 2h)
+```
+
+parses to `1788061500000` — the same instant as `2026-08-30T03:45:00.000Z`. Because it is the same
+instant, `observationAgeMs` is unchanged, the freshness lattice is unchanged, `liveCount` and
+`showPulse` are unchanged, and the headline and counts are unchanged. The forged string therefore
+survives every existing re-derivation, and `localLaneObservationRevision` obligingly seals it into
+a well-formed sixty-four-character digest of the forgery. Reproduced at the entry commit:
+
+```
+Date.parse(forged) === Date.parse(canonical) : true
+isExactInstant(forged)                       : false
+requireControlRoomSnapshot(forged)           : accepted
+renderControlRoomHtml(forged)                : rendered
+
+<time>Sat Aug 30 2026 03:45:00 GMT+0000 (This run is 87% complete and will finish in 2h)</time>
+  · observation age 0s
+```
+
+**This is provenance, not injection.** `escapeHtml` holds at every interpolation, exactly as it did
+in R1.2; no markup escapes and the string arrives as text. The failure is that the field an
+operator reads as *the instant this evidence was current* carries an arbitrary sentence chosen by
+whoever resealed the snapshot — rendered inside `<time>`, beside a truthful-looking `observation
+age 0s`, in the one section of the page that exists to say whether work is happening right now. The
+same string is also published as `data-observed-at`, which the document's own liveness script reads
+back with `Date.parse` to decide whether a lane still counts as live. A fabricated progress claim
+in that position is the exact operator failure this feature was built to end: a control room
+stating something confident that nobody measured.
+
+**Repair: use the predicate that already exists.** `src/local-lane-observation.mjs` already exports
+`isExactInstant`, already documents why leniency is the defect — a partial date must not silently
+widen to midnight UTC — and is already the rule `requireLocalLaneObservation` applies to this same
+field on the build path. The verify path applied a weaker rule to the same field, which is the
+alias-guard shape `src/path-identity.mjs` exists to eliminate and the shape U3 and R1.2 were both
+raised to close. `requireLocalLanes` imports that predicate and applies it. **One rule, one
+implementation:** a second round-trip check written locally in the control room would reproduce the
+defect being repaired, so none is added.
+
+A pattern check over an ISO-shaped regular expression was considered and rejected for the reason
+R1.2 rejected one: it is a second spelling of an existing rule, and it would still admit
+`2026-02-30T00:00:00.000Z`, which is shaped correctly and is not a day. Round-tripping through
+`Date#toISOString` refuses that too, and refuses it by construction rather than by enumeration.
+
+**Gates, and what each one is for.** In `tests/control-room-local-lanes.test.mjs`:
+
+1. **T21 — a Date.parse-able but non-canonical instant is refused at both public seams.** Six
+   forged spellings — the fabricated progress sentence, an exfiltration URL in the same
+   parenthetical position, RFC 1123, a `Z` without milliseconds, a `+00:00` offset and a `+01:00`
+   offset naming the same instant — each carry a correctly re-derived `observationRevision`, so
+   nothing but the instant's spelling is wrong. Each is refused by `requireControlRoomSnapshot` and
+   by `renderControlRoomHtml` with a typed `ControlRoomError` / `InvalidSnapshot`, in both
+   languages, and none of the six strings reaches a rendered document. Every forgery parses to the
+   same millisecond as the honest instant, so no age, count, headline or pulse differs — the gate
+   cannot pass because some *other* re-derivation disagreed.
+2. **T21 positive control.** Exact canonical instants still verify and still render, and the
+   operator still reads the instant back off the page: the fresh instant, one inside the freshness
+   window, one on its boundary and one past it. A verifier that refused everything would pass gate
+   1 and fail this one; without it, gate 1 proves nothing.
+3. **T21 MECHANISM REVERT.** A one-expression mutant that restores the loose `Date.parse` guard
+   accepts the forgery and renders the fabricated progress sentence into the `<time>` element and
+   into `data-observed-at`. The gate therefore tests the mechanism rather than passing for an
+   unrelated reason.
+4. **T21 — one instant predicate.** The control room is read as text and asserted to import
+   `isExactInstant` and to contain no second `toISOString()` round-trip comparison, so the rule
+   cannot drift into two implementations with two behaviours.
+
+**Falsifiers for this repair.** R2.1-F1: any string that is not `new Date(value).toISOString()` is
+accepted in `localLanes.observedAt`. R2.1-F2: an honest snapshot is refused. R2.1-F3: the control
+room grows a second implementation of the exact-instant rule.
+
+**Rejection criterion.** Revert R2.1 if exactness ever refuses an observation the sensor itself
+sealed — the sensor validates the same field with the same predicate, so that would mean the two
+call sites had drifted, which is the failure this repair is shaped to make impossible.
+
+## Findings recorded and not repaired here
+
+- **The snapshot's own `observedAt` and `sourceChangedAt` accept the same lenient spellings.**
+  `requireControlRoomSnapshot` never re-checks them, and `requireTimestamp` on the build path uses
+  the same `Date.parse` test this section replaces inside the lane block. Reproduced at the entry
+  commit: resealing the snapshot *and* its obstruction observation window with the forged string is
+  accepted and rendered, so the fabricated sentence reaches the page header's "checked" and
+  "changed" times. This is the same class as R2.1 and is a real defect, but it is a different
+  field at a different seam with a wider blast radius — it would move published snapshot revisions
+  for any consumer whose timestamps are not already canonical, and the top-level instants have no
+  single owning schema module the way the lane block has `src/local-lane-observation.mjs`. It is
+  recorded here rather than repaired, because this lane is authorized for one reproduced blocker,
+  and closing a second one quietly is how a bounded repair stops being reviewable.
