@@ -942,9 +942,23 @@ test('T20: the observation digest recipe has exactly one implementation', () => 
     /gaia-local-lane-observation\/1/u.test(control), false,
     'the control room does not respell the observation schema it hashes over',
   );
+  // This gate used to count `createHash` calls and require exactly one. That count stopped being
+  // the question when the module gained the artifact-completion recipes, and a count is the wrong
+  // mechanism anyway: two recipes are safe when they address different things and dangerous when
+  // they address the same thing. So the rule is now the property the count was standing in for —
+  // every recipe is domain-separated by its OWN schema constant, and exactly one of them names
+  // the observation.
+  const recipes = schema.split("createHash('sha256')").slice(1)
+    .map((tail) => /schema:\s*([A-Za-z_]+)/u.exec(tail)?.[1] ?? null);
+
+  assert.deepEqual(recipes, [
+    'LOCAL_LANE_OBSERVATION_SCHEMA',
+    'LANE_ARTIFACT_BINDING_RECORD_SCHEMA',
+    'LANE_ARTIFACT_BINDINGS_SCHEMA',
+    'LANE_COMPLETION_EVIDENCE_SCHEMA',
+  ], 'every digest recipe carries its own domain separator, so none can collide with another');
   assert.equal(
-    (schema.match(/createHash\('sha256'\)/gu) ?? []).length, 1,
-    'the schema module hashes an observation in exactly one place',
+    new Set(recipes).size, recipes.length, 'and no two recipes share a domain',
   );
   assert.match(control, /localLaneObservationRevision/u, 'the control room imports that one recipe');
 });

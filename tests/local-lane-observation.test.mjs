@@ -591,12 +591,16 @@ test('an unknown field is refused in a binding document, never ignored', () => {
 });
 
 test('a tampered binding revision is refused, and no record inside the document is used', () => {
-  const doc = sealLaneArtifactBindings({ bindings: [binding(1)] });
+  // The artifact sits two levels down, so widening or narrowing the fence is still a legal
+  // binding and the refusal below is about the revision rather than about the path.
+  const doc = sealLaneArtifactBindings({
+    bindings: [binding(1, { artifactPath: join(ARTIFACT_ROOT, 'nested', 'handoff-1.md') })],
+  });
 
   for (const tamper of [
     { sourceRevision: 'd'.repeat(64) },
     { completionMarker: 'GAIA_SOME_OTHER_MARKER_COMPLETE' },
-    { artifactPath: join(ARTIFACT_ROOT, 'someone-elses-handoff.md') },
+    { artifactPath: join(ARTIFACT_ROOT, 'nested', 'someone-elses-handoff.md') },
     { agentId: 'agent-9' },
     { allowedRoot: join(ARTIFACT_ROOT, 'nested') },
   ]) {

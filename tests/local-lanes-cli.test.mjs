@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 
 import { runFactoryDashboardCli } from '../scripts/factory-dashboard.mjs';
 import {
-  WMUX_LANE_ARGV, readArtifactEvidence, runLocalLaneSensorCli,
+  SensorRefusalError, WMUX_LANE_ARGV, readArtifactEvidence, runLocalLaneSensorCli,
 } from '../scripts/local-lane-sensor.mjs';
 import {
   MAX_WATCH_INTERVAL_MS, parseArgs, runLocalLanesTick,
@@ -545,7 +545,7 @@ test('a missing, corrupt or tampered binding file refuses the tick and changes n
         ['--out', out, '--wmux', FAKE_WMUX, '--bindings', path],
         { now: clock(), writeStdout: () => {} },
       ),
-      (error) => error.name === 'SensorRefusalError',
+      (error) => error instanceof SensorRefusalError,
       `${path} must refuse the tick rather than degrade to no bindings`,
     );
   }
@@ -564,7 +564,7 @@ test('a corrupt or future-dated previous observation refuses the tick', () => {
       ['--out', corrupt, '--wmux', FAKE_WMUX, '--bindings', bindings],
       { now: clock(), writeStdout: () => {} },
     ),
-    (error) => error.name === 'SensorRefusalError',
+    (error) => error instanceof SensorRefusalError,
     'treating a corrupt history as absence is the edit that resets a refusal to running',
   );
 
@@ -586,7 +586,7 @@ test('a corrupt or future-dated previous observation refuses the tick', () => {
       ['--out', future, '--wmux', FAKE_WMUX, '--bindings', bindings],
       { now: clock(), writeStdout: () => {} },
     ),
-    (error) => error.name === 'SensorRefusalError' && /after/u.test(error.message),
+    (error) => error instanceof SensorRefusalError && /after/u.test(error.message),
   );
 });
 
@@ -594,23 +594,34 @@ test('a corrupt or future-dated previous observation refuses the tick', () => {
 // a malformed artifact refuses one entry, and the other lanes stay observable
 // ---------------------------------------------------------------------------
 
-test('an artifact that escapes its allowed root once symlinks resolve is refused evidence', (t) => {
+test('an artifact that escapes its allowed root once links resolve is refused evidence', (t) => {
   const space = workspace([agent(1)]);
   const one = bound(space, 1, { write: false });
-  const outside = space.path('outside-the-fence.md');
-  writeFileSync(outside, COMPLETE_TEXT, 'utf8');
+
+  // A directory junction needs no elevation on Windows, so the PHYSICAL fence is exercised on
+  // every host rather than only on one that grants file-symlink creation.
+  const elsewhere = space.path('outside-the-fence');
+  mkdirSync(elsewhere, { recursive: true });
+  writeFileSync(join(elsewhere, 'handoff-1.md'), COMPLETE_TEXT, 'utf8');
+  const doorway = join(one.root, 'doorway');
   try {
-    symlinkSync(outside, one.artifactPath, 'file');
+    symlinkSync(elsewhere, doorway, process.platform === 'win32' ? 'junction' : 'dir');
   } catch {
-    t.skip('this host does not grant symlink creation');
+    t.skip('this host grants neither a junction nor a directory symlink');
     return;
   }
+  const escaping = {
+    ...one.binding, artifactPath: join(doorway, 'handoff-1.md'),
+  };
 
   assert.deepEqual(
-    readArtifactEvidence(one.binding),
+    readArtifactEvidence(escaping),
     { outcome: 'REFUSED', reason: 'PATH_ESCAPES_ALLOWED_ROOT' },
     'a lexically safe path is not a physically safe path',
   );
+  // The same bytes, reached inside the fence, are read: this is a fence and not a ban.
+  writeFileSync(one.artifactPath, COMPLETE_TEXT, 'utf8');
+  assert.equal(readArtifactEvidence(one.binding).outcome, 'READ');
 });
 
 test('a non-regular, oversized, unreadable or unstable artifact is refused evidence', () => {
