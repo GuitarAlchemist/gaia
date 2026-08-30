@@ -1036,6 +1036,8 @@ const RENDER_COPY = Object.freeze({
     laneObservationStale: 'Lane observation stale',
     laneWorkspace: 'workspace',
     lanePane: 'pane',
+    laneRunningGroup: (count) => `Running (${count})`,
+    laneInactiveGroup: (count) => `Inactive (${count})`,
     noLanes: 'No local wmux lane was observed.',
     laneStaleNote: (age, window) => `The sensor last reported ${age} ago, past its ${window}`
       + ' window. Lane liveness is unknown and nothing here is animated.',
@@ -1096,6 +1098,8 @@ const RENDER_COPY = Object.freeze({
     laneObservationStale: 'Observation de lane périmée',
     laneWorkspace: 'workspace',
     lanePane: 'pane',
+    laneRunningGroup: (count) => `En cours (${count})`,
+    laneInactiveGroup: (count) => `Inactives (${count})`,
     noLanes: 'Aucune lane wmux locale observée.',
     laneStaleNote: (age, window) => `Le capteur a rapporté il y a ${age}, au-delà de sa fenêtre`
       + ` de ${window}. La vivacité des lanes est inconnue et rien n’est animé ici.`,
@@ -1512,9 +1516,14 @@ function renderLocalLanes(snapshot, copy) {
   const age = formatDuration(block.observationAgeMs);
   const severity = (lane) => (lane.live ? 'healthy' : lane.lifecycle === 'RUNNING' ? 'warning' : 'neutral');
   const symbol = (lane) => (lane.live ? '●' : lane.lifecycle === 'RUNNING' ? '▲' : '○');
+  const orderedLanes = [...block.lanes].sort((left, right) => Number(right.live) - Number(left.live));
   const rows = block.lanes.length === 0
     ? `<p class="empty">${copy.noLanes}</p>`
-    : `<ol class="local-lane-list">${block.lanes.map((lane) => (
+    : `<div class="lane-summary" aria-label="${escapeHtml(copy.localLanes)}">`
+      + `<strong data-severity="${block.liveCount > 0 ? 'healthy' : 'neutral'}">`
+      + `<span class="semantic-symbol" aria-hidden="true">●</span>${copy.laneRunningGroup(block.liveCount)}</strong>`
+      + `<span>${copy.laneInactiveGroup(block.laneCount - block.liveCount)}</span></div>`
+      + `<ol class="local-lane-list">${orderedLanes.map((lane) => (
       `<li class="local-lane" data-lifecycle="${escapeHtml(lane.lifecycle)}"`
       + ` data-label-state="${escapeHtml(lane.labelState)}"`
       + ` data-severity="${severity(lane)}"`
@@ -1847,6 +1856,7 @@ export function renderControlRoomHtml(candidate, {
     .work-item { background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--semantic, var(--line)); padding: 15px; }
     .item-heading { align-items: start; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
     .heartbeat-pulse, .signal { border: 1px solid var(--green); color: var(--green); font-size: 10px; outline: 2px solid var(--green); outline-offset: 2px; padding: 4px 6px; white-space: nowrap; }
+    .status-chip.heartbeat-pulse { font-size: 12px; padding: 8px 11px; }
     .signal { border-color: #40516a; color: var(--muted); outline: 0; } .signal.stale { border-color: var(--amber); color: var(--amber); }
     .meter { align-items: center; display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr) auto; margin-top: 16px; }
     progress { accent-color: var(--green); height: 10px; width: 100%; } .not-measurable { color: var(--amber); }
@@ -1855,7 +1865,10 @@ export function renderControlRoomHtml(candidate, {
     .bullet-kind { color: var(--muted); font-size: 10px; letter-spacing: .09em; text-transform: uppercase; }
     .bullet-text { font-size: 14px; line-height: 1.4; }
     .bullet-meta { margin-top: 3px; }
-    .local-lane-list { display: grid; gap: 8px; list-style: none; margin: 14px 0 0; padding: 0; }
+    .lane-summary { align-items: center; display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 14px; }
+    .lane-summary strong { color: var(--semantic); }
+    .lane-summary > span { color: var(--muted); font-size: 12px; }
+    .local-lane-list { display: grid; gap: 8px; list-style: none; margin: 10px 0 0; padding: 0; }
     .local-lane { background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--semantic, var(--line)); display: grid; gap: 4px; padding: 12px; }
     .lane-label { font-size: 15px; font-weight: 650; line-height: 1.35; }
     .lane-unnamed { color: var(--muted); font-style: italic; font-weight: 400; }
@@ -1919,7 +1932,7 @@ export function renderControlRoomHtml(candidate, {
   <header>
     <div><h1>${copy.title}</h1>
     <div class="as-of">${copy.checked} <time>${escapeHtml(snapshot.observedAt)}</time> · ${copy.changed} <time>${escapeHtml(snapshot.sourceChangedAt)}</time> · ${copy.age} <span id="snapshot-age">…</span></div></div>
-    <div class="status-chip" data-severity="${headline.severity}"><span class="semantic-symbol" aria-hidden="true">${headline.symbol}</span>${copy.state[snapshot.headline.state]}</div>
+    <div class="status-chip${snapshot.showSpinner ? ' heartbeat-pulse' : ''}" data-severity="${headline.severity}"><span class="semantic-symbol" aria-hidden="true">${headline.symbol}</span>${copy.state[snapshot.headline.state]}</div>
     ${refreshSeconds === null ? '' : `<div class="auto-refresh">
       <button type="button" id="stop-refresh">${copy.stopRefresh}</button>
       <span class="as-of" id="refresh-note">${escapeHtml(copy.refreshing(refreshSeconds))}</span>
