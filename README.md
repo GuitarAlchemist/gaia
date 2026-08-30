@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 679 gates
+node --test                                   # 715 gates
 ```
 
 ### Functional factory tracer
@@ -237,15 +237,35 @@ npm run factory:dashboard -- \
   --watch-ms      5000
 ```
 
-The default view answers only five operator questions: what is moving now, what changed,
-what blocks it, what happens next, and which source revisions support those claims. A pulse
-is rendered only for a fresh, explicit `gaia-cli-progress/1` heartbeat. Stored `RUNNING`
-state without a fresh heartbeat is shown as stale. Each bounded lifecycle exposes named
-gates and a percentage; the open-ended portfolio itself deliberately has no fabricated
-completion percentage. ETA remains `UNKNOWN` until at least five comparable completed runs
-exist, then reports an interquartile range and sample size. The HTML has no remote assets and
-can be opened in wmux or shared as a standalone artifact. See
+A **Current run** card comes first and answers the operator's first question on its own: run
+state, the current stage or gate, elapsed work, the last verified transition with its digest, and
+the next evidence checkpoint or blocker. Evidence freshness is a separate labelled fact beside
+elapsed work, and says in words that a heartbeat proves the sensor is alive rather than that work
+advanced. A pulse is rendered only for a fresh, explicit `gaia-cli-progress/1` heartbeat, and is
+disabled entirely under `prefers-reduced-motion`. Stored `RUNNING` state without a fresh
+heartbeat is shown as stale. Each bounded lifecycle exposes named gates and a percentage; the
+open-ended portfolio itself deliberately has no fabricated completion percentage. Pace is stated
+as a calibration — `n/5` comparable completed runs — and an unavailable ETA names the exact
+missing evidence instead of a mood; a human forecast appears only when one is explicitly supplied,
+labelled **Operator forecast**, and is never invented. Aggregate `BLOCKED_*` counts live in a
+separately labelled **Portfolio backlog** section with their scope, as-of instant, total, count
+and share, because they are properties of the queue and not blockers of the run in front of you.
+The layout is phone-first: one readable column with the Current run card first and nothing that
+scrolls sideways, reflowing at 768 px and opening into a bounded multi-column grid up to 1600 px
+on a desktop. Status meaning always carries a word and a symbol, never colour alone. The HTML has
+no remote assets and can be opened in wmux or shared as a standalone artifact. See
 [`docs/factory-control-room.md`](docs/factory-control-room.md).
+
+Each live task also carries at most three deterministic sentences — what it is doing, what it last
+produced, and what would count as the next evidence — from
+`summarizeControlRoomActivity({ snapshot })` in `src/control-room-activity.mjs`. That module is
+pure, imports only `node:crypto`, and returns a separately content-addressed
+`gaia-control-room-activity/1` value whose `contentRevision` covers only the sentences: a tick
+carrying nothing but heartbeats therefore changes not one byte of what the summary says, which is
+asserted rather than promised. Every sentence comes from a closed phrasebook and every
+interpolated value is a `TOKEN`, so chain-of-thought, prompts, logs, URLs and worker-authored
+prose have nowhere to live. `--activity on --activity-out <path>` publishes the value beside the
+snapshot on either dashboard command; the two flags are refused unless supplied together.
 
 ### Why the drain is not moving
 
@@ -470,7 +490,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 679 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 715 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

@@ -4,6 +4,7 @@ import {
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { summarizeControlRoomActivity } from '../src/control-room-activity.mjs';
 import {
   buildControlRoomSnapshot, renderControlRoomHtml, requireControlRoomSnapshot,
 } from '../src/control-room.mjs';
@@ -44,6 +45,15 @@ function parseArgs(argv) {
   }
   if (flags.language !== undefined && !['en', 'fr'].includes(flags.language)) {
     throw new UsageError('--language must be en or fr');
+  }
+  // The two activity flags are paired on purpose. An opt-in with nowhere to write publishes
+  // nothing and would look like it had; an output with no opt-in is a path this adapter was
+  // never told it may replace. Either half alone is a mistake, so either half alone is refused.
+  if (flags.activity !== undefined && flags.activity !== 'on') {
+    throw new UsageError('--activity must be on');
+  }
+  if ((flags.activity === undefined) !== (flags['activity-out'] === undefined)) {
+    throw new UsageError('--activity on and --activity-out must be supplied together');
   }
   return flags;
 }
@@ -189,7 +199,18 @@ export function runFactoryDashboardCli(argv, {
   const telemetryPath = flags.telemetry ? resolve(flags.telemetry) : null;
   const htmlPath = resolve(flags['html-out']);
   const snapshotPath = resolve(flags['snapshot-out']);
-  if (htmlPath === snapshotPath) throw new UsageError('HTML and snapshot outputs must differ');
+  const activityPath = flags['activity-out'] ? resolve(flags['activity-out']) : null;
+  const outputs = [htmlPath, snapshotPath, ...(activityPath === null ? [] : [activityPath])];
+  if (new Set(outputs).size !== outputs.length) {
+    throw new UsageError('the HTML, snapshot and activity outputs must differ');
+  }
+  const inputs = [
+    projectionPath, portfolioPath, receiptsPath, holdsPath, dependenciesPath, progressPath,
+    historyPath, telemetryPath,
+  ].filter(Boolean);
+  if (outputs.some((output) => inputs.includes(output))) {
+    throw new UsageError('an output path aliases an input evidence path');
+  }
 
   const projection = projectionPath
     ? readJson(projectionPath, 'projection')
@@ -234,8 +255,13 @@ export function runFactoryDashboardCli(argv, {
     sourceChangedAt: windowStart.sourceChangedAt,
     sourceChangedAtBasis: windowStart.basis,
   });
+  // Machine evidence first, presentation bytes last, exactly as the refresh adapter publishes:
+  // the document quotes the activity revision, so the value it names must already be on disk.
+  const activity = summarizeControlRoomActivity({ snapshot });
   writeFileSync(snapshotPath, serialize(snapshot), 'utf8');
+  if (activityPath !== null) writeFileSync(activityPath, serialize(activity), 'utf8');
   writeFileSync(htmlPath, renderControlRoomHtml(snapshot, {
+    activity,
     language: flags.language ?? 'en',
   }), 'utf8');
   writeStdout(`Gaia dashboard checked: ${snapshot.headline.state}`

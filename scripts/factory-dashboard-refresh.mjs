@@ -15,7 +15,7 @@ class UsageError extends Error {}
 const ALLOWED_OPTIONS = new Set([
   'organization', 'policy-revision', 'portfolio-out', 'snapshot-out', 'html-out',
   'receipts', 'holds', 'progress', 'history', 'telemetry', 'capacity', 'language',
-  'watch-ms',
+  'activity', 'activity-out', 'watch-ms',
 ]);
 const CASE_INSENSITIVE_PATHS = process.platform === 'win32' || process.platform === 'darwin';
 const MAX_PATH_DEPTH = 256;
@@ -83,6 +83,12 @@ function parseArgs(argv) {
       throw new UsageError('--watch-ms must be an integer from 10000 through 300000');
     }
   }
+  if (flags.activity !== undefined && flags.activity !== 'on') {
+    throw new UsageError('--activity must be on');
+  }
+  if ((flags.activity === undefined) !== (flags['activity-out'] === undefined)) {
+    throw new UsageError('--activity on and --activity-out must be supplied together');
+  }
   return flags;
 }
 
@@ -105,7 +111,7 @@ async function defaultSurveyPortfolio(request) {
   return createPortfolioFactory({ githubRead: createGitHubReadAdapter() }).survey(request);
 }
 
-function dashboardArgs(flags, portfolioPath, snapshotPath, htmlPath) {
+function dashboardArgs(flags, portfolioPath, snapshotPath, htmlPath, activityPath) {
   const result = [
     '--portfolio', portfolioPath,
     '--snapshot-out', snapshotPath,
@@ -116,6 +122,7 @@ function dashboardArgs(flags, portfolioPath, snapshotPath, htmlPath) {
   ]) {
     if (flags[name] !== undefined) result.push(`--${name}`, flags[name]);
   }
+  if (activityPath !== null) result.push('--activity', 'on', '--activity-out', activityPath);
   return result;
 }
 
@@ -144,7 +151,11 @@ export async function runFactoryDashboardRefreshCli(argv, {
   const portfolioPath = resolve(flags['portfolio-out']);
   const snapshotPath = resolve(flags['snapshot-out']);
   const htmlPath = resolve(flags['html-out']);
-  const outputPaths = [portfolioPath, snapshotPath, htmlPath];
+  const activityOutPath = flags['activity-out'] ? resolve(flags['activity-out']) : null;
+  const outputPaths = [
+    portfolioPath, snapshotPath, htmlPath,
+    ...(activityOutPath === null ? [] : [activityOutPath]),
+  ];
   const openingPathIdentities = assertPathConstraints(flags, outputPaths);
 
   if (signal?.aborted) throw abortReason(signal);
@@ -160,9 +171,11 @@ export async function runFactoryDashboardRefreshCli(argv, {
     const stagedPortfolio = join(staging, 'portfolio.json');
     const stagedSnapshot = join(staging, 'control-room.json');
     const stagedHtml = join(staging, 'control-room.html');
+    const stagedActivity = activityOutPath === null
+      ? null : join(staging, 'control-room-activity.json');
     writeFileSync(stagedPortfolio, serialize(portfolio), { encoding: 'utf8', flag: 'wx' });
     const snapshot = runFactoryDashboardCli(
-      dashboardArgs(flags, stagedPortfolio, stagedSnapshot, stagedHtml),
+      dashboardArgs(flags, stagedPortfolio, stagedSnapshot, stagedHtml, stagedActivity),
       {
         now,
         // Never a mtime. Every tick writes a brand-new staged portfolio, so that file's mtime is
@@ -187,6 +200,11 @@ export async function runFactoryDashboardRefreshCli(argv, {
     // HTML document, and the next tick repairs any evidence file that could not be replaced.
     atomicReplace(portfolioPath, readFileSync(stagedPortfolio, 'utf8'));
     atomicReplace(snapshotPath, readFileSync(stagedSnapshot, 'utf8'));
+    // The activity summary is machine evidence and the HTML quotes its revision, so it is
+    // published ahead of the presentation bytes for the same reason the snapshot is.
+    if (stagedActivity !== null) {
+      atomicReplace(activityOutPath, readFileSync(stagedActivity, 'utf8'));
+    }
     atomicReplace(htmlPath, readFileSync(stagedHtml, 'utf8'));
     writeStdout(`Gaia control room refreshed: ${snapshot.headline.state}`
       + ` | next ${snapshot.nextAction.kind} | source ${snapshot.sourceRevision}\n`);

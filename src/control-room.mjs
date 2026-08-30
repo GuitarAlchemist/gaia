@@ -10,6 +10,9 @@ import { createHash } from 'node:crypto';
 
 import { FACTORY_TELEMETRY_PROJECTION_SCHEMA } from './factory-telemetry.mjs';
 import {
+  requireControlRoomActivity, summarizeControlRoomActivity,
+} from './control-room-activity.mjs';
+import {
   PORTFOLIO_DRAIN_OBSTRUCTION_SCHEMA,
   PORTFOLIO_DRAIN_OBSTRUCTION_STATES,
   classifyPortfolioDrainObstruction,
@@ -704,7 +707,7 @@ const RENDER_COPY = Object.freeze({
     checked: 'Checked', changed: 'source changed', age: 'age', moving: 'Moving', stale: 'Stale',
     blocked: 'Blocked', slots: 'Free slots', currentGate: 'Current gate', noHeartbeat: 'No active heartbeat',
     staleHeartbeat: 'Stale heartbeat', realHeartbeat: 'Real heartbeat received', notMeasurable: 'Not measurable while blocked',
-    pace: 'Pace', eta: 'ETA', blockerMix: 'Why work is blocked', topWork: 'Highest-priority work',
+    pace: 'Pace', eta: 'ETA', backlog: 'Portfolio backlog', topWork: 'Highest-priority work',
     fog: 'Fog of war', known: 'Known', partial: 'Partial', unobserved: 'Unobserved',
     frontier: 'Reconnaissance frontier',
     more: 'more items remain in the content-addressed snapshot', noItems: 'No work items in this snapshot.',
@@ -712,7 +715,21 @@ const RENDER_COPY = Object.freeze({
     readOnly: 'Read-only dashboard: effect=NONE and authority=NONE.', technical: 'Technical identities',
     run: 'Run', transition: 'Last verified transition', evidenceAge: 'Evidence age',
     notYetMeasured: 'Not yet measured',
+    currentRun: 'Current run', stageOrGate: 'Current stage or gate', elapsedWork: 'Elapsed work',
+    freshness: 'Evidence freshness',
+    freshnessCaveat: 'A heartbeat proves the sensor is alive, not that work advanced.',
+    nextCheckpoint: 'Next evidence checkpoint or blocker',
+    noCurrentRun: 'No run is currently claimed or observed.',
+    noneRecorded: 'None recorded', runSignals: 'Observed run signals', ago: 'ago',
+    noBoundInstant: 'no bound instant', verified: 'verified', unverified: 'unverified',
+    asOf: 'as of', of: 'of', share: 'share of portfolio',
+    backlogCaveat: 'These counts are portfolio-wide and are not blockers of the current run.',
+    operatorForecast: 'Operator forecast',
+    forecastCaveat: 'Human-supplied; not measured from evidence and not used in the ETA.',
+    activitySummary: 'Activity summary',
     state: { ACTIVE: 'Active', STALE: 'Needs attention', PAUSED: 'Paused' },
+    evidenceState: { FRESH: 'Fresh', PARTIAL: 'Partial', STALE: 'Stale', UNKNOWN: 'Unknown' },
+    bulletKind: { ACTION: 'Doing', RESULT: 'Produced', CHECKPOINT: 'Next', BLOCKER: 'Blocked' },
     obstruction: 'Why the drain is not moving', recovery: 'Bounded recovery',
     affected: 'Affected items', declaredEdges: 'Declared dependency evidence',
     obstructionState: {
@@ -729,7 +746,7 @@ const RENDER_COPY = Object.freeze({
     checked: 'Vérifié', changed: 'source modifiée', age: 'âge', moving: 'En cours', stale: 'Périmé',
     blocked: 'Bloqué', slots: 'Lanes libres', currentGate: 'Gate actuelle', noHeartbeat: 'Aucun heartbeat actif',
     staleHeartbeat: 'Heartbeat périmé', realHeartbeat: 'Heartbeat réel reçu', notMeasurable: 'Non mesurable tant que bloqué',
-    pace: 'Rythme', eta: 'ETA', blockerMix: 'Pourquoi le travail est bloqué', topWork: 'Travail prioritaire',
+    pace: 'Rythme', eta: 'ETA', backlog: 'Backlog du portfolio', topWork: 'Travail prioritaire',
     fog: 'Brouillard de connaissance', known: 'Connu', partial: 'Partiel', unobserved: 'Non observé',
     frontier: 'Frontière de reconnaissance',
     more: 'autres éléments restent dans le snapshot content-addressed', noItems: 'Aucun élément dans ce snapshot.',
@@ -737,7 +754,21 @@ const RENDER_COPY = Object.freeze({
     readOnly: 'Dashboard read-only : effect=NONE et authority=NONE.', technical: 'Identités techniques',
     run: 'Exécution', transition: 'Dernière transition vérifiée', evidenceAge: 'Âge de la preuve',
     notYetMeasured: 'Pas encore mesuré',
+    currentRun: 'Exécution en cours', stageOrGate: 'Étape ou gate actuelle', elapsedWork: 'Temps de travail écoulé',
+    freshness: 'Fraîcheur de la preuve',
+    freshnessCaveat: 'Un heartbeat prouve que le capteur est vivant, pas que le travail a avancé.',
+    nextCheckpoint: 'Prochaine preuve attendue ou blocage',
+    noCurrentRun: 'Aucune exécution réclamée ni observée actuellement.',
+    noneRecorded: 'Rien d’enregistré', runSignals: 'Signaux d’exécution observés', ago: 'plus tôt',
+    noBoundInstant: 'aucun instant lié', verified: 'vérifié', unverified: 'non vérifié',
+    asOf: 'au', of: 'sur', share: 'part du portfolio',
+    backlogCaveat: 'Ces comptes concernent tout le portfolio et ne bloquent pas l’exécution en cours.',
+    operatorForecast: 'Prévision opérateur',
+    forecastCaveat: 'Fournie par un humain ; non mesurée à partir des preuves et exclue de l’ETA.',
+    activitySummary: 'Résumé d’activité',
     state: { ACTIVE: 'En cours', STALE: 'À vérifier', PAUSED: 'En pause' },
+    evidenceState: { FRESH: 'Fraîche', PARTIAL: 'Partielle', STALE: 'Périmée', UNKNOWN: 'Inconnue' },
+    bulletKind: { ACTION: 'En cours', RESULT: 'Produit', CHECKPOINT: 'Ensuite', BLOCKER: 'Bloqué' },
     obstruction: 'Pourquoi le drain n’avance pas', recovery: 'Reprise bornée',
     affected: 'Éléments concernés', declaredEdges: 'Preuve de dépendances déclarée',
     obstructionState: {
@@ -749,6 +780,112 @@ const RENDER_COPY = Object.freeze({
     },
   }),
 });
+
+/**
+ * French is a presentation layer over the same closed `code` and the same bound `params`. It
+ * derives no new fact and re-decides no state, exactly as `localizedObstructionLabel` already
+ * does, so the published English sentence and the rendered French one cannot disagree about
+ * anything except the language they are written in.
+ */
+const FR_ACTIVITY_TEXT = Object.freeze({
+  IN_GATE: 'Dans la gate {gate}.',
+  BETWEEN_GATES: 'En cours entre deux gates.',
+  RUN_BLOCKED: 'Arrêté sur {blocker}.',
+  RUN_FINISHED: 'Exécution arrêtée : terminée.',
+  PROGRESS_STAGE: '{sentence} — rapporté par l’exécution elle-même, non vérifié.',
+  PROGRESS_STAGE_UNRECOGNISED: 'Étape de progression non reconnue ; à traiter comme non observée.',
+  LANE_CLAIMED_UNOBSERVED: 'Lane réclamée ; aucun enregistrement de démarrage observé.',
+  LANE_RUNNING_UNOBSERVED: 'Enregistré comme en cours ; aucune exécution observée.',
+  STATE_UNRECOGNISED: 'État d’exécution non reconnu {runState} ; à traiter comme non observé.',
+  RUN_STARTED: 'Exécution démarrée.',
+  GATE_ENTERED: 'Entrée dans la gate {gate}.',
+  GATE_PASSED: 'Gate {gate} passée.',
+  GATE_FAILED: 'Gate {gate} échouée.',
+  RUN_BLOCKED_RESULT: 'Exécution bloquée sur {blocker}.',
+  RUN_COMPLETED: 'Exécution terminée.',
+  NO_VERIFIED_RESULT: 'Aucun résultat vérifié n’a été enregistré pour cet élément.',
+  AWAIT_GATE_OUTCOME: 'Prochaine preuve vérifiable : gate.passed ou gate.failed sur {gate}.',
+  AWAIT_GATE_OR_COMPLETION: 'Prochaine preuve vérifiable : un enregistrement gate.entered, ou run.completed.',
+  AWAIT_DRAIN_RECONCILIATION: 'Exécution terminée ; le drain n’a pas enregistré la transition correspondante.',
+  AWAIT_RUN_STARTED: 'Prochaine preuve vérifiable : un enregistrement run.started pour cette lane.',
+  TELEMETRY_BLOCKED: 'Bloqué : {blocker}. L’exécution l’a enregistré et s’est arrêtée.',
+  DRAIN_BLOCKED: 'Bloqué : {drainState}.',
+});
+
+const FR_STAGE_SENTENCES = Object.freeze({
+  VALIDATING: 'Validation de l’exécution',
+  EXECUTION_STARTING: 'Démarrage de l’exécution',
+  AUTHORIZED_EXECUTION: 'Démarrage de l’exécution autorisée',
+  WORKER_RUNNING: 'Worker en cours',
+  WORKER_COMPLETED: 'Worker terminé',
+  INITIAL_REVIEW_RUNNING: 'Review initiale en cours',
+  INITIAL_REVIEW_VERDICT: 'Verdict de la review initiale',
+  REPAIR_RUNNING: 'Réparation en cours',
+  REPAIR_COMPLETED: 'Réparation terminée',
+  FINAL_REVIEW_RUNNING: 'Review finale en cours',
+  FINAL_REVIEW_VERDICT: 'Verdict de la review finale',
+  TERMINAL_OUTCOME: 'Exécution terminée',
+});
+
+/** Four evidence states, each with a word and a symbol. Colour alone is never the meaning. */
+const EVIDENCE_PRESENTATION = Object.freeze({
+  FRESH: { severity: 'healthy', symbol: '●' },
+  PARTIAL: { severity: 'warning', symbol: '◐' },
+  STALE: { severity: 'warning', symbol: '▲' },
+  UNKNOWN: { severity: 'neutral', symbol: '○' },
+});
+
+/**
+ * A human forecast is the one sentence on this page Gaia did not derive, so it is fenced rather
+ * than trusted: a short line of ordinary words and digits, with no colon, no slash and no angle
+ * bracket, which leaves no room for a URL, a path, a credential or markup. It is labelled as
+ * human-supplied wherever it appears and is excluded from every measured number beside it.
+ */
+const OPERATOR_FORECAST = /^[\p{L}\p{N} ,.;()'’–—-]{1,120}$/u;
+
+function requireOperatorForecast(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string' || !OPERATOR_FORECAST.test(value)) {
+    throw new ControlRoomError(
+      'InvalidOperatorForecast',
+      'an operator forecast must be one short line of plain words, never a URL, path or markup',
+    );
+  }
+  return value;
+}
+
+/**
+ * The activity summary the document displays.
+ *
+ * Supplying it is additive and optional: with no option the renderer derives the same value from
+ * the same snapshot, so the two calls are byte-identical. A value that *is* supplied is not
+ * trusted — it is verified on its own terms and then bound to this snapshot, because internally
+ * consistent is not the same as about this evidence. Without the binding a self-consistent
+ * summary of another projection, at another instant, could be rendered beside a `sourceRevision`
+ * that contradicts every sentence in it.
+ */
+function requireActivity(candidate, snapshot) {
+  if (candidate === null || candidate === undefined) {
+    return summarizeControlRoomActivity({ snapshot });
+  }
+  const refuse = (message) => {
+    throw new ControlRoomError('InvalidActivity', message);
+  };
+  try {
+    requireControlRoomActivity(candidate);
+  } catch (error) {
+    refuse(error?.message ?? 'the supplied activity summary is not a Gaia activity summary');
+  }
+  const known = new Set(snapshot.items.map(({ itemId }) => itemId));
+  if (candidate.snapshotRevision !== snapshot.revision
+      || candidate.observedAt !== snapshot.observedAt
+      || candidate.sourceRevision !== snapshot.sourceRevision
+      || candidate.telemetryRevision !== snapshot.telemetry.projectionRevision
+      || candidate.items.some(({ itemId }) => !known.has(itemId))) {
+    refuse('the supplied activity summary is not bound to this snapshot and its evidence');
+  }
+  return candidate;
+}
 
 function localizedHeadline(snapshot, language) {
   if (language === 'en') return snapshot.headline;
@@ -799,27 +936,71 @@ function localizedGate(item, language) {
   }[item.drainState] ?? 'Résoudre le blocage nommé avant de mesurer l’avancement';
 }
 
+/**
+ * Pace is a calibration, not a verdict: `n/5` says how far this publisher is from the five
+ * comparable completed runs the ETA policy requires, whether or not it has them yet. R0 printed
+ * "fewer than 5", which told an operator nothing about whether the next run would close the gap.
+ */
 function localizedPace(snapshot, language) {
-  if (language === 'en') return snapshot.pace.label;
-  return snapshot.pace.state === 'MEASURED'
-    ? `Médiane historique : ${formatDuration(snapshot.pace.medianCycleMs)} par exécution comparable terminée.`
-    : `Rythme inconnu : ${snapshot.pace.sampleSize}/5 exécutions comparables terminées.`;
+  const { state, sampleSize, medianCycleMs } = snapshot.pace;
+  if (language === 'fr') {
+    return state === 'MEASURED'
+      ? `Calibration du rythme : ${sampleSize}/5 exécutions comparables terminées.`
+        + ` Médiane historique : ${formatDuration(medianCycleMs)} par exécution.`
+      : `Calibration du rythme : ${sampleSize}/5 exécutions comparables terminées.`
+        + ' Rythme inconnu tant que cinq ne sont pas enregistrées.';
+  }
+  return state === 'MEASURED'
+    ? `Pace calibration: ${sampleSize}/5 comparable completed runs.`
+      + ` Historical median ${formatDuration(medianCycleMs)} per comparable completed run.`
+    : `Pace calibration: ${sampleSize}/5 comparable completed runs.`
+      + ' Pace is unknown until five are recorded.';
 }
 
+/**
+ * When there is no statistical ETA, name the evidence that is missing rather than the mood.
+ * "Insufficient comparable history." is true and unactionable; "3 more comparable completed
+ * portfolio-factory-run samples" is the same fact with the operator's next move inside it.
+ */
+const ETA_MISSING_EVIDENCE = Object.freeze({
+  en: Object.freeze({
+    'Insufficient comparable history.': (snapshot) => (
+      `${5 - snapshot.pace.sampleSize} more comparable completed portfolio-factory-run samples`
+      + ` (${snapshot.pace.sampleSize} of 5 recorded).`
+    ),
+    'Elapsed time is unavailable.': () => 'the elapsed time of the active run.',
+    'More than one run is active.': (snapshot) => (
+      `a single active run; ${snapshot.activeCount} are active.`
+    ),
+    'The heartbeat is stale; no reliable ETA exists.': () => 'a fresh heartbeat for the recorded run.',
+    'There is no active run to estimate.': () => 'an active run to estimate.',
+  }),
+  fr: Object.freeze({
+    'Insufficient comparable history.': (snapshot) => (
+      `${5 - snapshot.pace.sampleSize} exécutions comparables terminées de plus`
+      + ` (${snapshot.pace.sampleSize} sur 5 enregistrées).`
+    ),
+    'Elapsed time is unavailable.': () => 'le temps écoulé de l’exécution active.',
+    'More than one run is active.': (snapshot) => (
+      `une seule exécution active ; ${snapshot.activeCount} le sont.`
+    ),
+    'The heartbeat is stale; no reliable ETA exists.': () => 'un heartbeat frais pour l’exécution enregistrée.',
+    'There is no active run to estimate.': () => 'une exécution active à estimer.',
+  }),
+});
+
 function localizedEta(snapshot, language) {
-  if (language === 'en') return etaExplanation(snapshot);
   if (snapshot.eta.state === 'FORECAST') {
-    return `Entre ${formatDuration(snapshot.eta.remainingRangeMs[0])} et ${formatDuration(snapshot.eta.remainingRangeMs[1])}`
-      + ` · ${snapshot.eta.sampleSize} exécutions comparables · intervalle interquartile`;
+    return language === 'fr'
+      ? `Entre ${formatDuration(snapshot.eta.remainingRangeMs[0])} et ${formatDuration(snapshot.eta.remainingRangeMs[1])}`
+        + ` · ${snapshot.eta.sampleSize} exécutions comparables · intervalle interquartile`
+      : `${snapshot.eta.label} · ${snapshot.eta.sampleSize} comparable runs · interquartile range`;
   }
-  const reasons = {
-    'Insufficient comparable history.': 'Historique comparable insuffisant.',
-    'Elapsed time is unavailable.': 'Temps écoulé indisponible.',
-    'More than one run is active.': 'Plusieurs exécutions sont actives.',
-    'The heartbeat is stale; no reliable ETA exists.': 'Le heartbeat est périmé ; aucune ETA fiable.',
-    'There is no active run to estimate.': 'Aucune exécution active à estimer.',
-  };
-  return `Inconnue · ${reasons[snapshot.eta.reason] ?? 'Preuve insuffisante.'}`;
+  const detail = ETA_MISSING_EVIDENCE[language][snapshot.eta.reason]?.(snapshot)
+    ?? (language === 'fr' ? 'des preuves comparables suffisantes.' : 'sufficient comparable evidence.');
+  return language === 'fr'
+    ? `Inconnue · Preuve manquante : ${detail}`
+    : `Unknown · Missing evidence: ${detail}`;
 }
 
 /**
@@ -912,6 +1093,150 @@ function renderObstruction(snapshot, copy, language) {
   </section>`;
 }
 
+function activityText(bullet, language) {
+  if (language === 'en') return bullet.text;
+  const template = FR_ACTIVITY_TEXT[bullet.code];
+  if (template === undefined) return bullet.text;
+  const values = { ...bullet.params, sentence: FR_STAGE_SENTENCES[bullet.params.stage] };
+  return template.replaceAll(/\{([a-zA-Z]+)\}/gu, (whole, key) => (
+    Object.hasOwn(values, key) && values[key] !== undefined ? values[key] : whole
+  ));
+}
+
+/** The age of one bullet's own evidence, derived here so no moving number lives in a digest. */
+function bulletAge(bullet, snapshot, copy) {
+  if (bullet.observedAt === null) return copy.noBoundInstant;
+  return `${formatDuration(Date.parse(snapshot.observedAt) - Date.parse(bullet.observedAt))} ${copy.ago}`;
+}
+
+/** At most three sentences per live task: doing, produced, next — each naming its own evidence. */
+function renderActivityBullets(entry, snapshot, copy, language) {
+  if (!entry) return '';
+  return `<ol class="activity-bullets">${entry.bullets.map((bullet) => {
+    const shown = EVIDENCE_PRESENTATION[bullet.evidenceState];
+    return `<li class="activity-bullet" data-kind="${escapeHtml(bullet.kind)}"`
+      + ` data-code="${escapeHtml(bullet.code)}"`
+      + ` data-evidence-state="${escapeHtml(bullet.evidenceState)}"`
+      + ` data-severity="${shown.severity}">`
+      + `<span class="semantic-symbol" aria-hidden="true">${shown.symbol}</span>`
+      + `<span class="bullet-kind">${copy.bulletKind[bullet.kind]}</span>`
+      + `<span class="bullet-text">${escapeHtml(activityText(bullet, language))}</span>`
+      + `<span class="bullet-meta">${copy.evidenceState[bullet.evidenceState]}`
+      + ` · <code>${escapeHtml(bullet.source)}</code>`
+      + ` · ${bullet.verified ? copy.verified : copy.unverified}`
+      + (bullet.evidenceRevision === null ? '' : ` · <code>${escapeHtml(bullet.evidenceRevision)}</code>`)
+      + ` · ${escapeHtml(bulletAge(bullet, snapshot, copy))}</span></li>`;
+  }).join('')}</ol>`;
+}
+
+const fact = (label, value, extra = '', attributes = '') => (
+  `<div class="fact"${attributes}><span class="fact-label">${label}</span>`
+  + `<strong>${value}</strong>${extra}</div>`
+);
+
+/**
+ * The first and largest card, because it answers the operator's first question.
+ *
+ * Elapsed work and evidence freshness are two separate facts on purpose. R0 put a heartbeat chip
+ * beside a gate label and let the reader decide which of them meant progress; a fresh ping means
+ * only that a sensor is alive, and the card now says so in words next to the number.
+ */
+function renderCurrentRun(snapshot, activity, copy, language) {
+  const entry = activity.items[0] ?? null;
+  const item = entry === null
+    ? null
+    : snapshot.items.find(({ itemId }) => itemId === entry.itemId) ?? null;
+  const headline = localizedHeadline(snapshot, language);
+  const evidence = entry === null ? null : EVIDENCE_PRESENTATION[entry.evidenceState];
+  const telemetry = item?.telemetry ?? null;
+  const observedMs = Date.parse(snapshot.observedAt);
+  // Never the raw self-reported stage string: the closed token the phrasebook already validated,
+  // so nothing a running process chose freely is displayed as this run's current gate.
+  const gate = telemetry?.currentGate ?? telemetry?.lastTransition?.gate
+    ?? entry?.bullets[0]?.params?.stage ?? null;
+  // This card is about one run, so `Now` is that run's own liveness, not the portfolio headline.
+  // The portfolio state keeps its own chip in the header, where it is a statement about the queue.
+  const liveness = item === null ? snapshot.headline.state : {
+    ACTIVE: 'ACTIVE', STALE: 'STALE', IDLE: 'PAUSED',
+  }[item.activity.state];
+  const now = headlinePresentation(liveness);
+  const elapsedMs = item?.activity?.elapsedMs ?? null;
+  const heartbeatAt = telemetry?.lastHeartbeatAt ?? item?.activity?.lastHeartbeatAt ?? null;
+  const closing = entry === null ? null : entry.bullets[2];
+  const signals = snapshot.blockers.filter(({ state }) => state.startsWith('TELEMETRY_'));
+  const transition = telemetry === null ? copy.noneRecorded
+    : `<code>${escapeHtml(telemetry.lastTransition.event)}</code>`
+      + (telemetry.lastTransition.gate === null
+        ? '' : ` · <code>${escapeHtml(telemetry.lastTransition.gate)}</code>`);
+  const transitionExtra = telemetry === null ? ''
+    : `<span class="fact-note"><time>${escapeHtml(telemetry.lastTransition.observedAt)}</time>`
+      + ` · <code>${escapeHtml(telemetry.lastTransition.evidenceRevision)}</code></span>`;
+  const nextLine = closing === null
+    ? escapeHtml(localizedObstructionLabel(snapshot.obstruction, language))
+    : escapeHtml(activityText(closing, language));
+  return `<section class="current-run" data-severity="${entry === null ? 'neutral' : evidence.severity}">
+    <div class="section-heading"><h2>${copy.currentRun}</h2>${
+  entry === null ? '' : `<span class="as-of"><code>${escapeHtml(entry.itemId)}</code>${
+    entry.runId === null ? '' : ` · <code>${escapeHtml(entry.runId)}</code>`}${
+    entry.lane === null ? '' : ` · <code>${escapeHtml(entry.lane)}</code>`}</span>`}</div>
+    <div class="current-run-facts">
+      ${fact(
+    copy.now,
+    `<span class="semantic-symbol" aria-hidden="true">${now.symbol}</span>${escapeHtml(copy.state[liveness])}`,
+    `<span class="fact-note">${item === null ? escapeHtml(headline.detail)
+      : `<code>${escapeHtml(item.telemetry?.runState ?? item.drainState)}</code>`}</span>`,
+  )}
+      ${fact(copy.stageOrGate, gate === null ? copy.noneRecorded : `<code>${escapeHtml(gate)}</code>`)}
+      ${fact(copy.elapsedWork, elapsedMs === null ? copy.noneRecorded : escapeHtml(formatDuration(elapsedMs)))}
+      ${fact(copy.transition, transition, transitionExtra)}
+      ${fact(
+    copy.freshness,
+    entry === null
+      ? copy.noneRecorded
+      : `<span class="semantic-symbol" aria-hidden="true">${evidence.symbol}</span>${escapeHtml(copy.evidenceState[entry.evidenceState])}`,
+    `<span class="fact-note">${heartbeatAt === null ? copy.noHeartbeat
+      : `${escapeHtml(formatDuration(observedMs - Date.parse(heartbeatAt)))} ${copy.ago}`}`
+        + ` — ${copy.freshnessCaveat}</span>`,
+    ` data-evidence-state="${entry === null ? 'UNKNOWN' : escapeHtml(entry.evidenceState)}"`,
+  )}
+      ${fact(copy.nextCheckpoint, entry === null && snapshot.obstruction.state === 'NONE' ? copy.noCurrentRun : nextLine)}
+    </div>
+    ${signals.length === 0 ? '' : `<p class="evidence-line">${copy.runSignals}: ${signals.map(
+    ({ state, count }) => `<code>${escapeHtml(state)}</code> ×${count}`,
+  ).join(' · ')}</p>`}
+  </section>`;
+}
+
+/**
+ * The portfolio backlog, kept deliberately away from the current run.
+ *
+ * These counts are a property of the whole tracked queue, and R0 rendered them under "Why work is
+ * blocked" beside the run card, where an operator reasonably read them as the reason *this* run
+ * was not moving. They now carry their own scope, their own as-of instant, a total and a share,
+ * and say in words what they are not. Run-level `TELEMETRY_*` signals stay with the run.
+ */
+function renderBacklog(snapshot, copy) {
+  const portfolio = snapshot.blockers.filter(({ state }) => !state.startsWith('TELEMETRY_'));
+  const total = snapshot.totalItems;
+  const blocked = portfolio.reduce((sum, { count }) => sum + count, 0);
+  const share = (count) => (total === 0 ? '—' : `${Math.round((count / total) * 100)}%`);
+  const rows = portfolio.length === 0
+    ? `<p class="empty">${copy.noBlockers}</p>`
+    : `<div class="backlog-list wide-scroll">${portfolio.slice(0, 8).map(({ state, count }) => (
+      `<div data-severity="blocked"><span><span class="semantic-symbol" aria-hidden="true">■</span>`
+      + `<code>${escapeHtml(state)}</code></span><strong>${count}</strong>`
+      + `<span class="backlog-share" title="${copy.share}">${share(count)}</span></div>`
+    )).join('')}</div>`;
+  return `<section class="section-panel" data-severity="neutral">
+    <div class="section-heading"><h2>${copy.backlog}</h2>
+      <span class="as-of">${copy.asOf} <time>${escapeHtml(snapshot.observedAt)}</time></span></div>
+    <p class="evidence-line">${copy.backlogScope(total)}</p>
+    ${rows}
+    <p class="backlog-total"><strong>${blocked} ${copy.of} ${total} ${copy.items}</strong> · ${share(blocked)}</p>
+    <p class="evidence-line">${copy.backlogCaveat}</p>
+  </section>`;
+}
+
 /** Show the observed run itself: who, which gate, the last verified transition, its age. */
 function renderTelemetry(item, copy) {
   const { telemetry } = item;
@@ -929,16 +1254,17 @@ function renderTelemetry(item, copy) {
     + `</p>`;
 }
 
-function renderProgress(item, copy, language) {
-  const { progress, activity } = item;
-  const severity = activity.showPulse ? 'healthy'
-    : activity.state === 'STALE' ? 'warning'
+function renderProgress(item, snapshot, activity, copy, language) {
+  const { progress, activity: liveness } = item;
+  const entry = activity.items.find(({ itemId }) => itemId === item.itemId) ?? null;
+  const severity = liveness.showPulse ? 'healthy'
+    : liveness.state === 'STALE' ? 'warning'
       : BLOCKED_STATES.has(item.drainState) || item.telemetry?.runState === 'BLOCKED'
         ? 'blocked' : 'neutral';
-  const heartbeat = activity.showPulse
-    ? `<span class="heartbeat-pulse" data-heartbeat-at="${escapeHtml(activity.lastHeartbeatAt)}"`
+  const heartbeat = liveness.showPulse
+    ? `<span class="heartbeat-pulse" data-heartbeat-at="${escapeHtml(liveness.lastHeartbeatAt)}"`
       + ` role="status">${copy.realHeartbeat}</span>`
-    : activity.state === 'STALE'
+    : liveness.state === 'STALE'
       ? `<span class="signal stale" role="status">${copy.staleHeartbeat}</span>`
       : `<span class="signal">${copy.noHeartbeat}</span>`;
   const meter = progress.percentage === null
@@ -955,14 +1281,8 @@ function renderProgress(item, copy, language) {
     <p><strong>${copy.currentGate}:</strong> ${escapeHtml(localizedGate(item, language))}</p>
     <p class="evidence-line"><code>${escapeHtml(item.drainState)}</code> · ${escapeHtml(item.itemKind)} #${item.itemNumber}</p>
     ${renderTelemetry(item, copy)}
+    ${renderActivityBullets(entry, snapshot, copy, language)}
   </article>`;
-}
-
-function etaExplanation(snapshot) {
-  if (snapshot.eta.state === 'FORECAST') {
-    return `${snapshot.eta.label} · ${snapshot.eta.sampleSize} comparable runs · interquartile range`;
-  }
-  return `${snapshot.eta.label} · ${snapshot.eta.reason}`;
 }
 
 function headlinePresentation(state) {
@@ -974,10 +1294,14 @@ function headlinePresentation(state) {
 }
 
 /** Render one dependency-free, shareable operator artifact. */
-export function renderControlRoomHtml(candidate, { language = 'en' } = {}) {
+export function renderControlRoomHtml(candidate, {
+  language = 'en', activity = null, operatorForecast = null,
+} = {}) {
   const snapshot = requireControlRoomSnapshot(candidate);
   const copy = RENDER_COPY[language];
   if (!copy) throw new ControlRoomError('InvalidLanguage', 'language must be en or fr');
+  const forecast = requireOperatorForecast(operatorForecast);
+  const summary = requireActivity(activity, snapshot);
   const prioritized = [...snapshot.items].sort((left, right) => {
     const rank = { ACTIVE: 0, STALE: 1, IDLE: 2 };
     return rank[left.activity.state] - rank[right.activity.state]
@@ -987,14 +1311,9 @@ export function renderControlRoomHtml(candidate, { language = 'en' } = {}) {
   });
   const visible = prioritized.slice(0, 3);
   const items = visible.length > 0
-    ? visible.map((item) => renderProgress(item, copy, language)).join('\n')
+    ? visible.map((item) => renderProgress(item, snapshot, summary, copy, language)).join('\n')
     : `<p class="empty">${copy.noItems}</p>`;
   const remaining = Math.max(0, snapshot.items.length - visible.length);
-  const blockers = snapshot.blockers.length > 0
-    ? `<div class="blocker-list">${snapshot.blockers.slice(0, 5).map(({ state, count }) => (
-      `<div data-severity="blocked"><span><span class="semantic-symbol" aria-hidden="true">■</span><code>${escapeHtml(state)}</code></span><strong>${count}</strong></div>`
-    )).join('')}</div>`
-    : `<p class="empty">${copy.noBlockers}</p>`;
   const coverage = snapshot.knowledgeCoverage;
   const coverageLabel = language === 'fr'
     ? coverage.total === 0
@@ -1018,9 +1337,14 @@ export function renderControlRoomHtml(candidate, { language = 'en' } = {}) {
       @media (prefers-reduced-motion: reduce) { .heartbeat-pulse { animation: none; } }`
     : '';
   const headline = headlinePresentation(snapshot.headline.state);
-  const localizedHeadlineValue = localizedHeadline(snapshot, language);
   const nextSeverity = snapshot.nextAction.kind === 'NONE' ? 'neutral'
     : snapshot.nextAction.kind === 'OBSERVE_ACTIVE_RUN' ? 'healthy' : 'warning';
+  const backlogCopy = {
+    ...copy,
+    backlogScope: (total) => (language === 'fr'
+      ? `Portée : l’ensemble du portfolio suivi, ${total} éléments.`
+      : `Scope: the whole tracked portfolio, ${total} items.`),
+  };
   return `<!doctype html>
 <html lang="${language}">
 <head>
@@ -1032,60 +1356,94 @@ export function renderControlRoomHtml(candidate, { language = 'en' } = {}) {
     :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; --bg: #07101c; --panel: #0d1928; --panel-2: #101f31; --line: #253750; --muted: #8fa3bd; --text: #f3f7fc; --green: #54dc91; --amber: #ffbd59; --red: #ff6b78; --blue: #6ea8fe; }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--text); }
-    main { max-width: 1180px; margin: 0 auto; padding: 30px; }
-    header { align-items: end; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; margin-bottom: 22px; padding-bottom: 18px; }
-    section { margin-bottom: 18px; }
-    h1 { font-size: 25px; letter-spacing: -.02em; margin: 0 0 6px; }
+    main { margin: 0 auto; max-width: 620px; padding: 16px; }
+    main :where(section, article, div, p, ol, li, span) { min-width: 0; }
+    header { border-bottom: 1px solid var(--line); display: grid; gap: 10px; margin-bottom: 18px; padding-bottom: 16px; }
+    section { margin-bottom: 16px; }
+    h1 { font-size: 23px; letter-spacing: -.02em; margin: 0 0 6px; }
     h2 { color: var(--muted); font-size: 12px; letter-spacing: .11em; margin: 0 0 10px; text-transform: uppercase; }
     h3 { font-size: 16px; line-height: 1.35; margin: 4px 0 0; }
     p { line-height: 1.45; }
-    .as-of, .evidence-line, .repo { color: var(--muted); font-size: 12px; }
-    .status-chip { border: 1px solid var(--line); font-size: 12px; font-weight: 750; padding: 8px 11px; text-transform: uppercase; }
+    .as-of, .evidence-line, .repo, .bullet-meta, .fact-note { color: var(--muted); font-size: 12px; }
+    .status-chip { border: 1px solid var(--line); font-size: 12px; font-weight: 750; justify-self: start; padding: 8px 11px; text-transform: uppercase; }
     [data-severity="healthy"] { --semantic: var(--green); }
     [data-severity="warning"] { --semantic: var(--amber); }
     [data-severity="blocked"] { --semantic: var(--red); }
     [data-severity="neutral"] { --semantic: #c8d2df; }
     .semantic-symbol { color: var(--semantic); font-weight: 900; margin-right: 5px; }
     .status-chip { border-color: var(--semantic); color: var(--semantic); }
-    .hero { display: grid; gap: 14px; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); }
-    .now, .next { background: var(--panel); border: 1px solid var(--line); min-height: 150px; padding: 20px; }
+    .hero { display: grid; gap: 14px; }
+    .current-run, .next { background: var(--panel); border: 1px solid var(--line); padding: 18px; }
+    .current-run { border-left: 4px solid var(--semantic, var(--blue)); }
     .next { border-left: 4px solid var(--semantic, var(--blue)); }
     .next code { display: block; margin-bottom: 12px; }
-    .state { font-size: 32px; font-weight: 800; letter-spacing: -.03em; }
-    .state.ACTIVE { color: var(--green); } .state.STALE { color: var(--amber); } .state.PAUSED { color: #c8d2df; }
-    .metrics { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .current-run-facts { display: grid; gap: 10px; }
+    .fact { background: var(--panel-2); border-left: 3px solid var(--blue); padding: 13px; }
+    .fact strong { display: block; font-size: 17px; line-height: 1.35; margin-top: 4px; }
+    .fact-label { color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+    .fact-note { display: block; margin-top: 6px; }
+    .metrics { display: grid; gap: 10px; }
     .metric { background: var(--panel-2); border: 1px solid var(--line); border-top: 2px solid var(--semantic, var(--line)); padding: 14px; }
     .metric span { color: var(--muted); display: block; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
     .metric strong { display: block; font-size: 27px; margin-top: 5px; }
     .section-panel { background: var(--panel); border: 1px solid var(--line); padding: 18px; }
-    .section-heading { align-items: baseline; display: flex; justify-content: space-between; }
-    .work-list { display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .section-heading { align-items: baseline; display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; }
+    .work-list { display: grid; gap: 10px; }
     .work-item { background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--semantic, var(--line)); padding: 15px; }
-    .item-heading { align-items: start; display: flex; gap: 12px; justify-content: space-between; }
+    .item-heading { align-items: start; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
     .heartbeat-pulse, .signal { border: 1px solid var(--green); color: var(--green); font-size: 10px; outline: 2px solid var(--green); outline-offset: 2px; padding: 4px 6px; white-space: nowrap; }
     .signal { border-color: #40516a; color: var(--muted); outline: 0; } .signal.stale { border-color: var(--amber); color: var(--amber); }
-    .meter { align-items: center; display: grid; gap: 12px; grid-template-columns: minmax(120px, 1fr) auto; margin-top: 16px; }
+    .meter { align-items: center; display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr) auto; margin-top: 16px; }
     progress { accent-color: var(--green); height: 10px; width: 100%; } .not-measurable { color: var(--amber); }
-    .lower-grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-    .fog-grid { display: grid; gap: 16px; grid-template-columns: minmax(220px, .8fr) minmax(0, 1.2fr); }
+    .activity-bullets { display: grid; gap: 8px; list-style: none; margin: 14px 0 0; padding: 0; }
+    .activity-bullet { border-left: 3px solid var(--semantic, var(--line)); display: grid; padding: 8px 0 8px 10px; }
+    .bullet-kind { color: var(--muted); font-size: 10px; letter-spacing: .09em; text-transform: uppercase; }
+    .bullet-text { font-size: 14px; line-height: 1.4; }
+    .bullet-meta { margin-top: 3px; }
+    .lower-grid { display: grid; gap: 14px; }
+    .fog-grid { display: grid; gap: 16px; }
     .fog-meter { background: #050a12; border: 1px solid var(--line); display: flex; height: 18px; overflow: hidden; }
-    .fog-meter span { display: block; min-width: 0; }
+    .fog-meter span { display: block; }
     .fog-known { background: var(--green); } .fog-partial { background: var(--amber); } .fog-unobserved { background: #35435a; }
-    .fog-counts { display: grid; gap: 8px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 12px; }
+    .fog-counts { display: grid; gap: 8px; margin-top: 12px; }
     .fog-counts div { background: var(--panel-2); border: 1px solid var(--line); padding: 10px; }
     .fog-counts span { color: var(--muted); display: block; font-size: 11px; text-transform: uppercase; }
     .fog-counts strong { display: block; font-size: 22px; margin-top: 3px; }
     .fog-frontier { border-left: 3px solid var(--amber); margin: 0; padding-left: 14px; }
     .facts { display: grid; gap: 10px; }
-    .fact { background: var(--panel-2); border-left: 3px solid var(--blue); padding: 13px; }
-    .fact strong { display: block; font-size: 17px; line-height: 1.35; margin-top: 4px; }
-    .blocker-list { display: grid; gap: 8px; }
-    .blocker-list div { align-items: center; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; padding: 8px 0; }
-    .blocker-list strong { font-size: 20px; }
-    .evidence { align-items: start; display: grid; gap: 14px; grid-template-columns: 1fr 1fr; }
+    .backlog-list { display: grid; gap: 8px; }
+    .backlog-list div { align-items: center; border-bottom: 1px solid var(--line); display: flex; gap: 10px; justify-content: space-between; padding: 8px 0; }
+    .backlog-list strong { font-size: 20px; margin-left: auto; }
+    .backlog-share { color: var(--muted); font-size: 12px; min-width: 44px; text-align: right; }
+    .backlog-total { margin: 12px 0 4px; }
+    .evidence { align-items: start; display: grid; gap: 14px; }
+    .wide-scroll { overflow-x: auto; }
     code { color: #bdd2f2; overflow-wrap: anywhere; } .empty { color: var(--muted); }
-    @media (max-width: 850px) { .hero, .lower-grid, .evidence, .fog-grid { grid-template-columns: 1fr; } .work-list { grid-template-columns: 1fr; } }
-    @media (max-width: 600px) { .metrics { grid-template-columns: repeat(2, 1fr); } main { padding: 16px; } header { align-items: start; gap: 12px; } }
+    @media (min-width: 768px) {
+      main { max-width: 880px; padding: 22px; }
+      header { align-items: end; display: flex; justify-content: space-between; }
+      .current-run-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .work-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .lower-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .evidence { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .fog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .fog-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (min-width: 1024px) {
+      main { max-width: 1240px; padding: 26px 32px; }
+      .hero { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+      .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .work-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (min-width: 1440px) {
+      main { max-width: 1600px; padding: 30px 44px; }
+      .hero { grid-template-columns: minmax(0, 2.2fr) minmax(0, 1fr); }
+      .current-run-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .work-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .lower-grid { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+      .fog-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    }
     ${pulseCss}
   </style>
 </head>
@@ -1097,11 +1455,7 @@ export function renderControlRoomHtml(candidate, { language = 'en' } = {}) {
     <div class="status-chip" data-severity="${headline.severity}"><span class="semantic-symbol" aria-hidden="true">${headline.symbol}</span>${copy.state[snapshot.headline.state]}</div>
   </header>
   <section class="hero">
-    <div class="now">
-      <h2>${copy.now}</h2>
-      <div class="state ${escapeHtml(snapshot.headline.state)}">${escapeHtml(localizedHeadlineValue.label)}</div>
-      <p>${escapeHtml(localizedHeadlineValue.detail)}</p>
-    </div>
+    ${renderCurrentRun(snapshot, summary, copy, language)}
     <div class="next" data-severity="${nextSeverity}">
       <h2>${copy.next}</h2>
       <code>${escapeHtml(snapshot.nextAction.kind)}</code>
@@ -1115,6 +1469,30 @@ export function renderControlRoomHtml(candidate, { language = 'en' } = {}) {
     <div class="metric" data-severity="neutral"><span><span class="semantic-symbol" aria-hidden="true">○</span>${copy.slots}</span><strong>${snapshot.capacity.available}/${snapshot.capacity.occupied + snapshot.capacity.available}</strong></div>
   </section>
   ${renderObstruction(snapshot, copy, language)}
+  <section class="section-panel">
+    <div class="section-heading"><h2>${copy.progress}</h2><span class="as-of">${snapshot.totalItems} ${copy.items}</span></div>
+    <h3>${copy.topWork}</h3>
+    <div class="work-list">${items}</div>
+    ${remaining > 0 ? `<p class="evidence-line">+ ${remaining} ${copy.more}.</p>` : ''}
+    <p class="evidence-line">${language === 'fr'
+    ? 'Le portfolio est une file ouverte ; il n’a pas de pourcentage global d’achèvement fiable.'
+    : escapeHtml(snapshot.portfolioCompletion.reason)}</p>
+  </section>
+  <section class="lower-grid">
+    <div class="section-panel">
+      <h2>${copy.paceEta}</h2>
+      <div class="facts">
+        ${fact(copy.pace, escapeHtml(localizedPace(snapshot, language)))}
+        ${fact(copy.eta, escapeHtml(localizedEta(snapshot, language)))}
+        ${forecast === null ? '' : fact(
+    copy.operatorForecast,
+    `<span class="semantic-symbol" aria-hidden="true">○</span>${escapeHtml(forecast)}`,
+    `<span class="fact-note">${copy.forecastCaveat}</span>`,
+  )}
+      </div>
+    </div>
+    ${renderBacklog(snapshot, backlogCopy)}
+  </section>
   <section class="section-panel">
     <h2>${copy.fog}</h2>
     <div class="fog-grid">
@@ -1138,28 +1516,10 @@ export function renderControlRoomHtml(candidate, { language = 'en' } = {}) {
     </div>
   </section>
   <section class="section-panel">
-    <div class="section-heading"><h2>${copy.progress}</h2><span class="as-of">${snapshot.totalItems} ${copy.items}</span></div>
-    <h3>${copy.topWork}</h3>
-    <div class="work-list">${items}</div>
-    ${remaining > 0 ? `<p class="evidence-line">+ ${remaining} ${copy.more}.</p>` : ''}
-    <p class="evidence-line">${language === 'fr'
-    ? 'Le portfolio est une file ouverte ; il n’a pas de pourcentage global d’achèvement fiable.'
-    : escapeHtml(snapshot.portfolioCompletion.reason)}</p>
-  </section>
-  <section class="lower-grid">
-    <div class="section-panel">
-      <h2>${copy.paceEta}</h2>
-      <div class="facts">
-        <div class="fact">${copy.pace}<strong>${escapeHtml(localizedPace(snapshot, language))}</strong></div>
-        <div class="fact">${copy.eta}<strong>${escapeHtml(localizedEta(snapshot, language))}</strong></div>
-      </div>
-    </div>
-    <div class="section-panel"><h2>${copy.blockerMix}</h2>${blockers}</div>
-  </section>
-  <section class="section-panel">
     <h2>${copy.evidence}</h2>
     <div class="evidence"><p>${copy.snapshot}<br><code>${escapeHtml(snapshot.revision)}</code></p>
-      <p>${copy.source}<br><code>${escapeHtml(snapshot.sourceRevision)}</code></p></div>
+      <p>${copy.source}<br><code>${escapeHtml(snapshot.sourceRevision)}</code></p>
+      <p>${copy.activitySummary}<br><code>${escapeHtml(summary.revision)}</code></p></div>
     <p class="evidence-line">${copy.readOnly}</p>
   </section>
 </main>
