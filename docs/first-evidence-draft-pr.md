@@ -38,6 +38,15 @@ Each accepted or refused transition is appended to the existing telemetry journa
 
 The dashboard shows Draft age, last commit age, CI state, review gate, and obstruction separately from local lane liveness. It exposes no prompts, reasoning, commands, paths, credentials, account identifiers, or provider prose.
 
+Draft absence is itself a closed observation with a denominator:
+
+- `EXPECTED_NONE`: no claimed item and no evidence-bearing commit;
+- `AWAITING_FIRST_COMMIT`: one claimed item exists but no qualifying commit exists yet;
+- `MISSING_DRAFT`: a qualifying commit exists but no exactly bound open Draft PR exists;
+- `DRAFT_OPEN`: exactly one bound Draft PR exists.
+
+Only `MISSING_DRAFT` triggers create-or-reuse. `EXPECTED_NONE` is healthy idle state, while `AWAITING_FIRST_COMMIT` measures the pre-commit gate without fabricating repository movement. Multiple or ambiguous matches are a refusal, not `DRAFT_OPEN`. Every state and its age are projected into DuckDB so the operator can query time spent before the first commit and between the first commit and Draft visibility.
+
 ## Required evidence
 
 RED tests force creation, reuse, duplicate delivery, concurrent claimants, branch reuse, changed base, response loss after remote success, crash after `INTENT`, replay after restart, stale/future/corrupt evidence, GitHub refusal, and deterministic serialization. Barrier-controlled interleavings replace timing or `sleep` tests.
