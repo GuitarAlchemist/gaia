@@ -225,7 +225,9 @@ test('a present but null local lane block is refused rather than read as absence
 // ---------------------------------------------------------------------------
 
 test('T4: a fresh observation with running lanes makes the headline ACTIVE with a real pulse', () => {
-  const snapshot = snapshotWith(observation([lane(1), lane(2), lane(3), lane(4)]));
+  const snapshot = snapshotWith(observation([
+    lane(1), lane(2), lane(3), lane(4), lane(5, { lifecycle: 'EXITED' }),
+  ]));
 
   assert.equal(snapshot.headline.state, 'ACTIVE');
   assert.equal(snapshot.showSpinner, true);
@@ -239,8 +241,16 @@ test('T4: a fresh observation with running lanes makes the headline ACTIVE with 
   assert.equal(snapshot.nextAction.kind, 'OBSERVE_LOCAL_LANE');
 
   const html = renderControlRoomHtml(snapshot);
+  assert.match(html, /class="status-chip heartbeat-pulse" data-severity="healthy"/u);
   assert.match(html, /class="lane-pulse"/u);
   assert.match(localSection(html), /role="status"/u);
+  assert.match(localSection(html), /Running \(4\)/u);
+  assert.match(localSection(html), /Inactive \(1\)/u);
+  assert.equal(
+    localSection(html).indexOf('Running (4)') < localSection(html).indexOf('Inactive (1)'),
+    true,
+    'live lanes are immediately visible before the historical exited inventory',
+  );
 });
 
 test('T4 MECHANISM REVERT: the liveness term is what makes the headline ACTIVE', async () => {
@@ -275,8 +285,11 @@ test('T5: a paused drain observed beside exited lanes stays PAUSED and never ani
 
   const html = renderControlRoomHtml(snapshot);
   assert.doesNotMatch(html, /@keyframes/u, 'nothing animates at all');
+  assert.doesNotMatch(html, /class="status-chip heartbeat-pulse"/u);
   assert.doesNotMatch(html, /class="lane-pulse"/u);
   assert.match(localSection(html), /Exited/u, 'and the exited lanes are still listed');
+  assert.match(localSection(html), /Running \(0\)/u);
+  assert.match(localSection(html), /Inactive \(3\)/u);
 });
 
 test('T5 MECHANISM REVERT: mapping exited to running is what would falsely animate', async () => {
