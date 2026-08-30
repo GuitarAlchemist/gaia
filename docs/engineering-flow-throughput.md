@@ -99,7 +99,11 @@ Two pieces and one file between them:
 
 - `src/engineering-flow.mjs` — the closed `gaia-engineering-flow/1` schema, its total verifier, the
   single digest recipe, and one pure derivation from a verified artifact to the block the control
-  room publishes. It reads nothing, opens nothing, holds no clock, and imports `node:crypto` only.
+  room publishes. It reads nothing, opens nothing and holds no clock. It imports `node:crypto` and
+  the one shared `isExactInstant` predicate, and nothing else: F15 requires the exact-instant rule
+  to have a single implementation, so re-spelling it here to keep an import list of one would be
+  the very defect that gate exists to catch. `src/control-room.mjs` already imports it for exactly
+  this reason.
 - `scripts/factory-dashboard.mjs` — `--engineering-flow <path>`. The publisher reads the sealed
   artifact, hands it to `buildControlRoomSnapshot` as an explicit input exactly as it already
   hands over `telemetryProjection`, `dependencies` and `localLanes`, and computes the read model
@@ -288,6 +292,17 @@ Date.parse(windowStartedAt) <= Date.parse(observedAt) - W
 - Incomplete → `state: "UNKNOWN"`, `reasonCode: "WINDOW_INCOMPLETE"`, and `total`, `ratePerHour`
   and every per-outcome count are `null`. **Never `0`.**
 
+An event falls inside a window of `W` when
+
+```
+Date.parse(observedAt) - W <= Date.parse(occurredAt) <= Date.parse(observedAt)
+```
+
+— a closed interval on both ends. The verifier already refuses an `occurredAt` after `observedAt`,
+so the right-hand bound can never exclude an event; the left-hand bound is closed so that an event
+exactly `W` old is reported by the window that names its own age, rather than falling between the
+1h and 24h cells and being counted by neither.
+
 This is the single most important rule in this document. Zero and unknown are opposite readings:
 one says the queue produced nothing, the other says we did not look. A dashboard that prints `0`
 for both is worse than one that prints nothing, because it is confidently wrong in the reassuring
@@ -306,6 +321,13 @@ net     = inflow - outflow
 `net` is a **queue change**, not a backlog: it says the tracked queue grew or shrank by that many
 items over that window, and it says nothing about its absolute size. For `FACTORY_RUN` and
 `EVIDENCE_REVIEW` it is `UNKNOWN` / `NO_OBSERVED_INFLOW`.
+
+Where both reasons are true at once — an incomplete window over a family that has no inflow
+outcome — `NO_OBSERVED_INFLOW` is reported. It is the structural reason: it holds whatever the
+evidence does, so it stays true after the window fills, and reporting `WINDOW_INCOMPLETE` there
+would promise an operator a net that waiting will never produce. For the three families that do
+have an inflow outcome, an incomplete window reports `WINDOW_INCOMPLETE`, which is a reason that
+waiting does resolve.
 
 ### Cycle time
 
@@ -401,8 +423,8 @@ happening" is the highest-value one to forge in a resealed snapshot.
 ## Interfaces
 
 `summarizeEngineeringFlow({ artifact, observedAt, priorObservation })` in
-`src/engineering-flow.mjs` is the flow truth Module. It is pure, imports only `node:crypto`, holds
-no clock, and is usable without the control room.
+`src/engineering-flow.mjs` is the flow truth Module. It is pure, holds no clock, imports only
+`node:crypto` and the shared `isExactInstant` predicate, and is usable without the control room.
 `requireEngineeringFlowArtifact(value)` totally verifies one sealed artifact on its own terms.
 `sealEngineeringFlow({ observedAt, windowStartedAt, sequence, events })` orders and content-
 addresses one. `engineeringFlowRevision(...)` is the single digest recipe, exported so no consumer
