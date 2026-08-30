@@ -6,6 +6,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   runFactoryDashboardRefreshCli, runFactoryDashboardRefreshLoop,
@@ -406,4 +407,228 @@ test('aborting a real watch wait stops promptly instead of sleeping through the 
   clearTimeout(handle);
 
   assert.ok(Date.now() - startedAt < 1_000, 'abort should interrupt the 10-second wait');
+});
+
+/**
+ * R1 blocker 4 — the refresh observation window.
+ *
+ * Every tick surveys GitHub and writes a brand-new staged portfolio, so the staged file's mtime is
+ * the survey time and says nothing whatever about when the evidence changed. R0 measured the
+ * window from that mtime, which reset it to a few milliseconds on every tick: `THROUGHPUT_STALL`
+ * was unreachable in the one adapter that actually surveys GitHub, the headline silently degraded
+ * to the pre-change sentence, and the displayed evidence age was always `0s`.
+ *
+ * The window is now the interval over which this publisher has continuously observed this exact
+ * content-addressed projection revision, carried forward in the snapshot the command itself
+ * published. These ticks drive the public seam and move nothing but the injected clock.
+ */
+function refreshArgv(portfolioPath, snapshotPath, htmlPath) {
+  return [
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', portfolioPath,
+    '--snapshot-out', snapshotPath,
+    '--html-out', htmlPath,
+  ];
+}
+
+const READY_ISSUE = Object.freeze({
+  repository: 'GuitarAlchemist/ix', itemKind: 'ISSUE', itemId: 'issue-290',
+  itemNumber: 290, title: 'Repair a ready issue', state: 'READY',
+  updatedAt: '2026-08-29T18:00:00.000Z',
+});
+
+test('unchanged evidence keeps its observation window across refresh ticks until a stall is measurable', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-window-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const portfolioPath = join(scratch, 'portfolio.json');
+  const snapshotPath = join(scratch, 'control-room.json');
+  const htmlPath = join(scratch, 'control-room.html');
+  let clockMs = Date.parse('2026-08-29T20:00:00.000Z');
+  let surveyed = portfolio([READY_ISSUE]);
+  const tick = () => runFactoryDashboardRefreshCli(
+    refreshArgv(portfolioPath, snapshotPath, htmlPath),
+    {
+      now: () => new Date(clockMs),
+      surveyPortfolio: async () => surveyed,
+      writeStdout: () => {},
+    },
+  );
+
+  const first = await tick();
+  assert.equal(first.sourceChangedAt, '2026-08-29T20:00:00.000Z');
+  assert.equal(first.obstruction.observationWindow.durationMs, 0);
+  assert.equal(first.obstruction.state, 'NONE', 'nothing has yet been observed sitting still');
+
+  clockMs += 120_000;
+  const second = await tick();
+  assert.equal(second.sourceRevision, first.sourceRevision);
+  assert.equal(
+    second.sourceChangedAt, first.sourceChangedAt,
+    'a re-survey that produces the same projection revision is not a change in the evidence',
+  );
+  assert.equal(second.obstruction.observationWindow.durationMs, 120_000);
+  assert.equal(second.obstruction.state, 'NONE', 'below the threshold no stall is claimed');
+
+  clockMs += 181_000;
+  const third = await tick();
+  assert.equal(third.obstruction.observationWindow.durationMs, 301_000);
+  assert.equal(
+    third.obstruction.state, 'THROUGHPUT_STALL',
+    'the state R0 could never reach through the real GitHub refresh adapter',
+  );
+  assert.equal(third.obstruction.recovery.kind, 'CLAIM_QUEUED_WORK');
+  assert.deepEqual(third.obstruction.affectedItemIds, ['issue-290']);
+  assert.match(
+    third.headline.detail, /1 eligible item and free capacity have not moved for 5m 1s\./u,
+    'the headline states the measured window instead of degrading to the pre-change sentence',
+  );
+  assert.match(readFileSync(htmlPath, 'utf8'), /Throughput stalled/u);
+
+  // The carrier is the published artifact and nothing else, which is what makes an ordinary
+  // process restart resume the window: a restarted process reads exactly these bytes.
+  assert.equal(
+    JSON.parse(readFileSync(snapshotPath, 'utf8')).sourceChangedAt, first.sourceChangedAt,
+  );
+
+  // A changed revision resets the window exactly, and never carries a measurement across it.
+  surveyed = portfolio([READY_ISSUE, {
+    ...READY_ISSUE, itemId: 'issue-291', itemNumber: 291, title: 'A second ready issue',
+  }]);
+  clockMs += 60_000;
+  const fourth = await tick();
+  assert.notEqual(fourth.sourceRevision, third.sourceRevision);
+  assert.equal(fourth.sourceChangedAt, new Date(clockMs).toISOString());
+  assert.equal(fourth.obstruction.observationWindow.durationMs, 0);
+  assert.equal(fourth.obstruction.state, 'NONE', 'a fresh revision restarts the measurement');
+
+  // A published snapshot this publisher can no longer read is "no prior observation", which
+  // restarts the window rather than inventing one.
+  rmSync(snapshotPath);
+  clockMs += 400_000;
+  const afterLoss = await tick();
+  assert.equal(afterLoss.sourceChangedAt, new Date(clockMs).toISOString());
+  assert.equal(afterLoss.obstruction.observationWindow.durationMs, 0);
+});
+
+test('NEGATIVE CONTROL: the refresh adapter never reads a staged temp-file mtime as evidence age', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-mtime-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const portfolioPath = join(scratch, 'portfolio.json');
+  const snapshotPath = join(scratch, 'control-room.json');
+  const htmlPath = join(scratch, 'control-room.html');
+  const observedAt = '2026-08-29T20:00:00.000Z';
+
+  const published = await runFactoryDashboardRefreshCli(
+    refreshArgv(portfolioPath, snapshotPath, htmlPath),
+    {
+      now: () => new Date(observedAt),
+      surveyPortfolio: async () => portfolio([READY_ISSUE]),
+      writeStdout: () => {},
+    },
+  );
+
+  // The staged portfolio was written at the real wall-clock instant of this test run, which is
+  // years away from the injected observation instant. Under R0 that mtime decided the window and
+  // this call either produced a 0 ms window or, once the clamp was removed, refused outright.
+  assert.equal(published.sourceChangedAt, observedAt);
+  assert.equal(published.observedAt, observedAt);
+  assert.equal(published.obstruction.observationWindow.startedAt, observedAt);
+  assert.equal(published.obstruction.observationWindow.endedAt, observedAt);
+});
+
+test('NEGATIVE CONTROL: a clock running backwards refuses the tick and preserves the last artifacts', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-backwards-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const portfolioPath = join(scratch, 'portfolio.json');
+  const snapshotPath = join(scratch, 'control-room.json');
+  const htmlPath = join(scratch, 'control-room.html');
+  const argv = refreshArgv(portfolioPath, snapshotPath, htmlPath);
+  const surveyPortfolio = async () => portfolio([READY_ISSUE]);
+
+  await runFactoryDashboardRefreshCli(argv, {
+    now: () => new Date('2026-08-29T20:00:00.000Z'), surveyPortfolio, writeStdout: () => {},
+  });
+  const published = [portfolioPath, snapshotPath, htmlPath].map(
+    (path) => readFileSync(path, 'utf8'),
+  );
+
+  await assert.rejects(
+    runFactoryDashboardRefreshCli(argv, {
+      now: () => new Date('2026-08-29T19:59:00.000Z'), surveyPortfolio, writeStdout: () => {},
+    }),
+    (error) => {
+      assert.equal(error.name, 'ControlRoomError');
+      assert.equal(error.code, 'IncoherentEvidence');
+      assert.match(error.message, /after the instant it was observed/u);
+      return true;
+    },
+  );
+
+  assert.deepEqual(
+    [portfolioPath, snapshotPath, htmlPath].map((path) => readFileSync(path, 'utf8')),
+    published,
+    'a refused tick leaves the previous complete artifact set byte-identical',
+  );
+});
+
+/**
+ * Mechanism-revert witnesses for the refresh observation window.
+ *
+ * Each takes the shipped adapter, changes exactly one load-bearing line in a copy written outside
+ * this repository, and asserts the ticks above notice. Relative specifiers are rewritten to
+ * absolute file URLs so the mutant loads the same unmodified modules the original does; nothing
+ * inside the repository is written.
+ */
+const REFRESH_PATH = fileURLToPath(new URL('../scripts/factory-dashboard-refresh.mjs', import.meta.url));
+const SCRIPTS_URL = new URL('../scripts/', import.meta.url).href;
+const mutantScratch = mkdtempSync(join(tmpdir(), 'gaia-refresh-mutant-'));
+test.after(() => rmSync(mutantScratch, { recursive: true, force: true }));
+
+async function importRefreshMutant(name, find, replace) {
+  const source = readFileSync(REFRESH_PATH, 'utf8');
+  assert.equal(
+    source.includes(find), true,
+    `the mechanism-revert witness targets "${find}", which is no longer in the source`,
+  );
+  const mutated = source
+    .replace(find, replace)
+    .replaceAll("from '../src/", `from '${SCRIPTS_URL}../src/`)
+    .replaceAll("from './", `from '${SCRIPTS_URL}`);
+  assert.notEqual(mutated, source);
+  const path = join(mutantScratch, `${name}.mjs`);
+  writeFileSync(path, mutated, 'utf8');
+  return import(pathToFileURL(path).href);
+}
+
+test('MECHANISM REVERT: carrying the first observation forward is what makes a stall reachable', async (t) => {
+  const mutant = await importRefreshMutant(
+    'no-continuity',
+    'firstObservationOf(snapshotPath, projectionRevision) ?? observedAt',
+    'observedAt',
+  );
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-refresh-no-continuity-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const paths = ['portfolio.json', 'control-room.json', 'control-room.html']
+    .map((name) => join(scratch, name));
+  let clockMs = Date.parse('2026-08-29T20:00:00.000Z');
+  const options = {
+    now: () => new Date(clockMs),
+    surveyPortfolio: async () => portfolio([READY_ISSUE]),
+    writeStdout: () => {},
+  };
+
+  await mutant.runFactoryDashboardRefreshCli(refreshArgv(...paths), options);
+  clockMs += 3_600_000;
+  const later = await mutant.runFactoryDashboardRefreshCli(refreshArgv(...paths), options);
+
+  assert.equal(
+    later.obstruction.observationWindow.durationMs, 0,
+    'reverting the continuity restores the R0 defect: every tick restarts the window',
+  );
+  assert.equal(later.obstruction.state, 'NONE');
+  assert.equal(
+    later.headline.detail, 'No tracked factory run is moving right now.',
+    'and the headline degrades to the exact pre-change sentence this work exists to replace',
+  );
 });

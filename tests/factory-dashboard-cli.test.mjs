@@ -6,11 +6,15 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { runFactoryDashboardCli } from '../scripts/factory-dashboard.mjs';
 
+const DASHBOARD_PATH = fileURLToPath(new URL('../scripts/factory-dashboard.mjs', import.meta.url));
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-cli-'));
+const mutantScratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-cli-mutant-'));
 test.after(() => rmSync(scratch, { recursive: true, force: true }));
+test.after(() => rmSync(mutantScratch, { recursive: true, force: true }));
 
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -120,6 +124,10 @@ test('the dashboard CLI can reconcile a real Gaia portfolio without a hand-made 
     itemNumber: 290, title: 'Repair a ready issue', state: 'READY',
     updatedAt: '2026-08-29T18:00:00.000Z',
   }]))}\n`, 'utf8');
+  // Pin the evidence mtime. Evidence dated after the observation instant is now a typed
+  // refusal, so a fixture that leaves the file's real mtime in place tests the machine clock.
+  const changedAt = new Date('2026-08-29T18:30:00.000Z');
+  utimesSync(portfolioPath, changedAt, changedAt);
   let stdout = '';
 
   const snapshot = runFactoryDashboardCli([
@@ -173,6 +181,10 @@ test('the dashboard CLI distinguishes an empty drain from a blocked one', () => 
   const htmlPath = join(scratch, 'empty-control-room.html');
   const snapshotPath = join(scratch, 'empty-control-room.json');
   writeFileSync(portfolioPath, `${JSON.stringify(portfolio([]))}\n`, 'utf8');
+  // Pin the evidence mtime. Evidence dated after the observation instant is now a typed
+  // refusal, so a fixture that leaves the file's real mtime in place tests the machine clock.
+  const changedAt = new Date('2026-08-29T18:30:00.000Z');
+  utimesSync(portfolioPath, changedAt, changedAt);
   let stdout = '';
 
   const snapshot = runFactoryDashboardCli([
@@ -253,6 +265,11 @@ test('the dashboard CLI refuses declared edges that name an item the portfolio d
     edges: [{ itemId: 'issue-1', dependsOnItemId: 'issue-absent' }],
   })}\n`, 'utf8');
 
+  // Pin the evidence mtime. Evidence dated after the observation instant is now a typed
+  // refusal, so a fixture that leaves the file's real mtime in place tests the machine clock.
+  const changedAt = new Date('2026-08-29T18:30:00.000Z');
+  utimesSync(portfolioPath, changedAt, changedAt);
+  utimesSync(dependenciesPath, changedAt, changedAt);
   assert.throws(() => runFactoryDashboardCli([
     '--portfolio', portfolioPath,
     '--dependencies', dependenciesPath,
@@ -260,4 +277,151 @@ test('the dashboard CLI refuses declared edges that name an item the portfolio d
     '--snapshot-out', join(scratch, 'absent-control-room.json'),
   ], { now: () => new Date('2026-08-29T18:40:20.000Z'), writeStdout: () => {} }),
   /does not carry/u);
+});
+
+/**
+ * R1 blocker 4, file-fed path. The observation window is the interval over which this publisher
+ * has continuously observed this exact projection revision, so its own previous publication is
+ * the strongest evidence it has: a byte-identical rewrite of an input moves the mtime but changes
+ * no evidence, and must not restart the window.
+ */
+test('a rewritten input that changes no evidence keeps the observation window, a changed one resets it', () => {
+  const portfolioPath = join(scratch, 'continuity-portfolio.json');
+  const htmlPath = join(scratch, 'continuity-control-room.html');
+  const snapshotPath = join(scratch, 'continuity-control-room.json');
+  const write = (workItems, mtime) => {
+    writeFileSync(portfolioPath, `${JSON.stringify(portfolio(workItems))}\n`, 'utf8');
+    utimesSync(portfolioPath, new Date(mtime), new Date(mtime));
+  };
+  const ready = {
+    repository: 'GuitarAlchemist/ix', itemKind: 'ISSUE', itemId: 'issue-290',
+    itemNumber: 290, title: 'Repair a ready issue', state: 'READY',
+    updatedAt: '2026-08-29T18:00:00.000Z',
+  };
+  const render = (observedAt) => runFactoryDashboardCli([
+    '--portfolio', portfolioPath, '--html-out', htmlPath, '--snapshot-out', snapshotPath,
+  ], { now: () => new Date(observedAt), writeStdout: () => {} });
+
+  write([ready], '2026-08-29T18:00:00.000Z');
+  const first = render('2026-08-29T18:01:00.000Z');
+  // Same evidence, rewritten byte-identically five minutes later: the mtime moved, nothing else.
+  write([ready], '2026-08-29T18:06:00.000Z');
+  const rewritten = render('2026-08-29T18:07:00.000Z');
+  // Genuinely different evidence.
+  write([ready, { ...ready, itemId: 'issue-291', itemNumber: 291 }], '2026-08-29T18:06:00.000Z');
+  const changed = render('2026-08-29T18:08:00.000Z');
+
+  assert.equal(first.sourceChangedAt, '2026-08-29T18:00:00.000Z');
+  assert.equal(first.obstruction.observationWindow.durationMs, 60_000);
+  assert.equal(rewritten.sourceRevision, first.sourceRevision);
+  assert.equal(
+    rewritten.sourceChangedAt, '2026-08-29T18:00:00.000Z',
+    'a moved mtime over an unchanged revision is not a change in the evidence',
+  );
+  assert.equal(rewritten.obstruction.observationWindow.durationMs, 420_000);
+  assert.equal(rewritten.obstruction.state, 'THROUGHPUT_STALL');
+  assert.notEqual(changed.sourceRevision, first.sourceRevision);
+  assert.equal(
+    changed.sourceChangedAt, '2026-08-29T18:06:00.000Z',
+    'changed evidence restarts from the mtime it can show, never from the carried instant',
+  );
+  assert.equal(changed.obstruction.observationWindow.durationMs, 120_000);
+  assert.equal(changed.obstruction.state, 'NONE');
+});
+
+/**
+ * An input mtime after the observation instant shows nothing about how long this revision has
+ * been in force, so the adapter declines to assert it rather than measuring from it. This is a
+ * decision about what evidence the adapter *has*, taken before any measurement: the control-room
+ * seam still refuses outright any caller that hands it evidence dated after its observation, and
+ * `tests/control-room.test.mjs` holds that refusal. Disclosed as an R1 correction in
+ * `docs/portfolio-drain-obstruction-design.md`.
+ */
+test('an input mtime after the observation instant is not usable evidence of earlier observation', () => {
+  const portfolioPath = join(scratch, 'future-mtime-portfolio.json');
+  const htmlPath = join(scratch, 'future-mtime-control-room.html');
+  const snapshotPath = join(scratch, 'future-mtime-control-room.json');
+  writeFileSync(portfolioPath, `${JSON.stringify(portfolio([{
+    repository: 'GuitarAlchemist/ix', itemKind: 'ISSUE', itemId: 'issue-290',
+    itemNumber: 290, title: 'Repair a ready issue', state: 'READY',
+    updatedAt: '2026-08-29T18:00:00.000Z',
+  }]))}\n`, 'utf8');
+  const ahead = new Date('2026-08-29T19:00:00.000Z');
+  utimesSync(portfolioPath, ahead, ahead);
+  const render = (observedAt) => runFactoryDashboardCli([
+    '--portfolio', portfolioPath, '--html-out', htmlPath, '--snapshot-out', snapshotPath,
+  ], { now: () => new Date(observedAt), writeStdout: () => {} });
+
+  const first = render('2026-08-29T18:01:00.000Z');
+  const later = render('2026-08-29T18:07:00.000Z');
+
+  assert.equal(first.sourceChangedAt, '2026-08-29T18:01:00.000Z');
+  assert.equal(
+    first.obstruction.observationWindow.durationMs, 0,
+    'zero observed duration so far, which is what "no obstruction detectable yet" means',
+  );
+  assert.equal(first.obstruction.state, 'NONE');
+  assert.equal(
+    later.sourceChangedAt, '2026-08-29T18:01:00.000Z',
+    'and the window then grows from there, so a stall is reachable under a skewed clock',
+  );
+  assert.equal(later.obstruction.observationWindow.durationMs, 360_000);
+  assert.equal(later.obstruction.state, 'THROUGHPUT_STALL');
+});
+
+test('MECHANISM REVERT: the revision guard is what stops a window crossing changed evidence', async () => {
+  const source = readFileSync(DASHBOARD_PATH, 'utf8');
+  const find = '      || published.sourceRevision !== projectionRevision';
+  assert.equal(
+    source.includes(find), true,
+    `the mechanism-revert witness targets "${find}", which is no longer in the source`,
+  );
+  const mutated = source.replace(find, '      || false')
+    .replaceAll("from '../src/", `from '${new URL('../scripts/', import.meta.url).href}../src/`);
+  assert.notEqual(mutated, source);
+  const mutantPath = join(mutantScratch, 'no-revision-guard.mjs');
+  writeFileSync(mutantPath, mutated, 'utf8');
+  const mutant = await import(pathToFileURL(mutantPath).href);
+
+  const portfolioPath = join(scratch, 'guard-portfolio.json');
+  const htmlPath = join(scratch, 'guard-control-room.html');
+  const snapshotPath = join(scratch, 'guard-control-room.json');
+  const ready = {
+    repository: 'GuitarAlchemist/ix', itemKind: 'ISSUE', itemId: 'issue-290',
+    itemNumber: 290, title: 'Repair a ready issue', state: 'READY',
+    updatedAt: '2026-08-29T18:00:00.000Z',
+  };
+  const write = (workItems, mtime) => {
+    writeFileSync(portfolioPath, `${JSON.stringify(portfolio(workItems))}\n`, 'utf8');
+    utimesSync(portfolioPath, new Date(mtime), new Date(mtime));
+  };
+  const argv = [
+    '--portfolio', portfolioPath, '--html-out', htmlPath, '--snapshot-out', snapshotPath,
+  ];
+  const options = (observedAt) => ({
+    now: () => new Date(observedAt), writeStdout: () => {},
+  });
+
+  write([ready], '2026-08-29T18:00:00.000Z');
+  mutant.runFactoryDashboardCli(argv, options('2026-08-29T18:05:00.000Z'));
+  write([ready, { ...ready, itemId: 'issue-291', itemNumber: 291 }], '2026-08-29T18:04:00.000Z');
+  const mutantChanged = mutant.runFactoryDashboardCli(argv, options('2026-08-29T18:05:30.000Z'));
+
+  assert.equal(
+    mutantChanged.sourceChangedAt, '2026-08-29T18:00:00.000Z',
+    'without the guard the mutant carries a window across evidence that provably changed',
+  );
+  assert.equal(
+    mutantChanged.obstruction.state, 'THROUGHPUT_STALL',
+    'and claims a measured stall over evidence it observed for the first time this render',
+  );
+
+  write([ready], '2026-08-29T18:00:00.000Z');
+  runFactoryDashboardCli(argv, options('2026-08-29T18:05:00.000Z'));
+  write([ready, { ...ready, itemId: 'issue-291', itemNumber: 291 }], '2026-08-29T18:04:00.000Z');
+  const shipped = runFactoryDashboardCli(argv, options('2026-08-29T18:05:30.000Z'));
+
+  assert.equal(shipped.sourceChangedAt, '2026-08-29T18:04:00.000Z');
+  assert.equal(shipped.obstruction.observationWindow.durationMs, 90_000);
+  assert.equal(shipped.obstruction.state, 'NONE');
 });

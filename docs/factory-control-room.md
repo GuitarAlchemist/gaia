@@ -127,25 +127,53 @@ while carrying the full breakdown beside it.
   window, the affected item ids and their count, and exactly one bounded advisory recovery action
   with `effect: NONE`, `authority: NONE` and `advisory: true`. `NO_ELIGIBLE_WORK` over an empty
   portfolio is the one state whose affected list is legitimately empty — there is no item to name.
-- The observation window is `[sourceChangedAt, observedAt]`: the interval over which the pinned
-  evidence has not changed, which is also the age of that evidence. Evidence newer than the
-  observation instant clamps the window to zero rather than being refused; that is a file-mtime
-  race, and a zero-length window can never claim a stall.
-- `THROUGHPUT_STALL` requires eligible work, free capacity, no live lane and at least
+- The observation window is `[sourceChangedAt, observedAt]`: the interval over which this
+  publisher has continuously observed this exact projection revision. It is a **measured lower
+  bound** on the age of the evidence, never a claim about when the upstream world changed, so it
+  can only ever make a stall arrive late. How `sourceChangedAt` is obtained depends on the
+  adapter. The file-fed `factory:dashboard` path uses the newest input mtime: the inputs are
+  persisted evidence it does not write, so the instant one of them was last written is a real
+  lower bound. The `factory:dashboard:refresh` path writes a brand-new staged portfolio on every
+  tick, so a mtime there is the survey time and carries no information about the evidence; it
+  carries the first-observation instant forward from the control-room snapshot it published on
+  its previous tick, for as long as the content-addressed projection revision is unchanged, and
+  starts a fresh window on the exact tick that revision changes. The carrier is the published
+  artifact itself, so an ordinary process restart resumes the window with no private state store;
+  a snapshot that is missing, unreadable, or pinned to a different revision restarts the window.
+- Evidence dated after the instant it was observed is a **typed refusal** at the control-room seam
+  as well as inside the pure module. The file-fed adapter never asserts such an instant in the
+  first place: an input mtime later than the observation instant shows nothing about how long the
+  revision has been in force, so it is discarded and the window starts now, growing from there on
+  the next render. That leaves a single-shot file-fed render under a clock skewed behind the
+  filesystem showing a zero-length window; it is recorded as an open residual in
+  `docs/portfolio-drain-obstruction-design.md`. R0 clamped that case to a zero-length window, which published a
+  reassuring `Evidence age 0s` for a sensor whose true state is incoherent and marked the
+  substitution nowhere in the evidence. Both command-line adapters build the snapshot before they
+  write anything, so a refusal leaves the previously published portfolio, snapshot and HTML
+  byte-identical and the watch loop retries on the next tick.
+- `THROUGHPUT_STALL` requires eligible work, free capacity, no live **lane** and at least
   `THROUGHPUT_STALL_WINDOW_MS` (300 000 ms) of unchanged evidence. The threshold is a fixed
   exported constant, never a parameter: a configurable threshold would make the state mean
   something different depending on the arguments it was produced with.
 - A dependency cycle is derived **only** from explicitly declared edges carrying their own
   SHA-256 evidence revision. Prose, labels and model output are never read as dependencies, and an
   edge naming an item outside the projection is a typed refusal.
+- Liveness is a property of **lanes**. Only a `CLAIMED` or `RUNNING` item can report the drain as
+  draining. A terminal, blocked, candidate or queued item can legitimately carry an `ACTIVE`
+  liveness token — a merged pull request whose worker has not yet emitted `run.completed` is
+  ordinary — and none of them is motion out of the queue.
 - Fail-closed, never to health: an occupied lane with no liveness evidence is `LANE_STALE`; an
   unrecognised drain state is an evidence gap; a source state that merely claims a dependency is
   an evidence gap; an undecided liveness token, an incoherent window and a projection whose
   revision does not match its content are typed refusals.
-- The renderer re-verifies the nested obstruction two ways — its own digest against its own
-  content, and its invariants — and refuses a snapshot whose obstruction was edited after it was
-  built. There is no animation in this section: an obstruction is a standing fact, and a spinner
-  would suggest something is happening about it.
+- The renderer re-verifies the nested obstruction three ways — its own digest against its own
+  content, its invariants, and its binding to the snapshot it is displayed with — and refuses a
+  snapshot whose obstruction was edited after it was built, or whose obstruction names an
+  evidence revision or window end other than the snapshot's own `sourceRevision` and `observedAt`.
+  The binding is what separates "internally consistent" from "about this evidence": without it a
+  self-consistent obstruction from another projection can be grafted into a resealed snapshot and
+  rendered. There is no animation in this section: an obstruction is a standing fact, and a
+  spinner would suggest something is happening about it.
 - The Module owns no clock, provider, network call, filesystem access or retry loop, adds no bus
   verb, and leaves `src/portfolio-drain.mjs` untouched, so `machineId`, `machineVersion` and
   `rulesRevision` are unchanged and every persisted receipt replays exactly as before.

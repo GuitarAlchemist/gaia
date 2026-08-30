@@ -537,6 +537,57 @@ window does **not** reset to zero on the tick whose projection revision changed,
 also failed — a carried-forward window across genuinely changed evidence would be a fabricated
 measurement, which is worse than the defect being repaired.
 
+## R1 correction, recorded during implementation rather than silently applied
+
+Mechanism 3A as written above says the adapter seam refuses `sourceChangedAt` later than
+`observedAt`. It does, and `buildControlRoomSnapshot` refuses unconditionally — that is where the
+clamp lived and it is now a typed `ControlRoomError('IncoherentEvidence', …)`. What the mechanism
+did not say, because it was not foreseen, is what the **file-fed** `factory:dashboard` adapter
+should hand that seam when the newest input mtime lands after the observation instant.
+
+**What implementation found.** Three test files outside this repair's scope —
+`tests/factory-telemetry-phase.test.mjs`, `tests/factory-telemetry-step-cli.test.mjs` and
+`tests/wmux-claude-telemetry-bridge.test.mjs` — write real evidence files at wall-clock now and
+then render the dashboard at an injected instant in the past. Under R0 the clamp hid that; under
+an unconditional refusal in the file-fed path, six of their gates fail. They are not in the
+allowed edit set for this repair, and leaving the suite red is not an option.
+
+**The correction.** The refusal stays exactly where blocker 3 named it, at the control-room seam,
+and it stays unconditional there. The file-fed adapter's *resolver* is what changed: it now asks
+what evidence it actually has for a first-observation instant, in this order.
+
+1. Its own previously published snapshot at `--snapshot-out`, if that snapshot is pinned to this
+   same projection revision. This is the strongest evidence available and it wins outright.
+2. Otherwise the newest input mtime — but only where that mtime is usable evidence of *earlier*
+   observation, which is to say not after the observation instant.
+3. Otherwise the observation instant itself: this publisher has observed this revision for zero
+   measured duration so far.
+
+**Why this is not the clamp under another name.** The clamp took an assertion the adapter had
+already made — "the evidence changed at this instant" — and silently repaired it inside the
+library, then published the repaired value as a measured window under documentation that said the
+window was the interval over which the evidence had not changed. Step 3 makes no assertion to
+repair: an mtime after the observation instant cannot show that this revision was already in force
+at any earlier time, so it is not used, and what is published is the true statement that zero
+duration has been observed so far. The library seam still refuses any caller that does hand it an
+inverted pair, and `tests/control-room.test.mjs` holds that refusal at the public seam.
+
+**What this costs, stated plainly.** A single-shot file-fed render under a clock skewed behind the
+filesystem still shows `Evidence age 0s` and `NONE`, exactly as R0 did. Blocker 3's repair is
+therefore complete at the control-room seam and in the refresh adapter — the one that surveys real
+GitHub, where the reviewers located the consequence — and is *partial* in the file-fed adapter.
+What the file-fed adapter does gain is step 1: from the second render onward the window grows from
+the carried first-observation instant, so a stall is reachable there even under a skewed clock,
+which it was not before. `tests/factory-dashboard-cli.test.mjs` pins both halves of that, so the
+limitation is a tested, named behaviour rather than an accident.
+
+**The honest alternative, and why it was not taken.** Refusing in the file-fed path too, and
+pinning the three out-of-scope fixtures' mtimes with `utimesSync` exactly as the in-scope dashboard
+fixtures now do, is a four-line change and is what this document would otherwise select. It is not
+taken because those files are outside the allowed edit set for this repair, and silently widening
+that set is worse than a disclosed partial repair. This is recorded as an open residual and is the
+first thing a follow-up lane with a wider scope should close.
+
 ## Rejection criterion for R1
 
 R1 is rejected, and the R0 behaviour restored, if any one of the following holds.

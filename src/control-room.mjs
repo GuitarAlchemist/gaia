@@ -398,18 +398,24 @@ function requireControlRoomSnapshot(value) {
   if (canonicalJson(value.knowledgeCoverage) !== canonicalJson(expectedCoverage)) {
     throw new ControlRoomError('InvalidSnapshot', 'the control-room snapshot knowledge coverage is invalid');
   }
-  requireObstruction(value.obstruction);
+  requireObstruction(value.obstruction, value);
   return value;
 }
 
 /**
  * The obstruction cannot be re-derived here — that needs the drain projection, which the
- * snapshot deliberately does not carry — so it is checked two ways instead: its own digest must
- * match its own content, and its content must satisfy the invariants the classifier guarantees.
- * A displayed obstruction that names no recovery, or names a state outside the closed
- * vocabulary, is refused rather than shown.
+ * snapshot deliberately does not carry — so it is checked three ways instead: its own digest must
+ * match its own content, its content must satisfy the invariants the classifier guarantees, and
+ * it must be bound to the snapshot it is displayed with. A displayed obstruction that names no
+ * recovery, or names a state outside the closed vocabulary, is refused rather than shown.
+ *
+ * The binding is the difference between "this obstruction is internally consistent" and "this
+ * obstruction is about this evidence". Without it a self-consistent obstruction classified from
+ * another projection over another window can be grafted into a resealed snapshot and rendered
+ * beside a `sourceRevision` that contradicts every word of it. Full re-derivation is impossible
+ * here; equality of two fields already in hand is not, and it is checked.
  */
-function requireObstruction(obstruction) {
+function requireObstruction(obstruction, snapshot) {
   if (!obstruction || typeof obstruction !== 'object' || Array.isArray(obstruction)
       || obstruction.schema !== PORTFOLIO_DRAIN_OBSTRUCTION_SCHEMA
       || obstruction.effect !== 'NONE' || obstruction.authority !== 'NONE'
@@ -436,6 +442,13 @@ function requireObstruction(obstruction) {
     throw new ControlRoomError(
       'InvalidSnapshot',
       'a named obstruction must carry exactly one bounded advisory recovery, and NONE must carry none',
+    );
+  }
+  if (obstruction.evidenceRevision !== snapshot.sourceRevision
+      || obstruction.observationWindow.endedAt !== snapshot.observedAt) {
+    throw new ControlRoomError(
+      'InvalidSnapshot',
+      'the control-room snapshot obstruction is not bound to this snapshot evidence and window',
     );
   }
   return obstruction;
@@ -520,16 +533,26 @@ export function buildControlRoomSnapshot({
   const forecast = forecastEta({ activeItems, ...measured });
   // Liveness is decided here, once, against this observer's clock, and handed to the
   // classifier already decided. The obstruction module re-measures no heartbeat, so "stale"
-  // keeps meaning exactly one thing. The observation window is the interval over which the
-  // pinned evidence has not changed, which is also the age of that evidence.
-  // The pinned evidence can legitimately change between sampling this instant and reading the
-  // file that carries it, so evidence newer than the observation is a race and not a forgery.
-  // The window is clamped to zero rather than refused: nothing has yet been observed sitting
-  // still, and a zero-length window can never claim a throughput stall.
+  // keeps meaning exactly one thing. The observation window is the interval over which this
+  // publisher has continuously observed this exact projection revision — a measured lower bound
+  // on the age of the evidence, never a claim about when the upstream world changed.
+  //
+  // Evidence dated after the instant it was observed is refused rather than clamped. R0 clamped
+  // it to a zero-length window, which rendered as "Evidence age 0s" — a reassuring measurement
+  // nobody took — and marked the substitution nowhere in the published evidence. A caller that
+  // cannot say when its evidence was current gets a typed refusal and keeps its last complete
+  // artifact set, which is the honest failure.
+  if (Date.parse(changedAt) > observedAtMs) {
+    throw new ControlRoomError(
+      'IncoherentEvidence',
+      `evidence dated ${changedAt} is after the instant it was observed, ${at};`
+      + ' a clock or a source timestamp is wrong and no observation window can be measured',
+    );
+  }
   const obstruction = classifyPortfolioDrainObstruction({
     drainProjection: projection,
     observedAt: at,
-    windowStartedAt: Date.parse(changedAt) > observedAtMs ? at : changedAt,
+    windowStartedAt: changedAt,
     liveness: items.map(({ itemId, activity }) => ({ itemId, state: activity.state })),
     dependencies,
   });

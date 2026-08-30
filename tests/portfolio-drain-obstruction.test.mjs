@@ -550,3 +550,124 @@ test('MUTATION WITNESS: breaking terminal detection reports a blocked drain as a
     classifyPortfolioDrainObstruction(empty).state,
   );
 });
+
+/**
+ * R1 blocker 1 — liveness is a property of lanes, not of every item the projection carries.
+ *
+ * The design's precedence clause 3 reads "If any *lane* is live, the drain is draining: NONE."
+ * An ACTIVE token on a terminal or a blocked item is not a live lane, and must not erase a real
+ * obstruction. These are discriminating negative controls: the projection, the window and the
+ * declared evidence are held identical and only the item the ACTIVE token sits on varies.
+ */
+test('NEGATIVE CONTROL: an ACTIVE token on a terminal item never erases a real obstruction', () => {
+  const drainProjection = projection([
+    item('issue-1', 'BLOCKED_EVIDENCE'),
+    item('issue-2', 'BLOCKED_EVIDENCE'),
+    item('pr-9', 'TERMINAL_MERGED'),
+  ]);
+
+  const unobserved = classifyPortfolioDrainObstruction({ drainProjection, ...LONG_WINDOW });
+  const terminalActive = classifyPortfolioDrainObstruction({
+    drainProjection, ...LONG_WINDOW, liveness: [{ itemId: 'pr-9', state: 'ACTIVE' }],
+  });
+
+  assert.equal(unobserved.state, 'EVIDENCE_STARVATION');
+  assert.equal(
+    terminalActive.state, 'EVIDENCE_STARVATION',
+    'a merged pull request is not a live lane and cannot report the drain healthy',
+  );
+  assert.deepEqual(terminalActive.affectedItemIds, ['issue-1', 'issue-2']);
+  assert.equal(terminalActive.affectedCount, 2);
+  assert.equal(terminalActive.recovery.kind, 'COLLECT_MISSING_EVIDENCE');
+  assert.deepEqual(
+    terminalActive.breakdown, [{ state: 'EVIDENCE_STARVATION', count: 2 }],
+    'the breakdown already told the truth; the reported state must now agree with it',
+  );
+});
+
+test('NEGATIVE CONTROL: an ACTIVE token on a blocked or non-lane item erases nothing', () => {
+  const blockedDrain = projection([
+    item('issue-1', 'BLOCKED_EVIDENCE'),
+    item('issue-2', 'BLOCKED_HUMAN'),
+    item('issue-3', 'CANDIDATE_READY'),
+  ]);
+  const stalledDrain = projection([item('issue-1', 'QUEUED'), item('issue-2', 'QUEUED')]);
+
+  const blockedActive = classifyPortfolioDrainObstruction({
+    drainProjection: blockedDrain, ...LONG_WINDOW,
+    liveness: [{ itemId: 'issue-1', state: 'ACTIVE' }],
+  });
+  const candidateActive = classifyPortfolioDrainObstruction({
+    drainProjection: blockedDrain, ...LONG_WINDOW,
+    liveness: [{ itemId: 'issue-3', state: 'ACTIVE' }],
+  });
+  const queuedActive = classifyPortfolioDrainObstruction({
+    drainProjection: stalledDrain, ...LONG_WINDOW,
+    liveness: [{ itemId: 'issue-1', state: 'ACTIVE' }],
+  });
+
+  assert.equal(
+    blockedActive.state, 'AUTHORITY_STARVATION',
+    'a blocked item is not a lane, so its liveness token decides nothing',
+  );
+  assert.deepEqual(blockedActive.affectedItemIds, ['issue-2']);
+  assert.equal(
+    candidateActive.state, 'AUTHORITY_STARVATION',
+    'a candidate that has never been claimed is not an occupied lane',
+  );
+  assert.deepEqual(candidateActive.affectedItemIds, ['issue-2']);
+  assert.equal(
+    queuedActive.state, 'THROUGHPUT_STALL',
+    'queued work is what the stall is about; a token on it cannot dismiss the stall',
+  );
+  assert.deepEqual(queuedActive.affectedItemIds, ['issue-1', 'issue-2']);
+});
+
+test('a live lane still reports NONE, so the repair narrowed the predicate and not the policy', () => {
+  const drainProjection = projection([
+    item('issue-1', 'BLOCKED_EVIDENCE'),
+    item('issue-17', 'RUNNING'),
+    item('issue-18', 'CLAIMED'),
+  ], { occupied: 2, available: 2 });
+
+  const running = classifyPortfolioDrainObstruction({
+    drainProjection,
+    ...LONG_WINDOW,
+    liveness: [
+      { itemId: 'issue-17', state: 'ACTIVE' }, { itemId: 'issue-18', state: 'ACTIVE' },
+    ],
+  });
+  const claimedOnly = classifyPortfolioDrainObstruction({
+    drainProjection,
+    ...LONG_WINDOW,
+    liveness: [
+      { itemId: 'issue-17', state: 'IDLE' }, { itemId: 'issue-18', state: 'ACTIVE' },
+    ],
+  });
+
+  assert.equal(running.state, 'NONE');
+  assert.equal(running.recovery, null);
+  assert.equal(claimedOnly.state, 'NONE', 'one live CLAIMED lane is still a draining drain');
+});
+
+test('MUTATION WITNESS: scoping liveness to lanes is load-bearing', async () => {
+  const mutant = await importMutant(
+    'liveness-scope',
+    "const moving = lanes.some(({ itemId }) => decidedLiveness.get(itemId) === 'ACTIVE');",
+    "const moving = projection.items.some(({ itemId }) => decidedLiveness.get(itemId) === 'ACTIVE');",
+  );
+  const input = {
+    drainProjection: projection([
+      item('issue-1', 'BLOCKED_EVIDENCE'), item('pr-9', 'TERMINAL_MERGED'),
+    ]),
+    ...LONG_WINDOW,
+    liveness: [{ itemId: 'pr-9', state: 'ACTIVE' }],
+  };
+
+  assert.equal(classifyPortfolioDrainObstruction(input).state, 'EVIDENCE_STARVATION');
+  assert.equal(
+    mutant.classifyPortfolioDrainObstruction(input).state, 'NONE',
+    'reverting the scope to every item restores the R0 defect: a blocked drain reported healthy',
+  );
+  assert.equal(mutant.classifyPortfolioDrainObstruction(input).recovery, null);
+});

@@ -4,7 +4,9 @@ import {
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { buildControlRoomSnapshot, renderControlRoomHtml } from '../src/control-room.mjs';
+import {
+  CONTROL_ROOM_SCHEMA, buildControlRoomSnapshot, renderControlRoomHtml,
+} from '../src/control-room.mjs';
 import {
   factoryTelemetryLogPath, projectFactoryTelemetryLog,
 } from '../src/factory-telemetry-log.mjs';
@@ -92,8 +94,61 @@ function newestMtime(paths) {
 
 const serialize = (value) => `${JSON.stringify(value, null, 2)}\n`;
 
+/**
+ * The instant from which a publisher can show it had already observed this exact projection
+ * revision, read out of the control-room snapshot it published to `snapshotPath` last time.
+ *
+ * The carrier is the published artifact and nothing else — no private state store — so an
+ * ordinary process restart, or the next tick of a watch loop, resumes the window from bytes an
+ * operator and every downstream consumer can read too. A snapshot that is missing, unreadable,
+ * not a control-room body, or pinned to a different projection revision is "no prior
+ * observation", and the window restarts. That direction only ever delays a stall, never invents
+ * one.
+ */
+export function firstObservationOf(snapshotPath, projectionRevision) {
+  let published;
+  try {
+    published = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+  } catch {
+    return null;
+  }
+  if (published?.schema !== CONTROL_ROOM_SCHEMA
+      || published.sourceRevision !== projectionRevision
+      || typeof published.sourceChangedAt !== 'string') {
+    return null;
+  }
+  return published.sourceChangedAt;
+}
+
+/**
+ * Where the observation window starts, for the file-fed path.
+ *
+ * The window is the interval over which this publisher has continuously observed this exact
+ * content-addressed projection revision — a measured lower bound on the age of the evidence,
+ * never a claim about when the upstream world changed. Its own previous publication is the
+ * strongest such evidence, so it wins: a byte-identical rewrite of an input moves the mtime but
+ * changes no evidence, and the window must not restart for it.
+ *
+ * Failing that, the newest input mtime is used, but only where it is usable evidence of *earlier*
+ * observation. An mtime after the observation instant shows nothing about how long this revision
+ * has been in force, so it is discarded rather than asserted: this publisher reports that it has
+ * observed this revision for zero measured duration so far, and the next invocation over an
+ * unchanged revision grows the window from here. Note this is a decision about what evidence the
+ * adapter *has*, taken before any measurement; `buildControlRoomSnapshot` still refuses outright
+ * any caller that hands it evidence dated after the instant it was observed.
+ *
+ * An adapter that writes its own inputs on every tick, such as the GitHub refresh, cannot use an
+ * mtime for this at all and supplies its own resolver.
+ */
+const fileFedSourceChangedAt = ({ firstObservation, observedAt, newestInputChangedAt }) => {
+  if (firstObservation !== null) return firstObservation;
+  return Date.parse(newestInputChangedAt) > Date.parse(observedAt)
+    ? observedAt : newestInputChangedAt;
+};
+
 export function runFactoryDashboardCli(argv, {
   now = () => new Date(),
+  resolveSourceChangedAt = fileFedSourceChangedAt,
   writeStdout = (chunk) => process.stdout.write(chunk),
 } = {}) {
   const flags = parseArgs(argv);
@@ -140,10 +195,15 @@ export function runFactoryDashboardCli(argv, {
       ? null
       : readJson(dependenciesPath, 'dependencies'),
     observedAt,
-    sourceChangedAt: newestMtime([
-      projectionPath, portfolioPath, receiptsPath, holdsPath, progressPath, historyPath,
-      telemetryLogPath, dependenciesPath,
-    ]),
+    sourceChangedAt: resolveSourceChangedAt({
+      projectionRevision: projection.revision,
+      firstObservation: firstObservationOf(snapshotPath, projection.revision),
+      observedAt,
+      newestInputChangedAt: newestMtime([
+        projectionPath, portfolioPath, receiptsPath, holdsPath, progressPath, historyPath,
+        telemetryLogPath, dependenciesPath,
+      ]),
+    }),
   });
   writeFileSync(snapshotPath, serialize(snapshot), 'utf8');
   writeFileSync(htmlPath, renderControlRoomHtml(snapshot, {

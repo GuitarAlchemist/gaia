@@ -424,7 +424,11 @@ export function classifyPortfolioDrainObstruction({
   const staleLanes = lanes.filter(
     ({ itemId }) => (decidedLiveness.get(itemId) ?? UNOBSERVED_LANE_LIVENESS) === 'STALE',
   );
-  const moving = projection.items.some(({ itemId }) => decidedLiveness.get(itemId) === 'ACTIVE');
+  // Liveness is a property of lanes. A terminal, blocked, candidate or queued item can carry
+  // an ACTIVE token — a merged pull request whose worker has not yet reported completion is
+  // ordinary — and none of them is the drain draining. Scoping this to every item let one
+  // stray token report a fully blocked drain as healthy, which Rule 1 forbids.
+  const moving = lanes.some(({ itemId }) => decidedLiveness.get(itemId) === 'ACTIVE');
   const cyclic = itemsInDeclaredCycles(declared.edges, liveItemIds);
   const cycleItems = live.filter(({ itemId }) => cyclic.has(itemId));
   const eligible = live.filter(({ drainState }) => ELIGIBLE_STATES.has(drainState));

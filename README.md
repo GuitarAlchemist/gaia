@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 653 gates
+node --test                                   # 666 gates
 ```
 
 ### Functional factory tracer
@@ -278,9 +278,23 @@ rather than dropped.
 It fails closed rather than cheerfully. An occupied lane with no liveness evidence is
 `LANE_STALE`, because no heartbeat evidence is not evidence of a heartbeat. A drain state the
 vocabulary does not recognise is an evidence gap, not health. A source state that merely *claims*
-a dependency proves no cycle, so it stays an evidence gap. `THROUGHPUT_STALL` needs eligible work,
-free capacity and five minutes of unchanged evidence before it is claimed; below that window the
-answer is `NONE`, meaning "no obstruction detectable yet", never "healthy".
+a dependency proves no cycle, so it stays an evidence gap. Only a live **lane** reports the drain
+as draining: a terminal, blocked or queued item can legitimately carry a live run — a merged pull
+request whose worker has not yet reported completion is ordinary — and none of them is motion out
+of the queue. `THROUGHPUT_STALL` needs eligible work, free capacity and five minutes of unchanged
+evidence before it is claimed; below that window the answer is `NONE`, meaning "no obstruction
+detectable yet", never "healthy".
+
+The observation window is the interval over which the publisher has continuously observed one
+exact projection revision — a measured lower bound on the age of the evidence, so a stall can only
+ever arrive late. `npm run factory:dashboard` measures it from the newest input file it reads;
+`npm run factory:dashboard:refresh` writes its own portfolio on every tick, so it carries the
+first-observation instant forward in the snapshot it published last time and starts a fresh window
+on the exact tick the revision changes. Evidence dated after the instant it was observed is a
+typed refusal rather than a clamped zero-age reading, and because both commands build before they
+write, a refused tick leaves the last complete artifact set untouched. The rendered obstruction is
+bound to the snapshot's own `sourceRevision` and `observedAt`, so an obstruction from another
+projection or window cannot be grafted into a resealed snapshot and displayed.
 
 The obstruction is not an actuator. It starts nothing, retries nothing, unblocks nothing and
 grants nothing. See [`docs/portfolio-drain-obstruction-design.md`](docs/portfolio-drain-obstruction-design.md)
@@ -447,7 +461,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 653 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 666 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
