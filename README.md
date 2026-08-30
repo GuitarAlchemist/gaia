@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 679 gates
+node --test                                   # 687 gates
 ```
 
 ### Functional factory tracer
@@ -118,6 +118,22 @@ their shape but does not independently read the source to prove those claims. Re
 `RETRIEVAL_MATCH` observations with `authority: NONE`, never facts or approvals. Stale-only
 evidence returns `UNKNOWN` by default. See
 [`docs/hybrid-semantic-search.md`](docs/hybrid-semantic-search.md).
+
+### Advisory plan-contradiction audit
+
+Audit one normalized, digest-bound plan declaration without mutating its source:
+
+```bash
+npm run plans:audit -- audit --input ./plan-claim.json
+```
+
+The pure seam distinguishes a reproducible structural contradiction from deferred work,
+archived/parked declarations, review candidates, and missing evidence. A second `propose`
+mode can materialize a bounded repair proposal with competing hypotheses, falsifiers,
+controls, immutable evidence references, expiry, and explicit zero-cost limits. Both
+outputs are content-addressed and retain `effect: NONE`, `sourceMutationAuthorized: false`,
+and `executionAuthorized: false`. DuckDB or another registry may supply observations, but
+it is an adapter rather than an authority; Gaia never edits a plan through this seam.
 
 An optional local OpenTelemetry Collector can receive redacted cycle and provider-phase
 spans with `--otel-endpoint http://127.0.0.1:4318/v1/traces`. The endpoint is restricted
@@ -470,7 +486,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 679 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 687 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
