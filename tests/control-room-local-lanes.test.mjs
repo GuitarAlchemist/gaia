@@ -21,7 +21,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { summarizeControlRoomActivity } from '../src/control-room-activity.mjs';
 import {
-  ControlRoomError, buildControlRoomSnapshot, renderControlRoomHtml,
+  ControlRoomError, buildControlRoomSnapshot, renderControlRoomHtml, requireControlRoomSnapshot,
 } from '../src/control-room.mjs';
 import { sealLocalLaneObservation } from '../src/local-lane-observation.mjs';
 
@@ -816,4 +816,129 @@ test('local lanes change nothing about portfolio authority, obstruction or the t
   assert.equal(withLanes.effect, 'NONE');
   assert.equal(withLanes.authority, 'NONE');
   assert.equal(withLanes.localLanes.source, 'LOCAL_WMUX');
+});
+
+// ---------------------------------------------------------------------------
+// T20 — observationRevision is provenance, and is re-derived rather than believed
+//
+// R0 checked this field for `typeof … === 'string'` and then fed it back into the derivation as
+// its own expected value, so the comparison could never disagree with it. A resealed snapshot
+// carried arbitrary free text into the line an operator reads as the identity of the evidence
+// this page was built from. Escaping held throughout, so this was never an injection.
+// ---------------------------------------------------------------------------
+
+/** Free text a resealed snapshot used to be able to present as the identity of the evidence. */
+const FORGED_REVISIONS = Object.freeze({
+  'a URL': 'https://exfil.invalid/?k=EXFILTRATED',
+  'a local path': '../../../secrets/private-key',
+  'a fabricated progress claim': 'This run is 87% complete and will finish in 2h.',
+  markup: '<script>alert(1)</script>',
+  // Written as an escape rather than a literal byte, so this file stays plain reviewable text.
+  'a bidi override': 'A\u202Egnitucexe',
+  'the empty string': '',
+  'sixty-four wrong hex characters': 'f'.repeat(64),
+});
+
+const withRevision = (snapshot, observationRevision) => reseal({
+  ...snapshot,
+  localLanes: { ...snapshot.localLanes, observationRevision },
+});
+
+test('T20: a resealed snapshot cannot substitute free text for the observation revision', () => {
+  const honest = snapshotWith(observation([lane(1), lane(2)]));
+
+  for (const [why, forged] of Object.entries(FORGED_REVISIONS)) {
+    const resealed = withRevision(honest, forged);
+    for (const [seam, run] of [
+      ['requireControlRoomSnapshot', () => requireControlRoomSnapshot(resealed)],
+      ['renderControlRoomHtml', () => renderControlRoomHtml(resealed)],
+    ]) {
+      assert.throws(
+        run,
+        (error) => error instanceof ControlRoomError && error.code === 'InvalidSnapshot',
+        `${seam} accepted ${why} as the identity of the observation`,
+      );
+    }
+    // Refusal is the whole point: no document exists for the string to reach.
+    assert.throws(() => renderControlRoomHtml(resealed, { language: 'fr' }));
+  }
+});
+
+test('T20 POSITIVE CONTROL: an honest observation revision still verifies and is still rendered', () => {
+  const honest = [
+    snapshotWith(observation([lane(1)])),
+    snapshotWith(observation([lane(1), lane(2), lane(3)])),
+    snapshotWith(observation([lane(1, { label: null, labelState: 'ABSENT' })])),
+    snapshotWith(observation([lane(1, { labelState: 'WITHHELD_UNSAFE', label: null })])),
+    snapshotWith(observation([lane(1)], '2026-08-30T03:44:00.000Z')),
+  ];
+
+  for (const snapshot of honest) {
+    assert.equal(requireControlRoomSnapshot(snapshot), snapshot, 'an honest snapshot verifies');
+    const published = snapshot.localLanes.observationRevision;
+    assert.match(published, /^[a-f0-9]{64}$/u);
+    assert.equal(
+      localSection(renderControlRoomHtml(snapshot)).includes(`<code>${published}</code>`), true,
+      'the operator still sees the revision the evidence was actually derived from',
+    );
+  }
+});
+
+test('T20: the revision is bound to THESE lanes, not merely to a well-formed digest', () => {
+  const here = snapshotWith(observation([lane(1)]));
+  // A real digest, correctly derived by the sensor's own sealer — of different evidence.
+  const elsewhere = observation([lane(2)]).revision;
+  assert.match(elsewhere, /^[a-f0-9]{64}$/u);
+  assert.notEqual(elsewhere, here.localLanes.observationRevision);
+
+  assert.throws(
+    () => requireControlRoomSnapshot(withRevision(here, elsewhere)),
+    (error) => error instanceof ControlRoomError && error.code === 'InvalidSnapshot',
+    'a correctly shaped revision of the wrong evidence is still the wrong provenance',
+  );
+});
+
+test('T20 MECHANISM REVERT: re-deriving the revision is what refuses the free text', async () => {
+  const honest = snapshotWith(observation([lane(1), lane(2)]));
+  const forged = withRevision(honest, FORGED_REVISIONS['a URL']);
+
+  // Exactly the R0 behaviour: believe the published revision and feed it back as its own
+  // expected value.
+  const mutant = await importMutant('trust-published-observation-revision', (source) => source
+    .replace(
+      `  const observationRevision = localLaneObservationRevision({
+    observedAt: block.observedAt,
+    lanes: block.lanes,
+  });
+  if (block.observationRevision !== observationRevision) {
+    refuse('the snapshot local lane block names an observation revision its own lanes do not derive');
+  }
+`,
+      '  const observationRevision = block.observationRevision;\n',
+    ));
+
+  const rendered = mutant.renderControlRoomHtml(forged);
+  assert.equal(
+    rendered.includes(FORGED_REVISIONS['a URL']), true,
+    'without re-derivation the free text renders, which is why re-derivation is the mechanism',
+  );
+  assert.throws(
+    () => renderControlRoomHtml(forged),
+    (error) => error instanceof ControlRoomError && error.code === 'InvalidSnapshot',
+  );
+});
+
+test('T20: the observation digest recipe has exactly one implementation', () => {
+  const control = readFileSync(join(ROOT, 'src', 'control-room.mjs'), 'utf8');
+  const schema = readFileSync(join(ROOT, 'src', 'local-lane-observation.mjs'), 'utf8');
+
+  assert.equal(
+    /gaia-local-lane-observation\/1/u.test(control), false,
+    'the control room does not respell the observation schema it hashes over',
+  );
+  assert.equal(
+    (schema.match(/createHash\('sha256'\)/gu) ?? []).length, 1,
+    'the schema module hashes an observation in exactly one place',
+  );
+  assert.match(control, /localLaneObservationRevision/u, 'the control room imports that one recipe');
 });

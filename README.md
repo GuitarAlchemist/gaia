@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 782 gates
+node --test                                   # 791 gates
 ```
 
 ### Functional factory tracer
@@ -260,9 +260,13 @@ Each live task also carries at most three deterministic sentences — what it is
 produced, and what would count as the next evidence — from
 `summarizeControlRoomActivity({ snapshot })` in `src/control-room-activity.mjs`. That module is
 pure, imports only `node:crypto`, and returns a separately content-addressed
-`gaia-control-room-activity/1` value whose `contentRevision` covers only the sentences: a tick
-carrying nothing but heartbeats therefore changes not one byte of what the summary says, which is
-asserted rather than promised. Every sentence comes from a closed phrasebook and every
+`gaia-control-room-activity/1` value. A tick whose only new events are heartbeats changes **not
+one sentence**: every bullet kind, code, parameter and text is byte-identical, which is what "do
+not generate text on a ten-second heartbeat" was ever about. `contentRevision` also covers the
+freshness lattice, which is clock-derived, so a tick that crosses the 30-second boundary moves
+`contentRevision` while every sentence stays byte-identical. An earlier wording here claimed the
+digest covered only the sentences and therefore never moved on a heartbeat; that was false in both
+directions and is retracted. Every sentence comes from a closed phrasebook and every
 interpolated value is a `TOKEN`, so chain-of-thought, prompts, logs, URLs and worker-authored
 prose have nowhere to live. `--activity on --activity-out <path>` publishes the value beside the
 snapshot on either dashboard command; the two flags are refused unless supplied together.
@@ -540,7 +544,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 782 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 791 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

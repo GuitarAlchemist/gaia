@@ -321,6 +321,112 @@ test('a tick carrying only heartbeats changes no byte of what the summary says',
   );
 });
 
+// ---------------------------------------------------------------------------
+// R1.1: the heartbeat claim, narrowed to what is true and gated at the boundary
+//
+// The R0 claim — "contentRevision covers only the sentences, so a heartbeat-only tick moves
+// nothing" — was false in both directions: contentRevision covers evidenceState, which is clock
+// arithmetic against the 30-second window, so a tick that crosses the boundary moves it, and so
+// does a tick carrying no new event at all. The narrowed claim is gated here in both directions.
+// ---------------------------------------------------------------------------
+
+/** One run whose last heartbeat is 18:40:10.000Z, so the window closes at 18:40:40.000Z exactly. */
+const clockOnly = (observedAt) => summarizeControlRoomActivity({
+  snapshot: buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'RUNNING' })]),
+    observedAt,
+    telemetryProjection: telemetry(BETWEEN_GATES_RUN),
+  }),
+});
+
+/** Everything a bullet says, with the clock-derived lattice removed. */
+const saidBy = (activity) => canonicalJson(
+  bulletsOf(activity).map(({ evidenceState, ...said }) => said),
+);
+
+test('R1.1: the freshness boundary is exact and inclusive, and a clock-only crossing moves contentRevision', () => {
+  // Identical evidence, no new event of any kind, one millisecond apart.
+  const fresh = clockOnly('2026-08-29T18:40:40.000Z');
+  const stale = clockOnly('2026-08-29T18:40:40.001Z');
+
+  assert.equal(fresh.items[0].evidenceState, 'FRESH', '30000ms is inside the window');
+  assert.equal(stale.items[0].evidenceState, 'STALE', '30001ms is one millisecond outside it');
+  assert.deepEqual(fresh.counts, { fresh: 1, partial: 0, stale: 0, unknown: 0, items: 1 });
+  assert.deepEqual(stale.counts, { fresh: 0, partial: 0, stale: 1, unknown: 0, items: 1 });
+
+  // Not one sentence: kind, code, params, text, source, instant and digest, byte for byte.
+  assert.deepEqual(textsOf(stale), textsOf(fresh));
+  assert.deepEqual(codesOf(stale), codesOf(fresh));
+  assert.equal(saidBy(stale), saidBy(fresh), 'no new event arrived, so nothing said may change');
+
+  // And the half the retracted wording denied.
+  assert.notEqual(
+    stale.contentRevision, fresh.contentRevision,
+    'contentRevision covers evidenceState, so crossing the boundary moves it',
+  );
+  assert.notEqual(stale.revision, fresh.revision);
+});
+
+test('R1.1: a heartbeat-only tick that crosses the boundary changes not one sentence and moves contentRevision', () => {
+  const before = clockOnly('2026-08-29T18:40:20.000Z');
+  const after = summarizeControlRoomActivity({
+    snapshot: buildControlRoomSnapshot({
+      drainProjection: projection([item({ drainState: 'RUNNING' })]),
+      observedAt: '2026-08-29T18:40:46.000Z',
+      // The only new event in this tick is a heartbeat.
+      telemetryProjection: telemetry([
+        ...BETWEEN_GATES_RUN,
+        { event: 'run.heartbeat', observedAt: '2026-08-29T18:40:15.000Z' },
+      ]),
+    }),
+  });
+
+  assert.equal(before.items[0].evidenceState, 'FRESH');
+  assert.equal(
+    after.items[0].evidenceState, 'STALE',
+    'the only new event was a heartbeat, and the window expired against it anyway',
+  );
+  assert.deepEqual(textsOf(after), textsOf(before));
+  assert.deepEqual(codesOf(after), codesOf(before));
+  assert.equal(saidBy(after), saidBy(before));
+  assert.notEqual(
+    after.contentRevision, before.contentRevision,
+    'a heartbeat-only tick DOES move contentRevision when it crosses the boundary',
+  );
+});
+
+test('R1.1 TRUTH GATE: no shipped normative text still claims a heartbeat cannot move contentRevision', () => {
+  // Backticks and emphasis are markup, not claim; whitespace is layout, not claim.
+  const normalize = (text) => text.replace(/[`*]/gu, '').replace(/\s+/gu, ' ').toLowerCase();
+  const sources = {
+    'README.md': readFileSync(new URL('../README.md', import.meta.url), 'utf8'),
+    'docs/factory-control-room.md':
+      readFileSync(new URL('../docs/factory-control-room.md', import.meta.url), 'utf8'),
+    'src/control-room-activity.mjs': readFileSync(MODULE_PATH, 'utf8'),
+  };
+
+  // Each of these shipped as an unconditional invariant, and each is false of the product.
+  const retracted = [
+    'contentrevision covers only the sentences',
+    'the sentences, and only the sentences',
+    'produces a byte-identical contentrevision',
+    'changes no byte of contentrevision',
+    'f1: a tick carrying only heartbeats moves contentrevision',
+  ];
+  // The narrowed claim, in the wording every normative location now uses.
+  const required = ['changes not one sentence', 'boundary moves contentrevision'];
+
+  for (const [where, raw] of Object.entries(sources)) {
+    const text = normalize(raw);
+    for (const claim of retracted) {
+      assert.equal(text.includes(claim), false, `${where} still asserts a retracted claim: ${claim}`);
+    }
+    for (const clause of required) {
+      assert.equal(text.includes(clause), true, `${where} does not carry the narrowed claim: ${clause}`);
+    }
+  }
+});
+
 test('no checkpoint ever names a heartbeat as the next evidence', () => {
   const runs = [
     BETWEEN_GATES_RUN,
@@ -636,7 +742,7 @@ test('MUTATION WITNESS: the unverified-source marking is what keeps a self-repor
   assert.equal(shipped.items[0].bullets[0].verified, false);
 });
 
-test('MUTATION WITNESS: contentRevision covering only the sentences is what makes a heartbeat inert', async () => {
+test('MUTATION WITNESS: excluding the observation instant is what keeps a heartbeat-only tick inert', async () => {
   const mutant = await importMutant(
     'content-revision-binds-the-clock',
     'canonicalJson({ items, machine: CONTROL_ROOM_ACTIVITY_MACHINE })',
@@ -666,4 +772,38 @@ test('MUTATION WITNESS: contentRevision covering only the sentences is what make
     'with the observation instant inside it, a heartbeat-only tick moves the content digest',
   );
   assert.equal(shipped[0].contentRevision, shipped[1].contentRevision);
+});
+
+test('MUTATION WITNESS: contentRevision covering the freshness lattice is what the boundary gates measure', async () => {
+  // The resolution R1.1 declined, made real: strip evidenceState from the digest input and the
+  // unconditional sentence becomes true again — at the price of a published digest that stays
+  // silent when an operator-visible state changes. If the boundary gates passed under this
+  // mutant they would be measuring nothing about the lattice.
+  const mutant = await importMutant(
+    'content-revision-drops-the-lattice',
+    'canonicalJson({ items, machine: CONTROL_ROOM_ACTIVITY_MACHINE })',
+    'canonicalJson({ items: items.map((one) => ({ ...one, evidenceState: null,'
+    + ' bullets: one.bullets.map((b) => ({ ...b, evidenceState: null })) })),'
+    + ' machine: CONTROL_ROOM_ACTIVITY_MACHINE })',
+  );
+  const snapshots = ['2026-08-29T18:40:40.000Z', '2026-08-29T18:40:40.001Z'].map((observedAt) =>
+    buildControlRoomSnapshot({
+      drainProjection: projection([item({ drainState: 'RUNNING' })]),
+      observedAt,
+      telemetryProjection: telemetry(BETWEEN_GATES_RUN),
+    }));
+
+  const mutated = snapshots.map((snapshot) => mutant.summarizeControlRoomActivity({ snapshot }));
+  const shipped = snapshots.map((snapshot) => summarizeControlRoomActivity({ snapshot }));
+
+  assert.equal(mutated[0].items[0].evidenceState, 'FRESH');
+  assert.equal(mutated[1].items[0].evidenceState, 'STALE', 'the mutant still reports the state');
+  assert.equal(
+    mutated[0].contentRevision, mutated[1].contentRevision,
+    'without the lattice the boundary crossing is invisible to the digest, which is the trade declined',
+  );
+  assert.notEqual(
+    shipped[0].contentRevision, shipped[1].contentRevision,
+    'the shipped digest moves, which is exactly what the boundary gates assert',
+  );
 });

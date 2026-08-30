@@ -534,7 +534,9 @@ export function summarizeControlRoomActivity({ snapshot } = {}) {
     items,
     omittedCount: selected.length - items.length,
     counts,
-    // Deliberately not over the whole body: the sentences, and only the sentences.
+    // Deliberately not over the whole body: it excludes the observation instant, so a tick
+    // changes not one sentence. It does cover evidenceState, which is clock-derived, so a tick
+    // that crosses the 30-second boundary moves contentRevision while every sentence is identical.
     contentRevision: sha256(canonicalJson({ items, machine: CONTROL_ROOM_ACTIVITY_MACHINE })),
   };
   const value = { ...body, revision: sha256(canonicalJson(body)) };

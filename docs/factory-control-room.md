@@ -155,7 +155,9 @@ a verified telemetry `lastTransition`, which the spine builds by construction to
 `observedAt: null` — the drain projection is identified by its revision, and `gaia-cli-progress/1`
 is unchained self-report that binds no verifiable instant at all. Ages are therefore derived at
 render time from `snapshot.observedAt`, never stored. A tick whose only new events are heartbeats
-produces a byte-identical `contentRevision` for that reason and no other.
+therefore changes **not one sentence**. `contentRevision` also covers the freshness lattice, which
+is clock-derived, so a tick that crosses the 30-second boundary moves `contentRevision` while every
+sentence stays byte-identical.
 
 **The four-state evidence lattice, and what it deliberately does not mean.**
 `FRESH`, `PARTIAL`, `STALE` and `UNKNOWN` describe **the evidence**, never the motion.
@@ -212,7 +214,11 @@ made, and nothing else:
 fog-of-war contract, the pace and ETA policy and every published digest are unchanged; the
 deviation is confined to the rendered document and to the new module.
 
-**Falsifiers, pre-committed.** F1: a tick carrying only heartbeats moves `contentRevision`.
+**Falsifiers, pre-committed.** F1 *(amended in R1; see "Heartbeat truth, restated" below)*: a
+tick carrying only heartbeats changes a rendered sentence, or `contentRevision` moves for any
+reason other than the freshness lattice crossing its 30-second boundary. The original F1 — "a tick
+carrying only heartbeats moves `contentRevision`" — was pre-committed against a claim that is
+false, and the shipped product fires it; it is retracted rather than left standing.
 F2: a bullet is displayed that the bound `snapshotRevision` alone does not support. F3: an
 unverified `gaia-cli-progress/1` record fills the RESULT slot. F4: fresh, partial, stale and
 unknown are not four distinct states each carrying a word and a symbol. F5: any byte of prose,
@@ -416,7 +422,10 @@ understand the default page.
   projection revision, or which names an item the snapshot does not carry. Internally consistent
   is not the same as about this evidence.
 - Bullet ages are derived at render time from `snapshot.observedAt`. No age is stored, so a
-  heartbeat-only tick changes no byte of `contentRevision` and no rendered sentence.
+  heartbeat-only tick changes **not one sentence**. `contentRevision` also covers the freshness
+  lattice, which is clock-derived, so a tick that crosses the 30-second boundary moves
+  `contentRevision` while every sentence stays byte-identical — including a tick carrying no new
+  event at all, where only the clock advanced.
 
 ## Responsive layout rules
 
@@ -563,7 +572,15 @@ The claim now reads, in the module, in the truth rules and in the README:
 
 Gated three ways: sentences are byte-identical across a heartbeat-only tick **inside** the window
 and across one that **crosses** it; `contentRevision` is stable in the first case and moves in the
-second; and the existing tautological assertion is replaced by one that can fail.
+second.
+
+**Correction, recorded in R1.** At R0 this section overstated its own closure. The narrowed claim
+reached the module docstring only; `README.md`, the two-digests narrative, the truth rule under
+"Bullet ages" and falsifier F1 kept the retracted wording, and none of the three gates named above
+was written — `tests/control-room-activity.test.mjs` was byte-identical to the entry commit. An
+independent Spec review reproduced both facts. The propagation and the gates land in **R1.1**
+below, which also records why the existing inside-window assertion is kept rather than replaced:
+it is the true half of a two-sided claim, and the boundary gates are the half that was missing.
 
 ### U2 — two divergent orderings decide which run is "the current run"
 
@@ -695,3 +712,144 @@ The subject of this slice's own amendment, above. Local lanes enter no portfolio
   neither is in the blocker union the operator asked to close.
 - **Standards L1, inconsistent `?.` guarding around a missing `activity`** — closed as a
   side-effect of U3.2, which validates the field rather than guarding at each use.
+
+# R1 — the two blockers an independent Spec review reproduced
+
+Entry commit `45e988fe63394e759dc4dc08c9cc052ed1fd8523`. The Standards review of R0 returned
+APPROVE; the Spec review returned REQUEST_CHANGES on exactly two findings, each reproduced against
+the shipped modules before it was accepted here, and each reproduced again in this lane before a
+line of repair was written. Everything below was written before the code changed.
+
+The scope is those two findings and nothing else. No bus verb, authority, effect, network call,
+retry, clock source, provider, install or configuration surface is added, widened or renamed by
+this repair, and the LOCAL_WMUX sensor stays separated from the GitHub portfolio exactly as U8
+left it.
+
+## R1.1 — Heartbeat truth, restated everywhere it was stated wrongly
+
+*Spec review section 4. The successor of U1, which narrowed the claim in one place and left three
+others standing.*
+
+**What was actually wrong.** U1 chose the right resolution and applied it to one location.
+`src/control-room-activity.mjs` carried the narrowed claim; `README.md`, the narrative under
+"The value carries two digests", the truth rule under "Bullet ages", and the pre-committed
+falsifier F1 all still carried the retracted one. A reader keying on any of those four read the
+same false invariant they read before, and the R0 repair section asserted a closure a reader could
+disprove with one `git diff`. That is worse than the original defect: an uncorrected claim is a
+mistake, and a claim documented as corrected while still false is a claim nobody will check again.
+
+**The claim, in the one wording now used in every normative location:**
+
+> A tick whose only new events are heartbeats changes **not one sentence** — every bullet kind,
+> code, parameter and text is byte-identical. `contentRevision` also covers the freshness lattice,
+> which is clock-derived, so a tick that crosses the 30-second boundary moves `contentRevision`
+> while every sentence stays byte-identical.
+
+Reproduced against the shipped kernel at the entry commit, with the last heartbeat at
+`18:40:10.000Z` and nothing else changing:
+
+```
+observedAt 18:40:40.000Z  age 30000ms  evidenceState FRESH
+observedAt 18:40:40.001Z  age 30001ms  evidenceState STALE
+sentences byte-identical : true
+contentRevision stable   : false
+```
+
+**The digest recipe is deliberately not changed.** Dropping `evidenceState` from
+`contentRevision` would make the shorter sentence true, and would buy it by making a published
+digest silent about a state change an operator reads off the page — and by moving that digest for
+every existing consumer. A migration bought to rescue a sentence is the wrong trade; the sentence
+is corrected instead.
+
+**Gates, and what each one is for.** Four assertions and one witness, in
+`tests/control-room-activity.test.mjs`:
+
+1. **The boundary is exact and inclusive, on a clock-only tick.** Two summaries one millisecond
+   apart over identical evidence and no new event at all: 30000 ms is `FRESH`, 30001 ms is
+   `STALE`, every sentence is byte-identical, and `contentRevision` **moves**. This is the
+   assertion the retracted claim would have failed.
+2. **A heartbeat-only tick that crosses the boundary** — the tick's only new event is a
+   `run.heartbeat` — likewise changes no sentence and moves `contentRevision`.
+3. **A heartbeat-only tick inside the window** keeps `contentRevision` byte-identical, so the
+   claim is bounded in both directions rather than merely permissive. A digest that moved on every
+   tick would fail this one; a digest that never moved would fail 1 and 2.
+4. **Mutation witness, mechanism-revert.** A one-expression mutant that excludes `evidenceState`
+   from `contentRevision` — the resolution this document declined — makes the boundary-crossing
+   digest stable. If gates 1 and 2 passed under that mutant they would be testing nothing about
+   the lattice; they fail under it, which is what makes them non-vacuous.
+5. **A truth gate over the prose itself.** `README.md`, this document and the module are read as
+   text; the retracted phrasings are asserted absent and the narrowed one asserted present in
+   each. The defect this repair closes was a documentation defect, so the gate that keeps it
+   closed has to read documentation. This gate is RED at the entry commit.
+
+**Falsifiers for this repair.** R1.1-F1: any shipped normative text asserts that a heartbeat-only
+or clock-only tick cannot move `contentRevision`. R1.1-F2: a boundary-crossing tick changes a
+rendered sentence. R1.1-F3: a tick inside the window moves `contentRevision`.
+
+## R1.2 — `localLanes.observationRevision` is provenance, and is re-derived
+
+*Spec review section 5. Introduced by R0.*
+
+**What was actually wrong.** `requireLocalLanes` re-derives the whole lane block and compares
+canonical JSON, which is why twenty-three resealing forgeries met twenty refusals. One field
+escaped: `observationRevision` was checked only for `typeof … === 'string'` and was then fed back
+into the derivation as its own expected value, so the comparison could not disagree with it. A
+resealed snapshot therefore carried arbitrary free text — a URL, a local path, key-shaped
+material, a fabricated progress sentence — into the LOCAL_WMUX evidence line an operator reads as
+the identity of the observation this page was built from. Reproduced at the entry commit: seven
+such values, seven acceptances, seven renders.
+
+**This is provenance, not injection.** `escapeHtml` holds at every interpolation and no markup
+escapes; the failure is that a field presented as the identity of the evidence was not bound to
+the evidence. That is the class `requireControlRoomActivity` already closes on `evidenceRevision`
+in this same commit, and the class U3 was raised to close. One rule with two implementations and
+two behaviours is the alias-guard shape `src/path-identity.mjs` exists to eliminate.
+
+**Repair: re-derive, do not pattern-match.** The field is fully determined by the block the
+snapshot already publishes. Confirmed at the entry commit:
+
+```
+published observationRevision : 0a185bdb0b2889d64649cb1768e8129562ee45e808d294817b1d502bcd69969d
+re-derived from the block     : 0a185bdb0b2889d64649cb1768e8129562ee45e808d294817b1d502bcd69969d
+```
+
+So `src/local-lane-observation.mjs` — the module that owns the schema, and the only module that
+may own its digest recipe — exports that recipe as `localLaneObservationRevision({ observedAt,
+lanes })`, and `sealLocalLaneObservation` is rewritten to call it. **One recipe, one
+implementation**: adding a second hasher in the control room would have reproduced the very defect
+being repaired. `requireLocalLanes` then re-derives the revision from `block.observedAt` and
+`block.lanes` — projected to the seven observation fields, so the derived `live` flag is excluded
+— refuses a published value that disagrees, and passes the *derived* value into the block rather
+than the published one.
+
+A pattern check (`/^[a-f0-9]{64}$/`, as the sibling module applies to `evidenceRevision`) was
+considered and rejected as the weaker of two available repairs: it would still accept sixty-four
+wrong hex characters as the identity of this evidence. Re-derivation refuses those too. The
+sibling module keeps its pattern check because `evidenceRevision` names evidence the summary does
+not carry and therefore cannot rebuild; this block carries its own lanes.
+
+**Gates, and what each one is for.** In `tests/control-room-local-lanes.test.mjs`:
+
+1. **T20 — free text is refused at both public seams.** Seven forged revisions — a URL, a path, a
+   fabricated progress sentence, markup, a bidi override, the empty string, and sixty-four wrong
+   hex characters — are each refused by `requireControlRoomSnapshot` and by
+   `renderControlRoomHtml` with a typed `ControlRoomError` / `InvalidSnapshot`, and none of the
+   seven strings reaches a rendered document.
+2. **T20 honest positive control.** The unedited snapshot still verifies and still renders its
+   revision, for one lane, for several lanes, for a withheld label and for a stale block. A
+   verifier that refused everything would pass gate 1 and fail this one; without it, gate 1 proves
+   nothing.
+3. **T20 binding, not merely well-formedness.** The honest revision of a *different* lane set — a
+   real digest, correctly derived, of the wrong evidence — is refused when spliced into this
+   block. This is what separates re-derivation from a pattern check.
+4. **T20 MECHANISM REVERT.** A one-expression mutant that removes the new comparison accepts the
+   free-text forgery and renders it. The gate therefore tests the mechanism rather than passing
+   for an unrelated reason.
+
+**Falsifiers for this repair.** R1.2-F1: any string that is not the digest of the published block
+is accepted in `observationRevision`. R1.2-F2: an honest snapshot is refused. R1.2-F3: the control
+room grows a second implementation of the observation digest recipe.
+
+**Rejection criterion.** Revert R1.2 if re-derivation ever refuses an observation the sensor
+itself sealed — that would mean the two implementations had drifted, which is exactly the failure
+this repair is shaped to make impossible.
