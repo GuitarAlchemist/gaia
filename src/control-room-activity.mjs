@@ -13,12 +13,21 @@
  * rather than a filter, which is the only form of it that can be believed.
  *
  * Two digests, on purpose. `revision` covers the whole body and therefore moves on every tick,
- * because it binds the observation instant. `contentRevision` covers what the summary *says*, and
- * nothing that moves with a clock: no age is stored, and the only instant a bullet may carry is
- * the `observedAt` of a verified telemetry transition, which the spine builds to exclude
- * `run.heartbeat`. A tick whose only new events are heartbeats therefore produces a byte-identical
- * `contentRevision`, which turns "do not generate text on a ten-second heartbeat" from an
- * intention into an assertion.
+ * because it binds the observation instant. `contentRevision` covers what the summary *says* plus
+ * the freshness lattice it says it under: no age is stored, and the only instant a bullet may
+ * carry is the `observedAt` of a verified telemetry transition, which the spine builds to exclude
+ * `run.heartbeat`.
+ *
+ * The exact claim, narrowed to what an independent review reproduced. A tick whose only new events
+ * are heartbeats changes NOT ONE SENTENCE: every `kind`, `code`, `params` and `text` is
+ * byte-identical, which is what "do not generate text on a ten-second heartbeat" was ever about.
+ * `contentRevision` additionally covers `evidenceState`, which is derived from the 30-second
+ * freshness window and is therefore clock-derived, so a tick that CROSSES that boundary moves
+ * `contentRevision` while every sentence stays identical. An earlier draft of this comment claimed
+ * the digest never moves on a clock, and that was false in both directions — a boundary-crossing
+ * heartbeat moves it, and so does a tick with no new event at all. Excluding `evidenceState` would
+ * have made the shorter sentence true at the price of a digest that stays silent when an
+ * operator-visible state changes, which is the worse trade.
  */
 
 import { createHash } from 'node:crypto';
@@ -59,7 +68,14 @@ const PROGRESS_IS_VERIFIED = false;
  * The phrasebook. English lives here so the published value and the rendered document cannot
  * disagree about it; French is a presentation layer keyed on the same `code`, deriving no fact.
  */
-const TEMPLATES = Object.freeze({
+/**
+ * A closed lookup table. Null-prototype on purpose: a plain object literal answers `constructor`
+ * and `toString`, so a resealed snapshot naming one of those as a `runState` or an event skipped
+ * every `=== undefined` guard downstream and threw a raw `TypeError` instead of a typed refusal.
+ */
+const closedMap = (entries) => Object.freeze(Object.assign(Object.create(null), entries));
+
+const TEMPLATES = closedMap({
   // ACTION — what this task is doing now.
   IN_GATE: 'In gate {gate}.',
   BETWEEN_GATES: 'Running between gates.',
@@ -91,7 +107,7 @@ const TEMPLATES = Object.freeze({
 });
 
 /** The twelve caller-facing CLI progress stages, restated as a closed, digest-sealed table. */
-const STAGE_SENTENCES = Object.freeze({
+const STAGE_SENTENCES = closedMap({
   VALIDATING: 'Validating run',
   EXECUTION_STARTING: 'Starting execution',
   AUTHORIZED_EXECUTION: 'Authorized execution starting',
@@ -106,7 +122,7 @@ const STAGE_SENTENCES = Object.freeze({
   TERMINAL_OUTCOME: 'Run finished',
 });
 
-const RESULT_CODES = Object.freeze({
+const RESULT_CODES = closedMap({
   'run.started': 'RUN_STARTED',
   'gate.entered': 'GATE_ENTERED',
   'gate.passed': 'GATE_PASSED',
@@ -115,14 +131,14 @@ const RESULT_CODES = Object.freeze({
   'run.completed': 'RUN_COMPLETED',
 });
 
-const ACTION_CODES = Object.freeze({
+const ACTION_CODES = closedMap({
   IN_GATE: 'IN_GATE',
   RUNNING: 'BETWEEN_GATES',
   BLOCKED: 'RUN_BLOCKED',
   COMPLETED: 'RUN_FINISHED',
 });
 
-const CHECKPOINT_CODES = Object.freeze({
+const CHECKPOINT_CODES = closedMap({
   IN_GATE: 'AWAIT_GATE_OUTCOME',
   RUNNING: 'AWAIT_GATE_OR_COMPLETION',
   COMPLETED: 'AWAIT_DRAIN_RECONCILIATION',
@@ -172,6 +188,15 @@ function canonicalJson(value) {
 }
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+/**
+ * An instant must be the exact spelling this product emits, so a partial or locale date cannot be
+ * leniently widened into a confident one. Checked by pattern plus `Date.parse` rather than by
+ * round-tripping through the Date constructor, because this module owns no clock and the gate
+ * that asserts so scans for that constructor by name.
+ */
+const EXACT_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const isExactInstant = (value) => typeof value === 'string'
+  && EXACT_INSTANT.test(value) && Number.isFinite(Date.parse(value));
 const ordinal = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
 const byteLength = (value) => new TextEncoder().encode(value).length;
 
@@ -249,10 +274,18 @@ const asEvidence = (value) => (
     ? value : UNKNOWN_EVIDENCE
 );
 
+/**
+ * One interpolation rule, and the renderer holds the identical one.
+ *
+ * `values[key] !== undefined` is the load-bearing half. Substituting on `Object.hasOwn` alone let a
+ * `params.stage` outside `STAGE_SENTENCES` interpolate the literal string `undefined`, and the
+ * exported verifier then ACCEPTED a sentence the producer can never emit — the closed-phrasebook
+ * property is exactly what a third party is supposed to be able to check here.
+ */
 function interpolate(template, values) {
   return template.replaceAll(
     /\{([a-zA-Z]+)\}/gu,
-    (whole, key) => (Object.hasOwn(values, key) ? values[key] : whole),
+    (whole, key) => (Object.hasOwn(values, key) && values[key] !== undefined ? values[key] : whole),
   );
 }
 
@@ -451,6 +484,24 @@ function summarizeItem(entry, snapshot, observedAtMs) {
   };
 }
 
+/**
+ * The one ordering that decides which item is "the current run", exported so the renderer uses it
+ * rather than a second comparator of its own.
+ *
+ * There were two. This module took `activity.items[0]` as the Current run card's subject while the
+ * renderer sorted the same items with an extra lifecycle-percentage key and `localeCompare` where
+ * this one uses ordinal comparison, so one page could name `issue-3` the current run and `issue-7`
+ * the highest-priority work. The percentage key is dropped rather than copied across: it ranks a
+ * RUNNING item above a CLAIMED one for a reason that has nothing to do with liveness, and liveness
+ * is what the card is about.
+ */
+export function compareControlRoomItems(left, right) {
+  return (LIVENESS_RANK[left.activity?.state] ?? 3) - (LIVENESS_RANK[right.activity?.state] ?? 3)
+    || ordinal(left.repository, right.repository)
+    || left.itemNumber - right.itemNumber
+    || ordinal(left.itemId, right.itemId);
+}
+
 /** A live task: not finished, and either holding a lane or carrying an observed run. */
 const isLiveTask = (entry) => !TERMINAL_DRAIN_STATES.includes(entry.drainState)
   && (OCCUPIED_DRAIN_STATES.includes(entry.drainState) || entry.telemetry != null);
@@ -463,12 +514,7 @@ export function summarizeControlRoomActivity({ snapshot } = {}) {
   const verified = requireSnapshot(snapshot);
   const at = verified.observedAt;
   const observedAtMs = Date.parse(at);
-  const selected = verified.items.filter(isLiveTask).sort((left, right) => (
-    (LIVENESS_RANK[left.activity?.state] ?? 3) - (LIVENESS_RANK[right.activity?.state] ?? 3)
-    || ordinal(left.repository, right.repository)
-    || left.itemNumber - right.itemNumber
-    || ordinal(left.itemId, right.itemId)
-  ));
+  const selected = verified.items.filter(isLiveTask).sort(compareControlRoomItems);
   const items = selected
     .slice(0, MAX_ACTIVITY_ITEMS)
     .map((entry) => summarizeItem(entry, verified, observedAtMs));
@@ -525,6 +571,9 @@ export function requireControlRoomActivity(value) {
       || value.omittedCount < 0) {
     refuse('the activity summary exceeds its declared item bounds');
   }
+  if (!isExactInstant(value.observedAt)) {
+    refuse('the activity observation instant is not an exact ISO timestamp');
+  }
   for (const entry of value.items) {
     if (!Array.isArray(entry?.bullets) || entry.bullets.length !== MAX_BULLETS_PER_ITEM
         || !ACTIVITY_EVIDENCE_STATES.includes(entry.evidenceState)) {
@@ -546,6 +595,23 @@ export function requireControlRoomActivity(value) {
         if (typeof parameter !== 'string' || !TOKEN.test(parameter)) {
           refuse('an activity bullet interpolates a value that is not a closed token');
         }
+      }
+      // Two fields the phrasebook does not author and this verifier used not to look at. They are
+      // published, rendered, and were free text: a resealed summary carried a URL, a local path
+      // and key-shaped material to the operator's screen through them. Escaping held, so this was
+      // never an injection — it was a provenance failure, which is worse to leave undocumented.
+      if (one.evidenceRevision !== null && !REVISION.test(one.evidenceRevision ?? '')
+          && one.evidenceRevision !== UNKNOWN_EVIDENCE) {
+        refuse('an activity bullet evidence revision is neither a digest nor the honest UNKNOWN');
+      }
+      if (one.observedAt !== null && !isExactInstant(one.observedAt)) {
+        refuse('an activity bullet instant is not an exact ISO timestamp');
+      }
+      // The producer refuses evidence dated after the instant it was observed. A verifier weaker
+      // than its producer on a rule the producer will not bend is not a verifier: downstream, the
+      // age is a subtraction that clamps, so year-2999 evidence rendered as `0s ago`.
+      if (one.observedAt !== null && Date.parse(one.observedAt) > Date.parse(value.observedAt)) {
+        refuse('an activity bullet is dated after the instant the summary was observed');
       }
     }
   }

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { pathIdentity } from '../src/path-identity.mjs';
 import { createPortfolioFactory } from '../src/github-portfolio.mjs';
 import { createGitHubReadAdapter } from '../src/github-read-adapter.mjs';
 import { firstObservationOf, runFactoryDashboardCli } from './factory-dashboard.mjs';
@@ -17,28 +18,11 @@ const ALLOWED_OPTIONS = new Set([
   'receipts', 'holds', 'progress', 'history', 'telemetry', 'capacity', 'language',
   'activity', 'activity-out', 'watch-ms',
 ]);
-const CASE_INSENSITIVE_PATHS = process.platform === 'win32' || process.platform === 'darwin';
-const MAX_PATH_DEPTH = 256;
-
-function pathIdentity(path) {
-  const supplied = resolve(path);
-  let cursor = supplied;
-  const tail = [];
-  for (let depth = 0; depth < MAX_PATH_DEPTH; depth += 1) {
-    try {
-      const physical = statSync(cursor, { bigint: true });
-      const suffix = tail.reverse().join('/');
-      const canonicalSuffix = CASE_INSENSITIVE_PATHS ? suffix.toLowerCase() : suffix;
-      return `${physical.dev}:${physical.ino}:${canonicalSuffix}`;
-    } catch {
-      const parent = dirname(cursor);
-      if (parent === cursor) break;
-      tail.push(basename(cursor));
-      cursor = parent;
-    }
-  }
-  return CASE_INSENSITIVE_PATHS ? supplied.toLowerCase() : supplied;
-}
+/**
+ * `MAX_PATH_DEPTH` and `pathIdentity` used to live here. They now live in `src/path-identity.mjs`,
+ * because the file-fed adapter compared resolved strings instead and overwrote input evidence on
+ * a case-variant spelling. Two copies of one rule that disagree is the defect; there is now one.
+ */
 
 function abortReason(signal) {
   if (signal?.reason instanceof Error) return signal.reason;
