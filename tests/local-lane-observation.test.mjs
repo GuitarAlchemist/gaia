@@ -11,10 +11,11 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   LANE_ARTIFACT_BINDINGS_SCHEMA,
@@ -1274,4 +1275,196 @@ test('a task state entry is closed, ordered, bounded and reason-consistent', () 
     );
   }
   assert.equal(MAX_LANE_TASK_STATES, 128);
+});
+
+// ---------------------------------------------------------------------------
+// mechanism-revert controls
+//
+// Each of these loads a one-expression mutant of a SHIPPED module and shows the
+// gate above going green on evidence the real code refuses. A gate that passes
+// against both the code and its mutant is not testing a mechanism, it is
+// restating an accident.
+// ---------------------------------------------------------------------------
+
+const MUTANTS = mkdtempSync(join(tmpdir(), 'gaia-lane-mutants-'));
+test.after(() => rmSync(MUTANTS, { recursive: true, force: true, maxRetries: 12, retryDelay: 25 }));
+
+const SRC = fileURLToPath(new URL('../src', import.meta.url));
+
+/** Load a mutated copy of one shipped module, with its relative imports still resolving. */
+async function importMutant(name, file, mutate) {
+  const source = readFileSync(join(SRC, file), 'utf8');
+  const mutated = mutate(source);
+  assert.notEqual(mutated, source, `mutant ${name} changed nothing; the anchor has moved`);
+  const path = join(MUTANTS, `${name}.mjs`);
+  writeFileSync(
+    path,
+    mutated.replaceAll("from './", `from '${pathToFileURL(SRC).href}/`),
+    'utf8',
+  );
+  return import(pathToFileURL(path).href);
+}
+
+const soleTaskState = (states) => {
+  assert.equal(states.length, 1);
+  return states[0];
+};
+
+test('MECHANISM REVERT: terminal placement is what refuses a marker with work after it', async () => {
+  const bound = binding(1);
+  const notTerminal = readOutcome(`${MARKER}\nand then more work happened\n`);
+  const input = {
+    lanes: [lane(1)],
+    bindings: [bound],
+    artifactEvidence: evidenceFor([[bound, notTerminal]]),
+    observedAt: AT,
+  };
+
+  const mutant = await importMutant('marker-anywhere', 'local-lane-sensor.mjs', (source) => source
+    .replace('/^[\\r\\n\\t ]*$/u', '/^[\\s\\S]*$/u'));
+
+  assert.equal(
+    soleTaskState(mutant.deriveLaneTaskStates(input)).taskState, 'COMPLETED_EVIDENCE',
+    'without the terminality rule a marker buried mid-document reads as a completion',
+  );
+  assert.equal(soleTaskState(deriveLaneTaskStates(input)).evidenceReason, 'MARKER_NOT_TERMINAL');
+});
+
+test('MECHANISM REVERT: the exact count is what NAMES a duplicate; terminality blocks it twice', async () => {
+  const bound = binding(1);
+  const duplicated = (text) => ({
+    lanes: [lane(1)],
+    bindings: [bound],
+    artifactEvidence: evidenceFor([[bound, readOutcome(text)]]),
+    observedAt: AT,
+  });
+
+  const mutant = await importMutant('any-occurrence', 'local-lane-sensor.mjs', (source) => source
+    .replace(
+      "if (occurrences > 1) return verdict('REFUSED_EVIDENCE', 'DUPLICATE_MARKER');",
+      "if (occurrences > 1 && false) return verdict('REFUSED_EVIDENCE', 'DUPLICATE_MARKER');",
+    ));
+
+  // The honest result of running this mutant, rather than the one the gate was written expecting:
+  // a second marker cannot be the LAST thing in the file without making the first one non-terminal,
+  // so terminality already refuses every duplicate on its own. The count rule is not what stops a
+  // duplicate becoming a completion — it is what tells the operator WHICH rule they broke, and a
+  // replayed marker and a marker with an appendix after it are different operator mistakes.
+  const overlapping = {
+    lanes: [lane(1)],
+    bindings: [binding(1, { completionMarker: 'AAAAAAAA' })],
+    artifactEvidence: evidenceFor([[bound, readOutcome('AAAAAAAAA\n')]]),
+    observedAt: AT,
+  };
+  for (const input of [
+    duplicated(`${MARKER}\n\nlog\n\n${MARKER}\n`),
+    duplicated(`log\n\n${MARKER}\n${MARKER}\n`),
+    overlapping,
+  ]) {
+    const reverted = soleTaskState(mutant.deriveLaneTaskStates(input));
+    assert.equal(
+      reverted.taskState, 'REFUSED_EVIDENCE',
+      'reverting the count still refuses the completion, because terminality is the second wall',
+    );
+    assert.equal(reverted.evidenceReason, 'MARKER_NOT_TERMINAL', 'but the diagnosis is now wrong');
+    assert.equal(
+      soleTaskState(deriveLaneTaskStates(input)).evidenceReason, 'DUPLICATE_MARKER',
+      'while the shipped code names the duplicate, overlapping occurrences included',
+    );
+  }
+});
+
+test('MECHANISM REVERT: the lane cross-check is what keeps the two axes separate', async () => {
+  // A forged observation: a completed task claiming a lifecycle its own lane never reported.
+  const forged = withTaskStates([lane(1)], [completedEntry({ processLifecycle: 'EXITED' })]);
+
+  const mutant = await importMutant('trust-published-lifecycle', 'local-lane-observation.mjs', (source) => source
+    .replace(
+      `    if (lane === null
+      ? state.processLifecycle !== 'UNKNOWN'
+      : lane.paneId !== state.paneId || lane.lifecycle !== state.processLifecycle) {`,
+      '    if (false) {',
+    ));
+
+  assert.equal(
+    mutant.requireLocalLaneObservation(structuredClone(forged)).taskStates[0].processLifecycle,
+    'EXITED',
+    'without the cross-check the two axes are two strings rather than two facts about one pane',
+  );
+  assert.throws(
+    () => requireLocalLaneObservation(forged),
+    (error) => error instanceof LocalLaneObservationError && /lifecycle/u.test(error.message),
+  );
+});
+
+test('MECHANISM REVERT: the carried completion is what stops a silent revert', async () => {
+  const bound = binding(1);
+  const completed = deriveLaneTaskStates({
+    lanes: [lane(1)],
+    bindings: [bound],
+    artifactEvidence: evidenceFor([[bound, readOutcome(COMPLETE_TEXT)]]),
+    observedAt: AT,
+  });
+  const contradicted = {
+    lanes: [lane(1)],
+    bindings: [bound],
+    artifactEvidence: evidenceFor([[bound, readOutcome('the marker was removed\n')]]),
+    previousTaskStates: completed,
+    observedAt: '2026-08-30T03:46:00.000Z',
+  };
+
+  const mutant = await importMutant('forget-completion', 'local-lane-sensor.mjs', (source) => source
+    .replace(
+      "if (carried !== null && carried.taskState === 'COMPLETED_EVIDENCE') {",
+      "if (false && carried.taskState === 'COMPLETED_EVIDENCE') {",
+    ));
+
+  assert.equal(
+    soleTaskState(mutant.deriveLaneTaskStates(contradicted)).taskState, 'RUNNING',
+    'without the carried completion, work that was done silently becomes work in progress',
+  );
+  assert.equal(
+    soleTaskState(deriveLaneTaskStates(contradicted)).evidenceReason,
+    'COMPLETION_EVIDENCE_CONTRADICTED',
+  );
+});
+
+test('MECHANISM REVERT: the root fence is what refuses an artifact path that escapes it', async () => {
+  const escaping = binding(1, { artifactPath: `${ARTIFACT_ROOT}-evil${sep}handoff.md` });
+
+  const mutant = await importMutant('no-fence', 'local-lane-observation.mjs', (source) => source
+    .replace('    if (!isBoundArtifactPath(binding)) {', '    if (false) {'));
+
+  assert.equal(
+    mutant.sealLaneArtifactBindings({ bindings: [escaping] }).bindings[0].artifactPath,
+    escaping.artifactPath,
+    'without the fence a sibling directory is inside the allowed root',
+  );
+  assert.throws(
+    () => sealLaneArtifactBindings({ bindings: [escaping] }),
+    (error) => error instanceof LocalLaneObservationError && /root/u.test(error.message),
+  );
+});
+
+test('MECHANISM REVERT: re-deriving the completion address is what refuses a forged one', async () => {
+  const forged = withTaskStates(
+    [lane(1)],
+    [{ ...completedEntry(), artifactDigest: digestOf('a completion that never happened') }],
+  );
+
+  const mutant = await importMutant('trust-published-evidence', 'local-lane-observation.mjs', (source) => source
+    .replace(
+      '      if (state.completionEvidenceRevision !== laneCompletionEvidenceRevision(state)) {',
+      '      if (false) {',
+    ));
+
+  assert.equal(
+    mutant.requireLocalLaneObservation(structuredClone(forged)).taskStates[0].artifactDigest,
+    digestOf('a completion that never happened'),
+    'without re-derivation a completion can be moved onto any lane, generation or artifact',
+  );
+  assert.throws(
+    () => requireLocalLaneObservation(forged),
+    (error) => error instanceof LocalLaneObservationError && /address/u.test(error.message),
+  );
 });
