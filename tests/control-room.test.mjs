@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import {
+  mkdtempSync, readFileSync, rmSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { buildControlRoomSnapshot, renderControlRoomHtml } from '../src/control-room.mjs';
 import {
@@ -10,6 +15,26 @@ import {
 } from '../src/factory-telemetry.mjs';
 
 const SHA = 'a'.repeat(64);
+
+const CONTROL_ROOM_PATH = fileURLToPath(new URL('../src/control-room.mjs', import.meta.url));
+const mutantScratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-mutant-'));
+test.after(() => rmSync(mutantScratch, { recursive: true, force: true }));
+
+/**
+ * Load a one-expression mutant of the shipped Module, so a witness can prove the expression it
+ * targets is the thing doing the work rather than passing for an unrelated reason. The mutant is
+ * written outside the source tree, so its sibling imports are rewritten to absolute URLs.
+ */
+async function importMutant(name, mutated) {
+  const source = readFileSync(CONTROL_ROOM_PATH, 'utf8');
+  assert.notEqual(mutated, source, `mutant ${name} changed nothing`);
+  const rewritten = mutated.replaceAll(
+    "from './", `from '${new URL('../src/', import.meta.url).href}`,
+  );
+  const mutantPath = join(mutantScratch, `${name}.mjs`);
+  writeFileSync(mutantPath, rewritten, 'utf8');
+  return import(pathToFileURL(mutantPath).href);
+}
 
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -65,7 +90,8 @@ test('an idle portfolio is plainly paused and never gets a spinner or invented E
   assert.deepEqual(snapshot.headline, {
     state: 'PAUSED',
     label: 'Paused',
-    detail: 'No tracked factory run is moving right now.',
+    detail: 'No tracked factory run is moving. '
+      + 'The drain is empty: no work item is eligible to move.',
   });
   assert.equal(snapshot.activeCount, 0);
   assert.equal(snapshot.showSpinner, false);
@@ -335,7 +361,8 @@ test('the optional French renderer translates operator guidance, not only headin
   });
   const html = renderControlRoomHtml(snapshot, { language: 'fr' });
 
-  assert.match(html, /Aucune exécution suivie de la factory ne progresse actuellement/u);
+  assert.match(html, /Aucune exécution suivie de la factory ne progresse\./u);
+  assert.match(html, /4 éléments bloqués en attente de preuves que Gaia ne détient pas/u);
   assert.match(html, /éléments nécessitent des preuves manquantes/u);
   assert.match(html, /Résoudre le blocage nommé avant de mesurer l’avancement/u);
   assert.match(html, /Rythme inconnu/u);
@@ -705,4 +732,620 @@ test('a snapshot with no telemetry keeps its existing shape and reports an empty
     freshnessWindowMs: 30_000,
     projectionRevision: null,
   });
+});
+
+test('a paused empty drain and a paused blocked drain no longer look the same', () => {
+  const emptyDrain = buildControlRoomSnapshot({
+    drainProjection: projection(),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+  const blockedDrain = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ itemId: 'issue-17', drainState: 'BLOCKED_EVIDENCE', sourceState: 'CHECKS_UNKNOWN' }),
+      item({
+        itemId: 'issue-18', itemNumber: 18, drainState: 'BLOCKED_EVIDENCE',
+        sourceState: 'CHECKS_UNKNOWN',
+      }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+
+  assert.equal(emptyDrain.headline.state, 'PAUSED');
+  assert.equal(blockedDrain.headline.state, 'PAUSED');
+  assert.equal(emptyDrain.obstruction.state, 'NO_ELIGIBLE_WORK');
+  assert.equal(blockedDrain.obstruction.state, 'EVIDENCE_STARVATION');
+  assert.notEqual(
+    emptyDrain.headline.detail, blockedDrain.headline.detail,
+    'the two opposite pauses must not share one sentence',
+  );
+  assert.deepEqual(blockedDrain.obstruction.affectedItemIds, ['issue-17', 'issue-18']);
+  assert.equal(blockedDrain.obstruction.recovery.kind, 'COLLECT_MISSING_EVIDENCE');
+  assert.equal(blockedDrain.obstruction.recovery.effect, 'NONE');
+  assert.equal(blockedDrain.obstruction.recovery.authority, 'NONE');
+  assert.equal(blockedDrain.obstruction.evidenceRevision, blockedDrain.sourceRevision);
+});
+
+test('the obstruction is bound by the snapshot revision it is displayed with', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'BLOCKED_REVIEW' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+
+  const { revision, ...body } = snapshot;
+  assert.equal(revision, createHash('sha256').update(canonicalJson(body)).digest('hex'));
+  const { revision: obstructionRevision, ...obstructionBody } = snapshot.obstruction;
+  assert.equal(
+    obstructionRevision,
+    createHash('sha256').update(canonicalJson(obstructionBody)).digest('hex'),
+  );
+  assert.equal(snapshot.obstruction.state, 'REVIEW_STARVATION');
+});
+
+test('the observation window is measured from the pinned evidence, not invented', () => {
+  const stalled = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const justChanged = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:40:00.000Z',
+  });
+
+  assert.equal(stalled.obstruction.state, 'THROUGHPUT_STALL');
+  assert.deepEqual(stalled.obstruction.observationWindow, {
+    startedAt: '2026-08-29T18:30:20.000Z',
+    endedAt: '2026-08-29T18:40:20.000Z',
+    durationMs: 600_000,
+  });
+  assert.equal(justChanged.obstruction.state, 'NONE');
+  assert.equal(justChanged.obstruction.recovery, null);
+});
+
+test('NEGATIVE CONTROL: a live heartbeat on long-running work is never an obstruction', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item()]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:20:20.000Z',
+    progressObservations: [{
+      itemId: 'issue-17',
+      capturedAt: '2026-08-29T18:40:15.000Z',
+      record: {
+        schema: 'gaia-cli-progress/1', stage: 'worker_running', elapsedMs: 3_600_000,
+        heartbeat: true,
+      },
+    }],
+  });
+
+  assert.equal(snapshot.headline.state, 'ACTIVE');
+  assert.equal(snapshot.items[0].activity.elapsedMs, 3_600_000);
+  assert.equal(snapshot.obstruction.state, 'NONE');
+  assert.equal(snapshot.obstruction.recovery, null);
+});
+
+test('NEGATIVE CONTROL: the same run with an expired heartbeat is a named stale lane', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item()]),
+    observedAt: '2026-08-29T18:45:20.000Z',
+    sourceChangedAt: '2026-08-29T18:20:20.000Z',
+    progressObservations: [{
+      itemId: 'issue-17',
+      capturedAt: '2026-08-29T18:40:15.000Z',
+      record: {
+        schema: 'gaia-cli-progress/1', stage: 'worker_running', elapsedMs: 3_600_000,
+        heartbeat: true,
+      },
+    }],
+  });
+
+  assert.equal(snapshot.headline.state, 'STALE');
+  assert.equal(snapshot.obstruction.state, 'LANE_STALE');
+  assert.deepEqual(snapshot.obstruction.affectedItemIds, ['issue-17']);
+  assert.equal(snapshot.obstruction.recovery.kind, 'CHECK_STALE_LANE');
+});
+
+test('a declared dependency cycle reaches the control room; identical prose alone does not', () => {
+  const drainProjection = projection([
+    item({ itemId: 'issue-17', drainState: 'QUEUED', title: 'Blocked by issue-18' }),
+    item({
+      itemId: 'issue-18', itemNumber: 18, drainState: 'QUEUED', title: 'Blocked by issue-17',
+    }),
+  ]);
+  const shared = {
+    drainProjection,
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  };
+
+  const declared = buildControlRoomSnapshot({
+    ...shared,
+    dependencies: {
+      evidenceRevision: 'b'.repeat(64),
+      edges: [
+        { itemId: 'issue-17', dependsOnItemId: 'issue-18' },
+        { itemId: 'issue-18', dependsOnItemId: 'issue-17' },
+      ],
+    },
+  });
+  const proseOnly = buildControlRoomSnapshot(shared);
+
+  assert.equal(declared.obstruction.state, 'DEPENDENCY_DEADLOCK');
+  assert.equal(declared.obstruction.dependencyEvidenceRevision, 'b'.repeat(64));
+  assert.equal(proseOnly.obstruction.state, 'THROUGHPUT_STALL');
+});
+
+test('the default English view states the obstruction, its evidence age and one bounded recovery', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ drainState: 'BLOCKED_EVIDENCE', sourceState: 'CHECKS_UNKNOWN' }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const html = renderControlRoomHtml(snapshot);
+
+  assert.match(html, /Why the drain is not moving/u);
+  assert.match(html, /EVIDENCE_STARVATION/u);
+  assert.match(html, /Bounded recovery/u);
+  assert.match(html, /COLLECT_MISSING_EVIDENCE/u);
+  assert.match(html, /Collect the missing check or review evidence/u);
+  assert.match(html, /Evidence age/u);
+  assert.match(html, /10m/u);
+  assert.equal(snapshot.showSpinner, false);
+  assert.doesNotMatch(html, /class="heartbeat-pulse"/u);
+  assert.doesNotMatch(html, /@keyframes/u);
+});
+
+test('the optional French view translates the obstruction and its bounded recovery', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ drainState: 'BLOCKED_EVIDENCE', sourceState: 'CHECKS_UNKNOWN' }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const html = renderControlRoomHtml(snapshot, { language: 'fr' });
+
+  assert.match(html, /Pourquoi le drain n/u);
+  assert.match(html, /Preuves manquantes/u);
+  assert.match(html, /Reprise born/u);
+  assert.match(html, /Collecter les preuves manquantes/u);
+  assert.doesNotMatch(html, /Collect the missing check/u);
+});
+
+test('an obstruction edited after the snapshot was built is refused, not displayed', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ drainState: 'BLOCKED_EVIDENCE', sourceState: 'CHECKS_UNKNOWN' }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const withoutRevision = ({ revision, ...body }) => body;
+  const reseal = (body) => ({
+    ...body, revision: createHash('sha256').update(canonicalJson(body)).digest('hex'),
+  });
+
+  const digestBroken = reseal({
+    ...withoutRevision(snapshot),
+    obstruction: { ...snapshot.obstruction, state: 'NONE' },
+  });
+  const semanticsBroken = reseal({
+    ...withoutRevision(snapshot),
+    obstruction: reseal({ ...withoutRevision(snapshot.obstruction), recovery: null }),
+  });
+
+  assert.throws(() => renderControlRoomHtml(digestBroken), /obstruction/u);
+  assert.throws(() => renderControlRoomHtml(semanticsBroken), /obstruction/u);
+});
+
+/**
+ * R1 blocker 3 — evidence dated after the instant it was observed is a broken sensor.
+ *
+ * R0 clamped the window to zero here and published a snapshot whose rendered "Evidence age" read
+ * `0s` — the single most reassuring reading available — for a sensor whose true state is
+ * incoherent, with nothing in the emitted obstruction marking that a clamp had occurred. The pure
+ * module already refuses an inverted window; the adapter now refuses one too, in its own typed
+ * vocabulary, and both command-line adapters build before they write so the last complete
+ * artifact set survives the refusal.
+ */
+test('evidence newer than the observation is a typed refusal, never an invented zero age', () => {
+  const future = () => buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:50:20.000Z',
+  });
+  const oneMillisecondAhead = () => buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:40:20.001Z',
+  });
+
+  assert.throws(future, (error) => {
+    assert.equal(error.name, 'ControlRoomError');
+    assert.equal(error.code, 'IncoherentEvidence');
+    assert.match(error.message, /after the instant it was observed/u);
+    return true;
+  });
+  assert.throws(oneMillisecondAhead, { code: 'IncoherentEvidence' });
+  // The boundary itself is coherent: evidence observed at the instant it changed is a real,
+  // zero-length window, and it is measured rather than synthesized.
+  const boundary = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:40:20.000Z',
+  });
+  assert.equal(boundary.obstruction.observationWindow.durationMs, 0);
+  assert.equal(boundary.obstruction.state, 'NONE');
+});
+
+/**
+ * R1 blocker 1, reached through the production Adapter rather than a hand-forged liveness array.
+ *
+ * `itemActivity` decides ACTIVE from telemetry run state and heartbeat freshness alone, so the
+ * ordinary race "GitHub reports the pull request merged before the worker emits run.completed"
+ * puts a live, fresh-heartbeat run on a TERMINAL_MERGED item. That is not a live lane.
+ */
+test('NEGATIVE CONTROL: an open telemetry run on a terminal item never reports the drain healthy', () => {
+  const drainProjection = projection([
+    item({ itemId: 'issue-1', itemNumber: 1, drainState: 'BLOCKED_EVIDENCE' }),
+    item({ itemId: 'issue-2', itemNumber: 2, drainState: 'BLOCKED_EVIDENCE' }),
+    item({ drainState: 'TERMINAL_MERGED' }),
+  ]);
+  const shared = {
+    drainProjection,
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  };
+
+  const withoutRun = buildControlRoomSnapshot(shared);
+  const withOpenRun = buildControlRoomSnapshot({
+    ...shared, telemetryProjection: telemetry(OPEN_RUN),
+  });
+
+  assert.equal(withoutRun.obstruction.state, 'EVIDENCE_STARVATION');
+  assert.equal(
+    withOpenRun.items.find(({ itemId }) => itemId === 'issue-17').activity.state, 'ACTIVE',
+    'the item really is ACTIVE — the repair is in what liveness is allowed to decide',
+  );
+  assert.equal(
+    withOpenRun.obstruction.state, 'EVIDENCE_STARVATION',
+    'a terminal item carrying an open run is not a lane the drain is draining through',
+  );
+  assert.deepEqual(withOpenRun.obstruction.affectedItemIds, ['issue-1', 'issue-2']);
+  assert.equal(withOpenRun.obstruction.recovery.kind, 'COLLECT_MISSING_EVIDENCE');
+  assert.equal(withOpenRun.blockedCount, 2);
+  assert.match(
+    renderControlRoomHtml(withOpenRun), /Missing evidence/u,
+  );
+  assert.doesNotMatch(
+    renderControlRoomHtml(withOpenRun), /No obstruction detected/u,
+    'the rendered page must not print "no obstruction" beside two blocked items',
+  );
+});
+
+/**
+ * R1 blocker 2 — the displayed obstruction must be bound to the snapshot it is displayed with.
+ *
+ * Checking the obstruction against itself is not enough: a self-consistent obstruction classified
+ * from a different projection over a different window can be inserted into a resealed snapshot and
+ * rendered beside a `sourceRevision` that contradicts every word of it. The render seam cannot
+ * re-derive the obstruction — that needs the drain projection the snapshot deliberately does not
+ * carry — but it holds both bound fields already and must check them.
+ */
+test('an obstruction from another projection or window is refused at the render seam', () => {
+  const honest = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ itemId: 'issue-1', itemNumber: 1, drainState: 'BLOCKED_EVIDENCE' }),
+      item({ itemId: 'issue-2', itemNumber: 2, drainState: 'BLOCKED_EVIDENCE' }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const foreign = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'TERMINAL_MERGED' })]),
+    observedAt: '2020-01-01T00:00:01.000Z',
+    sourceChangedAt: '2020-01-01T00:00:00.000Z',
+  });
+  const withoutRevision = ({ revision, ...body }) => body;
+  const reseal = (body) => ({
+    ...body, revision: createHash('sha256').update(canonicalJson(body)).digest('hex'),
+  });
+
+  // Both halves are individually honest: the foreign obstruction verifies against its own
+  // content, and the graft is resealed so the snapshot verifies against its own content too.
+  const grafted = reseal({ ...withoutRevision(honest), obstruction: foreign.obstruction });
+  const windowGrafted = reseal({
+    ...withoutRevision(honest),
+    obstruction: reseal({
+      ...withoutRevision(honest.obstruction),
+      observationWindow: {
+        startedAt: '2026-08-29T18:30:20.000Z',
+        endedAt: '2026-08-29T18:39:20.000Z',
+        durationMs: 540_000,
+      },
+    }),
+  });
+
+  assert.notEqual(foreign.obstruction.evidenceRevision, honest.sourceRevision);
+  assert.equal(
+    grafted.obstruction.revision,
+    createHash('sha256').update(canonicalJson(withoutRevision(grafted.obstruction))).digest('hex'),
+    'the graft is self-consistent, so only a binding check can catch it',
+  );
+  assert.throws(
+    () => renderControlRoomHtml(grafted),
+    /obstruction/u,
+    'an obstruction naming a different evidence revision must not be displayed',
+  );
+  assert.throws(
+    () => renderControlRoomHtml(windowGrafted),
+    /obstruction/u,
+    'an obstruction whose window ends at a different instant must not be displayed',
+  );
+  assert.equal(honest.obstruction.evidenceRevision, honest.sourceRevision);
+  assert.equal(honest.obstruction.observationWindow.endedAt, honest.observedAt);
+  assert.match(renderControlRoomHtml(honest), /Missing evidence/u);
+});
+
+/**
+ * R2 blocker C — the displayed window's *start* must be bound to the snapshot too.
+ *
+ * R1 bound `evidenceRevision` and `observationWindow.endedAt`. `endedAt` is the half that cannot
+ * be stretched without also lying about `observedAt`, which is bound; `startedAt` is the half
+ * that lengthens a window, and it was unbound. `buildControlRoomSnapshot` assigns both
+ * `sourceChangedAt` and `windowStartedAt` from the same variable, so binding the third field can
+ * refuse nothing the builder itself produces — falsifier F6 in
+ * `docs/portfolio-drain-obstruction-design.md`.
+ */
+test('an obstruction whose window starts at a different instant is refused at the render seam', () => {
+  const honest = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const withoutRevision = ({ revision, ...body }) => body;
+  const reseal = (body) => ({
+    ...body, revision: createHash('sha256').update(canonicalJson(body)).digest('hex'),
+  });
+
+  // Only the window START is forged. `evidenceRevision` and `endedAt` stay truthful, so both
+  // bindings R1 shipped still pass, and both layers are resealed so both digests verify.
+  const forgedStart = '2020-01-01T00:00:00.000Z';
+  const startGrafted = reseal({
+    ...withoutRevision(honest),
+    obstruction: reseal({
+      ...withoutRevision(honest.obstruction),
+      observationWindow: {
+        startedAt: forgedStart,
+        endedAt: honest.observedAt,
+        durationMs: Date.parse(honest.observedAt) - Date.parse(forgedStart),
+      },
+    }),
+  });
+
+  assert.equal(
+    startGrafted.obstruction.evidenceRevision, startGrafted.sourceRevision,
+    'the R1 evidence binding still passes, so only the window-start binding can catch this',
+  );
+  assert.equal(startGrafted.obstruction.observationWindow.endedAt, startGrafted.observedAt);
+  assert.notEqual(
+    startGrafted.obstruction.observationWindow.startedAt, startGrafted.sourceChangedAt,
+    'and the displayed window contradicts the sourceChangedAt in the same JSON object',
+  );
+  assert.throws(
+    () => renderControlRoomHtml(startGrafted),
+    /obstruction/u,
+    'an obstruction whose window starts at a different instant must not be displayed',
+  );
+
+  // POSITIVE CONTROL: the honest snapshot the builder produced still renders, and its own two
+  // fields are equal by construction — rejection criterion 2.
+  assert.equal(honest.obstruction.observationWindow.startedAt, honest.sourceChangedAt);
+  assert.equal(honest.obstruction.state, 'THROUGHPUT_STALL');
+  assert.match(renderControlRoomHtml(honest), /Throughput stalled/u);
+});
+
+/**
+ * R2 blocker B — a window start the publisher could not measure must not be publishable as an
+ * indistinguishable measured one.
+ *
+ * The window is `[sourceChangedAt, observedAt]` either way. What differs is the publisher's
+ * epistemic position: `MEASURED` means the start is evidence of *earlier* observation, and
+ * `UNOBSERVED` means the adapter had no such evidence and the window therefore starts at the
+ * observation instant. The marker is sealed into the snapshot revision, so it cannot be added,
+ * removed or flipped without breaking the digest — assumption A12. Falsifier F5.
+ */
+test('the snapshot declares whether its window start was measured or merely unobserved', () => {
+  const shared = {
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  };
+  const measured = buildControlRoomSnapshot({
+    ...shared, sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const unobserved = buildControlRoomSnapshot({
+    ...shared,
+    sourceChangedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAtBasis: 'UNOBSERVED',
+  });
+  // A genuinely zero-age observation: the evidence changed at the exact instant it was observed.
+  // This is a real measurement and must stay distinguishable from the unobserved case.
+  const zeroAgeButMeasured = buildControlRoomSnapshot({
+    ...shared, sourceChangedAt: '2026-08-29T18:40:20.000Z',
+  });
+
+  assert.equal(measured.sourceChangedAtBasis, 'MEASURED', 'the default is a measured window');
+  assert.equal(unobserved.sourceChangedAtBasis, 'UNOBSERVED');
+  assert.equal(zeroAgeButMeasured.sourceChangedAtBasis, 'MEASURED');
+  assert.equal(unobserved.obstruction.observationWindow.durationMs, 0);
+  assert.equal(zeroAgeButMeasured.obstruction.observationWindow.durationMs, 0);
+  assert.notEqual(
+    unobserved.revision, zeroAgeButMeasured.revision,
+    'F5: two zero-length windows of different epistemic status must not publish equal bodies',
+  );
+  assert.equal(
+    unobserved.obstruction.revision, zeroAgeButMeasured.obstruction.revision,
+    'the obstruction contract is untouched: the marker is the adapter position, not the ruling',
+  );
+  assert.equal(
+    unobserved.obstruction.state, zeroAgeButMeasured.obstruction.state,
+    'and the marker never changes which obstruction state is reported',
+  );
+
+  // The rendered page must not print the single most reassuring reading available for a window
+  // nobody measured.
+  assert.match(renderControlRoomHtml(unobserved), /Not yet measured/u);
+  assert.doesNotMatch(renderControlRoomHtml(unobserved), /<strong>0s<\/strong>/u);
+  assert.match(renderControlRoomHtml(unobserved, { language: 'fr' }), /Pas encore mesuré/u);
+  assert.match(renderControlRoomHtml(zeroAgeButMeasured), /<strong>0s<\/strong>/u);
+  assert.doesNotMatch(renderControlRoomHtml(zeroAgeButMeasured), /Not yet measured/u);
+});
+
+test('NEGATIVE CONTROL: an evidence basis outside the closed vocabulary is a typed refusal', () => {
+  const shared = {
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:40:20.000Z',
+  };
+
+  assert.throws(
+    () => buildControlRoomSnapshot({ ...shared, sourceChangedAtBasis: 'ESTIMATED' }),
+    (error) => {
+      assert.equal(error.name, 'ControlRoomError');
+      assert.equal(error.code, 'InvalidEvidenceBasis');
+      return true;
+    },
+  );
+  assert.throws(
+    () => buildControlRoomSnapshot({ ...shared, sourceChangedAtBasis: null }),
+    { code: 'InvalidEvidenceBasis' },
+  );
+  // UNOBSERVED means "the window starts at the observation instant because nothing else could be
+  // shown". A long window claiming that basis is incoherent, so the marker cannot be used to
+  // dress up a measurement that was never taken.
+  assert.throws(
+    () => buildControlRoomSnapshot({
+      ...shared,
+      sourceChangedAt: '2026-08-29T18:30:20.000Z',
+      sourceChangedAtBasis: 'UNOBSERVED',
+    }),
+    { code: 'InvalidEvidenceBasis' },
+  );
+
+  // And the render seam refuses a resealed snapshot carrying a basis outside the vocabulary,
+  // rather than displaying a page whose evidence age means nothing.
+  const honest = buildControlRoomSnapshot(shared);
+  const withoutRevision = ({ revision, ...body }) => body;
+  const forged = {
+    ...withoutRevision(honest), sourceChangedAtBasis: 'ESTIMATED',
+  };
+  const resealed = {
+    ...forged, revision: createHash('sha256').update(canonicalJson(forged)).digest('hex'),
+  };
+  assert.throws(() => renderControlRoomHtml(resealed), /basis/u);
+});
+
+test('MECHANISM REVERT: the window-start binding is what refuses a forged observation window', async () => {
+  const source = readFileSync(CONTROL_ROOM_PATH, 'utf8');
+  const find = '      || obstruction.observationWindow.startedAt !== snapshot.sourceChangedAt';
+  assert.equal(
+    source.includes(find), true,
+    `the mechanism-revert witness targets "${find}", which is no longer in the source`,
+  );
+  const mutant = await importMutant('no-window-start-binding', source.replace(find, '      || false'));
+
+  const honest = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const withoutRevision = ({ revision, ...body }) => body;
+  const reseal = (body) => ({
+    ...body, revision: createHash('sha256').update(canonicalJson(body)).digest('hex'),
+  });
+  const forgedStart = '2020-01-01T00:00:00.000Z';
+  const startGrafted = reseal({
+    ...withoutRevision(honest),
+    obstruction: reseal({
+      ...withoutRevision(honest.obstruction),
+      observationWindow: {
+        startedAt: forgedStart,
+        endedAt: honest.observedAt,
+        durationMs: Date.parse(honest.observedAt) - Date.parse(forgedStart),
+      },
+    }),
+  });
+
+  assert.match(
+    mutant.renderControlRoomHtml(startGrafted), /Gaia/u,
+    'without the third binding clause the mutant renders a window it never measured',
+  );
+  assert.throws(() => renderControlRoomHtml(startGrafted), /obstruction/u);
+  assert.match(
+    mutant.renderControlRoomHtml(honest), /Gaia/u,
+    'and the mutant still renders the honest snapshot, so the clause is the only difference',
+  );
+});
+
+test('MECHANISM REVERT: the basis vocabulary check is what stops a meaningless evidence age', async () => {
+  const source = readFileSync(CONTROL_ROOM_PATH, 'utf8');
+  const find = '  if (!EVIDENCE_BASES.has(basis)';
+  assert.equal(
+    source.includes(find), true,
+    `the mechanism-revert witness targets "${find}", which is no longer in the source`,
+  );
+  const mutant = await importMutant(
+    'no-basis-vocabulary', source.replace(find, '  if (false'),
+  );
+
+  const honest = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:40:20.000Z',
+  });
+  const withoutRevision = ({ revision, ...body }) => body;
+  const forged = { ...withoutRevision(honest), sourceChangedAtBasis: 'ESTIMATED' };
+  const resealed = {
+    ...forged, revision: createHash('sha256').update(canonicalJson(forged)).digest('hex'),
+  };
+
+  assert.match(
+    mutant.renderControlRoomHtml(resealed), /Gaia/u,
+    'without the vocabulary check the mutant publishes an evidence age of unstated provenance',
+  );
+  assert.throws(() => renderControlRoomHtml(resealed), /basis/u);
+});
+
+test('MECHANISM REVERT: the UNOBSERVED coherence rule is what stops a dressed-up measurement', async () => {
+  const source = readFileSync(CONTROL_ROOM_PATH, 'utf8');
+  const find = "      || (basis === 'UNOBSERVED' && sourceChangedAt !== observedAt)) {";
+  assert.equal(
+    source.includes(find), true,
+    `the mechanism-revert witness targets "${find}", which is no longer in the source`,
+  );
+  const mutant = await importMutant(
+    'no-unobserved-coherence', source.replace(find, '      || false) {'),
+  );
+
+  // "UNOBSERVED" is a claim about what the publisher lacked, so it can only describe a window
+  // that starts where the observation does. Over a ten-minute window it would hide a real
+  // measurement behind "Not yet measured", which is a different lie in the same field.
+  const dressedUp = {
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+    sourceChangedAtBasis: 'UNOBSERVED',
+  };
+
+  const built = mutant.buildControlRoomSnapshot(dressedUp);
+  assert.equal(
+    built.obstruction.observationWindow.durationMs, 600_000,
+    'without the coherence rule the mutant publishes UNOBSERVED over a measured ten-minute window',
+  );
+  assert.match(mutant.renderControlRoomHtml(built), /Not yet measured/u);
+  assert.throws(
+    () => buildControlRoomSnapshot(dressedUp), { code: 'InvalidEvidenceBasis' },
+  );
 });

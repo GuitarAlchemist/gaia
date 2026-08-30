@@ -9,6 +9,11 @@
 import { createHash } from 'node:crypto';
 
 import { FACTORY_TELEMETRY_PROJECTION_SCHEMA } from './factory-telemetry.mjs';
+import {
+  PORTFOLIO_DRAIN_OBSTRUCTION_SCHEMA,
+  PORTFOLIO_DRAIN_OBSTRUCTION_STATES,
+  classifyPortfolioDrainObstruction,
+} from './portfolio-drain-obstruction.mjs';
 
 export const CONTROL_ROOM_SCHEMA = 'gaia-control-room/1';
 
@@ -43,6 +48,20 @@ const KNOWN_KNOWLEDGE_STATES = new Set([
 const UNOBSERVED_KNOWLEDGE_STATES = new Set([
   'EVIDENCE_UNKNOWN', 'MISSING_FROM_OPEN_SNAPSHOT',
 ]);
+
+/**
+ * What kind of thing the window start is, over a closed two-value vocabulary.
+ *
+ * `MEASURED` says the start is evidence of *earlier* observation: a verified first-observation
+ * instant this publisher carried forward, or an input timestamp at or before the instant it was
+ * observed. `UNOBSERVED` says the publisher had no such evidence at all and the window therefore
+ * begins at the observation instant.
+ *
+ * Both publish a window; only one of them publishes a measurement. Without this field a window
+ * the publisher declined to measure and a window it measured as one instant old were byte-equal,
+ * and `Evidence age 0s` — the single most reassuring reading available — was printed for both.
+ */
+const EVIDENCE_BASES = new Set(['MEASURED', 'UNOBSERVED']);
 
 export class ControlRoomError extends Error {
   constructor(code, message) {
@@ -91,6 +110,23 @@ function requireTimestamp(value) {
     throw new ControlRoomError('InvalidObservation', 'observedAt must be an ISO timestamp');
   }
   return value;
+}
+
+/**
+ * `UNOBSERVED` is a statement about what the publisher lacked, so it can only ever describe a
+ * window that starts where the observation does. Allowing it over a longer window would let the
+ * marker dress up a measurement nobody took, which is the defect it exists to remove.
+ */
+function requireEvidenceBasis(basis, sourceChangedAt, observedAt) {
+  if (!EVIDENCE_BASES.has(basis)
+      || (basis === 'UNOBSERVED' && sourceChangedAt !== observedAt)) {
+    throw new ControlRoomError(
+      'InvalidEvidenceBasis',
+      'the source-changed-at basis must be MEASURED, or UNOBSERVED over a window that starts at'
+      + ' the instant it was observed',
+    );
+  }
+  return basis;
 }
 
 function latestProgressByItem(observations) {
@@ -375,7 +411,15 @@ function measureKnowledgeCoverage(items) {
   };
 }
 
-function requireControlRoomSnapshot(value) {
+/**
+ * Total verification of one published `gaia-control-room/1` artifact.
+ *
+ * Exported because the file-fed adapter reads exactly these bytes back as its observation-window
+ * carrier, and a reader of a published artifact must not be more credulous than its renderer. An
+ * adapter that trusted three shallow fields could adopt a window start out of a file this
+ * function refuses, and publish a stall measured in years over evidence observed for seconds.
+ */
+export function requireControlRoomSnapshot(value) {
   if (!value || value.schema !== CONTROL_ROOM_SCHEMA
       || value.effect !== 'NONE' || value.authority !== 'NONE'
       || !Array.isArray(value.items) || typeof value.revision !== 'string') {
@@ -393,7 +437,67 @@ function requireControlRoomSnapshot(value) {
   if (canonicalJson(value.knowledgeCoverage) !== canonicalJson(expectedCoverage)) {
     throw new ControlRoomError('InvalidSnapshot', 'the control-room snapshot knowledge coverage is invalid');
   }
+  requireEvidenceBasis(value.sourceChangedAtBasis, value.sourceChangedAt, value.observedAt);
+  requireObstruction(value.obstruction, value);
   return value;
+}
+
+/**
+ * The obstruction cannot be re-derived here — that needs the drain projection, which the
+ * snapshot deliberately does not carry — so it is checked three ways instead: its own digest must
+ * match its own content, its content must satisfy the invariants the classifier guarantees, and
+ * it must be bound to the snapshot it is displayed with. A displayed obstruction that names no
+ * recovery, or names a state outside the closed vocabulary, is refused rather than shown.
+ *
+ * The binding is the difference between "this obstruction is internally consistent" and "this
+ * obstruction is about this evidence". Without it a self-consistent obstruction classified from
+ * another projection over another window can be grafted into a resealed snapshot and rendered
+ * beside a `sourceRevision` that contradicts every word of it. Full re-derivation is impossible
+ * here; equality of three fields already in hand is not, and all three are checked.
+ *
+ * All three, because `endedAt` is the half of the window that cannot be stretched without also
+ * lying about `observedAt`, which is bound — and `startedAt` is the half that lengthens it.
+ * `buildControlRoomSnapshot` assigns the window start and `sourceChangedAt` from the same
+ * variable, so this can refuse no snapshot the builder itself produced.
+ */
+function requireObstruction(obstruction, snapshot) {
+  if (!obstruction || typeof obstruction !== 'object' || Array.isArray(obstruction)
+      || obstruction.schema !== PORTFOLIO_DRAIN_OBSTRUCTION_SCHEMA
+      || obstruction.effect !== 'NONE' || obstruction.authority !== 'NONE'
+      || !PORTFOLIO_DRAIN_OBSTRUCTION_STATES.includes(obstruction.state)
+      || !Array.isArray(obstruction.affectedItemIds)
+      || obstruction.affectedCount !== obstruction.affectedItemIds.length
+      || typeof obstruction.observationWindow?.durationMs !== 'number') {
+    throw new ControlRoomError(
+      'InvalidSnapshot', 'the control-room snapshot obstruction is not a Gaia obstruction',
+    );
+  }
+  const { revision, ...body } = obstruction;
+  if (revision !== createHash('sha256').update(canonicalJson(body)).digest('hex')) {
+    throw new ControlRoomError(
+      'InvalidSnapshot', 'the control-room snapshot obstruction revision does not match its content',
+    );
+  }
+  const bounded = obstruction.state === 'NONE'
+    ? obstruction.recovery === null
+    : obstruction.recovery?.effect === 'NONE' && obstruction.recovery?.authority === 'NONE'
+      && obstruction.recovery?.advisory === true
+      && typeof obstruction.recovery?.kind === 'string';
+  if (!bounded) {
+    throw new ControlRoomError(
+      'InvalidSnapshot',
+      'a named obstruction must carry exactly one bounded advisory recovery, and NONE must carry none',
+    );
+  }
+  if (obstruction.evidenceRevision !== snapshot.sourceRevision
+      || obstruction.observationWindow.endedAt !== snapshot.observedAt
+      || obstruction.observationWindow.startedAt !== snapshot.sourceChangedAt) {
+    throw new ControlRoomError(
+      'InvalidSnapshot',
+      'the control-room snapshot obstruction is not bound to this snapshot evidence and window',
+    );
+  }
+  return obstruction;
 }
 
 function blockerAction(blocker) {
@@ -444,11 +548,14 @@ function nextActionFor(items, decisions, blockers) {
 
 export function buildControlRoomSnapshot({
   drainProjection, observedAt, sourceChangedAt = observedAt,
+  sourceChangedAtBasis = 'MEASURED',
   progressObservations = [], completedRuns = [], telemetryProjection = null,
+  dependencies = null,
 }) {
   const projection = requireProjection(drainProjection);
   const at = requireTimestamp(observedAt);
   const changedAt = requireTimestamp(sourceChangedAt);
+  const basis = requireEvidenceBasis(sourceChangedAtBasis, changedAt, at);
   const observedAtMs = Date.parse(at);
   const latest = latestProgressByItem(progressObservations);
   const spine = requireTelemetryProjection(telemetryProjection);
@@ -472,11 +579,40 @@ export function buildControlRoomSnapshot({
   const measured = measurePace(completedRuns);
   const activeItems = items.filter(({ activity }) => activity.state === 'ACTIVE');
   const forecast = forecastEta({ activeItems, ...measured });
+  // Liveness is decided here, once, against this observer's clock, and handed to the
+  // classifier already decided. The obstruction module re-measures no heartbeat, so "stale"
+  // keeps meaning exactly one thing. The observation window is the interval over which this
+  // publisher has continuously observed this exact projection revision — a measured lower bound
+  // on the age of the evidence, never a claim about when the upstream world changed.
+  //
+  // Evidence dated after the instant it was observed is refused rather than clamped. R0 clamped
+  // it to a zero-length window, which rendered as "Evidence age 0s" — a reassuring measurement
+  // nobody took — and marked the substitution nowhere in the published evidence. A caller that
+  // cannot say when its evidence was current gets a typed refusal and keeps its last complete
+  // artifact set, which is the honest failure.
+  if (Date.parse(changedAt) > observedAtMs) {
+    throw new ControlRoomError(
+      'IncoherentEvidence',
+      `evidence dated ${changedAt} is after the instant it was observed, ${at};`
+      + ' a clock or a source timestamp is wrong and no observation window can be measured',
+    );
+  }
+  const obstruction = classifyPortfolioDrainObstruction({
+    drainProjection: projection,
+    observedAt: at,
+    windowStartedAt: changedAt,
+    liveness: items.map(({ itemId, activity }) => ({ itemId, state: activity.state })),
+    dependencies,
+  });
 
   const body = {
     schema: CONTROL_ROOM_SCHEMA,
     observedAt: at,
     sourceChangedAt: changedAt,
+    // Sealed into the snapshot revision, so the distinction between a window this publisher
+    // measured and one it declined to measure cannot be added, removed or flipped without
+    // breaking the digest. A distinction that lives only in prose does not reach a consumer.
+    sourceChangedAtBasis: basis,
     sourceRevision: projection.revision,
     effect: 'NONE',
     authority: 'NONE',
@@ -484,7 +620,11 @@ export function buildControlRoomSnapshot({
       ? {
         state: 'PAUSED',
         label: 'Paused',
-        detail: 'No tracked factory run is moving right now.',
+        // An empty drain and a systemically blocked drain are operationally opposite and
+        // used to share this one sentence. They no longer do.
+        detail: obstruction.state === 'NONE'
+          ? 'No tracked factory run is moving right now.'
+          : `No tracked factory run is moving. ${obstruction.label}`,
       }
       : state === 'ACTIVE' ? {
         state: 'ACTIVE',
@@ -501,6 +641,7 @@ export function buildControlRoomSnapshot({
     totalItems: items.length,
     capacity: { ...projection.counts },
     blockers,
+    obstruction,
     showSpinner: items.some(({ activity }) => activity.showPulse),
     pace: measured.pace,
     eta: forecast ?? (activeCount === 0
@@ -570,7 +711,17 @@ const RENDER_COPY = Object.freeze({
     items: 'items', noBlockers: 'No blockers recorded.',
     readOnly: 'Read-only dashboard: effect=NONE and authority=NONE.', technical: 'Technical identities',
     run: 'Run', transition: 'Last verified transition', evidenceAge: 'Evidence age',
+    notYetMeasured: 'Not yet measured',
     state: { ACTIVE: 'Active', STALE: 'Needs attention', PAUSED: 'Paused' },
+    obstruction: 'Why the drain is not moving', recovery: 'Bounded recovery',
+    affected: 'Affected items', declaredEdges: 'Declared dependency evidence',
+    obstructionState: {
+      NONE: 'No obstruction detected', NO_ELIGIBLE_WORK: 'Empty drain',
+      EVIDENCE_STARVATION: 'Missing evidence', LANE_STALE: 'Stale lane',
+      DEPENDENCY_DEADLOCK: 'Declared dependency cycle', REVIEW_STARVATION: 'Missing review',
+      AUTHORITY_STARVATION: 'Missing authority', RECONCILE_REQUIRED: 'Reconcile required',
+      THROUGHPUT_STALL: 'Throughput stalled',
+    },
   }),
   fr: Object.freeze({
     title: 'Gaia — état réel', now: 'Maintenant', next: 'Prochaine action', progress: 'Avancement vérifiable',
@@ -585,14 +736,27 @@ const RENDER_COPY = Object.freeze({
     items: 'éléments', noBlockers: 'Aucun blocage enregistré.',
     readOnly: 'Dashboard read-only : effect=NONE et authority=NONE.', technical: 'Identités techniques',
     run: 'Exécution', transition: 'Dernière transition vérifiée', evidenceAge: 'Âge de la preuve',
+    notYetMeasured: 'Pas encore mesuré',
     state: { ACTIVE: 'En cours', STALE: 'À vérifier', PAUSED: 'En pause' },
+    obstruction: 'Pourquoi le drain n’avance pas', recovery: 'Reprise bornée',
+    affected: 'Éléments concernés', declaredEdges: 'Preuve de dépendances déclarée',
+    obstructionState: {
+      NONE: 'Aucun blocage détecté', NO_ELIGIBLE_WORK: 'Drain vide',
+      EVIDENCE_STARVATION: 'Preuves manquantes', LANE_STALE: 'Lane périmée',
+      DEPENDENCY_DEADLOCK: 'Cycle de dépendances déclaré', REVIEW_STARVATION: 'Review manquante',
+      AUTHORITY_STARVATION: 'Autorité manquante', RECONCILE_REQUIRED: 'Réconciliation requise',
+      THROUGHPUT_STALL: 'Débit à l’arrêt',
+    },
   }),
 });
 
 function localizedHeadline(snapshot, language) {
   if (language === 'en') return snapshot.headline;
   const details = {
-    PAUSED: 'Aucune exécution suivie de la factory ne progresse actuellement.',
+    PAUSED: snapshot.obstruction.state === 'NONE'
+      ? 'Aucune exécution suivie de la factory ne progresse actuellement.'
+      : `Aucune exécution suivie de la factory ne progresse. ${
+        localizedObstructionLabel(snapshot.obstruction, 'fr')}`,
     ACTIVE: `${snapshot.activeCount} exécution${snapshot.activeCount === 1 ? '' : 's'} Gaia en cours.`,
     STALE: `${snapshot.staleCount} exécution${snapshot.staleCount === 1 ? '' : 's'} sans heartbeat récent.`,
   };
@@ -656,6 +820,96 @@ function localizedEta(snapshot, language) {
     'There is no active run to estimate.': 'Aucune exécution active à estimer.',
   };
   return `Inconnue · ${reasons[snapshot.eta.reason] ?? 'Preuve insuffisante.'}`;
+}
+
+/**
+ * The obstruction's own English sentence comes from the truth Module, so JSON and HTML cannot
+ * disagree about it. French is a presentation layer over the same bound counts and window; it
+ * derives no new fact and re-decides no state.
+ */
+function localizedObstructionLabel(obstruction, language) {
+  if (language === 'en') return obstruction.label;
+  const count = obstruction.affectedCount;
+  const many = count === 1 ? '' : 's';
+  return {
+    NONE: 'Aucun blocage détectable avec ces preuves sur cette fenêtre.',
+    NO_ELIGIBLE_WORK: 'Le drain est vide : aucun élément n’est éligible.',
+    EVIDENCE_STARVATION: `${count} élément${many} bloqué${many} en attente de preuves que Gaia ne détient pas.`,
+    LANE_STALE: `${count} lane${many} occupée${many} sans preuve de heartbeat vivante.`,
+    DEPENDENCY_DEADLOCK: `${count} élément${many} sur un cycle de dépendances déclaré.`,
+    REVIEW_STARVATION: `${count} élément${many} en attente d’une review qui n’arrive pas.`,
+    AUTHORITY_STARVATION: `${count} élément${many} en attente d’une autorisation explicite.`,
+    RECONCILE_REQUIRED: `${count} élément${many} dont la preuve enregistrée contredit l’observation.`,
+    THROUGHPUT_STALL: `${count} élément${many} éligible${many} et de la capacité libre immobiles`
+      + ` depuis ${formatDuration(obstruction.observationWindow.durationMs)}.`,
+  }[obstruction.state];
+}
+
+function localizedRecoveryLabel(obstruction, language) {
+  if (language === 'en') return obstruction.recovery.label;
+  return {
+    SURVEY_PORTFOLIO_FOR_NEW_WORK: 'Lancer un relevé read-only du portfolio : rien n’est éligible.',
+    COLLECT_MISSING_EVIDENCE: 'Collecter les preuves manquantes des éléments nommés, puis réconcilier le drain.',
+    CHECK_STALE_LANE: 'Vérifier les lanes nommées dont la preuve de heartbeat a expiré, puis réconcilier.',
+    BREAK_DEPENDENCY_CYCLE: 'Retirer une arête de dépendance déclarée parmi les éléments nommés.',
+    REQUEST_INDEPENDENT_REVIEW: 'Demander une review indépendante pour les éléments nommés.',
+    REQUEST_EXPLICIT_AUTHORITY: 'Demander à un humain l’autorisation explicite attendue.',
+    RECONCILE_DRAIN_EVIDENCE: 'Ré-observer les éléments nommés et réconcilier la chaîne de reçus.',
+    CLAIM_QUEUED_WORK: 'Autoriser une exécution bornée de la factory pour le travail éligible.',
+  }[obstruction.recovery.kind] ?? obstruction.recovery.label;
+}
+
+const OBSTRUCTION_SEVERITY = Object.freeze({
+  NONE: 'healthy',
+  NO_ELIGIBLE_WORK: 'neutral',
+  LANE_STALE: 'warning',
+  THROUGHPUT_STALL: 'warning',
+  RECONCILE_REQUIRED: 'warning',
+  EVIDENCE_STARVATION: 'blocked',
+  REVIEW_STARVATION: 'blocked',
+  AUTHORITY_STARVATION: 'blocked',
+  DEPENDENCY_DEADLOCK: 'blocked',
+});
+
+/**
+ * Why the drain is not moving: one named state, the age of the evidence that named it, the
+ * items it affects and one bounded advisory recovery. No animation lives here — an obstruction
+ * is a standing fact, and a spinner would suggest something is happening about it.
+ */
+function renderObstruction(snapshot, copy, language) {
+  const { obstruction } = snapshot;
+  // A window nobody measured must not print the most reassuring number available for it.
+  const evidenceAge = snapshot.sourceChangedAtBasis === 'UNOBSERVED'
+    ? copy.notYetMeasured
+    : formatDuration(obstruction.observationWindow.durationMs);
+  const affected = obstruction.affectedItemIds.length === 0
+    ? ''
+    : `<p class="evidence-line"><strong>${copy.affected}:</strong> `
+      + `${obstruction.affectedItemIds.slice(0, 8).map(
+        (itemId) => `<code>${escapeHtml(itemId)}</code>`,
+      ).join(' ')}`
+      + (obstruction.affectedItemIds.length > 8
+        ? ` + ${obstruction.affectedItemIds.length - 8}` : '')
+      + ` (${obstruction.affectedCount})</p>`;
+  const recovery = obstruction.recovery === null
+    ? ''
+    : `<div class="fact">${copy.recovery} <code>${escapeHtml(obstruction.recovery.kind)}</code>`
+      + `<strong>${escapeHtml(localizedRecoveryLabel(obstruction, language))}</strong></div>`;
+  const declaredEdges = obstruction.dependencyEvidenceRevision === null
+    ? ''
+    : `<p class="evidence-line">${copy.declaredEdges}: `
+      + `<code>${escapeHtml(obstruction.dependencyEvidenceRevision)}</code></p>`;
+  return `<section class="section-panel" data-severity="${OBSTRUCTION_SEVERITY[obstruction.state]}">
+    <h2>${copy.obstruction}</h2>
+    <div class="facts">
+      <div class="fact"><span class="semantic-symbol" aria-hidden="true">■</span>${escapeHtml(copy.obstructionState[obstruction.state])} <code>${escapeHtml(obstruction.state)}</code><strong>${escapeHtml(localizedObstructionLabel(obstruction, language))}</strong></div>
+      <div class="fact">${copy.evidenceAge}<strong>${escapeHtml(evidenceAge)}</strong></div>
+      ${recovery}
+    </div>
+    ${affected}
+    ${declaredEdges}
+    <p class="evidence-line"><code>${escapeHtml(obstruction.revision)}</code> · effect=NONE · authority=NONE</p>
+  </section>`;
 }
 
 /** Show the observed run itself: who, which gate, the last verified transition, its age. */
@@ -860,6 +1114,7 @@ export function renderControlRoomHtml(candidate, { language = 'en' } = {}) {
     <div class="metric" data-severity="blocked"><span><span class="semantic-symbol" aria-hidden="true">■</span>${copy.blocked}</span><strong>${snapshot.blockedCount}</strong></div>
     <div class="metric" data-severity="neutral"><span><span class="semantic-symbol" aria-hidden="true">○</span>${copy.slots}</span><strong>${snapshot.capacity.available}/${snapshot.capacity.occupied + snapshot.capacity.available}</strong></div>
   </section>
+  ${renderObstruction(snapshot, copy, language)}
   <section class="section-panel">
     <h2>${copy.fog}</h2>
     <div class="fog-grid">

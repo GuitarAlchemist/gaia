@@ -4,7 +4,9 @@ import {
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { buildControlRoomSnapshot, renderControlRoomHtml } from '../src/control-room.mjs';
+import {
+  buildControlRoomSnapshot, renderControlRoomHtml, requireControlRoomSnapshot,
+} from '../src/control-room.mjs';
 import {
   factoryTelemetryLogPath, projectFactoryTelemetryLog,
 } from '../src/factory-telemetry-log.mjs';
@@ -92,8 +94,88 @@ function newestMtime(paths) {
 
 const serialize = (value) => `${JSON.stringify(value, null, 2)}\n`;
 
+/**
+ * The instant from which a publisher can show it had already observed this exact projection
+ * revision, read out of the control-room snapshot it published to `snapshotPath` last time.
+ *
+ * The carrier is the published artifact and nothing else — no private state store — so an
+ * ordinary process restart, or the next tick of a watch loop, resumes the window from bytes an
+ * operator and every downstream consumer can read too. That the artifact is this publisher's own
+ * is not an integrity property: the path can be written by a second publisher, by a rotation, or
+ * by an editor. So it is verified rather than trusted, with the same total verifier the render
+ * seam applies to these exact bytes — a reader of a published artifact must not be more credulous
+ * than its renderer.
+ *
+ * A snapshot that fails that verification, that is pinned to a different projection revision, or
+ * that claims to have observed evidence before that evidence existed, is "no prior observation",
+ * and the window restarts. Every one of those directions delays a stall; none invents one. That
+ * asymmetry is the whole point: an unverified carrier failed the other way, and one unsealed edit
+ * of a single field bought a `THROUGHPUT_STALL` measured in years over seconds of observation.
+ */
+export function firstObservationOf(snapshotPath, projectionRevision) {
+  let published;
+  try {
+    published = requireControlRoomSnapshot(JSON.parse(readFileSync(snapshotPath, 'utf8')));
+  } catch {
+    return null;
+  }
+  if (Date.parse(published.sourceChangedAt) > Date.parse(published.observedAt)
+      || published.sourceRevision !== projectionRevision) {
+    return null;
+  }
+  return published.sourceChangedAt;
+}
+
+/**
+ * Where the observation window starts, for the file-fed path.
+ *
+ * The window is the interval over which this publisher has continuously observed this exact
+ * content-addressed projection revision — a measured lower bound on the age of the evidence,
+ * never a claim about when the upstream world changed. Its own previous publication is the
+ * strongest such evidence, so it wins: a byte-identical rewrite of an input moves the mtime but
+ * changes no evidence, and the window must not restart for it.
+ *
+ * Failing that, the newest input mtime is used, but only where it is usable evidence of *earlier*
+ * observation. An mtime after the observation instant shows nothing about how long this revision
+ * has been in force, so it is discarded rather than asserted: this publisher reports that it has
+ * observed this revision for zero measured duration so far, and the next invocation over an
+ * unchanged revision grows the window from here. Note this is a decision about what evidence the
+ * adapter *has*, taken before any measurement; `buildControlRoomSnapshot` still refuses outright
+ * any caller that hands it evidence dated after the instant it was observed.
+ *
+ * The discard is reported, not merely commented. Publishing it as an ordinary zero-length window
+ * made a window this adapter declined to measure byte-indistinguishable from one it measured as a
+ * single instant old, so `UNOBSERVED` travels with the snapshot and is sealed into its revision.
+ *
+ * An adapter that writes its own inputs on every tick, such as the GitHub refresh, cannot use an
+ * mtime for this at all and supplies its own resolver.
+ */
+const fileFedSourceChangedAt = ({ firstObservation, observedAt, newestInputChangedAt }) => {
+  if (firstObservation !== null) {
+    return { sourceChangedAt: firstObservation, basis: 'MEASURED' };
+  }
+  if (Date.parse(newestInputChangedAt) > Date.parse(observedAt)) {
+    return { sourceChangedAt: observedAt, basis: 'UNOBSERVED' };
+  }
+  return { sourceChangedAt: newestInputChangedAt, basis: 'MEASURED' };
+};
+
+/**
+ * A resolver may answer with a bare instant instead of `{ sourceChangedAt, basis }`, and one does:
+ * the refresh adapter's, which this Module must keep working unchanged. A bare instant declares no
+ * basis, so it is read conservatively — it counts as evidence of earlier observation only where it
+ * actually is earlier. That labels a refresh tick that has just met a revision for the first time
+ * `UNOBSERVED`, which is exactly what it is, and lets the next tick over the same revision measure
+ * it for real.
+ */
+const declaredBasis = (resolved, observedAt) => (typeof resolved !== 'string' ? resolved : {
+  sourceChangedAt: resolved,
+  basis: resolved === observedAt ? 'UNOBSERVED' : 'MEASURED',
+});
+
 export function runFactoryDashboardCli(argv, {
   now = () => new Date(),
+  resolveSourceChangedAt = fileFedSourceChangedAt,
   writeStdout = (chunk) => process.stdout.write(chunk),
 } = {}) {
   const flags = parseArgs(argv);
@@ -101,6 +183,7 @@ export function runFactoryDashboardCli(argv, {
   const portfolioPath = flags.portfolio ? resolve(flags.portfolio) : null;
   const receiptsPath = flags.receipts ? resolve(flags.receipts) : null;
   const holdsPath = flags.holds ? resolve(flags.holds) : null;
+  const dependenciesPath = flags.dependencies ? resolve(flags.dependencies) : null;
   const progressPath = flags.progress ? resolve(flags.progress) : null;
   const historyPath = flags.history ? resolve(flags.history) : null;
   const telemetryPath = flags.telemetry ? resolve(flags.telemetry) : null;
@@ -128,22 +211,35 @@ export function runFactoryDashboardCli(argv, {
   const telemetryProjection = telemetryPath === null
     ? null
     : projectFactoryTelemetryLog({ directory: telemetryPath, notAfter: observedAt }).projection;
+  const windowStart = declaredBasis(resolveSourceChangedAt({
+    projectionRevision: projection.revision,
+    firstObservation: firstObservationOf(snapshotPath, projection.revision),
+    observedAt,
+    newestInputChangedAt: newestMtime([
+      projectionPath, portfolioPath, receiptsPath, holdsPath, progressPath, historyPath,
+      telemetryLogPath, dependenciesPath,
+    ]),
+  }), observedAt);
   const snapshot = buildControlRoomSnapshot({
     drainProjection: projection,
     progressObservations,
     completedRuns,
     telemetryProjection,
+    // Declared edges only. This adapter reads a file of explicit dependency evidence; it
+    // never derives an edge from an issue title, body, label or model output.
+    dependencies: dependenciesPath === null
+      ? null
+      : readJson(dependenciesPath, 'dependencies'),
     observedAt,
-    sourceChangedAt: newestMtime([
-      projectionPath, portfolioPath, receiptsPath, holdsPath, progressPath, historyPath,
-      telemetryLogPath,
-    ]),
+    sourceChangedAt: windowStart.sourceChangedAt,
+    sourceChangedAtBasis: windowStart.basis,
   });
   writeFileSync(snapshotPath, serialize(snapshot), 'utf8');
   writeFileSync(htmlPath, renderControlRoomHtml(snapshot, {
     language: flags.language ?? 'en',
   }), 'utf8');
   writeStdout(`Gaia dashboard checked: ${snapshot.headline.state}`
+    + ` | obstruction ${snapshot.obstruction.state}`
     + ` | next ${snapshot.nextAction.kind} | source ${snapshot.sourceRevision}\n`);
   return snapshot;
 }

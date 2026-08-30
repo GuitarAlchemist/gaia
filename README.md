@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 612 gates
+node --test                                   # 679 gates
 ```
 
 ### Functional factory tracer
@@ -247,6 +247,68 @@ exist, then reports an interquartile range and sample size. The HTML has no remo
 can be opened in wmux or shared as a standalone artifact. See
 [`docs/factory-control-room.md`](docs/factory-control-room.md).
 
+### Why the drain is not moving
+
+`PAUSED` used to mean two opposite things at once. An **empty** drain, where every item is
+terminal and the pause is the correct resting state, and a systemically **blocked** drain, where
+real work exists and every path out of the queue is closed, produced the same sentence.
+
+The control room now names the obstruction. Exactly one state is reported from a closed
+vocabulary of nine — `NONE`, `NO_ELIGIBLE_WORK`, `EVIDENCE_STARVATION`, `LANE_STALE`,
+`DEPENDENCY_DEADLOCK`, `REVIEW_STARVATION`, `AUTHORITY_STARVATION`, `RECONCILE_REQUIRED`,
+`THROUGHPUT_STALL` — and every named obstruction binds the exact drain-projection revision it was
+derived from, the observation window it was measured over, the affected item ids and their count,
+and one bounded advisory recovery action carrying `effect: NONE` and `authority: NONE`.
+
+```bash
+npm run factory:dashboard -- \
+  --portfolio     ../state/gaia-github-portfolio.json \
+  --dependencies  ../state/gaia-declared-dependencies.json \
+  --html-out      ../state/gaia-control-room.html \
+  --snapshot-out  ../state/gaia-control-room.json
+# Gaia dashboard checked: PAUSED | obstruction EVIDENCE_STARVATION | next TRIAGE_BLOCKED_EVIDENCE | source 9f2c…
+```
+
+`--dependencies` is optional and takes explicit declared evidence,
+`{ "evidenceRevision": "<sha256>", "edges": [{ "itemId": "…", "dependsOnItemId": "…" }] }`. A
+cycle is reported **only** from those declared edges. No issue title, body, label or model output
+is ever read as a dependency, and an edge naming an item the portfolio does not carry is refused
+rather than dropped.
+
+It fails closed rather than cheerfully. An occupied lane with no liveness evidence is
+`LANE_STALE`, because no heartbeat evidence is not evidence of a heartbeat. A drain state the
+vocabulary does not recognise is an evidence gap, not health. A source state that merely *claims*
+a dependency proves no cycle, so it stays an evidence gap. Only a live **lane** reports the drain
+as draining: a terminal, blocked or queued item can legitimately carry a live run — a merged pull
+request whose worker has not yet reported completion is ordinary — and none of them is motion out
+of the queue. `THROUGHPUT_STALL` needs eligible work, free capacity and five minutes of unchanged
+evidence before it is claimed; below that window the answer is `NONE`, meaning "no obstruction
+detectable yet", never "healthy".
+
+The observation window is the interval over which the publisher has continuously observed one
+exact projection revision — a measured lower bound on the age of the evidence, so a stall can only
+ever arrive late. `npm run factory:dashboard` measures it from the newest input file it reads;
+`npm run factory:dashboard:refresh` writes its own portfolio on every tick, so it carries the
+first-observation instant forward in the snapshot it published last time and starts a fresh window
+on the exact tick the revision changes. That carried instant is evidence, so the carrier is
+verified with the same total verifier the renderer applies to those exact bytes; a snapshot that
+does not verify is no prior observation and the window restarts, which delays a stall rather than
+inventing one. Evidence dated after the instant it was observed is a typed refusal rather than a
+clamped zero-age reading, and because both commands build before they write, a refused tick leaves
+the last complete artifact set untouched.
+
+Where a publisher has no usable evidence for a window start at all, it says so: every snapshot
+carries `sourceChangedAtBasis`, either `MEASURED` or `UNOBSERVED`, sealed into its content
+address, and the page reads "Not yet measured" rather than an evidence age of `0s`. A window
+nobody measured is no longer byte-indistinguishable from one measured as a single instant old.
+The rendered obstruction is bound to the snapshot's own `sourceRevision`, `observedAt` and
+`sourceChangedAt`, so an obstruction from another projection, or over a window with a forged start
+or end, cannot be grafted into a resealed snapshot and displayed.
+
+The obstruction is not an actuator. It starts nothing, retries nothing, unblocks nothing and
+grants nothing. See [`docs/portfolio-drain-obstruction-design.md`](docs/portfolio-drain-obstruction-design.md)
+for the seams that were rejected, the falsifiers and the rejection criterion.
+
 ### Passive factory telemetry spine
 
 The control room truthfully reported `PAUSED` while real work was happening, because the
@@ -408,7 +470,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 612 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 679 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

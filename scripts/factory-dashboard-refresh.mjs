@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 
 import { createPortfolioFactory } from '../src/github-portfolio.mjs';
 import { createGitHubReadAdapter } from '../src/github-read-adapter.mjs';
-import { runFactoryDashboardCli } from './factory-dashboard.mjs';
+import { firstObservationOf, runFactoryDashboardCli } from './factory-dashboard.mjs';
 
 class UsageError extends Error {}
 
@@ -163,7 +163,19 @@ export async function runFactoryDashboardRefreshCli(argv, {
     writeFileSync(stagedPortfolio, serialize(portfolio), { encoding: 'utf8', flag: 'wx' });
     const snapshot = runFactoryDashboardCli(
       dashboardArgs(flags, stagedPortfolio, stagedSnapshot, stagedHtml),
-      { now, writeStdout: () => {} },
+      {
+        now,
+        // Never a mtime. Every tick writes a brand-new staged portfolio, so that file's mtime is
+        // the survey time and carries no information whatever about the evidence; measuring the
+        // window from it restarted the window on every tick and made THROUGHPUT_STALL unreachable
+        // in the one adapter that actually surveys GitHub. Either this revision was already
+        // published and keeps its first-observation instant, or it is new to this publisher and
+        // the window starts now. The published snapshot is read, not the staged one.
+        resolveSourceChangedAt: ({ projectionRevision, observedAt }) => (
+          firstObservationOf(snapshotPath, projectionRevision) ?? observedAt
+        ),
+        writeStdout: () => {},
+      },
     );
     const publicationPathIdentities = assertPathConstraints(flags, outputPaths);
     if (publicationPathIdentities !== openingPathIdentities) {
