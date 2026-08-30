@@ -27,6 +27,7 @@ import { sealMergeQueueCapability } from '../src/merge-queue-capability.mjs';
 import {
   PORTFOLIO_DRAIN_OBSTRUCTION_STATES, classifyPortfolioDrainObstruction,
 } from '../src/portfolio-drain-obstruction.mjs';
+import { PORTFOLIO_DRAIN_MACHINE } from '../src/portfolio-drain.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -333,6 +334,18 @@ test('K5d: many waiting items under one absent capability produce one obstructio
   assert.equal(snapshot.obstruction.recovery.kind, 'CREATE_MERGE_QUEUE_RULE');
   assert.equal(typeof snapshot.obstruction.recovery.label, 'string',
     'one missing ruleset is one thing to do, not twelve');
+});
+
+test('K5e: the drain machine identity is byte-identical, so no persisted receipt needs migrating', () => {
+  // Pinned to a literal rather than recomputed, because recomputing it from the same rules it is
+  // derived from would agree with any change to those rules. Capability evidence enters the drain
+  // as an explicit input to the classifier, never as a rule of the machine, precisely so this
+  // digest cannot move: it is stamped beside every durable receipt already written.
+  assert.deepEqual(PORTFOLIO_DRAIN_MACHINE, {
+    machineId: 'gaia.portfolio-drain',
+    machineVersion: 1,
+    rulesRevision: '9d49b709619777fb0f39baf40c8e26e8cf7b65eb9626e17376ecc44d99b0afe8',
+  });
 });
 
 // ---------------------------------------------------------------------------------------------

@@ -777,7 +777,7 @@ test('M21: a stamped ruleset that is not active reconciles to AMBIGUOUS, never A
   );
 });
 
-test('M15: a write that loses a preserved ruleset refuses as DESTRUCTIVE_REPLACEMENT', async () => {
+test('M15a: a write that loses a preserved ruleset refuses as DESTRUCTIVE_REPLACEMENT', async () => {
   const existing = [ruleset({ rulesetId: '10', name: 'checks', mergeQueueRule: null })];
   const intent = acceptedIntent({ rulesets: existing });
   assert.deepEqual(intent.preserved.rulesetIds, ['10']);
