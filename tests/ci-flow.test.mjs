@@ -78,29 +78,39 @@ const check = (overrides = {}) => ({
  * 120000ms and execution is 300000ms, and every duration in these gates is a round number a
  * reader can check by eye.
  */
-const observation = (overrides = {}) => ({
-  provider: 'GITHUB_ACTIONS',
-  repositoryId: 'R_kgDOA1',
-  repository: 'GuitarAlchemist/gaia',
-  workflow: 'ci.yml',
-  runId: '1001',
-  attempt: 1,
-  sha: SHA,
-  branch: 'main',
-  pullRequest: null,
-  trigger: 'PUSH',
-  enqueueBasis: 'ATTEMPT',
-  enqueuedAt: at(52 * MINUTE),
-  runnerAcquiredAt: null,
-  startedAt: at(50 * MINUTE),
-  completedAt: at(45 * MINUTE),
-  conclusion: 'SUCCESS',
-  billableMs: null,
-  complete: true,
-  checks: [check()],
-  dependencies: null,
-  ...overrides,
-});
+const observation = (overrides = {}) => {
+  const run = {
+    provider: 'GITHUB_ACTIONS',
+    repositoryId: 'R_kgDOA1',
+    repository: 'GuitarAlchemist/gaia',
+    workflow: 'ci.yml',
+    runId: '1001',
+    attempt: 1,
+    sha: SHA,
+    branch: 'main',
+    pullRequest: null,
+    trigger: 'PUSH',
+    enqueueBasis: 'ATTEMPT',
+    enqueuedAt: at(52 * MINUTE),
+    runnerAcquiredAt: null,
+    startedAt: at(50 * MINUTE),
+    completedAt: at(45 * MINUTE),
+    conclusion: 'SUCCESS',
+    billableMs: null,
+    complete: true,
+    dependencies: null,
+    ...overrides,
+  };
+  // The default check tracks its own run's span and conclusion. A fixture whose check outlived
+  // its run would be refused for THAT reason, which would quietly stop testing whatever the case
+  // was written for.
+  return {
+    ...run,
+    checks: overrides.checks ?? [check({
+      conclusion: run.conclusion, startedAt: run.startedAt, completedAt: run.completedAt,
+    })],
+  };
+};
 
 const sealed = (observations, overrides = {}) => sealCiFlow({
   observedAt: OBSERVED, windowStartedAt: WINDOW_START, sequence: 1, observations, ...overrides,
@@ -323,7 +333,12 @@ test('K7: every cell obeys UNKNOWN => no value and MEASURED => no reason', () =>
       if (cell.state === 'UNKNOWN') {
         assert.ok(CI_FLOW_REASONS.includes(cell.reasonCode), `${path} names no known reason`);
         for (const [key, value] of Object.entries(cell)) {
-          if (key === 'state' || key === 'reasonCode') continue;
+          // `sampleSize` and the comparable-conclusion list describe the EVIDENCE, not the
+          // measurement. Withholding them alongside the measurement would leave the operator
+          // unable to see how far short of a legal sample they are, which is the one thing that
+          // tells them whether collecting more would help. The rule the contract states is about
+          // the measurement, and this is where that distinction is enforced.
+          if (['state', 'reasonCode', 'sampleSize', 'comparableConclusions'].includes(key)) continue;
           assert.ok(value === null || Array.isArray(value),
             `${path}.${key} must be null while the cell is UNKNOWN, got ${JSON.stringify(value)}`);
         }
@@ -433,7 +448,9 @@ test('K11: a cancelled run contributes no duration to the comparable percentiles
   const honest = block(runs(CI_FLOW_MIN_SAMPLE));
   const contaminated = block([
     ...runs(CI_FLOW_MIN_SAMPLE),
-    ...runs(4, (index) => ({
+    // SIX, not four: with four the median of nine would still land on a comparable run, so the
+    // gate would pass even if cancellations were admitted. It must outnumber them to bite.
+    ...runs(6, (index) => ({
       runId: `90${index}`,
       conclusion: 'CANCELLED',
       completedAt: at(50 * MINUTE - 20_000),
@@ -443,7 +460,7 @@ test('K11: a cancelled run contributes no duration to the comparable percentiles
   assert.equal(contaminated.percentiles.state, 'MEASURED');
   assert.equal(contaminated.percentiles.sampleSize, CI_FLOW_MIN_SAMPLE);
   assert.equal(contaminated.percentiles.p50Ms, honest.percentiles.p50Ms,
-    'four twenty-second cancellations must not move the median');
+    'six twenty-second cancellations must not move the median');
 });
 
 test('K11: timed-out and skipped runs are excluded from the distribution by name', () => {

@@ -1,0 +1,6 @@
+{
+  "schema": "gaia-ci-flow-projection/1",
+  "note": "Generated once from the shipped derivation and frozen. Regenerating it to make a failing J5 pass would delete the only gate that can catch a silent change to the derivation.",
+  "observationCount": 11,
+  "revision": "1458724499df6694db583b4c44562fe1d2caef2d928df0b371e3dc7af81eaa6a"
+}

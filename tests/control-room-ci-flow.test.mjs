@@ -22,7 +22,7 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { CI_FLOW_MIN_SAMPLE, sealCiFlow } from '../src/ci-flow.mjs';
+import { CI_FLOW_MIN_SAMPLE, ciFlowObservationIdentity, sealCiFlow } from '../src/ci-flow.mjs';
 import {
   ControlRoomError, buildControlRoomSnapshot, renderControlRoomHtml, requireControlRoomSnapshot,
 } from '../src/control-room.mjs';
@@ -91,29 +91,38 @@ const check = (overrides = {}) => ({
   ...overrides,
 });
 
-const observation = (overrides = {}) => ({
-  provider: 'GITHUB_ACTIONS',
-  repositoryId: 'R_kgDOA1',
-  repository: 'GuitarAlchemist/gaia',
-  workflow: 'ci.yml',
-  runId: '1001',
-  attempt: 1,
-  sha: 'a3f5c1d90b7e4826af10cc35b9d2e7418f60a5b2',
-  branch: 'main',
-  pullRequest: null,
-  trigger: 'PUSH',
-  enqueueBasis: 'ATTEMPT',
-  enqueuedAt: at(52 * MINUTE),
-  runnerAcquiredAt: null,
-  startedAt: at(50 * MINUTE),
-  completedAt: at(45 * MINUTE),
-  conclusion: 'SUCCESS',
-  billableMs: null,
-  complete: true,
-  checks: [check()],
-  dependencies: null,
-  ...overrides,
-});
+const observation = (overrides = {}) => {
+  const run = {
+    provider: 'GITHUB_ACTIONS',
+    repositoryId: 'R_kgDOA1',
+    repository: 'GuitarAlchemist/gaia',
+    workflow: 'ci.yml',
+    runId: '1001',
+    attempt: 1,
+    sha: 'a3f5c1d90b7e4826af10cc35b9d2e7418f60a5b2',
+    branch: 'main',
+    pullRequest: null,
+    trigger: 'PUSH',
+    enqueueBasis: 'ATTEMPT',
+    enqueuedAt: at(52 * MINUTE),
+    runnerAcquiredAt: null,
+    startedAt: at(50 * MINUTE),
+    completedAt: at(45 * MINUTE),
+    conclusion: 'SUCCESS',
+    billableMs: null,
+    complete: true,
+    dependencies: null,
+    ...overrides,
+  };
+  // The default check tracks its own run's span and conclusion, so a fixture is never refused
+  // for a reason the case was not written to test.
+  return {
+    ...run,
+    checks: overrides.checks ?? [check({
+      conclusion: run.conclusion, startedAt: run.startedAt, completedAt: run.completedAt,
+    })],
+  };
+};
 
 const runs = (count, shape = () => ({})) => Array.from({ length: count }, (_, index) => observation({
   runId: `20${String(index).padStart(2, '0')}`,
@@ -310,20 +319,24 @@ test('C7: flipping every conclusion changes the CI block and nothing else', () =
     'a CI conclusion must move no block that speaks about delivery');
 });
 
-test('C7: the CI block feeds no headline, next action, obstruction or pace field', () => {
+test('C7: the CI block is passed into no consumer that speaks about delivery', () => {
   const source = readFileSync(join(ROOT, 'src', 'control-room.mjs'), 'utf8');
-  const start = source.indexOf('const ciFlowBlock =');
-  assert.notEqual(start, -1, 'the block is derived in the builder');
-  const tail = source.slice(start);
-  for (const consumer of ['headlineState(', 'forecastEta(', 'measurePace(', 'blockerSummary(']) {
-    const usage = tail.indexOf(consumer);
-    if (usage === -1) continue;
-    const between = tail.slice(0, usage);
-    assert.ok(!between.includes('ciFlowBlock.') || !/ciFlowBlock\.[a-z]/u.test(between)
-      || !between.includes(consumer), `${consumer} must not read the CI block`);
+  assert.notEqual(source.indexOf('const ciFlowBlock ='), -1, 'the block is derived in the builder');
+  // The block being absent from the arguments of every consumer is the mechanical form of "a
+  // green pipeline is not a unit of delivery". Asserting it on the call sites rather than on the
+  // block is what makes it checkable: a reader can see which functions are named here.
+  for (const consumer of ['headlineState', 'forecastEta', 'measurePace', 'blockerSummary',
+    'nextActionFor', 'itemActivity']) {
+    assert.equal(
+      new RegExp(String.raw`\b${consumer}\([^)]*ciFlow`, 'u').test(source), false,
+      `${consumer} must not be handed the CI block`,
+    );
   }
-  assert.ok(!/headline[^\n]*ciFlow|ciFlow[^\n]*headline/u.test(source));
-  assert.ok(!/nextAction[^\n]*ciFlow|ciFlow[^\n]*nextAction/u.test(source));
+  for (const line of source.split('\n')) {
+    if (!line.includes('ciFlowBlock')) continue;
+    assert.ok(!/headline|nextAction|obstruction|pace/iu.test(line),
+      `the CI block shares a line with a delivery reading: ${line.trim()}`);
+  }
 });
 
 // -----------------------------------------------------------------------------------------------
@@ -379,8 +392,9 @@ test('MR3: letting the slowest check populate the critical path renames a vertex
   assert.equal(shipped.ciFlow.criticalPath.state, 'UNKNOWN');
   assert.equal(shipped.ciFlow.criticalPath.reasonCode, 'NO_PROVEN_DEPENDENCY_GRAPH');
 
-  const mutant = await importMutant('ci-flow.mjs', 'ci-flow-mr3',
-    (source) => source.replace('if (observation.dependencies === null) {', 'if (false) {'));
+  const mutant = await importMutant('ci-flow.mjs', 'ci-flow-mr3', (source) => source.replace(
+    'const edges = observation.dependencies;', 'const edges = observation.dependencies ?? [];',
+  ));
   const renamed = mutant.deriveCiFlowBlock({
     artifact: mutant.sealCiFlow({
       observedAt: AT, windowStartedAt: WINDOW_START, sequence: 11, observations: ungraphed,
@@ -398,12 +412,13 @@ test('MR4: dropping the claimed-identity set lets one observation close two comp
     ...entry, runId: `b${index}`,
   }));
   const candidate = runs(CI_FLOW_MIN_SAMPLE).map((entry, index) => ({
-    ...entry, runId: `c${index}`, completedAt: at(48 * MINUTE),
+    ...entry,
+    runId: `c${index}`,
+    completedAt: at(48 * MINUTE),
+    checks: [check({ completedAt: at(48 * MINUTE) })],
   }));
   const artifact = ciFlow([...baseline, ...candidate]);
-  const identities = (list) => list.map(
-    (entry) => `${entry.provider} ${entry.repositoryId} ${entry.runId} ${entry.attempt}`,
-  );
+  const identities = (list) => list.map(ciFlowObservationIdentity);
   const pinned = sealCiFlowComparison({
     lever: 'INTRODUCE_CACHING',
     baselineRevision: artifact.revision,
@@ -429,7 +444,7 @@ test('MR4: dropping the claimed-identity set lets one observation close two comp
 test('MR5: widening the comparable set to admit cancellations is what turns a lever into a false win', async () => {
   const observations = [
     ...runs(CI_FLOW_MIN_SAMPLE),
-    ...runs(4, (index) => ({
+    ...runs(6, (index) => ({
       runId: `90${index}`,
       conclusion: 'CANCELLED',
       completedAt: at(50 * MINUTE - 20_000),
