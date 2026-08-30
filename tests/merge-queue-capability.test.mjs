@@ -10,12 +10,14 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
+  DESIRED_MERGE_QUEUE_RULE,
   MERGE_QUEUE_CAPABILITY_FIELDS,
   MERGE_QUEUE_CAPABILITY_FRESH_MS,
   MERGE_QUEUE_CAPABILITY_SCHEMA,
@@ -34,6 +36,7 @@ import {
   probeMergeQueueCapability,
   reconcileMergeQueueRemediation,
   requireMergeQueueCapabilityArtifact,
+  requireMergeQueueRemediationIntent,
   resolveTargetsDefaultBranch,
   sealMergeQueueCapability,
 } from '../src/merge-queue-capability.mjs';
@@ -825,4 +828,238 @@ test('M22: reconciliation issues no write in any branch', () => {
   assert.ok(reconciler.includes('function reconcileMergeQueueRemediation'), 'the slice found it');
   assert.equal(reconciler.includes('applyRuleset'), false,
     'the reconciler is a pure read and cannot reach the effect at all');
+});
+
+// ---------------------------------------------------------------------------------------------
+// M23-M25 and MRM1-MRM3 — the R1 repairs. Each one is a place where this module answered a
+// question it had not asked: whether the rule it created actually landed, whether a governing
+// ruleset it cannot model is the same thing as no ruleset, and whether the one object that can
+// reach a write is the one the planner sealed.
+// ---------------------------------------------------------------------------------------------
+
+const mutantScratch = mkdtempSync(join(tmpdir(), 'gaia-mqm-'));
+test.after(() => rmSync(mutantScratch, {
+  recursive: true, force: true, maxRetries: 12, retryDelay: 25,
+}));
+
+/** Load a one-expression mutant of the shipped module, so a gate can be shown to be a mechanism. */
+async function importMutant(name, mutate) {
+  const source = readFileSync(join(ROOT, 'src', 'merge-queue-capability.mjs'), 'utf8');
+  const mutated = mutate(source);
+  assert.notEqual(mutated, source, `mutant ${name} changed nothing`);
+  const rewritten = mutated.replaceAll(
+    "from './", `from '${pathToFileURL(join(ROOT, 'src')).href}/`,
+  );
+  const path = join(mutantScratch, `${name}.mjs`);
+  writeFileSync(path, rewritten, 'utf8');
+  return import(pathToFileURL(path).href);
+}
+
+/** A provider that accepts the write and lands exactly what the case under test says it landed. */
+function providerLanding(landed) {
+  const writes = [];
+  let reads = 0;
+  return {
+    writes,
+    readRulesets: async () => (reads++ === 0 ? [] : landed.map((entry) => ({ ...entry }))),
+    applyRuleset: async (payload) => {
+      writes.push(payload);
+      return { applied: true };
+    },
+  };
+}
+
+/** One organization ruleset that genuinely provides a merge queue for the default branch. */
+const governingRuleset = (sourceType) => ({
+  id: 99,
+  name: 'org-wide',
+  enforcement: 'active',
+  ...(sourceType === null ? {} : { source_type: sourceType }),
+  conditions: { ref_name: { include: ['~ALL'], exclude: [] } },
+  rules: [{ type: 'merge_queue' }],
+});
+
+const governingTransport = (sourceType) => transport({
+  [RULESETS_PATH]: { status: 200, complete: true, body: [governingRuleset(sourceType)] },
+  [PROTECTION_PATH]: { status: 404, body: { message: 'Branch not protected' } },
+});
+
+test('M23: a write that landed no merge queue rule seals AMBIGUOUS, never APPLIED', async () => {
+  const intent = acceptedIntent();
+  const landed = [ruleset({ rulesetId: '4200', name: intent.stamp, mergeQueueRule: null })];
+  const provider = providerLanding(landed);
+  const outcome = await executeMergeQueueRemediation({ intent, ...provider });
+
+  assert.equal(provider.writes.length, 1, 'the one write happened and was not repeated');
+  assert.equal(outcome.receipt.verdict, 'AMBIGUOUS',
+    'a provider response that did not throw is not proof that the capability now exists');
+  assert.equal(
+    reconcileMergeQueueRemediation({ intent, rulesets: landed }).verdict,
+    outcome.receipt.verdict,
+    'the executor and the reconciler cannot give one read two opposite terminal answers',
+  );
+});
+
+test('M23: a write that landed nothing at all is AMBIGUOUS, not APPLIED and not NOT_APPLIED', async () => {
+  const intent = acceptedIntent();
+  const provider = providerLanding([]);
+  const outcome = await executeMergeQueueRemediation({ intent, ...provider });
+  assert.equal(provider.writes.length, 1);
+  assert.equal(outcome.receipt.verdict, 'AMBIGUOUS',
+    'a write left this process and the configuration cannot account for it, which is not "nothing happened"');
+});
+
+test('M23: a stamped ruleset that came back evaluate-only after the write is AMBIGUOUS', async () => {
+  const intent = acceptedIntent();
+  const provider = providerLanding([
+    ruleset({ rulesetId: '4200', name: intent.stamp, enforcement: 'evaluate' }),
+  ]);
+  const outcome = await executeMergeQueueRemediation({ intent, ...provider });
+  assert.equal(outcome.receipt.verdict, 'AMBIGUOUS',
+    'a queue that gates nothing is the original defect wearing a receipt that says it is fixed');
+});
+
+test('MRM1: reverting the post-write reconciliation restores the false APPLIED receipt', async () => {
+  const mutant = await importMutant('mq-assume-applied', (source) => source.replace(
+    'settledVerdict(reconcileMergeQueueRemediation({ intent, rulesets: after }).verdict)',
+    "'APPLIED'",
+  ));
+  const intent = acceptedIntent();
+  const provider = providerLanding([
+    ruleset({ rulesetId: '4200', name: intent.stamp, mergeQueueRule: null }),
+  ]);
+  const outcome = await mutant.executeMergeQueueRemediation({ intent, ...provider });
+  assert.equal(outcome.receipt.verdict, 'APPLIED',
+    'the mutant seals completion for a merge queue that does not exist, which is the defect');
+});
+
+test('M24: a governing ruleset this module cannot model decides UNKNOWN, never a false ABSENT', async () => {
+  for (const sourceType of ['Organization', 'Enterprise', null]) {
+    const { read } = governingTransport(sourceType);
+    const artifact = await probeMergeQueueCapability({
+      repository: REPOSITORY, repositoryId: REPOSITORY_ID, defaultBranch: DEFAULT_BRANCH,
+      read, observedAt: OBSERVED_AT,
+    });
+    assert.deepEqual(artifact.observation.rulesets, [],
+      `a ${sourceType ?? 'sourceless'} ruleset is still not a repository ruleset to reconcile against`);
+    assert.deepEqual(artifact.observation.unknownRuleTypes, ['unmodelled_governing_ruleset'],
+      'but the discard is recorded, because "I cannot administer it" is not "it does not exist"');
+    assert.equal(decideMergeQueueCapability({ artifact, observedAt: OBSERVED_AT }), 'UNKNOWN',
+      'a repository whose merge queue genuinely works must never be reported as having none');
+  }
+});
+
+test('M24: the doomed remediation is refused for a capability governed elsewhere', async () => {
+  const { read } = governingTransport('Organization');
+  const artifact = await probeMergeQueueCapability({
+    repository: REPOSITORY, repositoryId: REPOSITORY_ID, defaultBranch: DEFAULT_BRANCH,
+    read, observedAt: OBSERVED_AT,
+  });
+  const outcome = plan(artifact);
+  assert.equal(outcome.accepted, false,
+    'a second carrier beside a working org queue is the MISCONFIGURED state this design refuses');
+  assert.equal(outcome.refusal.reasonCode, 'CAPABILITY_NOT_REMEDIABLE');
+});
+
+test('M24: the contract decides the governing-ruleset case rather than leaving it to a test', () => {
+  const document = readFileSync(join(ROOT, 'docs', 'merge-queue-capability.md'), 'utf8');
+  assert.match(document, /unmodelled_governing_ruleset/u,
+    'a behaviour asserted by a test and decided by no contract is a behaviour nobody agreed to');
+  assert.match(document, /organization/iu);
+});
+
+test('MRM2: reverting the recorded discard restores the false ABSENT', async () => {
+  const mutant = await importMutant('mq-silent-discard', (source) => source.replace(
+    "      unknown.add('unmodelled_governing_ruleset');\n", '',
+  ));
+  const { read } = governingTransport('Organization');
+  const artifact = await mutant.probeMergeQueueCapability({
+    repository: REPOSITORY, repositoryId: REPOSITORY_ID, defaultBranch: DEFAULT_BRANCH,
+    read, observedAt: OBSERVED_AT,
+  });
+  assert.deepEqual(artifact.observation.unknownRuleTypes, []);
+  assert.equal(mutant.decideMergeQueueCapability({ artifact, observedAt: OBSERVED_AT }), 'ABSENT',
+    'the mutant asserts absence about a repository whose merge queue works, which is the defect');
+});
+
+test('M25: the sealed intent is verified, and its own seal is derived rather than believed', () => {
+  const intent = acceptedIntent();
+  assert.equal(requireMergeQueueRemediationIntent(intent), intent,
+    'an honest intent is returned as it is, never repaired');
+
+  const { expectedRulesetDigest, ...missingField } = intent;
+  const refused = {
+    'a forged addition': { ...intent, additions: [{ type: 'deletion' }] },
+    'an extra rule beside the desired one': {
+      ...intent, additions: [{ ...DESIRED_MERGE_QUEUE_RULE }, { type: 'deletion' }],
+    },
+    'an emptied preservation promise': { ...intent, preserved: { rulesetIds: [] } },
+    'a moved target': { ...intent, defaultBranch: 'release' },
+    'a stamp that names another identity': { ...intent, stamp: 'gaia-mq-0000000000000000' },
+    'an unknown field': { ...intent, urgency: 'high' },
+    'a missing field': missingField,
+  };
+  for (const [name, forged] of Object.entries(refused)) {
+    assert.throws(() => requireMergeQueueRemediationIntent(forged),
+      (error) => error instanceof MergeQueueCapabilityError
+        && error.code === 'InvalidMergeQueueRemediationIntent',
+      `${name} must be refused rather than written`);
+    // Resealing does not help: the identity, the stamp and the desired rule are all re-derived,
+    // so sixty-four hex characters of the wrong intent is still the wrong intent.
+    const { revision, ...body } = forged;
+    assert.throws(
+      () => requireMergeQueueRemediationIntent({ ...body, revision: sha256(canonicalJson(body)) }),
+      (error) => error instanceof MergeQueueCapabilityError,
+      `${name} must still be refused after a correct reseal`,
+    );
+  }
+});
+
+test('M25: a forged intent reaches no write at all', async () => {
+  const intent = acceptedIntent({
+    rulesets: [ruleset({ rulesetId: '10', name: 'checks', mergeQueueRule: null })],
+  });
+  const writes = [];
+  await assert.rejects(
+    () => executeMergeQueueRemediation({
+      intent: { ...intent, additions: [{ type: 'deletion' }] },
+      readRulesets: async () => [],
+      applyRuleset: async (payload) => {
+        writes.push(payload);
+        return { applied: true };
+      },
+    }),
+    (error) => error instanceof MergeQueueCapabilityError
+      && error.code === 'InvalidMergeQueueRemediationIntent',
+  );
+  assert.equal(writes.length, 0, 'the one object that can reach a write is verified at its mouth');
+});
+
+test('M25: the write payload carries the desired rule constant, not whatever the intent held', async () => {
+  const intent = acceptedIntent();
+  const provider = providerLanding([ruleset({ rulesetId: '4200', name: intent.stamp })]);
+  await executeMergeQueueRemediation({ intent, ...provider });
+  assert.deepEqual(provider.writes[0].rules, [{ ...DESIRED_MERGE_QUEUE_RULE }],
+    '"the merge queue Gaia asks for" is a constant, not an argument');
+});
+
+test('MRM3: reverting the intent boundary lets a forged rule reach the provider', async () => {
+  const mutant = await importMutant('mq-unverified-intent', (source) => source
+    .replace('const verified = requireMergeQueueRemediationIntent(intent);', 'const verified = intent;')
+    .replace(
+      'rules: [{ ...DESIRED_MERGE_QUEUE_RULE }],',
+      'rules: intent.additions.map((rule) => ({ ...rule })),',
+    ));
+  const intent = acceptedIntent();
+  const writes = [];
+  await mutant.executeMergeQueueRemediation({
+    intent: { ...intent, additions: [{ type: 'deletion' }] },
+    readRulesets: async () => [],
+    applyRuleset: async (payload) => {
+      writes.push(payload);
+      return { applied: true };
+    },
+  });
+  assert.deepEqual(writes[0].rules, [{ type: 'deletion' }],
+    'the mutant writes whatever a mutated intent happened to carry, which is the defect');
 });

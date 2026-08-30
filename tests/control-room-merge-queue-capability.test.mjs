@@ -23,7 +23,9 @@ import { runFactoryDashboardCli } from '../scripts/factory-dashboard.mjs';
 import {
   ControlRoomError, buildControlRoomSnapshot, renderControlRoomHtml, requireControlRoomSnapshot,
 } from '../src/control-room.mjs';
-import { sealMergeQueueCapability } from '../src/merge-queue-capability.mjs';
+import {
+  MERGE_QUEUE_CAPABILITY_STATES, sealMergeQueueCapability,
+} from '../src/merge-queue-capability.mjs';
 import {
   PORTFOLIO_DRAIN_OBSTRUCTION_STATES, classifyPortfolioDrainObstruction,
 } from '../src/portfolio-drain-obstruction.mjs';
@@ -495,4 +497,284 @@ test('MR2: collapsing 403 into 404 is what turns a permission failure into a doo
   assert.equal(snapshot.mergeQueueCapability.state, 'PERMISSION_DENIED',
     'and the shipped rule keeps a permission failure nameable, so the action can be the right one');
   assert.equal(snapshot.obstruction.recovery.kind, 'GRANT_CAPABILITY_READ');
+});
+
+// ---------------------------------------------------------------------------------------------
+// K12-K15 — the R1 repairs at the presentation seam. Every one of these is a place where the
+// page still read as slow progress: a fabricated data gap, a green instruction to wait, a fact
+// deleted by an unobserved lane, and a capability verified beside an obstruction that ignored it.
+// ---------------------------------------------------------------------------------------------
+
+/** The incident's exact input: one published pull request, one live worker, ample history. */
+const INCIDENT = Object.freeze({
+  drainProjection: projection([...WAITING, item('issue-9', 'RUNNING')],
+    { occupied: 1, available: 3 }),
+  observedAt: AT,
+  progressObservations: RUNNING_OBSERVATION,
+  completedRuns: Array.from({ length: 8 }, () => ({
+    workflow: 'portfolio-factory-run', outcome: 'COMPLETED', elapsedMs: 30 * MINUTE_MS,
+  })),
+});
+
+const CAPABILITY_ETA_REASON
+  = 'A merge queue capability obstruction stands; no completion estimate applies.';
+
+test('K12: the suppressed eta names the capability, not a data gap that does not exist', () => {
+  const withoutCapability = buildControlRoomSnapshot({ ...INCIDENT });
+  assert.equal(withoutCapability.eta.state, 'FORECAST',
+    'the history is ample: eight comparable completed runs, so nothing is missing');
+  assert.equal(withoutCapability.pace.sampleSize, 8);
+
+  const snapshot = buildControlRoomSnapshot({ ...INCIDENT, mergeQueueCapability: capability() });
+  assert.equal(snapshot.eta.state, 'UNKNOWN');
+  assert.equal(snapshot.eta.reason, CAPABILITY_ETA_REASON,
+    'the forecast was computed and discarded for a known cause; naming a different one is a fabrication');
+  assert.notEqual(snapshot.eta.reason, 'Insufficient comparable history.');
+});
+
+test('K12: no rendered missing-evidence sentence carries a negative count', () => {
+  const snapshot = buildControlRoomSnapshot({ ...INCIDENT, mergeQueueCapability: capability() });
+  for (const language of ['en', 'fr']) {
+    const rendered = renderControlRoomHtml(snapshot, { language });
+    const body = rendered.slice(rendered.indexOf('</style>'));
+    assert.equal(/-\d/u.test(body.replaceAll(/<time>[^<]*<\/time>/gu, '')), false,
+      `a negative number is arithmetic nonsense on an operator page (${language})`);
+    assert.equal(body.includes('of 5 recorded'), false,
+      'and the sample-size sentence belongs to a shortage this drain does not have');
+    assert.equal(body.includes('sur 5 enregistrées'), false);
+  }
+});
+
+test('MR3: reverting the eta reason restores the negative sample count on the page', async () => {
+  const mutant = await importMutant('control-room.mjs', 'eta-reason-reverted', (source) => source
+    .replace(
+      `capabilityObstructed
+      ? { state: 'UNKNOWN', label: 'Unknown', reason: CAPABILITY_ETA_REASON }
+      : forecast ?? (activeCount === 0`,
+      `(capabilityObstructed ? null : forecast) ?? (activeCount === 0`,
+    ));
+  const snapshot = mutant.buildControlRoomSnapshot({
+    ...INCIDENT, mergeQueueCapability: capability(),
+  });
+  assert.equal(snapshot.eta.reason, 'Insufficient comparable history.');
+  const rendered = mutant.renderControlRoomHtml(snapshot, { language: 'en' });
+  assert.match(rendered, /-3 more comparable completed portfolio-factory-run samples/u,
+    'the mutant tells the operator to record minus three samples, which is the defect');
+});
+
+test('K13: a capability obstruction outranks the hero next action and is never styled healthy', () => {
+  const snapshot = buildControlRoomSnapshot({ ...INCIDENT, mergeQueueCapability: capability() });
+  assert.equal(snapshot.headline.state, 'ACTIVE', 'a live worker, exactly as in the incident');
+  assert.equal(snapshot.obstruction.state, 'CAPABILITY_ABSENT');
+  assert.notEqual(snapshot.nextAction.kind, 'OBSERVE_ACTIVE_RUN',
+    'the field an operator reads first must not say wait while the mechanism does not exist');
+  assert.equal(snapshot.nextAction.kind, snapshot.obstruction.recovery.kind,
+    'the hero and the obstruction panel name one next move, from one truth');
+  assert.equal(snapshot.nextAction.label, snapshot.obstruction.recovery.label);
+
+  for (const language of ['en', 'fr']) {
+    const rendered = renderControlRoomHtml(snapshot, { language });
+    const hero = rendered.slice(rendered.indexOf('<div class="next"'));
+    const panel = hero.slice(0, hero.indexOf('</div>\n  </section>'));
+    assert.match(panel, /data-severity="blocked"/u,
+      `an obstruction the drain cannot pass is not healthy (${language})`);
+    assert.equal(panel.includes('Wait for the worker result'), false);
+    assert.equal(panel.includes('Attendre le résultat du worker'), false);
+  }
+});
+
+test('K13: a live worker with an available capability still reports the ordinary next action', () => {
+  const healthy = buildControlRoomSnapshot({
+    ...INCIDENT, mergeQueueCapability: capability({ rulesets: [ruleset()] }),
+  });
+  assert.equal(healthy.nextAction.kind, 'OBSERVE_ACTIVE_RUN',
+    'nothing is downgraded when there is no capability obstruction to report');
+  assert.match(renderControlRoomHtml(healthy, { language: 'en' }), /data-severity="healthy"/u);
+});
+
+test('MR4: reverting the next-action precedence restores the green instruction to wait', async () => {
+  const mutant = await importMutant('control-room.mjs', 'next-action-reverted',
+    (source) => source.replace('if (capabilityObstruction !== null) {', 'if (false) {'));
+  const snapshot = mutant.buildControlRoomSnapshot({
+    ...INCIDENT, mergeQueueCapability: capability(),
+  });
+  assert.equal(snapshot.nextAction.kind, 'OBSERVE_ACTIVE_RUN');
+  assert.match(
+    mutant.renderControlRoomHtml(snapshot, { language: 'en' }),
+    /class="next" data-severity="healthy"/u,
+    'the mutant renders "wait for the worker" in green above the obstruction, which is the defect',
+  );
+});
+
+test('MR5: reverting the next-action severity paints the same obstruction as a warning', async () => {
+  const mutant = await importMutant('control-room.mjs', 'next-severity-reverted',
+    (source) => source.replace('const nextSeverity = capabilityNext', 'const nextSeverity = false'));
+  const snapshot = mutant.buildControlRoomSnapshot({
+    ...INCIDENT, mergeQueueCapability: capability(),
+  });
+  const rendered = mutant.renderControlRoomHtml(snapshot, { language: 'en' });
+  assert.match(rendered, /class="next" data-severity="warning"/u,
+    'the mutant softens a blocked mechanism into a warning');
+  assert.match(
+    renderControlRoomHtml(buildControlRoomSnapshot({ ...INCIDENT, mergeQueueCapability: capability() }),
+      { language: 'en' }),
+    /class="next" data-severity="blocked"/u,
+    'and the shipped severity is taken from the obstruction it came from',
+  );
+});
+
+test('K14: an unobserved lane does not erase the absent capability from the page', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([...WAITING, item('issue-9', 'RUNNING')],
+      { occupied: 1, available: 3 }),
+    observedAt: AT,
+    mergeQueueCapability: capability(),
+  });
+  assert.equal(snapshot.obstruction.state, 'LANE_STALE',
+    'the stale lane still wins the obstruction, because both facts are true and neither is invented');
+
+  for (const language of ['en', 'fr']) {
+    const rendered = renderControlRoomHtml(snapshot, { language });
+    const body = rendered.slice(rendered.indexOf('</style>'));
+    assert.match(body, language === 'fr' ? /file d’attente de merge/u : /merge queue/iu,
+      `an independently sealed absent capability survives a defaulted lane liveness (${language})`);
+    assert.match(body, /ABSENT/u, 'and it survives as the state it was decided to be');
+    assert.match(body, /LANE_STALE/u, 'without displacing the obstruction that did win');
+    const lowered = body.toLowerCase();
+    for (const forbidden of ['queued', 'pending', 'in progress', 'eta ', 'estimated']) {
+      assert.equal(lowered.includes(forbidden), false,
+        `"${forbidden}" is not true of a mechanism that does not exist (${language})`);
+    }
+  }
+});
+
+test('K14: the capability panel is total over the closed state vocabulary in both languages', () => {
+  const cases = [
+    capability(),
+    capability({ rulesets: [ruleset()] }),
+    capability({ rulesets: [ruleset({ enforcement: 'evaluate' })] }),
+    capability({ rulesetsRead: 'FORBIDDEN' }),
+    capability({ rulesetsRead: 'NOT_FOUND' }),
+  ];
+  const seen = new Set();
+  for (const artifact of cases) {
+    for (const observedAt of [AT, at(6 * MINUTE_MS)]) {
+      const snapshot = buildControlRoomSnapshot({
+        drainProjection: projection(WAITING, { occupied: 1, available: 3 }),
+        observedAt,
+        mergeQueueCapability: artifact,
+      });
+      seen.add(snapshot.mergeQueueCapability.state);
+      for (const language of ['en', 'fr']) {
+        const rendered = renderControlRoomHtml(snapshot, { language });
+        assert.equal(rendered.includes('undefined'), false,
+          `no capability lookup table falls through (${snapshot.mergeQueueCapability.state}, ${language})`);
+      }
+    }
+  }
+  assert.deepEqual([...seen].sort(), [...MERGE_QUEUE_CAPABILITY_STATES].sort(),
+    'every state in the closed vocabulary is rendered by this gate, not only the interesting ones');
+});
+
+test('K14: with no capability artifact the page carries no residue of the panel', () => {
+  const rendered = renderControlRoomHtml(
+    buildControlRoomSnapshot({
+      drainProjection: projection(WAITING, { occupied: 1, available: 3 }), observedAt: AT,
+    }),
+    { language: 'en' },
+  );
+  assert.equal(rendered.includes('merge-queue-capability'), false,
+    'a feature nobody supplied evidence for leaves no stylesheet and no empty section behind');
+});
+
+test('MR6: reverting the capability panel deletes the fact under a stale lane', async () => {
+  const mutant = await importMutant('control-room.mjs', 'capability-panel-reverted',
+    (source) => source.replace(
+      '${renderMergeQueueCapability(snapshot, copy, language)}', '',
+    ));
+  const snapshot = mutant.buildControlRoomSnapshot({
+    drainProjection: projection([...WAITING, item('issue-9', 'RUNNING')],
+      { occupied: 1, available: 3 }),
+    observedAt: AT,
+    mergeQueueCapability: capability(),
+  });
+  const rendered = mutant.renderControlRoomHtml(snapshot, { language: 'en' });
+  const body = rendered.slice(rendered.indexOf('</style>'));
+  assert.equal(/merge queue/iu.test(body), false,
+    'the mutant publishes the absent capability into the snapshot and shows the operator none of it');
+});
+
+test('K15: a capability verified beside an obstruction that ignored it is refused', () => {
+  const honest = snapshotWith(capability());
+  const without = buildControlRoomSnapshot({
+    drainProjection: projection(WAITING, { occupied: 1, available: 3 }), observedAt: AT,
+  });
+  assert.equal(without.obstruction.state, 'AUTHORITY_STARVATION');
+
+  const forged = reseal({
+    ...without,
+    mergeQueueCapability: honest.mergeQueueCapability,
+  });
+  assert.equal(forged.mergeQueueCapability.state, 'ABSENT',
+    'the capability block is honest, correctly derived and correctly sealed');
+  assert.throws(() => requireControlRoomSnapshot(forged),
+    (error) => error instanceof ControlRoomError && error.code === 'InvalidSnapshot',
+    'an obstruction classified without the published capability cannot be displayed beside it');
+});
+
+test('K15: an obstruction whose carried capability contradicts the published block is refused', () => {
+  const honest = snapshotWith(capability());
+  const obstruction = reseal({
+    ...honest.obstruction,
+    capability: { ...honest.obstruction.capability, state: 'STALE' },
+  });
+  assert.throws(() => requireControlRoomSnapshot(reseal({ ...honest, obstruction })),
+    (error) => error instanceof ControlRoomError && error.code === 'InvalidSnapshot',
+    'one reading, published once, cannot be two readings on one page');
+});
+
+test('K15: an obstruction carrying a capability the snapshot does not publish is refused', () => {
+  const honest = snapshotWith(capability());
+  const { mergeQueueCapability, ...stripped } = honest;
+  assert.throws(() => requireControlRoomSnapshot(reseal(stripped)),
+    (error) => error instanceof ControlRoomError && error.code === 'InvalidSnapshot',
+    'an obstruction may not name evidence the snapshot declines to carry');
+});
+
+test('K15: every honest capability snapshot still verifies, including the outranked one', () => {
+  const honest = [
+    snapshotWith(capability()),
+    snapshotWith(capability({ rulesets: [ruleset()] })),
+    snapshotWith(capability({ rulesetsRead: 'FORBIDDEN' })),
+    buildControlRoomSnapshot({
+      drainProjection: projection([...WAITING, item('issue-9', 'RUNNING')],
+        { occupied: 1, available: 3 }),
+      observedAt: AT,
+      mergeQueueCapability: capability(),
+    }),
+    buildControlRoomSnapshot({
+      drainProjection: projection([item('issue-1', 'QUEUED')]),
+      observedAt: AT,
+      mergeQueueCapability: capability(),
+    }),
+    buildControlRoomSnapshot({
+      drainProjection: projection(WAITING, { occupied: 1, available: 3 }), observedAt: AT,
+    }),
+  ];
+  for (const snapshot of honest) {
+    assert.equal(requireControlRoomSnapshot(snapshot), snapshot,
+      `${snapshot.obstruction.state} is a snapshot the builder itself produced and must not be refused`);
+  }
+});
+
+test('MR7: reverting the binding accepts a capability beside an obstruction that ignored it', async () => {
+  const mutant = await importMutant('control-room.mjs', 'capability-binding-reverted',
+    (source) => source.replace('requireCapabilityBinding(obstruction, snapshot, capability);', ''));
+  const honest = snapshotWith(capability());
+  const without = buildControlRoomSnapshot({
+    drainProjection: projection(WAITING, { occupied: 1, available: 3 }), observedAt: AT,
+  });
+  const forged = reseal({ ...without, mergeQueueCapability: honest.mergeQueueCapability });
+  assert.equal(mutant.requireControlRoomSnapshot(forged), forged,
+    'the mutant accepts an ABSENT capability beside "ask a human for a grant" — the incident restored');
 });

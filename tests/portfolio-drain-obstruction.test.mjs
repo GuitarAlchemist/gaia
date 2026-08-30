@@ -7,6 +7,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import {
+  MERGE_DEPENDENT_DRAIN_STATES,
+  MERGE_QUEUE_CAPABILITY_OBSTRUCTION,
+  OBSTRUCTIONS_OUTRANKING_CAPABILITY,
   ObstructionError,
   PORTFOLIO_DRAIN_OBSTRUCTION_SCHEMA,
   PORTFOLIO_DRAIN_OBSTRUCTION_STATES,
@@ -671,4 +674,62 @@ test('MUTATION WITNESS: scoping liveness to lanes is load-bearing', async () => 
     'reverting the scope to every item restores the R0 defect: a blocked drain reported healthy',
   );
   assert.equal(mutant.classifyPortfolioDrainObstruction(input).recovery, null);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The capability tables the control room binds against. Exported rather than re-spelled at the
+// verification seam, because a second copy of a precedence table is how two of them come to
+// disagree about which obstruction may stand beside which capability reading.
+// ---------------------------------------------------------------------------------------------
+
+test('the exported capability tables are the ones the classifier itself decides with', () => {
+  const drain = projection([item('pr-34', 'PUBLISHED')], { occupied: 1, available: 3 });
+  for (const [state, expected] of Object.entries(MERGE_QUEUE_CAPABILITY_OBSTRUCTION)) {
+    const obstruction = classifyPortfolioDrainObstruction({
+      drainProjection: drain,
+      ...LONG_WINDOW,
+      mergeQueueCapability: {
+        state, evidenceRevision: SHA, observationAgeMs: 0,
+        repository: 'GuitarAlchemist/gaia', defaultBranch: 'main',
+      },
+    });
+    assert.equal(obstruction.state, expected,
+      `${state} must select the obstruction the exported table names, or the binding checks a fiction`);
+  }
+  assert.equal(Object.hasOwn(MERGE_QUEUE_CAPABILITY_OBSTRUCTION, 'AVAILABLE'), false,
+    'AVAILABLE names no obstruction, and a table entry for it would invent one');
+
+  for (const drainState of MERGE_DEPENDENT_DRAIN_STATES) {
+    const obstruction = classifyPortfolioDrainObstruction({
+      drainProjection: projection([item('pr-34', drainState)], { occupied: 1, available: 3 }),
+      ...LONG_WINDOW,
+      mergeQueueCapability: {
+        state: 'ABSENT', evidenceRevision: SHA, observationAgeMs: 0,
+        repository: 'GuitarAlchemist/gaia', defaultBranch: 'main',
+      },
+    });
+    assert.equal(obstruction.state, 'CAPABILITY_ABSENT',
+      `${drainState} is a state whose next transition is a merge, so an absent queue obstructs it`);
+  }
+});
+
+test('the exported outranking states are exactly those that may stand above a capability', () => {
+  assert.deepEqual([...OBSTRUCTIONS_OUTRANKING_CAPABILITY], ['RECONCILE_REQUIRED', 'LANE_STALE'],
+    'these two are failures of the evidence Gaia holds about its own work, and only these two');
+  for (const state of OBSTRUCTIONS_OUTRANKING_CAPABILITY) {
+    assert.equal(PORTFOLIO_DRAIN_OBSTRUCTION_STATES.includes(state), true);
+  }
+
+  const outranked = classifyPortfolioDrainObstruction({
+    drainProjection: projection([item('pr-34', 'PUBLISHED'), item('issue-9', 'RUNNING')],
+      { occupied: 1, available: 3 }),
+    ...LONG_WINDOW,
+    mergeQueueCapability: {
+      state: 'ABSENT', evidenceRevision: SHA, observationAgeMs: 0,
+      repository: 'GuitarAlchemist/gaia', defaultBranch: 'main',
+    },
+  });
+  assert.equal(outranked.state, 'LANE_STALE');
+  assert.equal(outranked.capability.state, 'ABSENT',
+    'and the outranked reading is still carried, so nothing downstream has to guess it was there');
 });
