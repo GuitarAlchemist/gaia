@@ -1078,3 +1078,64 @@ test('T21: the exact-instant rule has exactly one implementation', () => {
     'the control room does not respell the round-trip rule it imports',
   );
 });
+
+// ---------------------------------------------------------------------------
+// ARTIFACT COMPLETION SIGNALS R0 — the control room is downstream of it, and
+// deliberately unchanged by it. docs/artifact-completion-signals.md.
+// ---------------------------------------------------------------------------
+
+test('T22: an observation carrying task states still projects to exactly the process axis', () => {
+  const lanes = [lane(1), lane(2, { lifecycle: 'EXITED' })];
+  const taskState = (n, overrides = {}) => ({
+    workspaceId: `ws-${n}`,
+    paneId: `pane-${n}`,
+    surfaceId: `surf-${n}`,
+    agentId: `agent-${n}`,
+    processLifecycle: 'RUNNING',
+    taskState: 'UNBOUND',
+    evidenceReason: 'NO_BINDING',
+    bindingRevision: null,
+    generation: 0,
+    artifactDigest: null,
+    completionObservedAt: null,
+    completionEvidenceRevision: null,
+    ...overrides,
+  });
+  const withStates = {
+    ...observation(lanes),
+    taskStates: [taskState(1), taskState(2, { processLifecycle: 'EXITED' })],
+  };
+
+  const plain = renderControlRoomHtml(requireControlRoomSnapshot(snapshotWith(observation(lanes))));
+  const enriched = renderControlRoomHtml(requireControlRoomSnapshot(snapshotWith(withStates)));
+
+  assert.equal(
+    enriched, plain,
+    'the page is a function of the process axis alone, so R0 changes no rendered byte',
+  );
+  const snapshot = snapshotWith(withStates);
+  assert.equal(
+    JSON.stringify(snapshot).includes('taskState'), false,
+    'and no task state, digest or binding reaches the snapshot the browser is handed',
+  );
+  assert.equal(snapshot.localLanes.binding, 'NONE');
+  assert.equal(
+    snapshot.localLanes.observationRevision,
+    localLaneObservationRevision({ observedAt: AT, lanes: withStates.lanes }),
+    'the lane revision still re-derives, which is why the recipe was not widened',
+  );
+});
+
+test('T23: the browser reads no local file, and no artifact path or marker reaches the page', () => {
+  const html = renderControlRoomHtml(requireControlRoomSnapshot(
+    snapshotWith(observation([lane(1)])),
+  ));
+  const control = readFileSync(join(ROOT, 'src', 'control-room.mjs'), 'utf8');
+
+  for (const reader of ['readFileSync', 'node:fs', 'fetch(', 'XMLHttpRequest', 'FileReader']) {
+    assert.equal(control.includes(reader), false, `the control room must not ${reader}`);
+  }
+  for (const leak of ['artifactPath', 'allowedRoot', 'completionMarker', 'COMPLETED_EVIDENCE']) {
+    assert.equal(html.includes(leak), false, `${leak} must never reach the page`);
+  }
+});
