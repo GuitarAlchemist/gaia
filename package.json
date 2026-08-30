@@ -20,6 +20,7 @@
     "factory:telemetry:phase": "node scripts/factory-telemetry-phase.mjs",
     "search:hybrid": "node scripts/hybrid-search.mjs",
     "plans:audit": "node scripts/plan-contradiction-audit.mjs",
+    "requests:frame": "node scripts/framing-execution-contract.mjs",
     "portfolio:survey": "node scripts/github-portfolio.mjs",
     "portfolio:operator": "node scripts/github-portfolio-operator.mjs"
   }
