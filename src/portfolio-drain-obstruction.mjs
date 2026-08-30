@@ -7,7 +7,7 @@
  * path out of the queue is closed. Those are operationally opposite and were visually identical.
  *
  * This Module reads one already reconciled `gaia-portfolio-drain-projection/1` and names exactly
- * one obstruction from a closed vocabulary of nine states. It reconciles nothing, re-measures no
+ * one obstruction from a closed vocabulary of eleven states. It reconciles nothing, re-measures no
  * heartbeat, owns no clock, opens no socket, calls no provider, retries nothing and adds no bus
  * verb. `effect` and `authority` are `NONE`, and its recovery action is one sentence of advice
  * bound to evidence — never an instruction the machine executes.
@@ -23,6 +23,9 @@
  * 3. **Every non-`NONE` answer binds its evidence.** The exact projection revision it was derived
  *    from, the observation window it was measured over, the affected item ids and their count,
  *    and exactly one bounded advisory recovery action.
+ * 4. **A live lane cannot hide a missing mechanism.** The two capability states are decided above
+ *    the live-lane short-circuit, because a busy worker polling a merge queue that does not exist
+ *    is exactly what the incident looked like, and `moving` reported NONE throughout it.
  *
  * The design decision, its rejected alternatives, its falsifiers and its rejection criterion are
  * in `docs/portfolio-drain-obstruction-design.md`.
@@ -43,6 +46,8 @@ export const PORTFOLIO_DRAIN_OBSTRUCTION_STATES = Object.freeze([
   'AUTHORITY_STARVATION',
   'RECONCILE_REQUIRED',
   'THROUGHPUT_STALL',
+  'CAPABILITY_ABSENT',
+  'CAPABILITY_UNVERIFIED',
 ]);
 
 /**
@@ -64,6 +69,28 @@ const TERMINAL_STATE_PREFIX = 'TERMINAL_';
 const UNOBSERVED_LANE_LIVENESS = 'STALE';
 
 const LANE_STATES = new Set(['CLAIMED', 'RUNNING']);
+
+/**
+ * The live states whose next transition is a merge, and therefore the only ones an absent merge
+ * queue can obstruct. A repository with no merge queue and nothing waiting to merge is not
+ * obstructed by the missing queue; reporting it as such would make the obstruction a standing
+ * property of the repository rather than a statement about this drain.
+ */
+const MERGE_DEPENDENT_STATES = new Set(['PUBLISHED', 'AWAITING_MERGE_AUTHORITY']);
+
+/** The capability states this classifier recognises. AVAILABLE is decided and obstructs nothing. */
+const CAPABILITY_STATES = new Set([
+  'AVAILABLE', 'ABSENT', 'MISCONFIGURED', 'PERMISSION_DENIED', 'STALE', 'UNKNOWN',
+]);
+
+/** Which obstruction each capability state names. AVAILABLE names none. */
+const CAPABILITY_OBSTRUCTION = Object.freeze({
+  ABSENT: 'CAPABILITY_ABSENT',
+  MISCONFIGURED: 'CAPABILITY_ABSENT',
+  PERMISSION_DENIED: 'CAPABILITY_UNVERIFIED',
+  STALE: 'CAPABILITY_UNVERIFIED',
+  UNKNOWN: 'CAPABILITY_UNVERIFIED',
+});
 const ELIGIBLE_STATES = new Set(['QUEUED']);
 const LIVENESS_STATES = new Set(['ACTIVE', 'STALE', 'IDLE']);
 
@@ -361,11 +388,54 @@ const RECOVERY = Object.freeze({
     label: `Re-observe the ${count} named ${plural(count, 'item', 'items')} and reconcile the `
       + 'receipt chain before recording another transition.',
   }),
+  CAPABILITY_ABSENT: (count, durationMs, capability) => CAPABILITY_RECOVERY[capability](count),
+  CAPABILITY_UNVERIFIED: (count, durationMs, capability) => CAPABILITY_RECOVERY[capability](count),
   THROUGHPUT_STALL: (count, durationMs) => ({
     kind: 'CLAIM_QUEUED_WORK',
     label: `Authorize one bounded factory run: ${count} eligible `
       + `${plural(count, 'item', 'items')} and free capacity have not moved for `
       + `${formatDuration(durationMs)}.`,
+  }),
+});
+
+/**
+ * One exact next action per capability state, and never a wait.
+ *
+ * Not one of these says queued, pending, in progress, or when it will resolve. None of those is
+ * true of a mechanism that does not exist, and every one of them is what the operator was told
+ * for as long as this went unfixed. Each names the repository and the branch and nothing else:
+ * no URL, no command, no token, no path, no account and no provider sentence.
+ */
+const CAPABILITY_RECOVERY = Object.freeze({
+  ABSENT: (count) => ({
+    kind: 'CREATE_MERGE_QUEUE_RULE',
+    label: 'Create one active repository ruleset carrying a merge queue rule for the default '
+      + `branch, then re-observe: the ${count} named ${plural(count, 'item', 'items')} cannot `
+      + 'merge until the queue exists.',
+  }),
+  MISCONFIGURED: (count) => ({
+    kind: 'CORRECT_MERGE_QUEUE_RULE',
+    label: 'Correct the ruleset so exactly one active ruleset carries a merge queue rule for the '
+      + `default branch, then re-observe: the ${count} named `
+      + `${plural(count, 'item is', 'items are')} waiting on a rule that does not govern them.`,
+  }),
+  PERMISSION_DENIED: (count) => ({
+    kind: 'GRANT_CAPABILITY_READ',
+    label: 'Grant the reading identity permission to list this repository’s rulesets, then '
+      + `re-observe: the merge queue serving the ${count} named `
+      + `${plural(count, 'item', 'items')} cannot be verified at all.`,
+  }),
+  STALE: (count) => ({
+    kind: 'REPROBE_CAPABILITY',
+    label: 'Re-observe the merge queue capability: this reading is older than its freshness '
+      + `window, and the ${count} named ${plural(count, 'item is', 'items are')} waiting against `
+      + 'evidence that may no longer hold.',
+  }),
+  UNKNOWN: (count) => ({
+    kind: 'REPORT_UNREADABLE_CAPABILITY',
+    label: 'Report the unreadable merge queue configuration and re-observe: the '
+      + `${count} named ${plural(count, 'item', 'items')} cannot be merged by waiting for a `
+      + 'capability that could not be established.',
   }),
 });
 
@@ -384,10 +454,47 @@ const LABEL = Object.freeze({
     + 'an explicit authority grant.',
   RECONCILE_REQUIRED: (count) => `${count} ${plural(count, 'item has', 'items have')} recorded `
     + 'evidence that contradicts the current observation.',
+  CAPABILITY_ABSENT: (count, durationMs, capability) => (capability === 'MISCONFIGURED'
+    ? `${count} ${plural(count, 'item is', 'items are')} waiting on a merge queue that exists but `
+      + 'does not govern the default branch.'
+    : `${count} ${plural(count, 'item is', 'items are')} waiting on a merge queue this `
+      + 'repository does not have.'),
+  CAPABILITY_UNVERIFIED: (count, durationMs, capability) => `${count} `
+    + `${plural(count, 'item is', 'items are')} waiting on a merge queue Gaia could not verify `
+    + `(${capability.toLowerCase().replaceAll('_', ' ')}).`,
   THROUGHPUT_STALL: (count, durationMs) => `${count} eligible `
     + `${plural(count, 'item and', 'items and')} free capacity have not moved for `
     + `${formatDuration(durationMs)}.`,
 });
+
+/**
+ * One merge queue capability reading, decided by the caller that owns the clock.
+ *
+ * Decided elsewhere on purpose, for the same reason liveness is: whoever measured the fact owns
+ * it, and this module owns no clock, so it cannot be the thing that decides whether evidence is
+ * still fresh. A caller that hands over a state this vocabulary does not recognise is refused
+ * rather than guessed at — an unrecognised capability is an evidence gap, never availability.
+ *
+ * A missing capability is the absence of an input, not a state. It selects nothing, and the drain
+ * reports exactly the obstruction it reported before this evidence existed.
+ */
+function requireCapability(capability) {
+  if (capability === null || capability === undefined) return null;
+  if (typeof capability !== 'object' || Array.isArray(capability)
+      || !CAPABILITY_STATES.has(capability.state)
+      || typeof capability.evidenceRevision !== 'string'
+      || !/^[a-f0-9]{64}$/u.test(capability.evidenceRevision)
+      || !Number.isSafeInteger(capability.observationAgeMs) || capability.observationAgeMs < 0
+      || typeof capability.repository !== 'string'
+      || typeof capability.defaultBranch !== 'string') {
+    throw new ObstructionError(
+      'InvalidCapabilityEvidence',
+      'a merge queue capability reading needs a decided state, an exact evidence revision, a '
+        + 'measured age, a repository and a branch',
+    );
+  }
+  return capability;
+}
 
 /**
  * Name the one obstruction standing between this drain and its next transition.
@@ -403,9 +510,11 @@ const LABEL = Object.freeze({
  * @param {string} input.windowStartedAt ISO instant the window starts.
  * @param {Array<{itemId: string, state: string}>} [input.liveness] decided lane liveness.
  * @param {{evidenceRevision: string, edges: Array}|null} [input.dependencies] declared edges.
+ * @param {object|null} [input.mergeQueueCapability] one already-decided capability reading.
  */
 export function classifyPortfolioDrainObstruction({
   drainProjection, observedAt, windowStartedAt, liveness = [], dependencies = null,
+  mergeQueueCapability = null,
 }) {
   const projection = requireProjection(drainProjection);
   const observationWindow = requireWindow(windowStartedAt, observedAt);
@@ -432,6 +541,10 @@ export function classifyPortfolioDrainObstruction({
   const cyclic = itemsInDeclaredCycles(declared.edges, liveItemIds);
   const cycleItems = live.filter(({ itemId }) => cyclic.has(itemId));
   const eligible = live.filter(({ drainState }) => ELIGIBLE_STATES.has(drainState));
+  const capability = requireCapability(mergeQueueCapability);
+  const awaitingMerge = live.filter(({ drainState }) => MERGE_DEPENDENT_STATES.has(drainState));
+  const capabilityState = capability === null || awaitingMerge.length === 0
+    ? null : CAPABILITY_OBSTRUCTION[capability.state] ?? null;
   const stalled = eligible.length > 0 && projection.counts.available > 0 && !moving
     && observationWindow.durationMs >= THROUGHPUT_STALL_WINDOW_MS;
 
@@ -448,6 +561,7 @@ export function classifyPortfolioDrainObstruction({
   const breakdown = [
     ['RECONCILE_REQUIRED', reconcile.length],
     ['LANE_STALE', staleLanes.length],
+    [capabilityState ?? 'CAPABILITY_ABSENT', capabilityState ? awaitingMerge.length : 0],
     ['DEPENDENCY_DEADLOCK', cycleItems.length],
     ['THROUGHPUT_STALL', stalled ? eligible.length : 0],
     ...STARVATION_PRECEDENCE.map((state) => [state, starving.get(state).length]),
@@ -458,6 +572,11 @@ export function classifyPortfolioDrainObstruction({
   const selected = (() => {
     if (reconcile.length > 0) return ['RECONCILE_REQUIRED', idsOf(reconcile)];
     if (staleLanes.length > 0) return ['LANE_STALE', idsOf(staleLanes)];
+    // Above the live-lane short-circuit, deliberately. The incident's drain had a live worker
+    // polling a queue that did not exist, and `moving` reported NONE. Liveness proves a process
+    // is alive; it cannot prove a mechanism exists, and a capability gap is exactly the condition
+    // a busy process cannot resolve and will happily hide.
+    if (capabilityState !== null) return [capabilityState, idsOf(awaitingMerge)];
     if (moving) return ['NONE', []];
     if (cycleItems.length > 0) return ['DEPENDENCY_DEADLOCK', idsOf(cycleItems)];
     if (stalled) return ['THROUGHPUT_STALL', idsOf(eligible)];
@@ -480,9 +599,22 @@ export function classifyPortfolioDrainObstruction({
     observationWindow,
     affectedItemIds,
     affectedCount: affectedItemIds.length,
-    label: LABEL[state](count, observationWindow.durationMs),
+    // Omitted entirely when no capability was supplied, and never published as `null`. A present
+    // key holding null canonicalises into the digest and would move every previously published
+    // snapshot revision for evidence that did not change — the gate that caught this is T1 of the
+    // local-lane contract, and it is the same rule the flow block already follows.
+    ...(capability === null ? {} : {
+      capability: {
+        state: capability.state,
+        evidenceRevision: capability.evidenceRevision,
+        observationAgeMs: capability.observationAgeMs,
+        repository: capability.repository,
+        defaultBranch: capability.defaultBranch,
+      },
+    }),
+    label: LABEL[state](count, observationWindow.durationMs, capability?.state),
     recovery: state === 'NONE' ? null : {
-      ...RECOVERY[state](count, observationWindow.durationMs),
+      ...RECOVERY[state](count, observationWindow.durationMs, capability?.state),
       effect: 'NONE',
       authority: 'NONE',
       advisory: true,
