@@ -52,8 +52,14 @@ const TRANSITIONS = Object.freeze({
 });
 
 const ACTIVE_STATES = new Set(['CLAIMED', 'RUNNING']);
-const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const ordinal = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
+const RECEIPT_KEYS = Object.freeze([
+  'event', 'evidenceRevision', 'itemId', 'itemKind', 'itemNumber', 'itemRevision',
+  'machineId', 'machineVersion', 'ordinal', 'portfolioRevision', 'previousRevision',
+  'repository', 'revision', 'rulesRevision', 'schema', 'sourceState', 'sourceTitle',
+  'sourceUpdatedAt',
+].sort(ordinal));
+const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
 export class PortfolioDrainError extends Error {
   constructor(code, message) {
@@ -80,11 +86,54 @@ function deepFreeze(value) {
   return value;
 }
 
+const MACHINE_RULES = {
+  machineId: 'gaia.portfolio-drain',
+  machineVersion: 1,
+  receiptEvents: RECEIPT_EVENTS,
+  sourceStates: SOURCE_STATES,
+  transitions: TRANSITIONS,
+  activeStates: [...ACTIVE_STATES].sort(ordinal),
+  maximumCapacity: 4,
+  decisions: [
+    { action: 'CLAIM_FACTORY_RUN', effect: 'NONE', requiredAuthority: 'FACTORY_RUN' },
+    { action: 'PREPARE_PUBLICATION_INTENT', effect: 'NONE', requiredAuthority: 'NONE' },
+  ],
+};
+
+/**
+ * Exact interpreter identity recorded beside every durable receipt.
+ *
+ * A future rule change adds a new machine version and keeps this interpreter available for
+ * replay. It must never silently reinterpret receipts written by a previous version.
+ */
+export const PORTFOLIO_DRAIN_MACHINE = deepFreeze({
+  machineId: MACHINE_RULES.machineId,
+  machineVersion: MACHINE_RULES.machineVersion,
+  rulesRevision: sha256(canonicalJson(MACHINE_RULES)),
+});
+
 function requireSha(value, field) {
   if (typeof value !== 'string' || !/^[a-f0-9]{64}$/u.test(value)) {
     throw new PortfolioDrainError('InvalidRequest', `${field} must be a lowercase SHA-256`);
   }
   return value;
+}
+
+function requireClosedReceiptObject(receipt) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)
+      || Object.getPrototypeOf(receipt) !== Object.prototype) {
+    throw new PortfolioDrainError('ReceiptInvalid', 'receipt must be a plain object');
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(receipt);
+  const keys = Reflect.ownKeys(receipt);
+  if (keys.some((key) => typeof key !== 'string')
+      || keys.some((key) => !descriptors[key]?.enumerable
+        || !Object.hasOwn(descriptors[key], 'value'))
+      || canonicalJson([...keys].sort(ordinal)) !== canonicalJson(RECEIPT_KEYS)) {
+    throw new PortfolioDrainError(
+      'ReceiptInvalid', 'receipt must contain exactly the closed enumerable data fields',
+    );
+  }
 }
 
 function requireItem(item) {
@@ -153,7 +202,7 @@ export function buildPortfolioDrainReceipt({
   }
   if (previous !== null) {
     try {
-      verifyReceipt(previous);
+      verifyPortfolioDrainReceipt(previous);
     } catch {
       throw new PortfolioDrainError('InvalidRequest', 'previous receipt must be valid');
     }
@@ -163,6 +212,7 @@ export function buildPortfolioDrainReceipt({
   }
   const body = {
     schema: PORTFOLIO_DRAIN_RECEIPT_SCHEMA,
+    ...PORTFOLIO_DRAIN_MACHINE,
     portfolioRevision,
     ...itemIdentity(item),
     sourceTitle: item.title,
@@ -177,7 +227,8 @@ export function buildPortfolioDrainReceipt({
   return deepFreeze({ ...body, revision: sha256(canonicalJson(body)) });
 }
 
-function verifyReceipt(receipt) {
+export function verifyPortfolioDrainReceipt(receipt) {
+  requireClosedReceiptObject(receipt);
   if (!receipt || receipt.schema !== PORTFOLIO_DRAIN_RECEIPT_SCHEMA) {
     throw new PortfolioDrainError('ReceiptInvalid', 'unsupported drain receipt');
   }
@@ -187,6 +238,13 @@ function verifyReceipt(receipt) {
   requireSha(revision, 'receipt.revision');
   if (sha256(canonicalJson(body)) !== revision) {
     throw new PortfolioDrainError('ReceiptInvalid', 'receipt content does not match its revision');
+  }
+  if (receipt.machineId !== PORTFOLIO_DRAIN_MACHINE.machineId
+      || receipt.machineVersion !== PORTFOLIO_DRAIN_MACHINE.machineVersion
+      || receipt.rulesRevision !== PORTFOLIO_DRAIN_MACHINE.rulesRevision) {
+    throw new PortfolioDrainError(
+      'MachineUnsupported', 'receipt binds an unsupported portfolio drain interpreter',
+    );
   }
   if (!RECEIPT_EVENTS.includes(receipt.event)
       || !Number.isSafeInteger(receipt.ordinal) || receipt.ordinal < 0
@@ -298,7 +356,7 @@ export function reconcilePortfolioDrain({ portfolio, receipts = [], holds = [], 
   const receiptsByItem = new Map();
   const revisions = new Set();
   for (const candidate of receipts) {
-    const receipt = verifyReceipt(candidate);
+    const receipt = verifyPortfolioDrainReceipt(candidate);
     if (revisions.has(receipt.revision)) {
       throw new PortfolioDrainError('ReceiptDuplicate', `duplicate receipt ${receipt.revision}`);
     }
@@ -409,6 +467,7 @@ export function reconcilePortfolioDrain({ portfolio, receipts = [], holds = [], 
 
   const body = {
     schema: PORTFOLIO_DRAIN_PROJECTION_SCHEMA,
+    machine: PORTFOLIO_DRAIN_MACHINE,
     portfolioRevision: portfolio.revision,
     effect: 'NONE',
     authority: 'NONE',

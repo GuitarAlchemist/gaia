@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import {
+  PORTFOLIO_DRAIN_MACHINE,
   PortfolioDrainError,
   buildPortfolioDrainReceipt,
   reconcilePortfolioDrain,
@@ -61,6 +62,16 @@ function rehashReceipt(receipt) {
     revision: createHash('sha256').update(canonicalJson(body)).digest('hex'),
   };
 }
+
+test('the machine definition is immutable and content-addresses its exact rules version', () => {
+  assert.deepEqual(Object.keys(PORTFOLIO_DRAIN_MACHINE).sort(), [
+    'machineId', 'machineVersion', 'rulesRevision',
+  ]);
+  assert.equal(PORTFOLIO_DRAIN_MACHINE.machineId, 'gaia.portfolio-drain');
+  assert.equal(PORTFOLIO_DRAIN_MACHINE.machineVersion, 1);
+  assert.match(PORTFOLIO_DRAIN_MACHINE.rulesRevision, /^[a-f0-9]{64}$/u);
+  assert.equal(Object.isFrozen(PORTFOLIO_DRAIN_MACHINE), true);
+});
 
 test('the drain projection is deterministic and proposes at most one factory claim per repo', () => {
   const gaIssue = issue({
@@ -155,6 +166,26 @@ test('a receipt chain advances one item while preserving the one-use authority f
   assert.equal(projection.items[0].drainState, 'FAILED_AUTHORITY_CONSUMED');
   assert.equal(projection.decisions.length, 0);
   assert.equal(Object.isFrozen(failed), true);
+  assert.equal(failed.machineId, PORTFOLIO_DRAIN_MACHINE.machineId);
+  assert.equal(failed.machineVersion, PORTFOLIO_DRAIN_MACHINE.machineVersion);
+  assert.equal(failed.rulesRevision, PORTFOLIO_DRAIN_MACHINE.rulesRevision);
+  assert.deepEqual(projection.machine, PORTFOLIO_DRAIN_MACHINE);
+});
+
+test('a receipt cannot be replayed under a different machine or rule revision', () => {
+  const claimed = buildPortfolioDrainReceipt({
+    portfolioRevision: baseRevision(), item: issue(), previous: null,
+    event: 'CLAIMED', evidenceRevision: 'b'.repeat(64),
+  });
+  const changedVersion = rehashReceipt({ ...claimed, machineVersion: 2 });
+  const changedRules = rehashReceipt({ ...claimed, rulesRevision: 'a'.repeat(64) });
+
+  for (const receipt of [changedVersion, changedRules]) {
+    assert.throws(
+      () => reconcilePortfolioDrain({ portfolio: portfolio([issue()]), receipts: [receipt] }),
+      (error) => error instanceof PortfolioDrainError && error.code === 'MachineUnsupported',
+    );
+  }
 });
 
 test('a candidate receipt moves the pump to publication preparation without granting publication', () => {

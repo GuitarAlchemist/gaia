@@ -44,7 +44,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 496 gates
+node --test                                   # 694 gates
 ```
 
 ### Functional factory tracer
@@ -279,6 +279,155 @@ terminal outcome. Progress writer and timer failures are ignored and cannot affe
 consumption, execution, receipts, final stdout, or exit status.
 See [`docs/github-portfolio-operator.md`](docs/github-portfolio-operator.md).
 
+### Factory control room
+
+Generate a self-contained, read-only dashboard directly from the pinned portfolio and
+Gaia's append-only drain receipts:
+
+```bash
+npm run factory:dashboard -- \
+  --portfolio     ../state/gaia-github-portfolio.json \
+  --receipts      ../state/gaia-drain-receipts.json \
+  --html-out      ../state/gaia-control-room.html \
+  --snapshot-out  ../state/gaia-control-room.json \
+  --watch-ms      5000
+```
+
+The default view answers only five operator questions: what is moving now, what changed,
+what blocks it, what happens next, and which source revisions support those claims. A pulse
+is rendered only for a fresh, explicit `gaia-cli-progress/1` heartbeat. Stored `RUNNING`
+state without a fresh heartbeat is shown as stale. Each bounded lifecycle exposes named
+gates and a percentage; the open-ended portfolio itself deliberately has no fabricated
+completion percentage. ETA remains `UNKNOWN` until at least five comparable completed runs
+exist, then reports an interquartile range and sample size. The HTML has no remote assets and
+can be opened in wmux or shared as a standalone artifact. See
+[`docs/factory-control-room.md`](docs/factory-control-room.md).
+
+### Why the drain is not moving
+
+`PAUSED` used to mean two opposite things at once. An **empty** drain, where every item is
+terminal and the pause is the correct resting state, and a systemically **blocked** drain, where
+real work exists and every path out of the queue is closed, produced the same sentence.
+
+The control room now names the obstruction. Exactly one state is reported from a closed
+vocabulary of nine — `NONE`, `NO_ELIGIBLE_WORK`, `EVIDENCE_STARVATION`, `LANE_STALE`,
+`DEPENDENCY_DEADLOCK`, `REVIEW_STARVATION`, `AUTHORITY_STARVATION`, `RECONCILE_REQUIRED`,
+`THROUGHPUT_STALL` — and every named obstruction binds the exact drain-projection revision it was
+derived from, the observation window it was measured over, the affected item ids and their count,
+and one bounded advisory recovery action carrying `effect: NONE` and `authority: NONE`.
+
+```bash
+npm run factory:dashboard -- \
+  --portfolio     ../state/gaia-github-portfolio.json \
+  --dependencies  ../state/gaia-declared-dependencies.json \
+  --html-out      ../state/gaia-control-room.html \
+  --snapshot-out  ../state/gaia-control-room.json
+# Gaia dashboard checked: PAUSED | obstruction EVIDENCE_STARVATION | next TRIAGE_BLOCKED_EVIDENCE | source 9f2c…
+```
+
+`--dependencies` is optional and takes explicit declared evidence,
+`{ "evidenceRevision": "<sha256>", "edges": [{ "itemId": "…", "dependsOnItemId": "…" }] }`. A
+cycle is reported **only** from those declared edges. No issue title, body, label or model output
+is ever read as a dependency, and an edge naming an item the portfolio does not carry is refused
+rather than dropped.
+
+It fails closed rather than cheerfully. An occupied lane with no liveness evidence is
+`LANE_STALE`, because no heartbeat evidence is not evidence of a heartbeat. A drain state the
+vocabulary does not recognise is an evidence gap, not health. A source state that merely *claims*
+a dependency proves no cycle, so it stays an evidence gap. Only a live **lane** reports the drain
+as draining: a terminal, blocked or queued item can legitimately carry a live run — a merged pull
+request whose worker has not yet reported completion is ordinary — and none of them is motion out
+of the queue. `THROUGHPUT_STALL` needs eligible work, free capacity and five minutes of unchanged
+evidence before it is claimed; below that window the answer is `NONE`, meaning "no obstruction
+detectable yet", never "healthy".
+
+The observation window is the interval over which the publisher has continuously observed one
+exact projection revision — a measured lower bound on the age of the evidence, so a stall can only
+ever arrive late. `npm run factory:dashboard` measures it from the newest input file it reads;
+`npm run factory:dashboard:refresh` writes its own portfolio on every tick, so it carries the
+first-observation instant forward in the snapshot it published last time and starts a fresh window
+on the exact tick the revision changes. That carried instant is evidence, so the carrier is
+verified with the same total verifier the renderer applies to those exact bytes; a snapshot that
+does not verify is no prior observation and the window restarts, which delays a stall rather than
+inventing one. Evidence dated after the instant it was observed is a typed refusal rather than a
+clamped zero-age reading, and because both commands build before they write, a refused tick leaves
+the last complete artifact set untouched.
+
+Where a publisher has no usable evidence for a window start at all, it says so: every snapshot
+carries `sourceChangedAtBasis`, either `MEASURED` or `UNOBSERVED`, sealed into its content
+address, and the page reads "Not yet measured" rather than an evidence age of `0s`. A window
+nobody measured is no longer byte-indistinguishable from one measured as a single instant old.
+The rendered obstruction is bound to the snapshot's own `sourceRevision`, `observedAt` and
+`sourceChangedAt`, so an obstruction from another projection, or over a window with a forged start
+or end, cannot be grafted into a resealed snapshot and displayed.
+
+The obstruction is not an actuator. It starts nothing, retries nothing, unblocks nothing and
+grants nothing. See [`docs/portfolio-drain-obstruction-design.md`](docs/portfolio-drain-obstruction-design.md)
+for the seams that were rejected, the falsifiers and the rejection criterion.
+
+### Passive factory telemetry spine
+
+The control room truthfully reported `PAUSED` while real work was happening, because the
+only run evidence it had was best-effort CLI progress. The telemetry spine is the missing
+sensor, not more orchestration.
+
+A sensor records one of exactly seven bounded facts - `run.started`, `run.heartbeat`,
+`gate.entered`, `gate.passed`, `gate.failed`, `run.blocked`, `run.completed` - into one
+append-only, content-addressed JSONL log under a single-writer lock. Every field is a typed
+identity or a canonical token, so a prompt, a reasoning trace, a credential, a screen
+capture, a source fragment or an arbitrary log line has nowhere to live; where evidence is
+absent the record says `UNKNOWN`. Replay is a pure function of the event set: duplicate
+delivery is idempotent, and gaps, reordering, identity substitution, impossible transitions,
+unknown future event types, invalid or future timestamps and corrupted history all fail
+closed with typed diagnostics.
+
+Run one real local transition end to end:
+
+```bash
+npm run factory:telemetry -- \
+  --portfolio      ../state/gaia-portfolio.json \
+  --ledger-dir     ../state/gaia-drain \
+  --telemetry-dir  ../state/gaia-telemetry \
+  --item           issue-27 \
+  --event          CLAIMED \
+  --lane           LANE_A \
+  --agent          CLAUDE_WORKER \
+  --out            ../state/gaia-telemetry-step.json
+```
+
+That step records a whole run inside one process, so the report it writes is a unit
+demonstration of the freshness rule at three explicit instants over a recorded prefix, not
+three observations of the durable log. It is a settled run by the time any dashboard can
+read it.
+
+To watch a run actually move and expire, record its phases one at a time. Each call returns,
+so the run stays open on disk between them:
+
+```bash
+npm run factory:telemetry:phase -- --telemetry-dir ../state/gaia-telemetry \
+  --run-id run-27-alpha --phase start \
+  --repository GuitarAlchemist/gaia --item issue-27 --item-number 27 \
+  --lane WMUX_LANE_A --agent CLAUDE_CODE
+npm run factory:telemetry:phase -- --telemetry-dir ../state/gaia-telemetry \
+  --run-id run-27-alpha --phase heartbeat
+npm run factory:telemetry:phase -- --telemetry-dir ../state/gaia-telemetry \
+  --run-id run-27-alpha --phase gate-entered --gate CLAIMED
+```
+
+`scripts/factory-dashboard.mjs --telemetry <dir>` now renders `ACTIVE` with a pulse and the
+truthful current gate. Wait past the 30 s freshness window without another `heartbeat` and
+the same log renders `STALE` with the named blockage `TELEMETRY_HEARTBEAT_EXPIRED`, its
+evidence age, and `CHECK_STALE_RUN` as the next action. `--phase gate-passed --gate CLAIMED`
+then `--phase finish` closes it, and it settles to `PAUSED` for good. A fact recorded after
+the rendered instant is refused rather than shown.
+
+The seven phases - `start`, `heartbeat`, `gate-entered`, `gate-passed`, `gate-failed`,
+`finish`, `block` - are exactly the seven event kinds under operator-facing names; the seam
+adds no event, field or schema. `observeWmuxClaudeTask` is a thin wrapper over that same
+seam for one bounded wmux/Claude task: it launches nothing, reads no screen or prompt, and
+takes one closed outcome from the task itself. See
+[`docs/factory-telemetry-spine.md`](docs/factory-telemetry-spine.md).
+
 ### Candidate publication
 
 `buildGitHubCandidatePublishIntent({ transition, gitObservation })` accepts only an exact,
@@ -349,16 +498,24 @@ by **absence**, not by a check that could be bypassed.
 | `src/ix-local-embedding.mjs` | Capability-free adapter for IX's cached local embedder; strips provider API keys and verifies model, revision, text hashes, dimensions, and vectors before returning them. |
 | `src/github-portfolio.mjs` | Deterministic portfolio revision, conservative classification, bounded scheduling, and one-step authority intent. |
 | `src/github-portfolio-authority.mjs` | Exact Ed25519 grant verification plus an atomic, one-use file ledger; prompts and bus text confer no authority. |
+| `src/remote-operator-authority-prototype.mjs` | Authority-free tracer bullet for the remote exact-intent Seam; proves remeasurement, expiry, executor binding and one-use consumption while explicitly authorizing no execution. |
 | `src/github-portfolio-execution.mjs` | Binds one authorized portfolio intent to one local factory-agent run, linked worktree, and external evidence directory; proves the worktree's measured Git identity is the bound repository before it can be constructed. |
 | `src/github-portfolio-operator.mjs` | The operator seam: mints the dedicated encrypted Ed25519 keypair, performs one confirmed, short-lived, in-memory-only authorized advance that always leaves a redacted receipt, and owns the total terminal readers and the exit mapping. |
 | `src/github-portfolio-publish.mjs` | Pure dry-run projection from one exact `CANDIDATE_READY` transition plus inert caller-observed Git data to a closed, deterministic advisory publication intent with `effect: NONE`; it accepts no callback or effect capability. |
 | `src/github-portfolio-publication.mjs` | Authorized publication controller: consumes one exact publish grant and sequences only observe, commit, leased push, and pull-request creation; typed redaction and no merge capability. |
 | `src/portfolio-drain.mjs` | Pure portfolio drain state machine: reconciles exact GitHub observations with content-addressed receipts and restrictive policy holds, then proposes bounded authority-free pump decisions. |
+| `src/portfolio-drain-ledger.mjs` | Append-only, CAS-protected receipt ledger and read-only idempotent drain `tick`; binds an exact machine/rules version and performs no worker or GitHub effect. |
+| `src/control-room.mjs` | Pure, content-addressed operator read model plus dependency-free HTML renderer; fresh real heartbeats are the only animated signal, and open-ended progress or ETA remains explicitly unknown. |
 | `src/git-gh-publication-effects.mjs` | Concrete local Git and `gh` publication effects with repeated identity checks, explicit remote-branch leases, and exact pull-request reuse. |
 | `src/github-read-adapter.mjs` | Read-only `gh` ingestion adapter with fail-closed query-cap detection. |
+| `src/factory-telemetry-phase.mjs` | The generic file-backed phase sensor: accepts one closed lifecycle fact and returns, so a run stays open on disk and a separately invoked reader observes it moving, expiring and settling. Binds the subject once, at start. |
+| `src/wmux-claude-telemetry-bridge.mjs` | Thin wrapper binding one bounded, caller-supplied wmux/Claude task to the phase seam. Launches nothing, reads no screen or prompt, accepts one closed outcome, and re-throws infrastructure failures rather than recording them as blocked runs. |
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
 | `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
 | `scripts/factory-agent.mjs` | Real Claude worker → Codex read-only review → optional one Claude repair → fresh Codex review tracer. Produces a fail-closed, content-addressed run receipt; never commits or publishes. |
+| `scripts/factory-dashboard.mjs` | One-command portfolio/drain projection → control-room snapshot + standalone HTML adapter, with optional bounded polling and no listener or authority. |
+| `scripts/factory-telemetry-step.mjs` | One real, bounded, instrumented portfolio-drain transition: reads the ledger, records the closed telemetry arc, attempts exactly one compare-and-swap receipt, and publishes the three control-room views. No provider, no worker, no authority. |
+| `scripts/factory-telemetry-phase.mjs` | Records exactly one lifecycle phase of one run, then exits. The operator-facing half of the phase sensor; refuses to rebind a run's subject or to overwrite a durable evidence log. |
 | `scripts/hybrid-search.mjs` | One-command local corpus → content-addressed hybrid index → cited result tracer; reserves new outputs and never contacts a provider. |
 | `scripts/github-portfolio.mjs` | One-command read-only organization survey; writes only a caller-named new local report. |
 | `scripts/github-portfolio-operator.mjs` | Two operator verbs, `init` and `run`. Parses a closed argument list, proves stdin is a terminal, names which streams the terminal is, and composes the existing adapters. Decides nothing about authority. |
@@ -369,7 +526,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 496 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 694 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
