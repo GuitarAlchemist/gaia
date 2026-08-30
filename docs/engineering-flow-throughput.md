@@ -316,8 +316,11 @@ Over a complete window, let `C` be the family's closing events inside it.
 - any `c` in `C` with `startedAt === null` → `UNKNOWN` / `INCOMPLETE_COMPARABLE_DURATIONS`. A
   median over the subset that happens to carry a start is a selection-biased estimate presented as
   a measurement, so the whole cell is withheld rather than computed over what is convenient.
-- otherwise → `MEASURED`, `sampleSize = C.length`, `medianMs` = the lower median of the sorted
-  durations, matching `measurePace`'s existing convention exactly.
+- otherwise → `MEASURED`, `sampleSize = C.length`, `medianMs` = `sorted[Math.floor(n / 2)]` over
+  the ascending durations, quoting `measurePace`'s existing formula exactly rather than
+  re-deriving one. For an even sample that is the upper of the two middle values; the point of
+  quoting it is that this page and the pace card cannot disagree about what "median" means, not
+  that either choice of middle is more correct.
 
 ### Published block
 
