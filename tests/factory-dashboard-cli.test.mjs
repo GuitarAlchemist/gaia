@@ -9,6 +9,7 @@ import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { runFactoryDashboardCli } from '../scripts/factory-dashboard.mjs';
+import { renderControlRoomHtml } from '../src/control-room.mjs';
 
 const DASHBOARD_PATH = fileURLToPath(new URL('../scripts/factory-dashboard.mjs', import.meta.url));
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-cli-'));
@@ -423,5 +424,360 @@ test('MECHANISM REVERT: the revision guard is what stops a window crossing chang
 
   assert.equal(shipped.sourceChangedAt, '2026-08-29T18:04:00.000Z');
   assert.equal(shipped.obstruction.observationWindow.durationMs, 90_000);
+  assert.equal(shipped.obstruction.state, 'NONE');
+});
+
+/**
+ * R2 blocker A — the continuity carrier is evidence, so it is verified rather than trusted.
+ *
+ * R1 read the previously published snapshot with a bare `JSON.parse` and three shallow field
+ * checks, then carried its `sourceChangedAt` forward. One unsealed edit of that field — a file
+ * `renderControlRoomHtml` itself refuses — bought a `THROUGHPUT_STALL` measured in years over
+ * evidence this publisher had observed for seconds, laundered into a freshly sealed snapshot that
+ * then rendered. Every other window mechanism here fails toward "no obstruction detectable yet";
+ * this one failed toward a confidently asserted stall.
+ */
+test('a published carrier the render seam refuses is not a first observation', () => {
+  const portfolioPath = join(scratch, 'carrier-portfolio.json');
+  const htmlPath = join(scratch, 'carrier-control-room.html');
+  const snapshotPath = join(scratch, 'carrier-control-room.json');
+  const ready = {
+    repository: 'GuitarAlchemist/ix', itemKind: 'ISSUE', itemId: 'issue-290',
+    itemNumber: 290, title: 'Repair a ready issue', state: 'READY',
+    updatedAt: '2026-08-29T18:00:00.000Z',
+  };
+  writeFileSync(portfolioPath, `${JSON.stringify(portfolio([ready]))}\n`, 'utf8');
+  const mtime = new Date('2026-08-29T18:00:00.000Z');
+  utimesSync(portfolioPath, mtime, mtime);
+  const render = (observedAt) => runFactoryDashboardCli([
+    '--portfolio', portfolioPath, '--html-out', htmlPath, '--snapshot-out', snapshotPath,
+  ], { now: () => new Date(observedAt), writeStdout: () => {} });
+
+  const first = render('2026-08-29T18:00:30.000Z');
+  assert.equal(first.obstruction.observationWindow.durationMs, 30_000);
+  assert.equal(first.obstruction.state, 'NONE');
+
+  // One field, edited and NOT resealed. The repository's own render seam already refuses this
+  // exact byte sequence; the adapter that reads it must not be more credulous than the renderer.
+  const tampered = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+  tampered.sourceChangedAt = '2020-01-01T00:00:00.000Z';
+  writeFileSync(snapshotPath, `${JSON.stringify(tampered, null, 2)}\n`, 'utf8');
+  assert.throws(
+    () => renderControlRoomHtml(tampered), /revision/u,
+    'the render seam refuses the tampered carrier, so the adapter has a verifier available',
+  );
+
+  const afterTamper = render('2026-08-29T18:01:00.000Z');
+  assert.notEqual(
+    afterTamper.sourceChangedAt, '2020-01-01T00:00:00.000Z',
+    'an unverifiable carrier is no prior observation; it must never become the window start',
+  );
+  assert.equal(
+    afterTamper.sourceChangedAt, '2026-08-29T18:00:00.000Z',
+    'the window falls back to the mtime it can actually show',
+  );
+  assert.equal(afterTamper.obstruction.observationWindow.durationMs, 60_000);
+  assert.equal(
+    afterTamper.obstruction.state, 'NONE',
+    'and no stall is invented from evidence this publisher observed for sixty seconds',
+  );
+
+  // POSITIVE CONTROL: an untouched carrier this publisher wrote is still carried forward, so the
+  // repair verifies the carrier rather than abandoning continuity.
+  const continued = render('2026-08-29T18:06:00.000Z');
+  assert.equal(continued.sourceChangedAt, '2026-08-29T18:00:00.000Z');
+  assert.equal(continued.obstruction.observationWindow.durationMs, 360_000);
+  assert.equal(continued.obstruction.state, 'THROUGHPUT_STALL');
+});
+
+test('NEGATIVE CONTROL: a resealed carrier that observed evidence before it existed is refused', () => {
+  const portfolioPath = join(scratch, 'incoherent-carrier-portfolio.json');
+  const htmlPath = join(scratch, 'incoherent-carrier-control-room.html');
+  const snapshotPath = join(scratch, 'incoherent-carrier-control-room.json');
+  writeFileSync(portfolioPath, `${JSON.stringify(portfolio([{
+    repository: 'GuitarAlchemist/ix', itemKind: 'ISSUE', itemId: 'issue-290',
+    itemNumber: 290, title: 'Repair a ready issue', state: 'READY',
+    updatedAt: '2026-08-29T18:00:00.000Z',
+  }]))}\n`, 'utf8');
+  const mtime = new Date('2026-08-29T18:00:00.000Z');
+  utimesSync(portfolioPath, mtime, mtime);
+  const render = (observedAt) => runFactoryDashboardCli([
+    '--portfolio', portfolioPath, '--html-out', htmlPath, '--snapshot-out', snapshotPath,
+  ], { now: () => new Date(observedAt), writeStdout: () => {} });
+
+  const honest = render('2026-08-29T18:00:30.000Z');
+  const withoutRevision = ({ revision, ...body }) => body;
+  const reseal = (body) => ({
+    ...body, revision: createHash('sha256').update(canonicalJson(body)).digest('hex'),
+  });
+  // Fully resealed at both layers, and every binding the render seam checks still holds — the
+  // carrier is internally perfect and still claims to have observed evidence from the future.
+  const ahead = '2027-01-01T00:00:00.000Z';
+  const forged = reseal({
+    ...withoutRevision(honest),
+    sourceChangedAt: ahead,
+    obstruction: reseal({
+      ...withoutRevision(honest.obstruction),
+      observationWindow: {
+        startedAt: ahead,
+        endedAt: honest.observedAt,
+        durationMs: honest.obstruction.observationWindow.durationMs,
+      },
+    }),
+  });
+  writeFileSync(snapshotPath, `${JSON.stringify(forged, null, 2)}\n`, 'utf8');
+  assert.doesNotThrow(
+    () => renderControlRoomHtml(forged),
+    'the forgery passes every render-seam check, so only a coherence bound can catch it',
+  );
+
+  const next = render('2026-08-29T18:01:00.000Z');
+  assert.notEqual(next.sourceChangedAt, ahead);
+  assert.equal(next.sourceChangedAt, '2026-08-29T18:00:00.000Z');
+  assert.equal(next.obstruction.state, 'NONE');
+});
+
+/**
+ * R2 blocker B — a window start the adapter could not measure is published as such.
+ *
+ * An input mtime after the observation instant still shows nothing about how long this revision
+ * has been in force, and the adapter still declines to assert it. What changes is that the
+ * published body now says so: `sourceChangedAtBasis: UNOBSERVED`, sealed into the snapshot
+ * revision, and a page that reads "Not yet measured" rather than the most reassuring number
+ * available. Falsifier F5 in `docs/portfolio-drain-obstruction-design.md`.
+ */
+test('a window start the adapter could not measure is published as UNOBSERVED, not as measured zero age', () => {
+  const ready = {
+    repository: 'GuitarAlchemist/ix', itemKind: 'ISSUE', itemId: 'issue-290',
+    itemNumber: 290, title: 'Repair a ready issue', state: 'READY',
+    updatedAt: '2026-08-29T18:00:00.000Z',
+  };
+  const observedAt = '2026-08-29T18:01:00.000Z';
+  const publish = (label, inputMtime) => {
+    const portfolioPath = join(scratch, `basis-${label}-portfolio.json`);
+    const htmlPath = join(scratch, `basis-${label}-control-room.html`);
+    const snapshotPath = join(scratch, `basis-${label}-control-room.json`);
+    writeFileSync(portfolioPath, `${JSON.stringify(portfolio([ready]))}\n`, 'utf8');
+    utimesSync(portfolioPath, new Date(inputMtime), new Date(inputMtime));
+    const snapshot = runFactoryDashboardCli([
+      '--portfolio', portfolioPath, '--html-out', htmlPath, '--snapshot-out', snapshotPath,
+    ], { now: () => new Date(observedAt), writeStdout: () => {} });
+    return { snapshot, html: readFileSync(htmlPath, 'utf8') };
+  };
+
+  // The mtime lands an hour after the observation instant: unusable as evidence of earlier
+  // observation, so the window starts now and says so.
+  const unusable = publish('unobserved', '2026-08-29T19:00:00.000Z');
+  // The evidence changed at the exact instant it was observed: a real, measured zero-age window.
+  const genuine = publish('measured', observedAt);
+  // And an ordinary measured window, for contrast.
+  const earlier = publish('earlier', '2026-08-29T18:00:00.000Z');
+
+  assert.equal(unusable.snapshot.sourceChangedAt, observedAt);
+  assert.equal(unusable.snapshot.obstruction.observationWindow.durationMs, 0);
+  assert.equal(unusable.snapshot.obstruction.state, 'NONE');
+  assert.equal(unusable.snapshot.sourceChangedAtBasis, 'UNOBSERVED');
+
+  assert.equal(genuine.snapshot.sourceChangedAt, observedAt);
+  assert.equal(genuine.snapshot.obstruction.observationWindow.durationMs, 0);
+  assert.equal(genuine.snapshot.sourceChangedAtBasis, 'MEASURED');
+  assert.equal(earlier.snapshot.sourceChangedAtBasis, 'MEASURED');
+  assert.equal(earlier.snapshot.obstruction.observationWindow.durationMs, 60_000);
+
+  const withoutRevision = ({ revision, ...body }) => body;
+  assert.notDeepEqual(
+    withoutRevision(unusable.snapshot), withoutRevision(genuine.snapshot),
+    'F5: the two zero-length windows must not publish equal bodies',
+  );
+  assert.notEqual(unusable.snapshot.revision, genuine.snapshot.revision);
+  assert.equal(
+    unusable.snapshot.obstruction.revision, genuine.snapshot.obstruction.revision,
+    'the obstruction contract is untouched — the marker records the adapter position only',
+  );
+  assert.match(unusable.html, /Not yet measured/u);
+  assert.doesNotMatch(genuine.html, /Not yet measured/u);
+
+  // And the window still grows from there on the next render, so a stall stays reachable under a
+  // clock skewed behind the filesystem — the half R1 did buy, kept.
+  const portfolioPath = join(scratch, 'basis-unobserved-portfolio.json');
+  const later = runFactoryDashboardCli([
+    '--portfolio', portfolioPath,
+    '--html-out', join(scratch, 'basis-unobserved-control-room.html'),
+    '--snapshot-out', join(scratch, 'basis-unobserved-control-room.json'),
+  ], { now: () => new Date('2026-08-29T18:07:00.000Z'), writeStdout: () => {} });
+  assert.equal(later.sourceChangedAt, observedAt);
+  assert.equal(later.obstruction.state, 'THROUGHPUT_STALL');
+  assert.equal(
+    later.sourceChangedAtBasis, 'MEASURED',
+    'once a verified carrier exists the window start is measured evidence of earlier observation',
+  );
+});
+
+test('MECHANISM REVERT: verifying the carrier is what stops a tampered file inventing a stall', async () => {
+  const source = readFileSync(DASHBOARD_PATH, 'utf8');
+  const find = '    published = requireControlRoomSnapshot(JSON.parse(readFileSync(snapshotPath, \'utf8\')));';
+  assert.equal(
+    source.includes(find), true,
+    `the mechanism-revert witness targets "${find}", which is no longer in the source`,
+  );
+  const mutated = source
+    .replace(find, '    published = JSON.parse(readFileSync(snapshotPath, \'utf8\'));')
+    .replaceAll("from '../src/", `from '${new URL('../scripts/', import.meta.url).href}../src/`);
+  assert.notEqual(mutated, source);
+  const mutantPath = join(mutantScratch, 'unverified-carrier.mjs');
+  writeFileSync(mutantPath, mutated, 'utf8');
+  const mutant = await import(pathToFileURL(mutantPath).href);
+
+  const ready = {
+    repository: 'GuitarAlchemist/ix', itemKind: 'ISSUE', itemId: 'issue-290',
+    itemNumber: 290, title: 'Repair a ready issue', state: 'READY',
+    updatedAt: '2026-08-29T18:00:00.000Z',
+  };
+  const run = (cli, label, observedAt, tamper = false) => {
+    const portfolioPath = join(scratch, `revert-${label}-portfolio.json`);
+    const snapshotPath = join(scratch, `revert-${label}-control-room.json`);
+    if (tamper) {
+      const published = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+      published.sourceChangedAt = '2020-01-01T00:00:00.000Z';
+      writeFileSync(snapshotPath, `${JSON.stringify(published, null, 2)}\n`, 'utf8');
+      return null;
+    }
+    writeFileSync(portfolioPath, `${JSON.stringify(portfolio([ready]))}\n`, 'utf8');
+    const mtime = new Date('2026-08-29T18:00:00.000Z');
+    utimesSync(portfolioPath, mtime, mtime);
+    return cli([
+      '--portfolio', portfolioPath,
+      '--html-out', join(scratch, `revert-${label}-control-room.html`),
+      '--snapshot-out', snapshotPath,
+    ], { now: () => new Date(observedAt), writeStdout: () => {} });
+  };
+
+  run(mutant.runFactoryDashboardCli, 'mutant', '2026-08-29T18:00:30.000Z');
+  run(null, 'mutant', null, true);
+  const invented = run(mutant.runFactoryDashboardCli, 'mutant', '2026-08-29T18:01:00.000Z');
+
+  assert.equal(
+    invented.sourceChangedAt, '2020-01-01T00:00:00.000Z',
+    'without verification the mutant adopts a window start from a file the renderer refuses',
+  );
+  assert.equal(
+    invented.obstruction.state, 'THROUGHPUT_STALL',
+    'and asserts a measured stall over evidence it observed for sixty seconds',
+  );
+  assert.ok(invented.obstruction.observationWindow.durationMs > 200_000_000_000);
+
+  run(runFactoryDashboardCli, 'shipped', '2026-08-29T18:00:30.000Z');
+  run(null, 'shipped', null, true);
+  const refused = run(runFactoryDashboardCli, 'shipped', '2026-08-29T18:01:00.000Z');
+
+  assert.equal(refused.sourceChangedAt, '2026-08-29T18:00:00.000Z');
+  assert.equal(refused.obstruction.state, 'NONE');
+});
+
+test('MECHANISM REVERT: the UNOBSERVED basis is what keeps an unmeasured window distinguishable', async () => {
+  const source = readFileSync(DASHBOARD_PATH, 'utf8');
+  const find = "    return { sourceChangedAt: observedAt, basis: 'UNOBSERVED' };";
+  assert.equal(
+    source.includes(find), true,
+    `the mechanism-revert witness targets "${find}", which is no longer in the source`,
+  );
+  const mutated = source
+    .replace(find, "    return { sourceChangedAt: observedAt, basis: 'MEASURED' };")
+    .replaceAll("from '../src/", `from '${new URL('../scripts/', import.meta.url).href}../src/`);
+  assert.notEqual(mutated, source);
+  const mutantPath = join(mutantScratch, 'no-unobserved-basis.mjs');
+  writeFileSync(mutantPath, mutated, 'utf8');
+  const mutant = await import(pathToFileURL(mutantPath).href);
+
+  const ready = {
+    repository: 'GuitarAlchemist/ix', itemKind: 'ISSUE', itemId: 'issue-290',
+    itemNumber: 290, title: 'Repair a ready issue', state: 'READY',
+    updatedAt: '2026-08-29T18:00:00.000Z',
+  };
+  const observedAt = '2026-08-29T18:01:00.000Z';
+  const publish = (cli, label, inputMtime) => {
+    const portfolioPath = join(scratch, `basis-revert-${label}-portfolio.json`);
+    writeFileSync(portfolioPath, `${JSON.stringify(portfolio([ready]))}\n`, 'utf8');
+    utimesSync(portfolioPath, new Date(inputMtime), new Date(inputMtime));
+    return cli([
+      '--portfolio', portfolioPath,
+      '--html-out', join(scratch, `basis-revert-${label}-control-room.html`),
+      '--snapshot-out', join(scratch, `basis-revert-${label}-control-room.json`),
+    ], { now: () => new Date(observedAt), writeStdout: () => {} });
+  };
+  const withoutRevision = ({ revision, ...body }) => body;
+
+  const mutantUnusable = publish(mutant.runFactoryDashboardCli, 'mutant-unusable', '2026-08-29T19:00:00.000Z');
+  const mutantGenuine = publish(mutant.runFactoryDashboardCli, 'mutant-genuine', observedAt);
+  assert.deepEqual(
+    withoutRevision(mutantUnusable), withoutRevision(mutantGenuine),
+    'without the UNOBSERVED basis the two cases publish byte-identical bodies again',
+  );
+
+  const shippedUnusable = publish(runFactoryDashboardCli, 'shipped-unusable', '2026-08-29T19:00:00.000Z');
+  const shippedGenuine = publish(runFactoryDashboardCli, 'shipped-genuine', observedAt);
+  assert.notDeepEqual(withoutRevision(shippedUnusable), withoutRevision(shippedGenuine));
+});
+
+test('MECHANISM REVERT: the carrier coherence bound is what refuses evidence observed before it existed', async () => {
+  const source = readFileSync(DASHBOARD_PATH, 'utf8');
+  const find = '  if (Date.parse(published.sourceChangedAt) > Date.parse(published.observedAt)';
+  assert.equal(
+    source.includes(find), true,
+    `the mechanism-revert witness targets "${find}", which is no longer in the source`,
+  );
+  const mutated = source
+    .replace(find, '  if (false')
+    .replaceAll("from '../src/", `from '${new URL('../scripts/', import.meta.url).href}../src/`);
+  assert.notEqual(mutated, source);
+  const mutantPath = join(mutantScratch, 'no-carrier-coherence.mjs');
+  writeFileSync(mutantPath, mutated, 'utf8');
+  const mutant = await import(pathToFileURL(mutantPath).href);
+
+  const portfolioPath = join(scratch, 'coherence-revert-portfolio.json');
+  const htmlPath = join(scratch, 'coherence-revert-control-room.html');
+  const snapshotPath = join(scratch, 'coherence-revert-control-room.json');
+  writeFileSync(portfolioPath, `${JSON.stringify(portfolio([{
+    repository: 'GuitarAlchemist/ix', itemKind: 'ISSUE', itemId: 'issue-290',
+    itemNumber: 290, title: 'Repair a ready issue', state: 'READY',
+    updatedAt: '2026-08-29T18:00:00.000Z',
+  }]))}\n`, 'utf8');
+  const mtime = new Date('2026-08-29T18:00:00.000Z');
+  utimesSync(portfolioPath, mtime, mtime);
+  const argv = [
+    '--portfolio', portfolioPath, '--html-out', htmlPath, '--snapshot-out', snapshotPath,
+  ];
+  const options = (observedAt) => ({ now: () => new Date(observedAt), writeStdout: () => {} });
+
+  const honest = runFactoryDashboardCli(argv, options('2026-08-29T18:00:30.000Z'));
+  const withoutRevision = ({ revision, ...body }) => body;
+  const reseal = (body) => ({
+    ...body, revision: createHash('sha256').update(canonicalJson(body)).digest('hex'),
+  });
+  const ahead = '2027-01-01T00:00:00.000Z';
+  const forged = reseal({
+    ...withoutRevision(honest),
+    sourceChangedAt: ahead,
+    obstruction: reseal({
+      ...withoutRevision(honest.obstruction),
+      observationWindow: {
+        startedAt: ahead,
+        endedAt: honest.observedAt,
+        durationMs: honest.obstruction.observationWindow.durationMs,
+      },
+    }),
+  });
+  const write = () => writeFileSync(snapshotPath, `${JSON.stringify(forged, null, 2)}\n`, 'utf8');
+
+  write();
+  assert.throws(
+    () => mutant.runFactoryDashboardCli(argv, options('2026-08-29T18:01:00.000Z')),
+    { code: 'IncoherentEvidence' },
+    'without the bound the mutant hands the seam a window start after the instant it observed',
+  );
+
+  write();
+  const shipped = runFactoryDashboardCli(argv, options('2026-08-29T18:01:00.000Z'));
+  assert.equal(shipped.sourceChangedAt, '2026-08-29T18:00:00.000Z');
   assert.equal(shipped.obstruction.state, 'NONE');
 });

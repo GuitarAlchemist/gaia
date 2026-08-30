@@ -800,6 +800,33 @@ Forge only `observationWindow.startedAt` in an otherwise honest obstruction, res
 and reseal the snapshot around it so that `evidenceRevision` and `endedAt` both still bind. If
 `renderControlRoomHtml` returns markup, C has failed.
 
+## R2 correction, recorded during implementation rather than silently applied
+
+Mechanism B2 above says that where `resolveSourceChangedAt` returns a bare instant rather than
+`{ sourceChangedAt, basis }`, "the string form is normalised to `MEASURED`". Implementation found
+that clause wrong by B2's own definition, and it is corrected rather than quietly kept.
+
+**What implementation found.** The one resolver that returns a bare instant is the refresh
+adapter's, at `scripts/factory-dashboard-refresh.mjs` — a file outside R2's edit set. It answers
+with the carried first-observation instant where one verifies, and with `observedAt` where none
+does. The second case is precisely "the publisher had no evidence of earlier observation and the
+window therefore starts at the observation instant", which this document defines as `UNOBSERVED`.
+Normalising it to `MEASURED` would have published `Evidence age 0s` for the first refresh tick
+over any revision — the exact reassuring reading blocker B exists to remove — and would have made
+this document's own definition false in the adapter the repair lane was opened for.
+
+**The correction.** A bare instant declares no basis, so it is read conservatively: `MEASURED`
+where the instant is genuinely earlier than the observation instant, `UNOBSERVED` where it equals
+it. A resolver that knows better declares its basis explicitly, and the file-fed resolver does —
+which is why an input mtime landing exactly at the observation instant is still `MEASURED` there,
+since a real timestamp was read and used. Declare your basis, or get the conservative reading.
+
+**What this costs, stated plainly.** The first refresh tick over any newly seen revision now
+publishes `UNOBSERVED` and renders `Not yet measured` instead of `0s`. That is a visible change to
+an artifact an operator reads, it is the honest reading, and it self-corrects on the next tick,
+where the carrier verifies and the window is measured for real.
+`tests/factory-dashboard-refresh-cli.test.mjs` pins all four ticks of that sequence.
+
 ## Rejection criterion for R2
 
 R2 is rejected, and R1 behaviour restored, if any one of the following holds.

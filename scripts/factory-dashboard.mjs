@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
-  CONTROL_ROOM_SCHEMA, buildControlRoomSnapshot, renderControlRoomHtml,
+  buildControlRoomSnapshot, renderControlRoomHtml, requireControlRoomSnapshot,
 } from '../src/control-room.mjs';
 import {
   factoryTelemetryLogPath, projectFactoryTelemetryLog,
@@ -100,21 +100,27 @@ const serialize = (value) => `${JSON.stringify(value, null, 2)}\n`;
  *
  * The carrier is the published artifact and nothing else — no private state store — so an
  * ordinary process restart, or the next tick of a watch loop, resumes the window from bytes an
- * operator and every downstream consumer can read too. A snapshot that is missing, unreadable,
- * not a control-room body, or pinned to a different projection revision is "no prior
- * observation", and the window restarts. That direction only ever delays a stall, never invents
- * one.
+ * operator and every downstream consumer can read too. That the artifact is this publisher's own
+ * is not an integrity property: the path can be written by a second publisher, by a rotation, or
+ * by an editor. So it is verified rather than trusted, with the same total verifier the render
+ * seam applies to these exact bytes — a reader of a published artifact must not be more credulous
+ * than its renderer.
+ *
+ * A snapshot that fails that verification, that is pinned to a different projection revision, or
+ * that claims to have observed evidence before that evidence existed, is "no prior observation",
+ * and the window restarts. Every one of those directions delays a stall; none invents one. That
+ * asymmetry is the whole point: an unverified carrier failed the other way, and one unsealed edit
+ * of a single field bought a `THROUGHPUT_STALL` measured in years over seconds of observation.
  */
 export function firstObservationOf(snapshotPath, projectionRevision) {
   let published;
   try {
-    published = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+    published = requireControlRoomSnapshot(JSON.parse(readFileSync(snapshotPath, 'utf8')));
   } catch {
     return null;
   }
-  if (published?.schema !== CONTROL_ROOM_SCHEMA
-      || published.sourceRevision !== projectionRevision
-      || typeof published.sourceChangedAt !== 'string') {
+  if (Date.parse(published.sourceChangedAt) > Date.parse(published.observedAt)
+      || published.sourceRevision !== projectionRevision) {
     return null;
   }
   return published.sourceChangedAt;
@@ -137,14 +143,35 @@ export function firstObservationOf(snapshotPath, projectionRevision) {
  * adapter *has*, taken before any measurement; `buildControlRoomSnapshot` still refuses outright
  * any caller that hands it evidence dated after the instant it was observed.
  *
+ * The discard is reported, not merely commented. Publishing it as an ordinary zero-length window
+ * made a window this adapter declined to measure byte-indistinguishable from one it measured as a
+ * single instant old, so `UNOBSERVED` travels with the snapshot and is sealed into its revision.
+ *
  * An adapter that writes its own inputs on every tick, such as the GitHub refresh, cannot use an
  * mtime for this at all and supplies its own resolver.
  */
 const fileFedSourceChangedAt = ({ firstObservation, observedAt, newestInputChangedAt }) => {
-  if (firstObservation !== null) return firstObservation;
-  return Date.parse(newestInputChangedAt) > Date.parse(observedAt)
-    ? observedAt : newestInputChangedAt;
+  if (firstObservation !== null) {
+    return { sourceChangedAt: firstObservation, basis: 'MEASURED' };
+  }
+  if (Date.parse(newestInputChangedAt) > Date.parse(observedAt)) {
+    return { sourceChangedAt: observedAt, basis: 'UNOBSERVED' };
+  }
+  return { sourceChangedAt: newestInputChangedAt, basis: 'MEASURED' };
 };
+
+/**
+ * A resolver may answer with a bare instant instead of `{ sourceChangedAt, basis }`, and one does:
+ * the refresh adapter's, which this Module must keep working unchanged. A bare instant declares no
+ * basis, so it is read conservatively — it counts as evidence of earlier observation only where it
+ * actually is earlier. That labels a refresh tick that has just met a revision for the first time
+ * `UNOBSERVED`, which is exactly what it is, and lets the next tick over the same revision measure
+ * it for real.
+ */
+const declaredBasis = (resolved, observedAt) => (typeof resolved !== 'string' ? resolved : {
+  sourceChangedAt: resolved,
+  basis: resolved === observedAt ? 'UNOBSERVED' : 'MEASURED',
+});
 
 export function runFactoryDashboardCli(argv, {
   now = () => new Date(),
@@ -184,6 +211,15 @@ export function runFactoryDashboardCli(argv, {
   const telemetryProjection = telemetryPath === null
     ? null
     : projectFactoryTelemetryLog({ directory: telemetryPath, notAfter: observedAt }).projection;
+  const windowStart = declaredBasis(resolveSourceChangedAt({
+    projectionRevision: projection.revision,
+    firstObservation: firstObservationOf(snapshotPath, projection.revision),
+    observedAt,
+    newestInputChangedAt: newestMtime([
+      projectionPath, portfolioPath, receiptsPath, holdsPath, progressPath, historyPath,
+      telemetryLogPath, dependenciesPath,
+    ]),
+  }), observedAt);
   const snapshot = buildControlRoomSnapshot({
     drainProjection: projection,
     progressObservations,
@@ -195,15 +231,8 @@ export function runFactoryDashboardCli(argv, {
       ? null
       : readJson(dependenciesPath, 'dependencies'),
     observedAt,
-    sourceChangedAt: resolveSourceChangedAt({
-      projectionRevision: projection.revision,
-      firstObservation: firstObservationOf(snapshotPath, projection.revision),
-      observedAt,
-      newestInputChangedAt: newestMtime([
-        projectionPath, portfolioPath, receiptsPath, holdsPath, progressPath, historyPath,
-        telemetryLogPath, dependenciesPath,
-      ]),
-    }),
+    sourceChangedAt: windowStart.sourceChangedAt,
+    sourceChangedAtBasis: windowStart.basis,
   });
   writeFileSync(snapshotPath, serialize(snapshot), 'utf8');
   writeFileSync(htmlPath, renderControlRoomHtml(snapshot, {

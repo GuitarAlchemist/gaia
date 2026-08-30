@@ -22,7 +22,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 666 gates
+node --test                                   # 679 gates
 ```
 
 ### Functional factory tracer
@@ -290,11 +290,20 @@ exact projection revision — a measured lower bound on the age of the evidence,
 ever arrive late. `npm run factory:dashboard` measures it from the newest input file it reads;
 `npm run factory:dashboard:refresh` writes its own portfolio on every tick, so it carries the
 first-observation instant forward in the snapshot it published last time and starts a fresh window
-on the exact tick the revision changes. Evidence dated after the instant it was observed is a
-typed refusal rather than a clamped zero-age reading, and because both commands build before they
-write, a refused tick leaves the last complete artifact set untouched. The rendered obstruction is
-bound to the snapshot's own `sourceRevision` and `observedAt`, so an obstruction from another
-projection or window cannot be grafted into a resealed snapshot and displayed.
+on the exact tick the revision changes. That carried instant is evidence, so the carrier is
+verified with the same total verifier the renderer applies to those exact bytes; a snapshot that
+does not verify is no prior observation and the window restarts, which delays a stall rather than
+inventing one. Evidence dated after the instant it was observed is a typed refusal rather than a
+clamped zero-age reading, and because both commands build before they write, a refused tick leaves
+the last complete artifact set untouched.
+
+Where a publisher has no usable evidence for a window start at all, it says so: every snapshot
+carries `sourceChangedAtBasis`, either `MEASURED` or `UNOBSERVED`, sealed into its content
+address, and the page reads "Not yet measured" rather than an evidence age of `0s`. A window
+nobody measured is no longer byte-indistinguishable from one measured as a single instant old.
+The rendered obstruction is bound to the snapshot's own `sourceRevision`, `observedAt` and
+`sourceChangedAt`, so an obstruction from another projection, or over a window with a forged start
+or end, cannot be grafted into a resealed snapshot and displayed.
 
 The obstruction is not an actuator. It starts nothing, retries nothing, unblocks nothing and
 grants nothing. See [`docs/portfolio-drain-obstruction-design.md`](docs/portfolio-drain-obstruction-design.md)
@@ -461,7 +470,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 666 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 679 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

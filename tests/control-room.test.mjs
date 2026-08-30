@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import {
+  mkdtempSync, readFileSync, rmSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { buildControlRoomSnapshot, renderControlRoomHtml } from '../src/control-room.mjs';
 import {
@@ -10,6 +15,26 @@ import {
 } from '../src/factory-telemetry.mjs';
 
 const SHA = 'a'.repeat(64);
+
+const CONTROL_ROOM_PATH = fileURLToPath(new URL('../src/control-room.mjs', import.meta.url));
+const mutantScratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-mutant-'));
+test.after(() => rmSync(mutantScratch, { recursive: true, force: true }));
+
+/**
+ * Load a one-expression mutant of the shipped Module, so a witness can prove the expression it
+ * targets is the thing doing the work rather than passing for an unrelated reason. The mutant is
+ * written outside the source tree, so its sibling imports are rewritten to absolute URLs.
+ */
+async function importMutant(name, mutated) {
+  const source = readFileSync(CONTROL_ROOM_PATH, 'utf8');
+  assert.notEqual(mutated, source, `mutant ${name} changed nothing`);
+  const rewritten = mutated.replaceAll(
+    "from './", `from '${new URL('../src/', import.meta.url).href}`,
+  );
+  const mutantPath = join(mutantScratch, `${name}.mjs`);
+  writeFileSync(mutantPath, rewritten, 'utf8');
+  return import(pathToFileURL(mutantPath).href);
+}
 
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -1062,4 +1087,265 @@ test('an obstruction from another projection or window is refused at the render 
   assert.equal(honest.obstruction.evidenceRevision, honest.sourceRevision);
   assert.equal(honest.obstruction.observationWindow.endedAt, honest.observedAt);
   assert.match(renderControlRoomHtml(honest), /Missing evidence/u);
+});
+
+/**
+ * R2 blocker C — the displayed window's *start* must be bound to the snapshot too.
+ *
+ * R1 bound `evidenceRevision` and `observationWindow.endedAt`. `endedAt` is the half that cannot
+ * be stretched without also lying about `observedAt`, which is bound; `startedAt` is the half
+ * that lengthens a window, and it was unbound. `buildControlRoomSnapshot` assigns both
+ * `sourceChangedAt` and `windowStartedAt` from the same variable, so binding the third field can
+ * refuse nothing the builder itself produces — falsifier F6 in
+ * `docs/portfolio-drain-obstruction-design.md`.
+ */
+test('an obstruction whose window starts at a different instant is refused at the render seam', () => {
+  const honest = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const withoutRevision = ({ revision, ...body }) => body;
+  const reseal = (body) => ({
+    ...body, revision: createHash('sha256').update(canonicalJson(body)).digest('hex'),
+  });
+
+  // Only the window START is forged. `evidenceRevision` and `endedAt` stay truthful, so both
+  // bindings R1 shipped still pass, and both layers are resealed so both digests verify.
+  const forgedStart = '2020-01-01T00:00:00.000Z';
+  const startGrafted = reseal({
+    ...withoutRevision(honest),
+    obstruction: reseal({
+      ...withoutRevision(honest.obstruction),
+      observationWindow: {
+        startedAt: forgedStart,
+        endedAt: honest.observedAt,
+        durationMs: Date.parse(honest.observedAt) - Date.parse(forgedStart),
+      },
+    }),
+  });
+
+  assert.equal(
+    startGrafted.obstruction.evidenceRevision, startGrafted.sourceRevision,
+    'the R1 evidence binding still passes, so only the window-start binding can catch this',
+  );
+  assert.equal(startGrafted.obstruction.observationWindow.endedAt, startGrafted.observedAt);
+  assert.notEqual(
+    startGrafted.obstruction.observationWindow.startedAt, startGrafted.sourceChangedAt,
+    'and the displayed window contradicts the sourceChangedAt in the same JSON object',
+  );
+  assert.throws(
+    () => renderControlRoomHtml(startGrafted),
+    /obstruction/u,
+    'an obstruction whose window starts at a different instant must not be displayed',
+  );
+
+  // POSITIVE CONTROL: the honest snapshot the builder produced still renders, and its own two
+  // fields are equal by construction — rejection criterion 2.
+  assert.equal(honest.obstruction.observationWindow.startedAt, honest.sourceChangedAt);
+  assert.equal(honest.obstruction.state, 'THROUGHPUT_STALL');
+  assert.match(renderControlRoomHtml(honest), /Throughput stalled/u);
+});
+
+/**
+ * R2 blocker B — a window start the publisher could not measure must not be publishable as an
+ * indistinguishable measured one.
+ *
+ * The window is `[sourceChangedAt, observedAt]` either way. What differs is the publisher's
+ * epistemic position: `MEASURED` means the start is evidence of *earlier* observation, and
+ * `UNOBSERVED` means the adapter had no such evidence and the window therefore starts at the
+ * observation instant. The marker is sealed into the snapshot revision, so it cannot be added,
+ * removed or flipped without breaking the digest — assumption A12. Falsifier F5.
+ */
+test('the snapshot declares whether its window start was measured or merely unobserved', () => {
+  const shared = {
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  };
+  const measured = buildControlRoomSnapshot({
+    ...shared, sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const unobserved = buildControlRoomSnapshot({
+    ...shared,
+    sourceChangedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAtBasis: 'UNOBSERVED',
+  });
+  // A genuinely zero-age observation: the evidence changed at the exact instant it was observed.
+  // This is a real measurement and must stay distinguishable from the unobserved case.
+  const zeroAgeButMeasured = buildControlRoomSnapshot({
+    ...shared, sourceChangedAt: '2026-08-29T18:40:20.000Z',
+  });
+
+  assert.equal(measured.sourceChangedAtBasis, 'MEASURED', 'the default is a measured window');
+  assert.equal(unobserved.sourceChangedAtBasis, 'UNOBSERVED');
+  assert.equal(zeroAgeButMeasured.sourceChangedAtBasis, 'MEASURED');
+  assert.equal(unobserved.obstruction.observationWindow.durationMs, 0);
+  assert.equal(zeroAgeButMeasured.obstruction.observationWindow.durationMs, 0);
+  assert.notEqual(
+    unobserved.revision, zeroAgeButMeasured.revision,
+    'F5: two zero-length windows of different epistemic status must not publish equal bodies',
+  );
+  assert.equal(
+    unobserved.obstruction.revision, zeroAgeButMeasured.obstruction.revision,
+    'the obstruction contract is untouched: the marker is the adapter position, not the ruling',
+  );
+  assert.equal(
+    unobserved.obstruction.state, zeroAgeButMeasured.obstruction.state,
+    'and the marker never changes which obstruction state is reported',
+  );
+
+  // The rendered page must not print the single most reassuring reading available for a window
+  // nobody measured.
+  assert.match(renderControlRoomHtml(unobserved), /Not yet measured/u);
+  assert.doesNotMatch(renderControlRoomHtml(unobserved), /<strong>0s<\/strong>/u);
+  assert.match(renderControlRoomHtml(unobserved, { language: 'fr' }), /Pas encore mesuré/u);
+  assert.match(renderControlRoomHtml(zeroAgeButMeasured), /<strong>0s<\/strong>/u);
+  assert.doesNotMatch(renderControlRoomHtml(zeroAgeButMeasured), /Not yet measured/u);
+});
+
+test('NEGATIVE CONTROL: an evidence basis outside the closed vocabulary is a typed refusal', () => {
+  const shared = {
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:40:20.000Z',
+  };
+
+  assert.throws(
+    () => buildControlRoomSnapshot({ ...shared, sourceChangedAtBasis: 'ESTIMATED' }),
+    (error) => {
+      assert.equal(error.name, 'ControlRoomError');
+      assert.equal(error.code, 'InvalidEvidenceBasis');
+      return true;
+    },
+  );
+  assert.throws(
+    () => buildControlRoomSnapshot({ ...shared, sourceChangedAtBasis: null }),
+    { code: 'InvalidEvidenceBasis' },
+  );
+  // UNOBSERVED means "the window starts at the observation instant because nothing else could be
+  // shown". A long window claiming that basis is incoherent, so the marker cannot be used to
+  // dress up a measurement that was never taken.
+  assert.throws(
+    () => buildControlRoomSnapshot({
+      ...shared,
+      sourceChangedAt: '2026-08-29T18:30:20.000Z',
+      sourceChangedAtBasis: 'UNOBSERVED',
+    }),
+    { code: 'InvalidEvidenceBasis' },
+  );
+
+  // And the render seam refuses a resealed snapshot carrying a basis outside the vocabulary,
+  // rather than displaying a page whose evidence age means nothing.
+  const honest = buildControlRoomSnapshot(shared);
+  const withoutRevision = ({ revision, ...body }) => body;
+  const forged = {
+    ...withoutRevision(honest), sourceChangedAtBasis: 'ESTIMATED',
+  };
+  const resealed = {
+    ...forged, revision: createHash('sha256').update(canonicalJson(forged)).digest('hex'),
+  };
+  assert.throws(() => renderControlRoomHtml(resealed), /basis/u);
+});
+
+test('MECHANISM REVERT: the window-start binding is what refuses a forged observation window', async () => {
+  const source = readFileSync(CONTROL_ROOM_PATH, 'utf8');
+  const find = '      || obstruction.observationWindow.startedAt !== snapshot.sourceChangedAt';
+  assert.equal(
+    source.includes(find), true,
+    `the mechanism-revert witness targets "${find}", which is no longer in the source`,
+  );
+  const mutant = await importMutant('no-window-start-binding', source.replace(find, '      || false'));
+
+  const honest = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+  });
+  const withoutRevision = ({ revision, ...body }) => body;
+  const reseal = (body) => ({
+    ...body, revision: createHash('sha256').update(canonicalJson(body)).digest('hex'),
+  });
+  const forgedStart = '2020-01-01T00:00:00.000Z';
+  const startGrafted = reseal({
+    ...withoutRevision(honest),
+    obstruction: reseal({
+      ...withoutRevision(honest.obstruction),
+      observationWindow: {
+        startedAt: forgedStart,
+        endedAt: honest.observedAt,
+        durationMs: Date.parse(honest.observedAt) - Date.parse(forgedStart),
+      },
+    }),
+  });
+
+  assert.match(
+    mutant.renderControlRoomHtml(startGrafted), /Gaia/u,
+    'without the third binding clause the mutant renders a window it never measured',
+  );
+  assert.throws(() => renderControlRoomHtml(startGrafted), /obstruction/u);
+  assert.match(
+    mutant.renderControlRoomHtml(honest), /Gaia/u,
+    'and the mutant still renders the honest snapshot, so the clause is the only difference',
+  );
+});
+
+test('MECHANISM REVERT: the basis vocabulary check is what stops a meaningless evidence age', async () => {
+  const source = readFileSync(CONTROL_ROOM_PATH, 'utf8');
+  const find = '  if (!EVIDENCE_BASES.has(basis)';
+  assert.equal(
+    source.includes(find), true,
+    `the mechanism-revert witness targets "${find}", which is no longer in the source`,
+  );
+  const mutant = await importMutant(
+    'no-basis-vocabulary', source.replace(find, '  if (false'),
+  );
+
+  const honest = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:40:20.000Z',
+  });
+  const withoutRevision = ({ revision, ...body }) => body;
+  const forged = { ...withoutRevision(honest), sourceChangedAtBasis: 'ESTIMATED' };
+  const resealed = {
+    ...forged, revision: createHash('sha256').update(canonicalJson(forged)).digest('hex'),
+  };
+
+  assert.match(
+    mutant.renderControlRoomHtml(resealed), /Gaia/u,
+    'without the vocabulary check the mutant publishes an evidence age of unstated provenance',
+  );
+  assert.throws(() => renderControlRoomHtml(resealed), /basis/u);
+});
+
+test('MECHANISM REVERT: the UNOBSERVED coherence rule is what stops a dressed-up measurement', async () => {
+  const source = readFileSync(CONTROL_ROOM_PATH, 'utf8');
+  const find = "      || (basis === 'UNOBSERVED' && sourceChangedAt !== observedAt)) {";
+  assert.equal(
+    source.includes(find), true,
+    `the mechanism-revert witness targets "${find}", which is no longer in the source`,
+  );
+  const mutant = await importMutant(
+    'no-unobserved-coherence', source.replace(find, '      || false) {'),
+  );
+
+  // "UNOBSERVED" is a claim about what the publisher lacked, so it can only describe a window
+  // that starts where the observation does. Over a ten-minute window it would hide a real
+  // measurement behind "Not yet measured", which is a different lie in the same field.
+  const dressedUp = {
+    drainProjection: projection([item({ drainState: 'QUEUED' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    sourceChangedAt: '2026-08-29T18:30:20.000Z',
+    sourceChangedAtBasis: 'UNOBSERVED',
+  };
+
+  const built = mutant.buildControlRoomSnapshot(dressedUp);
+  assert.equal(
+    built.obstruction.observationWindow.durationMs, 600_000,
+    'without the coherence rule the mutant publishes UNOBSERVED over a measured ten-minute window',
+  );
+  assert.match(mutant.renderControlRoomHtml(built), /Not yet measured/u);
+  assert.throws(
+    () => buildControlRoomSnapshot(dressedUp), { code: 'InvalidEvidenceBasis' },
+  );
 });

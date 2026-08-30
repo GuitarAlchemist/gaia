@@ -138,19 +138,35 @@ while carrying the full breakdown beside it.
   carries the first-observation instant forward from the control-room snapshot it published on
   its previous tick, for as long as the content-addressed projection revision is unchanged, and
   starts a fresh window on the exact tick that revision changes. The carrier is the published
-  artifact itself, so an ordinary process restart resumes the window with no private state store;
-  a snapshot that is missing, unreadable, or pinned to a different revision restarts the window.
+  artifact itself, so an ordinary process restart resumes the window with no private state store.
+  That the artifact is the publisher's own is not an integrity property — the path can be written
+  by a second publisher, a rotation or an editor — so the carrier is verified with the same total
+  verifier the render seam applies to those exact bytes. A snapshot that is missing, unreadable,
+  that fails that verification, that is pinned to a different revision, or that claims to have
+  observed evidence before that evidence existed, is no prior observation and the window restarts.
+  Every one of those directions delays a stall; none invents one.
 - Evidence dated after the instant it was observed is a **typed refusal** at the control-room seam
   as well as inside the pure module. The file-fed adapter never asserts such an instant in the
   first place: an input mtime later than the observation instant shows nothing about how long the
   revision has been in force, so it is discarded and the window starts now, growing from there on
-  the next render. That leaves a single-shot file-fed render under a clock skewed behind the
-  filesystem showing a zero-length window; it is recorded as an open residual in
-  `docs/portfolio-drain-obstruction-design.md`. R0 clamped that case to a zero-length window, which published a
-  reassuring `Evidence age 0s` for a sensor whose true state is incoherent and marked the
-  substitution nowhere in the evidence. Both command-line adapters build the snapshot before they
+  the next render. That still leaves a single-shot file-fed render under a clock skewed behind the
+  filesystem showing a zero-length window — refusing there too would break three telemetry test
+  files outside that repair's scope, and it is recorded as an open residual in
+  `docs/portfolio-drain-obstruction-design.md` — but the discard is no longer silent. R0 clamped
+  that case, which published a reassuring `Evidence age 0s` for a sensor whose true state is
+  incoherent and marked the substitution nowhere in the evidence. Both command-line adapters build the snapshot before they
   write anything, so a refusal leaves the previously published portfolio, snapshot and HTML
   byte-identical and the watch loop retries on the next tick.
+- Every snapshot declares what kind of thing its window start is. `sourceChangedAtBasis` is a
+  closed two-value vocabulary: `MEASURED`, where the start is evidence of *earlier* observation —
+  a verified carried first observation, or an input timestamp at or before the observation
+  instant — and `UNOBSERVED`, where the publisher had none and the window therefore begins at the
+  observation instant. The marker is sealed into the snapshot revision, so it cannot be added,
+  removed or flipped without breaking the digest, and `UNOBSERVED` is refused over any window that
+  does not start where the observation does, so it can never dress up a measurement nobody took.
+  The page reads `Not yet measured` rather than `0s` for an `UNOBSERVED` window. The obstruction's
+  own contract is untouched: the marker records the adapter's epistemic position, never the
+  ruling.
 - `THROUGHPUT_STALL` requires eligible work, free capacity, no live **lane** and at least
   `THROUGHPUT_STALL_WINDOW_MS` (300 000 ms) of unchanged evidence. The threshold is a fixed
   exported constant, never a parameter: a configurable threshold would make the state mean
@@ -169,10 +185,13 @@ while carrying the full breakdown beside it.
 - The renderer re-verifies the nested obstruction three ways — its own digest against its own
   content, its invariants, and its binding to the snapshot it is displayed with — and refuses a
   snapshot whose obstruction was edited after it was built, or whose obstruction names an
-  evidence revision or window end other than the snapshot's own `sourceRevision` and `observedAt`.
-  The binding is what separates "internally consistent" from "about this evidence": without it a
-  self-consistent obstruction from another projection can be grafted into a resealed snapshot and
-  rendered. There is no animation in this section: an obstruction is a standing fact, and a
+  evidence revision, a window end or a window **start** other than the snapshot's own
+  `sourceRevision`, `observedAt` and `sourceChangedAt`. All three, because the window end cannot
+  be stretched without also lying about `observedAt`, which is bound — and the window start is the
+  half that lengthens it. The binding is what separates "internally consistent" from "about this
+  evidence": without it a self-consistent obstruction from another projection, or one carrying a
+  window start that contradicts the `sourceChangedAt` sitting in the same JSON object, can be
+  grafted into a resealed snapshot and rendered. There is no animation in this section: an obstruction is a standing fact, and a
   spinner would suggest something is happening about it.
 - The Module owns no clock, provider, network call, filesystem access or retry loop, adds no bus
   verb, and leaves `src/portfolio-drain.mjs` untouched, so `machineId`, `machineVersion` and
@@ -225,7 +244,7 @@ understand the default page.
 
 ## Interfaces
 
-`buildControlRoomSnapshot({ drainProjection, observedAt, sourceChangedAt,
+`buildControlRoomSnapshot({ drainProjection, observedAt, sourceChangedAt, sourceChangedAtBasis,
 progressObservations, completedRuns, telemetryProjection, dependencies })` is pure. It returns
 one content-addressed `gaia-control-room/1` value carrying a nested, separately content-addressed
 `gaia-portfolio-drain-obstruction/1`.

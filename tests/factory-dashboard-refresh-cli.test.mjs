@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   runFactoryDashboardRefreshCli, runFactoryDashboardRefreshLoop,
 } from '../scripts/factory-dashboard-refresh.mjs';
+import { renderControlRoomHtml } from '../src/control-room.mjs';
 
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -631,4 +632,86 @@ test('MECHANISM REVERT: carrying the first observation forward is what makes a s
     later.headline.detail, 'No tracked factory run is moving right now.',
     'and the headline degrades to the exact pre-change sentence this work exists to replace',
   );
+});
+
+/**
+ * R2 blocker A, in the adapter this repair lane exists for.
+ *
+ * `factory:dashboard:refresh` surveys real GitHub and writes a brand-new staged portfolio on
+ * every tick, so its window start comes from the control-room snapshot it published last time and
+ * from nothing else. R1 read that file with a bare `JSON.parse`: one unsealed edit of its
+ * `sourceChangedAt` — a file `renderControlRoomHtml` itself refuses — bought a `THROUGHPUT_STALL`
+ * measured in years over evidence observed for thirty seconds, laundered into a freshly sealed,
+ * fully renderable artifact set. The carrier is now verified with the same total verifier the
+ * render seam applies to those exact bytes, and an unverifiable carrier is no prior observation.
+ */
+test('the refresh adapter refuses a tampered continuity carrier rather than inventing a stall', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-carrier-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const portfolioPath = join(scratch, 'portfolio.json');
+  const snapshotPath = join(scratch, 'control-room.json');
+  const htmlPath = join(scratch, 'control-room.html');
+  const surveyed = portfolio([{
+    repository: 'GuitarAlchemist/ix', itemKind: 'ISSUE', itemId: 'issue-290',
+    itemNumber: 290, title: 'Repair a ready issue', state: 'READY',
+    updatedAt: '2026-08-29T18:00:00.000Z',
+  }]);
+  const argv = [
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', portfolioPath,
+    '--snapshot-out', snapshotPath,
+    '--html-out', htmlPath,
+  ];
+  const tick = (observedAt) => runFactoryDashboardRefreshCli(argv, {
+    now: () => new Date(observedAt),
+    surveyPortfolio: async () => surveyed,
+    writeStdout: () => {},
+  });
+
+  // Tick 1: this revision is new to this publisher, so the window starts now and the published
+  // body says the start is not evidence of earlier observation.
+  const first = await tick('2026-08-29T20:00:00.000Z');
+  assert.equal(first.sourceChangedAt, '2026-08-29T20:00:00.000Z');
+  assert.equal(first.obstruction.observationWindow.durationMs, 0);
+  assert.equal(first.obstruction.state, 'NONE');
+  assert.equal(first.sourceChangedAtBasis, 'UNOBSERVED');
+  assert.match(readFileSync(htmlPath, 'utf8'), /Not yet measured/u);
+
+  // Tick 2: the carrier verifies, so continuity holds and the window is now genuinely measured.
+  const second = await tick('2026-08-29T20:00:30.000Z');
+  assert.equal(second.sourceChangedAt, '2026-08-29T20:00:00.000Z');
+  assert.equal(second.obstruction.observationWindow.durationMs, 30_000);
+  assert.equal(second.sourceChangedAtBasis, 'MEASURED');
+
+  // One field, edited and NOT resealed — the exact coordinator replay witness.
+  const tampered = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+  tampered.sourceChangedAt = '2020-01-01T00:00:00.000Z';
+  writeFileSync(snapshotPath, `${JSON.stringify(tampered, null, 2)}\n`, 'utf8');
+  assert.throws(
+    () => renderControlRoomHtml(tampered), /revision/u,
+    'the render seam refuses the tampered carrier, so the adapter has a verifier available',
+  );
+
+  const third = await tick('2026-08-29T20:01:00.000Z');
+  assert.notEqual(
+    third.sourceChangedAt, '2020-01-01T00:00:00.000Z',
+    'an unverifiable carrier must never become the window start of a published snapshot',
+  );
+  assert.equal(third.sourceChangedAt, '2026-08-29T20:01:00.000Z');
+  assert.equal(third.obstruction.observationWindow.durationMs, 0);
+  assert.equal(
+    third.obstruction.state, 'NONE',
+    'no stall is invented; the window restarts, which only ever delays a stall',
+  );
+  assert.equal(third.sourceChangedAtBasis, 'UNOBSERVED');
+
+  // POSITIVE CONTROL: continuity resumes from the freshly published, verifiable carrier, so the
+  // repair verifies the carrier rather than abandoning the mechanism blocker 4 delivered.
+  const fourth = await tick('2026-08-29T20:06:30.000Z');
+  assert.equal(fourth.sourceChangedAt, '2026-08-29T20:01:00.000Z');
+  assert.equal(fourth.obstruction.observationWindow.durationMs, 330_000);
+  assert.equal(fourth.obstruction.state, 'THROUGHPUT_STALL');
+  assert.equal(fourth.sourceChangedAtBasis, 'MEASURED');
+  assert.match(readFileSync(htmlPath, 'utf8'), /Throughput stalled/u);
 });

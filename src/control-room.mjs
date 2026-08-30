@@ -49,6 +49,20 @@ const UNOBSERVED_KNOWLEDGE_STATES = new Set([
   'EVIDENCE_UNKNOWN', 'MISSING_FROM_OPEN_SNAPSHOT',
 ]);
 
+/**
+ * What kind of thing the window start is, over a closed two-value vocabulary.
+ *
+ * `MEASURED` says the start is evidence of *earlier* observation: a verified first-observation
+ * instant this publisher carried forward, or an input timestamp at or before the instant it was
+ * observed. `UNOBSERVED` says the publisher had no such evidence at all and the window therefore
+ * begins at the observation instant.
+ *
+ * Both publish a window; only one of them publishes a measurement. Without this field a window
+ * the publisher declined to measure and a window it measured as one instant old were byte-equal,
+ * and `Evidence age 0s` — the single most reassuring reading available — was printed for both.
+ */
+const EVIDENCE_BASES = new Set(['MEASURED', 'UNOBSERVED']);
+
 export class ControlRoomError extends Error {
   constructor(code, message) {
     super(message);
@@ -96,6 +110,23 @@ function requireTimestamp(value) {
     throw new ControlRoomError('InvalidObservation', 'observedAt must be an ISO timestamp');
   }
   return value;
+}
+
+/**
+ * `UNOBSERVED` is a statement about what the publisher lacked, so it can only ever describe a
+ * window that starts where the observation does. Allowing it over a longer window would let the
+ * marker dress up a measurement nobody took, which is the defect it exists to remove.
+ */
+function requireEvidenceBasis(basis, sourceChangedAt, observedAt) {
+  if (!EVIDENCE_BASES.has(basis)
+      || (basis === 'UNOBSERVED' && sourceChangedAt !== observedAt)) {
+    throw new ControlRoomError(
+      'InvalidEvidenceBasis',
+      'the source-changed-at basis must be MEASURED, or UNOBSERVED over a window that starts at'
+      + ' the instant it was observed',
+    );
+  }
+  return basis;
 }
 
 function latestProgressByItem(observations) {
@@ -380,7 +411,15 @@ function measureKnowledgeCoverage(items) {
   };
 }
 
-function requireControlRoomSnapshot(value) {
+/**
+ * Total verification of one published `gaia-control-room/1` artifact.
+ *
+ * Exported because the file-fed adapter reads exactly these bytes back as its observation-window
+ * carrier, and a reader of a published artifact must not be more credulous than its renderer. An
+ * adapter that trusted three shallow fields could adopt a window start out of a file this
+ * function refuses, and publish a stall measured in years over evidence observed for seconds.
+ */
+export function requireControlRoomSnapshot(value) {
   if (!value || value.schema !== CONTROL_ROOM_SCHEMA
       || value.effect !== 'NONE' || value.authority !== 'NONE'
       || !Array.isArray(value.items) || typeof value.revision !== 'string') {
@@ -398,6 +437,7 @@ function requireControlRoomSnapshot(value) {
   if (canonicalJson(value.knowledgeCoverage) !== canonicalJson(expectedCoverage)) {
     throw new ControlRoomError('InvalidSnapshot', 'the control-room snapshot knowledge coverage is invalid');
   }
+  requireEvidenceBasis(value.sourceChangedAtBasis, value.sourceChangedAt, value.observedAt);
   requireObstruction(value.obstruction, value);
   return value;
 }
@@ -413,7 +453,12 @@ function requireControlRoomSnapshot(value) {
  * obstruction is about this evidence". Without it a self-consistent obstruction classified from
  * another projection over another window can be grafted into a resealed snapshot and rendered
  * beside a `sourceRevision` that contradicts every word of it. Full re-derivation is impossible
- * here; equality of two fields already in hand is not, and it is checked.
+ * here; equality of three fields already in hand is not, and all three are checked.
+ *
+ * All three, because `endedAt` is the half of the window that cannot be stretched without also
+ * lying about `observedAt`, which is bound — and `startedAt` is the half that lengthens it.
+ * `buildControlRoomSnapshot` assigns the window start and `sourceChangedAt` from the same
+ * variable, so this can refuse no snapshot the builder itself produced.
  */
 function requireObstruction(obstruction, snapshot) {
   if (!obstruction || typeof obstruction !== 'object' || Array.isArray(obstruction)
@@ -445,7 +490,8 @@ function requireObstruction(obstruction, snapshot) {
     );
   }
   if (obstruction.evidenceRevision !== snapshot.sourceRevision
-      || obstruction.observationWindow.endedAt !== snapshot.observedAt) {
+      || obstruction.observationWindow.endedAt !== snapshot.observedAt
+      || obstruction.observationWindow.startedAt !== snapshot.sourceChangedAt) {
     throw new ControlRoomError(
       'InvalidSnapshot',
       'the control-room snapshot obstruction is not bound to this snapshot evidence and window',
@@ -502,12 +548,14 @@ function nextActionFor(items, decisions, blockers) {
 
 export function buildControlRoomSnapshot({
   drainProjection, observedAt, sourceChangedAt = observedAt,
+  sourceChangedAtBasis = 'MEASURED',
   progressObservations = [], completedRuns = [], telemetryProjection = null,
   dependencies = null,
 }) {
   const projection = requireProjection(drainProjection);
   const at = requireTimestamp(observedAt);
   const changedAt = requireTimestamp(sourceChangedAt);
+  const basis = requireEvidenceBasis(sourceChangedAtBasis, changedAt, at);
   const observedAtMs = Date.parse(at);
   const latest = latestProgressByItem(progressObservations);
   const spine = requireTelemetryProjection(telemetryProjection);
@@ -561,6 +609,10 @@ export function buildControlRoomSnapshot({
     schema: CONTROL_ROOM_SCHEMA,
     observedAt: at,
     sourceChangedAt: changedAt,
+    // Sealed into the snapshot revision, so the distinction between a window this publisher
+    // measured and one it declined to measure cannot be added, removed or flipped without
+    // breaking the digest. A distinction that lives only in prose does not reach a consumer.
+    sourceChangedAtBasis: basis,
     sourceRevision: projection.revision,
     effect: 'NONE',
     authority: 'NONE',
@@ -659,6 +711,7 @@ const RENDER_COPY = Object.freeze({
     items: 'items', noBlockers: 'No blockers recorded.',
     readOnly: 'Read-only dashboard: effect=NONE and authority=NONE.', technical: 'Technical identities',
     run: 'Run', transition: 'Last verified transition', evidenceAge: 'Evidence age',
+    notYetMeasured: 'Not yet measured',
     state: { ACTIVE: 'Active', STALE: 'Needs attention', PAUSED: 'Paused' },
     obstruction: 'Why the drain is not moving', recovery: 'Bounded recovery',
     affected: 'Affected items', declaredEdges: 'Declared dependency evidence',
@@ -683,6 +736,7 @@ const RENDER_COPY = Object.freeze({
     items: 'éléments', noBlockers: 'Aucun blocage enregistré.',
     readOnly: 'Dashboard read-only : effect=NONE et authority=NONE.', technical: 'Identités techniques',
     run: 'Exécution', transition: 'Dernière transition vérifiée', evidenceAge: 'Âge de la preuve',
+    notYetMeasured: 'Pas encore mesuré',
     state: { ACTIVE: 'En cours', STALE: 'À vérifier', PAUSED: 'En pause' },
     obstruction: 'Pourquoi le drain n’avance pas', recovery: 'Reprise bornée',
     affected: 'Éléments concernés', declaredEdges: 'Preuve de dépendances déclarée',
@@ -824,6 +878,10 @@ const OBSTRUCTION_SEVERITY = Object.freeze({
  */
 function renderObstruction(snapshot, copy, language) {
   const { obstruction } = snapshot;
+  // A window nobody measured must not print the most reassuring number available for it.
+  const evidenceAge = snapshot.sourceChangedAtBasis === 'UNOBSERVED'
+    ? copy.notYetMeasured
+    : formatDuration(obstruction.observationWindow.durationMs);
   const affected = obstruction.affectedItemIds.length === 0
     ? ''
     : `<p class="evidence-line"><strong>${copy.affected}:</strong> `
@@ -845,7 +903,7 @@ function renderObstruction(snapshot, copy, language) {
     <h2>${copy.obstruction}</h2>
     <div class="facts">
       <div class="fact"><span class="semantic-symbol" aria-hidden="true">■</span>${escapeHtml(copy.obstructionState[obstruction.state])} <code>${escapeHtml(obstruction.state)}</code><strong>${escapeHtml(localizedObstructionLabel(obstruction, language))}</strong></div>
-      <div class="fact">${copy.evidenceAge}<strong>${escapeHtml(formatDuration(obstruction.observationWindow.durationMs))}</strong></div>
+      <div class="fact">${copy.evidenceAge}<strong>${escapeHtml(evidenceAge)}</strong></div>
       ${recovery}
     </div>
     ${affected}
