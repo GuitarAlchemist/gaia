@@ -114,6 +114,142 @@ The selected design is freely reversible. Its deliberate costs are a closed voca
 an unknown future drain state as an evidence gap, and a fixed precedence that reports one cause
 while carrying the full breakdown beside it.
 
+### Progress and ETA UX — Design It Twice
+
+R3 answers the question the R0 default view conflated. `Now`, the heartbeat chip, the blocker
+mix and the pace sentence sat in one visual register, so an operator could not tell **what is
+moving** from **what is merely being pinged**, could not tell a blocker *of the current run*
+from a portfolio-wide backlog count, and read `Unknown pace: fewer than 5 comparable completed
+runs.` without ever learning which evidence was missing. Two seams were compared before any
+production code was written.
+
+**(A) Embed all of it in the existing snapshot and renderer — rejected.**
+Put the three operator sentences, the freshness lattice and the backlog shares directly into
+`buildControlRoomSnapshot`'s body and into `renderProgress`. It is the smallest diff and cannot
+drift from the snapshot, because it *is* the snapshot. It was rejected on three specific grounds.
+It changes the `gaia-control-room/1` body, so every previously published `revision` for the same
+evidence moves and every machine consumer must re-verify — a presentation improvement becoming a
+migration. It binds no evidence of its own, so *"a heartbeat-only tick changes nothing"* could
+only be eyeballed across rendered bytes that also carry a moving `observedAt`; the single most
+important constraint of this slice would have no seam to assert it at. And the sentences would
+exist only as HTML, so a CLI status line, a bus payload or a DuckDB query would have to
+re-derive the rules or parse a document.
+
+**(B) A pure derived activity artifact bound to the snapshot — selected.**
+One new module, `src/control-room-activity.mjs`, exporting
+`summarizeControlRoomActivity({ snapshot })`. It re-verifies the published snapshot's own digest,
+reads nothing else, and returns one separately content-addressed, deeply frozen
+`gaia-control-room-activity/1` value: for each active item, exactly three bullets — current
+verified **action**, most recent concrete **result**, next evidence **checkpoint or blocker** —
+authored by a closed phrasebook keyed on tokens the snapshot already carries. It collects no
+evidence, spends no provider token, writes nothing, and imports only `node:crypto`.
+`gaia-control-room/1` is untouched: same schema, same body, same canonical-JSON recipe, same
+digest for the same inputs.
+
+The value carries **two digests**. `revision` covers the whole body and therefore moves on every
+tick, because it binds `observedAt`. `contentRevision` covers `{ machine, items }` only, and is
+what makes requirement 9 an assertion rather than an intention: **no wall-clock arithmetic and no
+heartbeat instant may enter a bullet.** The only instant a bullet may carry is the `observedAt` of
+a verified telemetry `lastTransition`, which the spine builds by construction to exclude
+`run.heartbeat` (`src/factory-telemetry.mjs`). Drain-sourced and progress-sourced bullets carry
+`observedAt: null` — the drain projection is identified by its revision, and `gaia-cli-progress/1`
+is unchained self-report that binds no verifiable instant at all. Ages are therefore derived at
+render time from `snapshot.observedAt`, never stored. A tick whose only new events are heartbeats
+produces a byte-identical `contentRevision` for that reason and no other.
+
+**The four-state evidence lattice, and what it deliberately does not mean.**
+`FRESH`, `PARTIAL`, `STALE` and `UNKNOWN` describe **the evidence**, never the motion.
+`UNKNOWN` is an occupied lane with no telemetry run and no progress record at all — absence of
+evidence, never rendered as health. `STALE` is `activity.state === 'STALE'`: evidence existed and
+expired. `PARTIAL` is a bullet whose source is unverified, or whose bound evidence carries the
+spine's honest `UNKNOWN` sentinel. `FRESH` is everything bound, named and verified. Liveness is
+carried separately, by the run-state sentence and by the existing heartbeat chip, so a blocked run
+whose block is recorded with a real digest reads `Evidence FRESH` beside `Stopped on <BLOCKER>` —
+which is exactly the split requirement 2 asks for. Nothing here re-measures a heartbeat: the
+lattice reads decisions `itemTelemetry` and `itemActivity` already made against one window.
+
+**Deviations from the advisory design, recorded exactly.**
+
+- `MAX_ACTIVITY_BYTES` is `16384`, not the advisory `8192`. Eight items × three bullets, each
+  bullet carrying a 64-hex `evidenceRevision`, an instant, a code, a source, a state and a
+  sentence, canonicalises to roughly 1.3 KB per item; `8192` would have made the documented
+  `MAX_ACTIVITY_ITEMS = 8` unreachable, turning a guard rail into a defect. The cap still exists
+  so that a future phrasebook edit that breaks the fragment budget fails a test, not a browser.
+- `src/cli-progress.mjs` does not export `HUMAN_STAGES` and is outside this slice's permitted
+  files, so the twelve stage sentences are restated as a closed table inside the activity module
+  and sealed into `rulesRevision`. A future rename in either place is a visible digest change,
+  not a silent divergence.
+- The renderer's `activity` option is **additive and optional, and the renderer computes the same
+  value itself when it is absent**, so the Current run card is complete for every caller. Supplied
+  activity is not trusted: it is verified for self-consistency and then for binding to *this*
+  snapshot. Consequently `renderControlRoomHtml(s)` and
+  `renderControlRoomHtml(s, { activity: summarizeControlRoomActivity({ snapshot: s }) })` are
+  byte-identical, which is the property the option is tested against.
+
+**Unavoidable deviation from byte-identical R0 output.** Requirements 1, 2, 4, 5 and 7 are
+statements about the committed control-room shell itself, not about the optional activity value,
+so the document changes whether or not activity is supplied. Exactly these shell changes are
+made, and nothing else:
+
+1. a **Current run** card is placed first inside `<main>`, carrying state, current stage or gate,
+   elapsed work, the last verified transition and the next evidence checkpoint or blocker;
+2. **evidence freshness is labelled separately from elapsed work**, with its own state word,
+   symbol and the sentence that a heartbeat proves the sensor is alive rather than that work
+   advanced;
+3. the aggregate `blockers` mix moves out of *"Why work is blocked"* into a separately labelled
+   **Portfolio backlog** section carrying scope, as-of instant, total, count and percentage, and
+   stating that those counts are not blockers of the current run; run-level `TELEMETRY_*` signals
+   stay with the run and are never counted as portfolio backlog;
+4. the pace sentence becomes **Pace calibration: n/5 comparable completed runs**, and an
+   unavailable ETA names the exact missing evidence instead of *"Insufficient comparable
+   history."*; a human forecast is rendered only from the explicit `operatorForecast` render
+   option and only under the label **Operator forecast**, never invented;
+5. the stylesheet is restructured from desktop-first `max-width` queries to a phone-first base
+   with `min-width` breakpoints at 768 px, 1024 px and 1440 px, and `main` widens to 1600 px, so a
+   large viewport is a bounded multi-column grid rather than a narrow central strip.
+
+`buildControlRoomSnapshot`, `requireControlRoomSnapshot`, the obstruction contract, the
+fog-of-war contract, the pace and ETA policy and every published digest are unchanged; the
+deviation is confined to the rendered document and to the new module.
+
+**Falsifiers, pre-committed.** F1: a tick carrying only heartbeats moves `contentRevision`.
+F2: a bullet is displayed that the bound `snapshotRevision` alone does not support. F3: an
+unverified `gaia-cli-progress/1` record fills the RESULT slot. F4: fresh, partial, stale and
+unknown are not four distinct states each carrying a word and a symbol. F5: any byte of prose,
+prompt, log, URL or credential reaches a bullet. F6: a percentage, ETA or confidence score that
+is not copied from bound evidence appears in a bullet. F7: a self-consistent activity value from
+another snapshot, instant or projection renders. F8: a large viewport still renders one narrow
+column, or a phone viewport scrolls horizontally.
+
+**Rejection criterion.** Roll back to inline rendering with no module if the module acquires a
+clock, a provider, a network call, a filesystem read or any `effect` or `authority` other than
+`NONE`; if a bullet is emitted that is not derivable from the bound snapshot; if heartbeat
+inertness is satisfied by convention rather than by assertion; or if the `gaia-control-room/1`
+body has to change to make any of it work.
+
+**Reversibility: freely reversible.** Delete the module, its test, the renderer option and the
+new sections. No schema migrates, no persisted evidence changes, no user data is transformed.
+
+The extension is bound to Gaia base commit
+`e4d242abe10118bc63244d5973077fb665724db9`, Git blob
+`13785627547556fb44e963244141768613251dcc` for `src/control-room.mjs`, Git blob
+`237e337cbbcd75d2a7508b0bcb1d4d97dff7cc6a` for `src/factory-telemetry.mjs`, Git blob
+`82b7c1f441ede600f1a18fe774d4de22e844b70a` for `src/cli-progress.mjs`, and Git blob
+`4b4c3f0f8a8aaa2047d9284ffc279868b23d3479` for
+`docs/engineering-and-research-principles.md`.
+
+Canonical receipt body:
+
+```json
+{"baseCommit":"e4d242abe10118bc63244d5973077fb665724db9","inputBlobs":{"cliProgress":"82b7c1f441ede600f1a18fe774d4de22e844b70a","controlRoom":"13785627547556fb44e963244141768613251dcc","engineeringPrinciples":"4b4c3f0f8a8aaa2047d9284ffc279868b23d3479","factoryTelemetry":"237e337cbbcd75d2a7508b0bcb1d4d97dff7cc6a"},"reversibility":"freely-reversible","schema":"gaia-decision-receipt/1","selectedDesign":"snapshot-bound-derived-control-room-activity-projection","status":"SELECTED"}
+```
+
+Receipt SHA-256:
+`94fd98ebd41571aa49e0850609f30b909f3594d7960ee77d7f2fde92a2a787d5`.
+
+This receipt selects an implementation candidate; it grants no runtime, publication or merge
+authority and is not independent approval.
+
 ## Obstruction truth rules
 
 - Exactly one state is reported, from a closed vocabulary of nine: `NONE`, `NO_ELIGIBLE_WORK`,
@@ -206,15 +342,24 @@ Without it, no deadlock can ever be reported.
 
 Every visible element answers one operator question:
 
-1. **Now** — active, stale or paused. Stored `RUNNING` state alone is insufficient.
+1. **Current run** — first, and largest. State, current stage or gate, elapsed work, the last
+   verified transition, evidence freshness as its own labelled fact, and the next evidence
+   checkpoint or blocker. Stored `RUNNING` state alone is insufficient, and a fresh ping is
+   never shown as progress.
 2. **Next action** — one closed action from the drain projection, or a stale-run check.
 3. **Why the drain is not moving** — one named obstruction, the age of the evidence that named
    it, the items it affects and one bounded advisory recovery. An empty drain and a blocked drain
    never share a sentence.
-4. **Verifiable progress** — named gates for each bounded lifecycle.
-5. **Pace and ETA** — measured evidence, its sample size, or an explicit unknown.
-6. **Fog of war** — known, partial and unobserved evidence plus the next reconnaissance frontier.
-7. **Proof** — the content-addressed control-room snapshot and source projection revision.
+4. **Verifiable progress** — named gates for each bounded lifecycle, and at most three
+   deterministic activity bullets per live task: current verified action, most recent concrete
+   result, next evidence checkpoint or blocker.
+5. **Pace and ETA** — pace calibration as `n/5` comparable completed runs, a statistical ETA
+   only where the evidence supports one, otherwise the exact missing evidence, and an
+   **Operator forecast** only where a human explicitly supplied it.
+6. **Portfolio backlog** — the aggregate blocked mix with its scope, as-of instant, total, count
+   and percentage, stated as portfolio-wide and explicitly not blockers of the current run.
+7. **Fog of war** — known, partial and unobserved evidence plus the next reconnaissance frontier.
+8. **Proof** — the content-addressed control-room snapshot and source projection revision.
 
 The graph, Gantt and full state remain optional detail views. They are not required to
 understand the default page.
@@ -242,6 +387,55 @@ understand the default page.
 - `effect` and `authority` are both `NONE`. This module cannot start a lane, spend a grant,
   publish, merge, assign, label or mutate GitHub.
 
+## Activity summary truth rules
+
+- `summarizeControlRoomActivity({ snapshot })` in `src/control-room-activity.mjs` is pure, imports
+  only `node:crypto`, and returns one deeply frozen `gaia-control-room-activity/1` value with
+  `effect: NONE` and `authority: NONE`. It reads no clock, opens no file, calls no provider and
+  spends no token.
+- An item is summarized only when it is a live task: not terminal, and either occupying a lane
+  (`CLAIMED` or `RUNNING`) or carrying an observed telemetry run. Aggregate portfolio blockers are
+  not tasks and are counted in the Portfolio backlog section instead.
+- Exactly three bullets per item, in fixed slot order. Slot 1 `ACTION` is what the task is doing
+  now; slot 2 `RESULT` is the last **verified** transition, or the explicit `NO_VERIFIED_RESULT`
+  absence; slot 3 is `BLOCKER` when a blocker exists and `CHECKPOINT` otherwise. The blocker
+  displaces the checkpoint because `TRANSITIONS.BLOCKED` is empty — a blocked run admits no next
+  transition, so naming one would be a fabricated expectation.
+- An unverified source may never fill the RESULT slot. `gaia-cli-progress/1` is self-reported and
+  unchained, so it may say what is happening and never that something was produced.
+- `run.heartbeat` is named by no checkpoint, in any run state. It advances no state and produces
+  no evidence, so offering it as something to wait for would invite an operator to read the next
+  ping as progress.
+- Every sentence comes from the closed phrasebook sealed into `machine.rulesRevision`; every
+  interpolated value is a `TOKEN` matching `/^[A-Z][A-Z0-9_]{0,31}$/`. There is no field whose
+  content originates outside a closed set, so chain-of-thought, prompts, terminal or provider
+  logs, URLs, credentials and worker-authored prose have nowhere to live — by construction, not by
+  filtering.
+- The renderer refuses a supplied activity value whose own digests do not match its content, or
+  which is not bound to this snapshot's `revision`, `observedAt`, `sourceRevision` and telemetry
+  projection revision, or which names an item the snapshot does not carry. Internally consistent
+  is not the same as about this evidence.
+- Bullet ages are derived at render time from `snapshot.observedAt`. No age is stored, so a
+  heartbeat-only tick changes no byte of `contentRevision` and no rendered sentence.
+
+## Responsive layout rules
+
+- The document is phone-first. The base stylesheet declares no multi-column
+  `grid-template-columns`, so a viewport narrower than 768 px is one readable column with the
+  Current run card first and nothing that can scroll horizontally: every grid child carries
+  `min-width: 0`, every identifier wraps with `overflow-wrap: anywhere`, and wide content scrolls
+  inside its own container rather than the page.
+- `min-width: 768px` reflows to two columns for the metrics, backlog, pace and evidence panels
+  while the hero stays stacked; `min-width: 1024px` opens the hero and the work list;
+  `min-width: 1440px` widens `main` to 1600 px and expands the Current run facts and the work list
+  to three columns, so a large desktop is a bounded multi-column grid and never a narrow central
+  strip.
+- Colour is never meaning. Every status carries a word and a symbol: `●` fresh or active, `◐`
+  partial, `▲` stale or needs attention, `■` blocked, `○` unknown, unobserved or neutral.
+- The one animation in the product remains `.heartbeat-pulse`, emitted only when the snapshot
+  carries a genuinely fresh recorded heartbeat, and disabled entirely under
+  `prefers-reduced-motion: reduce`. No keyframe is emitted at all when nothing is pulsing.
+
 ## Interfaces
 
 `buildControlRoomSnapshot({ drainProjection, observedAt, sourceChangedAt, sourceChangedAtBasis,
@@ -253,9 +447,20 @@ one content-addressed `gaia-control-room/1` value carrying a nested, separately 
 dependencies })` in `src/portfolio-drain-obstruction.mjs` is the obstruction truth Module. It is
 pure, imports only `node:crypto`, and is usable without the control room.
 
-`renderControlRoomHtml(snapshot)` returns one dependency-free HTML document. It embeds no
-remote resource. Browser-side code only ages the already displayed snapshot and stops a pulse
-when its heartbeat expires.
+`summarizeControlRoomActivity({ snapshot })` in `src/control-room-activity.mjs` is the activity
+truth Module. It is pure, imports only `node:crypto`, and returns one content-addressed, deeply
+frozen `gaia-control-room-activity/1` value carrying two digests: `revision` over the whole body,
+and `contentRevision` over what the summary actually says. `requireControlRoomActivity(value)`
+verifies one such value on its own terms, and is usable without the control room.
+
+`renderControlRoomHtml(snapshot, { language, activity, operatorForecast })` returns one
+dependency-free HTML document. It embeds no remote resource. Browser-side code only ages the
+already displayed snapshot and stops a pulse when its heartbeat expires. `activity` is additive
+and optional: when it is omitted the renderer derives the same value itself, and when it is
+supplied it is verified for self-consistency and for binding to this exact snapshot before a
+single bullet is displayed. `operatorForecast` is the only way a human forecast can appear; it is
+a bounded plain sentence, rendered under its own **Operator forecast** label, excluded from the
+statistical ETA, and never invented when absent.
 
 `npm run factory:dashboard` is the filesystem adapter. It accepts either an existing exact
 drain projection or a portfolio plus optional receipt and hold arrays, writes replaceable
