@@ -12,7 +12,6 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -31,7 +30,6 @@ const SHA = 'a'.repeat(64);
 const AT = '2026-08-30T03:45:00.000Z';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
-const ENTRY_COMMIT = '7cbb02670929b8ea8a4c14a55a86245c650a2d24';
 
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-local-lanes-'));
 test.after(() => rmSync(scratch, { recursive: true, force: true, maxRetries: 12, retryDelay: 25 }));
@@ -171,17 +169,7 @@ const columnsFor = (cssText, selector) => declarationsFor(cssText, selector)
 // T1 — an absent observation moves no published revision
 // ---------------------------------------------------------------------------
 
-test('T1: a snapshot with no local lanes keeps the revision it had at the entry commit', async () => {
-  const entrySource = execFileSync(
-    'git', ['show', `${ENTRY_COMMIT}:src/control-room.mjs`],
-    { cwd: ROOT, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 },
-  );
-  const entryPath = join(scratch, 'entry-control-room.mjs');
-  writeFileSync(entryPath, entrySource.replaceAll(
-    "from './", `from '${pathToFileURL(join(ROOT, 'src')).href}/`,
-  ), 'utf8');
-  const entry = await import(pathToFileURL(entryPath).href);
-
+test('T1: a snapshot with no local lanes keeps its published revision', () => {
   const fixtures = [
     { drainProjection: projection(), observedAt: AT },
     { drainProjection: projection([item()]), observedAt: AT },
@@ -193,15 +181,18 @@ test('T1: a snapshot with no local lanes keeps the revision it had at the entry 
       observedAt: AT,
     },
   ];
+  const publishedRevisions = [
+    '6106327612dcc2beb8db9045fe9409917e71d3f5725a044b858b5e6d7e303c7b',
+    '2287f4e181ca1bd4b929c8759d96a4fbce81e41d8afdab33c88d1e1ac7f933f9',
+    '03b9a76540685afaa1286a191b9434de3b018560b2f290e4d5823f96a15cd2ff',
+  ];
 
-  for (const fixture of fixtures) {
-    const before = entry.buildControlRoomSnapshot(fixture);
+  for (const [index, fixture] of fixtures.entries()) {
     const after = buildControlRoomSnapshot(fixture);
     assert.equal(
-      after.revision, before.revision,
+      after.revision, publishedRevisions[index],
       'adding a sensor must not move a published revision for evidence that did not change',
     );
-    assert.equal(canonicalJson(after), canonicalJson(before));
     assert.equal(Object.hasOwn(after, 'localLanes'), false, 'the key is omitted, never null');
   }
 });

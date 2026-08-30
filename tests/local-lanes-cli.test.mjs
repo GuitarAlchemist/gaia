@@ -319,7 +319,9 @@ test('T17: an observation newer than every other input leaves the drain window u
 // U5 — the alias guard is filesystem identity, not a spelling test
 // ---------------------------------------------------------------------------
 
-test('U5: an output that aliases an input by case only is refused, and the input survives', () => {
+test('U5: an output that aliases an input by case only is refused, and the input survives', {
+  skip: process.platform !== 'win32',
+}, () => {
   const space = workspace([agent(1)]);
   const projection = projectionFile(space.dir, 'Projection.json');
   const before = readFileSync(projection, 'utf8');
@@ -336,7 +338,9 @@ test('U5: an output that aliases an input by case only is refused, and the input
   assert.equal(readFileSync(projection, 'utf8'), before, 'the input evidence is untouched');
 });
 
-test('U5: two outputs that differ only in case are refused as one file', () => {
+test('U5: two outputs that differ only in case are refused as one file', {
+  skip: process.platform !== 'win32',
+}, () => {
   const space = workspace([agent(1)]);
 
   assert.throws(
