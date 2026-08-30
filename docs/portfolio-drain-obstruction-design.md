@@ -642,3 +642,219 @@ the seven-map vocabulary duplication, the French view's dropped counts, the `NO_
 count disagreement, the unread `counts.occupied`, the loose `requireWindow` parsing and the
 dashboard's silent acceptance of unknown flags all remain open and are recorded as residuals rather
 than repaired here.
+
+# R2 repair decision and amendment
+
+Recorded **before** any R2 implementation edit, as a labelled amendment rather than a rewrite of
+the R0 or R1 text above. Nothing earlier is deleted; where R2 supersedes an earlier sentence, that
+sentence stays and this section says so explicitly.
+
+R2 exists because two fresh independent reviews of R1 (Standards and Spec) each returned
+`REQUEST_CHANGES` against commit `7373bebdd0461fdcda54b0cbd4b5424c80b8f432`. R2 repairs only the
+three blockers this writer independently reproduced from those reviews' own witnesses. It is a
+repair lane, not a feature lane.
+
+## The three blockers R2 repairs, each reproduced before it was believed
+
+Reproduced by running the coordinator replay `replay-gaia-drain-obstruction-r1-blockers.mjs`
+against the entry tree, and again by hand against each seam. The reviews were read as claims;
+these are the measurements.
+
+| # | Blocker | Where R1 diverged | Reproduced witness |
+| --- | --- | --- | --- |
+| A | `firstObservationOf` trusts a prior control-room carrier without verifying its own content-addressed snapshot revision, so a tampered past `sourceChangedAt` invents a stall. | `scripts/factory-dashboard.mjs:108-121` checks three shallow fields and calls no verifier, though the verifier for exactly this file (`requireControlRoomSnapshot`) ships in the same module. | One unsealed edit of the published `sourceChangedAt` to `2020-01-01T00:00:00.000Z` — a file `renderControlRoomHtml` itself refuses — yields on the next tick `THROUGHPUT_STALL` with `durationMs 210196830000` (about 6.7 years) over evidence observed for 30 s, in a fully sealed snapshot that then renders. |
+| B | File-fed evidence whose newest input mtime lands after `observedAt` is silently replaced with `observedAt` and published as a zero-age `NONE` indistinguishable from a truthful one. | `scripts/factory-dashboard.mjs:143-147`, step 3 of the R1 correction, marks the substitution nowhere in the published evidence. | A future-mtime render publishes `sourceChangedAt === observedAt`, `durationMs 0`, `state NONE`, and no field anywhere in the sealed body distinguishes it from a genuinely one-instant-old observation. |
+| C | `requireObstruction` binds `evidenceRevision` and `observationWindow.endedAt` to the snapshot, but not `observationWindow.startedAt` to `sourceChangedAt`, so a separately resealed forged start renders. | `src/control-room.mjs:447-448`. | An obstruction whose `startedAt` is forged to `2020-01-01T00:00:00.000Z`, resealed and grafted into a resealed honest snapshot, is accepted by `renderControlRoomHtml` and rendered beside the snapshot's own contradicting `sourceChangedAt`. |
+
+Blockers A and C are one-expression repairs against a standard this document already committed to,
+so they get no mechanism comparison: there is exactly one candidate that is not a policy change.
+Blocker B is a genuine public-contract question and is compared below, as the R2 mandate requires.
+
+## Assumptions carried into R2
+
+- **A10.** A published artifact is evidence only to the extent it is verified. The publisher's own
+  previous snapshot (A6) remains legitimate evidence, but "mine" is not an integrity property: the
+  path may be written by a second publisher, a rotation, or an editor.
+- **A11.** A downstream consumer reads the published JSON body, not this document and not a source
+  comment. An epistemic distinction that exists only in prose does not exist.
+- **A12.** A field sealed into the content-addressed snapshot revision cannot be added, removed or
+  flipped without breaking the digest, so a marker carried there is as trustworthy as the snapshot
+  it qualifies — no more, and no less.
+
+A10 through A12 are additions. A1 through A9 above are unchanged.
+
+## Blocker A — the unverified continuity carrier
+
+### Mechanism A1 — verify the carrier with the repository's own snapshot verifier — **selected**
+
+`firstObservationOf` stops trusting the file. It runs the published snapshot through
+`requireControlRoomSnapshot` — the same total verifier `renderControlRoomHtml` already applies to
+that exact byte sequence — and treats any refusal as "no prior observation", which restarts the
+window. It additionally refuses a carrier whose `sourceChangedAt` is after its own `observedAt`,
+because a carrier that claims to have observed evidence before it existed is incoherent however
+well it is sealed.
+
+- **Assumptions relied on.** A6, A7, A10.
+- **Strongest counterargument.** The verifier is strictly stronger than what the read needs: a
+  snapshot that is valid in every way that matters to a window, but stale against some later
+  invariant, restarts the window and delays a stall the operator wanted.
+  **Concession.** Accepted, and it is the correct direction: every failure mode of this mechanism
+  delays a stall, and none invents one. That is the asymmetry R1 claimed and did not have.
+- **Hidden costs.** (1) One export is added to `src/control-room.mjs`; the verifier becomes public
+  surface and its refusals become a compatibility surface for the adapter. (2) A publisher whose
+  snapshot was written by an older or newer build restarts its window silently rather than loudly —
+  the same failure the unreadable-file branch already had, and it is the safe direction.
+  (3) Verification cost is now paid on every tick, over a file the process is reading anyway.
+- **Reversibility.** Freely reversible; deleting the call restores R1 behaviour exactly. No data is
+  written, migrated or destroyed by either behaviour.
+
+### Mechanism A2 — recompute the snapshot revision digest inline in the adapter — rejected
+
+Rejected because it duplicates the canonical-JSON and digest recipe in a second place, so the two
+can drift; and because it authenticates the snapshot's bytes without checking the obstruction
+binding those bytes carry, which is the weaker half of what the render seam already knows how to
+do. It is smaller in imports and larger in the invariant it fails to check.
+
+## Blocker B — preserving explicit epistemic truth about the window basis
+
+The mandate is not "refuse" — it is that a substituted zero-age reading must not be publishable as
+an indistinguishable truthful one. Two minimal designs were compared.
+
+### Mechanism B1 — typed refusal in the file-fed adapter
+
+Extend blocker 3's refusal to the file-fed resolver: an mtime after the observation instant throws
+rather than resolving.
+
+- **Cost, measured rather than argued.** Patched into the entry tree and run:
+  `tests/factory-telemetry-phase.test.mjs`, `tests/factory-telemetry-step-cli.test.mjs` and
+  `tests/wmux-claude-telemetry-bridge.test.mjs` go to **tests 17, pass 11, fail 6**. Those three
+  files write real evidence at wall-clock now and render at an injected past instant; they are
+  outside R2's allowed edit set.
+- **Rejected because** it cannot be delivered without widening the edit set, and silently widening
+  the edit set is worse than the defect. This is the same finding R1 recorded, re-measured rather
+  than inherited. It remains the right repair for a follow-up lane whose scope includes those files.
+
+### Mechanism B2 — an explicit content-addressed evidence-basis marker — **selected**
+
+`gaia-control-room/1` gains exactly one field, `sourceChangedAtBasis`, over a closed two-value
+vocabulary: `MEASURED` when the window start is evidence of earlier observation (a carried first
+observation, or an input mtime at or before the observation instant), and `UNOBSERVED` when the
+adapter had no usable such evidence and the window therefore starts at the observation instant.
+The field sits inside the snapshot body, so it is sealed into the snapshot revision (A12) and
+`requireControlRoomSnapshot` validates it against the closed vocabulary. The rendered evidence-age
+fact reads `Not yet measured` rather than `0s` when the basis is `UNOBSERVED`.
+
+- **Assumptions relied on.** A11, A12.
+- **Why this is the smallest compatible public contract.** The marker belongs to the *adapter's*
+  epistemic position, not to the obstruction's classification, and it is placed accordingly. The
+  alternative placement — a `basis` inside `observationWindow` — was rejected: it would widen
+  `gaia-portfolio-drain-obstruction/1`, whose whole value is that each of its fields means exactly
+  one thing, and it would require editing `src/portfolio-drain-obstruction.mjs`, which is outside
+  R2's edit set. One field on the snapshot is strictly smaller than one field on both.
+- **Why this is not R1's rejected 3B.** 3B was rejected for keeping a *clamp* — repairing an
+  assertion the adapter had made and publishing the repaired value as measured. There is no clamp
+  left to keep: the R1 correction already removed the assertion, and the seam refusal at
+  `src/control-room.mjs` stays unconditional and untouched. B2 adds no new severity, no new
+  classification path and no second meaning of "measured window"; it names which of the two things
+  the existing window already is. 3B's decisive cost — that the obstruction it qualifies would
+  carry no trace — is answered by placing the marker where the adapter's decision actually lives
+  and by leaving the obstruction's own contract alone.
+- **Strongest counterargument.** A consumer that does not read the new field sees exactly what it
+  saw before, so B2 informs rather than enforces.
+  **Concession.** Accepted. Enforcement is B1 and B1 is out of scope; between "silent" and
+  "declared but ignorable", declared is strictly more truthful and is reachable now.
+- **Hidden costs.** (1) One added field to a published schema, and one added entry in each of the
+  English and French copy maps — the seven-map duplication the R0 Standards review flagged grows by
+  one row. (2) Every previously published snapshot lacks the field and is refused by the new
+  validator, so the first tick after upgrade restarts its window; that is the safe direction and is
+  the same restart an unreadable carrier already causes. (3) `resolveSourceChangedAt` may now return
+  either a string or an object `{ sourceChangedAt, basis }`; the string form is normalised to
+  `MEASURED` so the refresh adapter's injected resolver in `scripts/factory-dashboard-refresh.mjs`
+  — outside the edit set — keeps working byte-for-byte unchanged.
+- **Reversibility.** Freely reversible. The field is additive and derived; removing it and its
+  validation restores R1's published body exactly.
+
+### Simplest alternative considered for blocker B
+
+Render `Evidence age UNKNOWN` in the HTML and change nothing in the JSON. Rejected under A11: the
+snapshot is the artifact downstream consumers read, and a distinction that exists only in one
+renderer's markup is not carried by the evidence.
+
+### Falsifier for blocker B — F5
+
+Publish two file-fed snapshots at the same `observedAt` over the same projection revision, one from
+an input mtime before that instant and one from an input mtime after it. If their published bodies
+are equal modulo content hashes — if no field distinguishes the measured window from the unobserved
+one — B2 has failed.
+
+## Blocker C — binding the window start
+
+One clause is added to the existing binding condition in `requireObstruction`:
+`obstruction.observationWindow.startedAt !== snapshot.sourceChangedAt`. `buildControlRoomSnapshot`
+assigns both from the same variable, so by construction this can refuse no snapshot the builder
+itself produced, which is rejection criterion 2 satisfied without a search.
+
+### Falsifier for blocker C — F6
+
+Forge only `observationWindow.startedAt` in an otherwise honest obstruction, reseal the obstruction
+and reseal the snapshot around it so that `evidenceRevision` and `endedAt` both still bind. If
+`renderControlRoomHtml` returns markup, C has failed.
+
+## Rejection criterion for R2
+
+R2 is rejected, and R1 behaviour restored, if any one of the following holds.
+
+1. The verified carrier refuses any snapshot that `buildControlRoomSnapshot` itself produced and
+   that this same build published.
+2. The window-start binding refuses any snapshot that `buildControlRoomSnapshot` itself produced.
+3. `sourceChangedAtBasis` ever reports `MEASURED` for a window whose start the adapter did not have
+   evidence of earlier observation for, or ever changes which obstruction state is reported.
+4. Any repair here requires a new bus verb, a new state store, a change to the obstruction
+   vocabulary, a change to the drain interpreter or ledger bytes, a provider call, a socket, a
+   retry loop, wall-clock ownership, or any `effect` or `authority` other than `NONE`.
+5. Any file outside the R2 allowed edit set is modified.
+
+## What R2 supersedes in the R1 text above
+
+- The R1 correction's sentence "A single-shot file-fed render under a clock skewed behind the
+  filesystem still shows `Evidence age 0s` and `NONE`, exactly as R0 did" is superseded. It still
+  shows a zero-length window — B1 remains out of scope — but it is no longer indistinguishable: the
+  published body carries `sourceChangedAtBasis: UNOBSERVED` and the page reads `Not yet measured`.
+- R1's description of `firstObservationOf` — "A snapshot that is missing, unreadable, not a
+  control-room body, or pinned to a different projection revision is 'no prior observation'" — is
+  superseded by the stronger rule: a snapshot that does not pass `requireControlRoomSnapshot`, or
+  whose own `sourceChangedAt` is after its own `observedAt`, is also no prior observation.
+- The render-seam binding is now three equalities, not two. The sentence in
+  `docs/factory-control-room.md` naming "an evidence revision or window end" is superseded and
+  corrected there.
+
+## R2 Decision Receipt
+
+Bound to Gaia entry commit `7373bebdd0461fdcda54b0cbd4b5424c80b8f432`, Git blob
+`bf2df427913781f138320ddeee6371d05a610d59` for `src/portfolio-drain-obstruction.mjs`, Git blob
+`9e338c0e8155de4c34f1d901414571dc0607c5e8` for `src/control-room.mjs`, Git blob
+`4c3b89c6f5a58853c67751ac31d5171d3d98c427` for `scripts/factory-dashboard.mjs`, and Git blob
+`3f884506fc66453c53fba1f4a0eee895e1e29c81` for `scripts/factory-dashboard-refresh.mjs`.
+
+Canonical receipt body:
+
+```json
+{"entryCommit":"7373bebdd0461fdcda54b0cbd4b5424c80b8f432","inputBlobs":{"controlRoom":"9e338c0e8155de4c34f1d901414571dc0607c5e8","factoryDashboard":"4c3b89c6f5a58853c67751ac31d5171d3d98c427","factoryDashboardRefresh":"3f884506fc66453c53fba1f4a0eee895e1e29c81","portfolioDrainObstruction":"bf2df427913781f138320ddeee6371d05a610d59"},"repairs":["verified-continuity-carrier","published-evidence-basis-marker","window-start-binding"],"reversibility":"freely-reversible","schema":"gaia-decision-receipt/1","status":"SELECTED"}
+```
+
+This receipt selects a repair mechanism. It grants no runtime, publication, merge or model-training
+authority, and it is not independent review. R2 is owed fresh independent Standards and Spec
+reviews; this amendment is not one.
+
+## What R2 does not claim
+
+R2 does not widen the obstruction vocabulary, add a bus verb, add a state store, touch the drain
+interpreter or the ledger, change retry behaviour, own a clock, grant publication or merge
+authority, call a provider, or open a socket. It does not close blocker B by refusal — B1 stays an
+open residual for a lane whose scope includes the three telemetry test files. It does not
+authenticate an obstruction's `state`, `label` or `affectedItemIds`: those need re-derivation from
+the drain projection, which the snapshot deliberately does not carry, and the binding proves an
+obstruction is *about* this evidence, never that its content is correct. Every low and cosmetic
+finding carried forward from R0 and R1 — the seven-map vocabulary duplication, the French view's
+dropped counts, the `NO_ELIGIBLE_WORK` count disagreement, the unread `counts.occupied`, the loose
+`requireWindow` parsing and the dashboard's silent acceptance of unknown flags — remains open.
