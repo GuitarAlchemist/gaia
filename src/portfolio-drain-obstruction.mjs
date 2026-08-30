@@ -75,22 +75,48 @@ const LANE_STATES = new Set(['CLAIMED', 'RUNNING']);
  * queue can obstruct. A repository with no merge queue and nothing waiting to merge is not
  * obstructed by the missing queue; reporting it as such would make the obstruction a standing
  * property of the repository rather than a statement about this drain.
+ *
+ * Exported because the control room's verification seam must decide the same question about the
+ * same drain states. A second copy of this list at that seam is how the classifier and the
+ * verifier come to disagree about which obstruction may stand beside which capability reading.
  */
-const MERGE_DEPENDENT_STATES = new Set(['PUBLISHED', 'AWAITING_MERGE_AUTHORITY']);
+export const MERGE_DEPENDENT_DRAIN_STATES = Object.freeze([
+  'AWAITING_MERGE_AUTHORITY', 'PUBLISHED',
+]);
+
+const MERGE_DEPENDENT_STATES = new Set(MERGE_DEPENDENT_DRAIN_STATES);
 
 /** The capability states this classifier recognises. AVAILABLE is decided and obstructs nothing. */
 const CAPABILITY_STATES = new Set([
   'AVAILABLE', 'ABSENT', 'MISCONFIGURED', 'PERMISSION_DENIED', 'STALE', 'UNKNOWN',
 ]);
 
-/** Which obstruction each capability state names. AVAILABLE names none. */
-const CAPABILITY_OBSTRUCTION = Object.freeze({
+/**
+ * Which obstruction each capability state names. AVAILABLE names none, and has no entry rather
+ * than a null one, so a lookup cannot invent an obstruction for a capability that serves.
+ *
+ * Exported for the same reason as the drain states above: the control room verifies that a
+ * published capability and the obstruction displayed beside it are compatible, and it must decide
+ * that against this table rather than against a copy of it.
+ */
+export const MERGE_QUEUE_CAPABILITY_OBSTRUCTION = Object.freeze({
   ABSENT: 'CAPABILITY_ABSENT',
   MISCONFIGURED: 'CAPABILITY_ABSENT',
   PERMISSION_DENIED: 'CAPABILITY_UNVERIFIED',
   STALE: 'CAPABILITY_UNVERIFIED',
   UNKNOWN: 'CAPABILITY_UNVERIFIED',
 });
+/**
+ * The two obstructions that may legitimately stand above a capability obstruction.
+ *
+ * Both are failures of the evidence Gaia holds about its own work, and a capability verdict
+ * computed beside evidence Gaia does not trust is not the thing to report first. Nothing else may
+ * outrank a capability reading, which is what the live-lane short circuit used to do.
+ */
+export const OBSTRUCTIONS_OUTRANKING_CAPABILITY = Object.freeze([
+  'RECONCILE_REQUIRED', 'LANE_STALE',
+]);
+
 const ELIGIBLE_STATES = new Set(['QUEUED']);
 const LIVENESS_STATES = new Set(['ACTIVE', 'STALE', 'IDLE']);
 
@@ -544,7 +570,7 @@ export function classifyPortfolioDrainObstruction({
   const capability = requireCapability(mergeQueueCapability);
   const awaitingMerge = live.filter(({ drainState }) => MERGE_DEPENDENT_STATES.has(drainState));
   const capabilityState = capability === null || awaitingMerge.length === 0
-    ? null : CAPABILITY_OBSTRUCTION[capability.state] ?? null;
+    ? null : MERGE_QUEUE_CAPABILITY_OBSTRUCTION[capability.state] ?? null;
   const stalled = eligible.length > 0 && projection.counts.available > 0 && !moving
     && observationWindow.durationMs >= THROUGHPUT_STALL_WINDOW_MS;
 

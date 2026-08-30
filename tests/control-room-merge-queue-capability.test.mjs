@@ -537,7 +537,10 @@ test('K12: no rendered missing-evidence sentence carries a negative count', () =
   for (const language of ['en', 'fr']) {
     const rendered = renderControlRoomHtml(snapshot, { language });
     const body = rendered.slice(rendered.indexOf('</style>'));
-    assert.equal(/-\d/u.test(body.replaceAll(/<time>[^<]*<\/time>/gu, '')), false,
+    // Tags stripped, so this reads what an operator reads. A hyphen inside a date is preceded by
+    // a digit; a negative count is preceded by a space or a line start.
+    const readable = body.replaceAll(/<[^>]*>/gu, ' ');
+    assert.equal(/(^|\s)-\d/u.test(readable), false,
       `a negative number is arithmetic nonsense on an operator page (${language})`);
     assert.equal(body.includes('of 5 recorded'), false,
       'and the sample-size sentence belongs to a shortage this drain does not have');

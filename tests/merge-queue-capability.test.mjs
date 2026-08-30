@@ -921,7 +921,7 @@ test('M23: a stamped ruleset that came back evaluate-only after the write is AMB
 
 test('MRM1: reverting the post-write reconciliation restores the false APPLIED receipt', async () => {
   const mutant = await importMutant('mq-assume-applied', (source) => source.replace(
-    'settledVerdict(reconcileMergeQueueRemediation({ intent, rulesets: after }).verdict)',
+    'settledVerdict(landed.verdict)',
     "'APPLIED'",
   ));
   const intent = acceptedIntent();
@@ -993,7 +993,13 @@ test('M25: the sealed intent is verified, and its own seal is derived rather tha
     'an extra rule beside the desired one': {
       ...intent, additions: [{ ...DESIRED_MERGE_QUEUE_RULE }, { type: 'deletion' }],
     },
-    'an emptied preservation promise': { ...intent, preserved: { rulesetIds: [] } },
+    'an unsorted preservation promise': { ...intent, preserved: { rulesetIds: ['11', '10'] } },
+    'a preservation promise naming prose': {
+      ...intent, preserved: { rulesetIds: ['the checks ruleset'] },
+    },
+    'a preservation promise carrying a second key': {
+      ...intent, preserved: { rulesetIds: [], note: 'best effort' },
+    },
     'a moved target': { ...intent, defaultBranch: 'release' },
     'a stamp that names another identity': { ...intent, stamp: 'gaia-mq-0000000000000000' },
     'an unknown field': { ...intent, urgency: 'high' },

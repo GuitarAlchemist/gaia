@@ -264,6 +264,22 @@ Eight notes on why these rules are what they are:
 - **`adminPermission` does not decide the state.** It is evidence about *writing*; the capability
   question is about *reading* what exists. It gates remediation, not classification. A read-only
   identity that successfully lists zero rulesets has honestly established `ABSENT`.
+- **A governing ruleset this module cannot model decides `UNKNOWN`, not `ABSENT`.**
+  `GET /repos/{owner}/{repo}/rulesets` defaults to `includes_parents=true`, so an organization or
+  enterprise ruleset with `enforcement: 'active'`, `include: ['~ALL']` and a `merge_queue` rule
+  routinely appears in exactly the response the probe reads — and it genuinely governs the default
+  branch and genuinely provides a merge queue. It cannot be read or written through this
+  repository's endpoints, so it never enters `observation.rulesets` and is never a remediation
+  target: that exclusion is correct and is an argument about *writing*. The capability question is
+  about *reading whether the mechanism exists*, and it does. The probe therefore records the
+  discard as `unmodelled_governing_ruleset` in `unknownRuleTypes`, and rule 3 decides `UNKNOWN`
+  with `REPORT_UNREADABLE_CAPABILITY`. Any entry whose `source_type` is not `Repository` —
+  including one carrying no `source_type` at all — is treated this way, because a shape this
+  version cannot model is exactly the input rule 2 is about. Dropping it silently would turn "Gaia
+  could not model the configuration governing this branch" into "Gaia looked and there is no merge
+  queue", assert `ABSENT` about a repository whose merge queue works, and hand the operator a
+  `CREATE_MERGE_QUEUE_RULE` action that would produce a second active carrier and therefore the
+  `MISCONFIGURED` state this design refuses.
 - **Rule 2 puts `unknownRuleTypes` in `UNKNOWN`, not `AVAILABLE`.** A rule Gaia cannot model may be
   the very thing that governs merging. Absence of understanding is not evidence of absence of a
   constraint. It is also what makes the remediation refusal in the next section decidable rather
@@ -391,12 +407,98 @@ defect if missed rather than a formality:
 Both tables, in both languages, gain both states, and one gate asserts every table is total over
 `PORTFOLIO_DRAIN_OBSTRUCTION_STATES` rather than asserting the two new entries specifically.
 
+### The hero next action, and its severity
+
+Correct classification and a correct headline are still not enough, because `nextAction` is the
+page's dedicated, top-of-hero, name-of-the-next-move field — the field most directly analogous to
+the incident's "the drain told the operator to ask a human for a grant nobody could give". It was
+dispatched purely on lane activity, so under the incident's own input — one published pull request,
+one live worker, an `ABSENT` capability — the page read `OBSERVE_ACTIVE_RUN`, *Wait for the worker
+result, then run the independent review.*, at `healthy` severity, above the obstruction panel. The
+sentence is not false; `issue-9` really is running. The defect is priority and severity, and this
+change's whole purpose is that an absent mechanism must not be readable as something to wait
+through.
+
+A capability obstruction therefore ranks **first** in `nextActionFor`, above the stale-run and
+active-run branches, for the same reason it sits above the live-lane short circuit in the
+classifier. The action is the obstruction's own `recovery.kind` and `recovery.label` rather than a
+second copy of them, so the hero and the obstruction panel cannot name two different next moves
+from one truth, and the French rendering goes through the obstruction's own phrasebook for the same
+reason. It names no item: an absent merge queue is a fact about the repository's configuration, and
+naming one of several waiting items would say the others are not waiting.
+
+The hero panel's severity is taken from `OBSTRUCTION_SEVERITY[obstruction.state]` when the action
+came from the obstruction, rather than from a second severity table that could disagree with the
+panel below it. `blocked`, not `healthy`, and not `warning`.
+
+### The capability is its own panel
+
+The published `mergeQueueCapability` block had no rendering of its own: it reached the page only
+through the obstruction, so any higher-precedence obstruction hid it completely. With one occupied
+lane, no `progressObservations` and no telemetry — which is precisely what
+`node scripts/factory-dashboard.mjs` produces when `--progress` and `--telemetry` are not passed —
+`UNOBSERVED_LANE_LIVENESS` defaults the lane to `STALE`, `LANE_STALE` wins the precedence, and the
+absent merge queue disappeared from the rendered document entirely while remaining sealed into the
+snapshot JSON. That is the rejection criterion's "suppressed by … a default value", with the
+default value named.
+
+The precedence is not the thing to change: `LANE_STALE` really did win, and reordering would erase
+that truth to display this one. `LANE_STALE` is a statement about lane heartbeat evidence, though,
+and not about whether a ruleset listing was complete thirty seconds ago — the capability artifact
+carries its own instant and its own independently decided freshness verdict. So the reading is
+rendered as **its own panel**, beside the obstruction rather than inside it, and both truths reach
+the operator without either inventing progress. The panel names the state, the repository and
+default branch, when the configuration was read, how old that reading is against its freshness
+window, and the artifact revision — no estimate, no queue position, no wait. `CAPABILITY_SEVERITY`
+and the two copy tables are total over `MERGE_QUEUE_CAPABILITY_STATES`, checked at module load
+because that vocabulary lives in another module and can grow without this one noticing. With no
+artifact the panel and its stylesheet are omitted entirely, exactly as the lane and flow blocks
+are, so a document published without the evidence carries no residue of the feature.
+
+### The published capability is bound to the obstruction beside it
+
+`requireMergeQueueCapabilityBlock` refuses a forged *state*, which is the highest-value forgery.
+`requireCapabilityBinding` refuses the next one: keep the honestly derived `ABSENT` block verbatim,
+splice in the obstruction, headline and ETA from the same drain classified *without* the
+capability, and reseal. Every existing check passed, and the result was the incident's second half
+restored through the verified seam — a published `ABSENT` capability displayed beside
+`AUTHORITY_STARVATION` and *ask a human for the explicit grant*.
+
+Three comparisons, all already in hand:
+
+1. A snapshot that publishes no capability must carry an obstruction that names none, and one that
+   publishes a capability must carry an obstruction that was classified with it.
+2. The obstruction's carried `capability` must equal the projection the published block derives —
+   one reading, published once, cannot be two readings on one page.
+3. With at least one published item in a `MERGE_DEPENDENT_DRAIN_STATES` state, a capability state
+   that names an obstruction must produce that obstruction or one of
+   `OBSTRUCTIONS_OUTRANKING_CAPABILITY`. Both tables are imported from the classifier rather than
+   re-spelled here, because a second copy of a precedence table is how the classifier and the
+   verifier come to disagree.
+
+This is a consistency check and not a re-derivation: the obstruction has never been re-derivable
+from a snapshot alone, and no verifier can compel a publisher to consult the capability at all —
+omitting the block entirely still yields a valid pre-feature snapshot. What it can do is refuse a
+snapshot that published both facts and made them contradict each other.
+
 ### No forecast under a capability obstruction
 
 `ETA` must not report `FORECAST` while a capability obstruction stands. An estimate of when
 something will finish is a claim that it is progressing, and this is the exact wording criterion 2
 forbids. The obstruction is the answer; a completion time alongside it would contradict it in the
 reassuring direction.
+
+Suppressing the forecast is not enough on its own: the withheld estimate must also carry the reason
+it was withheld. Discarding a computed forecast and then publishing the pre-existing
+`'Insufficient comparable history.'` names a data gap that does not exist, and that string is
+rendered through `ETA_MISSING_EVIDENCE` as `5 - pace.sampleSize` more samples — so a drain with
+eight comparable completed runs printed `-3 more comparable completed portfolio-factory-run samples
+(8 of 5 recorded)` in English and French alike. A negative count is arithmetic nonsense, and the
+next move it names is both impossible and irrelevant to the actual blocker. `ETA` therefore
+publishes its own reason under a capability obstruction —
+`'A merge queue capability obstruction stands; no completion estimate applies.'` — with its own
+missing-evidence sentence in both languages: *a verified merge queue capability for the default
+branch*. The kind of uncertainty is not compressed into the wrong kind.
 
 ### Recovery actions
 
@@ -493,7 +595,25 @@ call to `applyRuleset`, and only after a compare-and-swap:
 1. Re-read the rulesets and recompute the digest.
 2. If it differs from `expectedRulesetDigest`, refuse `PRECONDITION_CHANGED` and write nothing. The
    plan was made against a configuration that no longer exists, and a plan is not a licence.
-3. If it matches, call `applyRuleset` exactly once with the stamped payload.
+3. If it matches, call `applyRuleset` exactly once with the stamped payload. The payload's `rules`
+   is `DESIRED_MERGE_QUEUE_RULE` taken from the constant, not `intent.additions`.
+4. Re-read the configuration. If any `preserved.rulesetIds` entry is gone, refuse
+   `DESTRUCTIVE_REPLACEMENT` and seal `AMBIGUOUS`.
+5. Otherwise **reconcile that read** and adopt its verdict. A provider response that did not throw
+   is not proof of the end state.
+
+Step 5 is the difference between a receipt and a claim. The executor previously checked only that
+nothing was lost and then sealed `APPLIED` — "Terminal. My effect landed." — without ever asking
+whether the thing it was created to create was actually there, while
+`reconcileMergeQueueRemediation` given the identical read answered `AMBIGUOUS`. Two functions in one
+module, one read, two opposite terminal answers, and the false one durable and content-addressed.
+Inferring the end state from a non-throwing response is the same "infer the fact from a proxy for
+the fact" move Seam 1 was rejected for, and an `APPLIED` receipt for a merge queue that does not
+exist is stronger than progress: it asserts completion. The executor therefore applies its own
+module's table to its own post-write read, with exactly one adjustment: a post-write `NOT_APPLIED`
+is sealed as `AMBIGUOUS`, because a write that left this process and was accepted, over a
+configuration carrying nothing, is not "nothing happened" — it is an outcome the read cannot
+account for.
 
 `applyRuleset` is an injected function parameter, and is a fake in every test. It is deliberately
 **not** a new method on `createGitGhCandidatePublicationEffects`
@@ -503,6 +623,37 @@ call to `applyRuleset`, and only after a compare-and-swap:
 administration is a different authority from candidate publication, and merging the two into one
 port would make the gate that proves Gaia cannot merge weaker in order to make this feature
 smaller. Passing the executor its own function keeps that boundary exactly where it is.
+
+### The intent is verified where it can reach a write
+
+`planMergeQueueRemediation` seals `intent.revision`, and for as long as nothing checked it that
+seal was decorative. The capability artifact is re-verified at every consumption seam — the render
+seam re-derives the whole block and refuses a resealed `AVAILABLE` — while the intent, the only
+object in this module that can reach a write, was accepted on the strength of carrying the right
+property names, and `intent.additions` was copied verbatim into the request payload. Any caller
+holding a mutated intent — one that crossed a process boundary, was persisted, or was edited —
+could write arbitrary rules, including a `deletion`.
+
+`requireMergeQueueRemediationIntent(value)` is a total verifier over the closed field list
+`MERGE_QUEUE_REMEDIATION_INTENT_FIELDS`, called by the planner on the intent it produces and by
+`executeMergeQueueRemediation` before the single-flight and before any read. Nothing is repaired:
+an unknown field is refused, a missing field is refused, and every derivable field is re-derived
+rather than believed — `intentId` from the target and the desired rule digest, `stamp` from
+`intentId`, `additions` compared against `DESIRED_MERGE_QUEUE_RULE` itself. Resealing does not help,
+which is the point: sixty-four hex characters of the wrong intent is still the wrong intent. A
+refused intent registers no execution and reaches no read.
+
+`DESIRED_MERGE_QUEUE_RULE` is a constant precisely so that "the merge queue Gaia asks for" cannot
+mean something different depending on the arguments it was called with, so the write payload is
+built from that constant rather than from the intent's copy of it — the check and the payload are
+independent, and loosening either one alone changes nothing.
+
+**Residual limit, stated rather than papered over.** A correctly resealed intent whose
+`preserved.rulesetIds` was emptied is indistinguishable, to a verifier holding no rulesets, from an
+honest plan made against a repository that had none. The verifier refuses a malformed, unsorted,
+unbounded or extra-keyed preservation promise; it cannot refuse an emptied one. The executor's
+compare-and-swap still refuses to write at all unless the observed digest matches the one the plan
+was made against, which bounds what such an intent could do.
 
 ### Why Gaia cannot authorize this itself
 
@@ -526,7 +677,10 @@ left, the read is decidable:
 | No ruleset named `intent.stamp`, but another active ruleset carries a merge queue rule for the branch | `SUPERSEDED` | Terminal. Someone else's effect landed and the capability is satisfied. No write, ever. |
 | Neither | `NOT_APPLIED` | The single effect above may be attempted, once. |
 | More than one ruleset named `intent.stamp` | `AMBIGUOUS` | Terminal refusal. A human decides. No write. |
-| A ruleset named `intent.stamp` that does **not** carry the desired rule | `AMBIGUOUS` | Terminal refusal. No write. |
+| A ruleset named `intent.stamp` that does **not** carry the desired rule, or one that is not `active`, or one that does not target the default branch | `AMBIGUOUS` | Terminal refusal. No write. |
+
+The same table decides the executor's post-write read, so there is exactly one answer to "did this
+land?" in this module and it is reached by exactly one function.
 
 Two concurrent remediators derive the same `intentId` and therefore the same stamp, so the second
 one's reconciliation reads the first one's ruleset and terminates at `APPLIED` without writing.
@@ -595,12 +749,19 @@ the closed labels in this document, in English and in French.
 - `planMergeQueueRemediation({ artifact, observedAt, authority })`,
   `executeMergeQueueRemediation({ intent, readRulesets, applyRuleset })`,
   `reconcileMergeQueueRemediation({ intent, rulesets })`
+- `requireMergeQueueRemediationIntent(value)` — total verifier for the one object that can reach a
+  write, and `MERGE_QUEUE_REMEDIATION_INTENT_FIELDS`, its closed field list
+- `DESIRED_MERGE_QUEUE_RULE` — the one rule this module is prepared to add
 - `MergeQueueCapabilityError`
 
 `buildControlRoomSnapshot({ …, mergeQueueCapability })` takes the sealed artifact as one explicit
 input and decides its state against the snapshot's own instant.
 `classifyPortfolioDrainObstruction({ …, mergeQueueCapability })` takes the reading *already
 decided*, exactly as it already takes liveness, so it still owns no clock and imports nothing new.
+`src/portfolio-drain-obstruction.mjs` additionally exports `MERGE_QUEUE_CAPABILITY_OBSTRUCTION`,
+`MERGE_DEPENDENT_DRAIN_STATES` and `OBSTRUCTIONS_OUTRANKING_CAPABILITY` — the three tables the
+classifier decides with — so the control room's verification seam binds against them rather than
+against a copy.
 `npm run factory:dashboard -- --merge-queue-capability <path>` is the only way it reaches the
 publisher.
 
@@ -634,6 +795,21 @@ The implementation is wrong if any of these can be made to happen:
 13. A credential, token, URL, command, path, prompt or provider sentence reaches any rendered
     string.
 14. English and French disagree about any state, label or recovery, or either is incomplete.
+15. An `APPLIED` receipt is sealed for a write after which no active ruleset carries the desired
+    merge queue rule for the default branch, or the executor and `reconcileMergeQueueRemediation`
+    reach two different verdicts over one post-write read.
+16. A ruleset that governs the default branch but that this module cannot model — an organization
+    or enterprise ruleset, or one carrying no `source_type` — is discarded into `ABSENT` rather
+    than recorded and decided `UNKNOWN`.
+17. An intent that `requireMergeQueueRemediationIntent` refuses reaches `applyRuleset`, or a write
+    payload carries any rule other than `DESIRED_MERGE_QUEUE_RULE`.
+18. An `ETA` withheld because of a capability obstruction names any cause other than that
+    obstruction, or any rendered missing-evidence sentence contains a negative count.
+19. `nextAction` reports an instruction to wait, or is rendered at `healthy` severity, while a
+    capability obstruction stands.
+20. A published capability reading is absent from the rendered page under any obstruction state.
+21. A resealed snapshot pairs a verified capability block with an obstruction that was classified
+    without it, contradicts it, or is incompatible with it while work waits to merge.
 
 ## Rejection criterion
 
@@ -659,9 +835,11 @@ swallowed exception. That is the whole point. Every other property here is in se
 - **Authority delta:** none. `effect: NONE`, `authority: NONE` on every published artifact, six bus
   verbs unchanged, no new dependency, no new command, no repository administered.
 - **Reversibility:** freely reversible.
-- **Falsifiers:** the fourteen listed above, each with at least one gate, and mechanism-revert
-  mutations for the two mechanisms the incident turned on — the live-lane short-circuit and the
-  `403`/`404` distinction.
+- **Falsifiers:** the twenty-one listed above, each with at least one gate, and mechanism-revert
+  mutations for every mechanism they turn on — the live-lane short-circuit, the `403`/`404`
+  distinction, the post-write reconciliation, the recorded governing-ruleset discard, the intent
+  boundary, the ETA reason, the next-action precedence, the next-action severity, the capability
+  panel and the obstruction binding.
 
 ## Gates
 
@@ -699,6 +877,12 @@ In `tests/merge-queue-capability.test.mjs`:
 | M20 | Two concurrent remediators derive one identity and produce at most one effect and one terminal receipt. |
 | M21 | Two stamped rulesets, and a stamped ruleset without the desired rule, read `AMBIGUOUS`. |
 | M22 | Partial failure leaves no partial configuration and no second write. |
+| M23 | A write after which no active ruleset carries the desired rule — including one that landed nothing, and one that came back `evaluate`-only — seals `AMBIGUOUS`, and the executor's verdict equals the reconciler's over the same read. |
+| M24 | An organization, enterprise or `source_type`-less ruleset carrying an active merge queue records `unmodelled_governing_ruleset` and decides `UNKNOWN`; the planner refuses it; and this document decides the case. |
+| M25 | The sealed intent is verified at the executor's mouth, refused after a correct reseal, reaches no write when refused, and the payload carries the desired-rule constant. |
+| MRM1 | Mechanism revert: assuming `APPLIED` after a non-throwing write is what seals completion for a merge queue that does not exist. |
+| MRM2 | Mechanism revert: discarding a governing ruleset silently is what asserts absence about a repository whose merge queue works. |
+| MRM3 | Mechanism revert: dropping the intent verification and writing `intent.additions` is what lets a forged `deletion` rule reach the provider. |
 
 In `tests/control-room-merge-queue-capability.test.mjs`:
 
@@ -723,6 +907,20 @@ In `tests/control-room-merge-queue-capability.test.mjs`:
 | K11 | Deterministic replay through the CLI. |
 | MR1 | Mechanism revert: moving the capability check below the live-lane short-circuit is what would let a busy worker hide an absent queue. |
 | MR2 | Mechanism revert: collapsing `403` into `404` is what would turn a permission failure into `ABSENT` and a doomed remediation. |
+| K12 | Under a capability obstruction with ample history the `ETA` names the capability as its cause, and no rendered missing-evidence sentence carries a negative count, in either language. |
+| K13 | A capability obstruction outranks the hero next action, is rendered at `blocked` severity in both languages, and says nothing about waiting — while an `AVAILABLE` capability leaves the ordinary `OBSERVE_ACTIVE_RUN` action and its `healthy` severity exactly as they were. |
+| K14 | An unobserved lane that wins `LANE_STALE` does not erase the sealed absent capability from the page; the panel is total over `MERGE_QUEUE_CAPABILITY_STATES` in both languages; and with no artifact the page carries no residue of it. |
+| K15 | A resealed snapshot pairing a verified capability block with an obstruction classified without it, contradicting it, or naming a capability the snapshot does not publish, is refused — and every honest snapshot the builder produces, including the outranked `LANE_STALE` one, still verifies. |
+| MR3 | Mechanism revert: reusing `'Insufficient comparable history.'` under a capability obstruction is what renders `-3 more comparable completed portfolio-factory-run samples` on the operator's page. |
+| MR4 | Mechanism revert: dispatching the next action on lane activity alone is what puts *Wait for the worker result* in green above the obstruction. |
+| MR5 | Mechanism revert: taking the hero severity from a second table is what paints a blocked mechanism as a warning. |
+| MR6 | Mechanism revert: removing the capability panel is what lets a defaulted lane liveness delete the fact from the document. |
+| MR7 | Mechanism revert: removing the binding is what accepts an `ABSENT` capability beside "ask a human for a grant". |
+
+In `tests/portfolio-drain-obstruction.test.mjs`, two gates hold that
+`MERGE_QUEUE_CAPABILITY_OBSTRUCTION`, `MERGE_DEPENDENT_DRAIN_STATES` and
+`OBSTRUCTIONS_OUTRANKING_CAPABILITY` are the tables the classifier itself decides with, so the
+binding above cannot be checking a fiction.
 
 ## What R0 does not claim
 

@@ -98,6 +98,12 @@ export const MERGE_QUEUE_ENFORCEMENTS = Object.freeze(['active', 'evaluate', 'di
 export const MERGE_QUEUE_ADMIN_PERMISSIONS = Object.freeze(['PRESENT', 'ABSENT', 'UNKNOWN']);
 
 export const MERGE_QUEUE_REMEDIATION_INTENT_SCHEMA = 'gaia-merge-queue-remediation-intent/1';
+
+/** The closed field list of one intent. An unknown field is refused, never ignored. */
+export const MERGE_QUEUE_REMEDIATION_INTENT_FIELDS = Object.freeze([
+  'additions', 'defaultBranch', 'desiredRuleDigest', 'expectedRulesetDigest', 'intentId',
+  'observedAt', 'preserved', 'repository', 'repositoryId', 'revision', 'schema', 'stamp',
+]);
 export const MERGE_QUEUE_REMEDIATION_REFUSAL_SCHEMA = 'gaia-merge-queue-remediation-refusal/1';
 export const MERGE_QUEUE_REMEDIATION_RECEIPT_SCHEMA = 'gaia-merge-queue-remediation-receipt/1';
 
@@ -134,6 +140,7 @@ const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const REPOSITORY_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/u;
 const RULE_TYPE = /^[a-z][a-z0-9_]{0,63}$/u;
+const DIGEST = /^[0-9a-f]{64}$/u;
 
 const MAX_RULESETS = 64;
 const MAX_UNKNOWN_RULE_TYPES = 64;
@@ -545,9 +552,18 @@ function parseRulesets(body, defaultBranch) {
   const rulesets = [];
   const unknown = new Set();
   for (const entry of Array.isArray(body) ? body : []) {
-    // An organization ruleset governs this branch but cannot be read or written through this
-    // repository's endpoints, so it is not evidence this module can reconcile against.
-    if (entry?.source_type !== 'Repository') continue;
+    // An organization, enterprise or otherwise non-repository ruleset governs this branch but
+    // cannot be read or written through this repository's endpoints, so it is not evidence this
+    // module can reconcile against and it never enters `rulesets`. It is recorded rather than
+    // dropped: `GET /repos/{owner}/{repo}/rulesets` defaults to `includes_parents=true`, so a
+    // parent ruleset carrying an active merge queue routinely appears in exactly this response,
+    // and discarding it silently turns "Gaia could not model the configuration governing this
+    // branch" into "Gaia looked and there is no merge queue" — the false ABSENT this module
+    // exists to refuse. Rule 3 then decides UNKNOWN, which is the true sentence.
+    if (entry?.source_type !== 'Repository') {
+      unknown.add('unmodelled_governing_ruleset');
+      continue;
+    }
     const targets = resolveTargetsDefaultBranch({
       include: entry.conditions?.ref_name?.include ?? [],
       exclude: entry.conditions?.ref_name?.exclude ?? [],
@@ -603,16 +619,7 @@ export function planMergeQueueRemediation({ artifact, observedAt, authority }) {
       || authority.action !== 'ADMINISTER_REPOSITORY') {
     return refuse('INSUFFICIENT_AUTHORITY');
   }
-  // The effect identity is a pure function of the target and the desired end state, and of
-  // nothing else. It must not include the authority grant — two concurrent remediators
-  // legitimately hold two grants, and two identities means two stamps and two rulesets. It must
-  // not include the precondition digest either, which moves whenever any unrelated ruleset does.
-  const intentId = sha256(canonicalJson({
-    repositoryId: verified.repositoryId,
-    defaultBranch: verified.defaultBranch,
-    capability: 'MERGE_QUEUE',
-    desiredRuleDigest: DESIRED_RULE_DIGEST,
-  }));
+  const intentId = remediationIntentId(verified.repositoryId, verified.defaultBranch);
   const body = {
     schema: MERGE_QUEUE_REMEDIATION_INTENT_SCHEMA,
     intentId,
@@ -630,8 +637,119 @@ export function planMergeQueueRemediation({ artifact, observedAt, authority }) {
   };
   return deepFreeze({
     accepted: true,
-    intent: { ...body, revision: sha256(canonicalJson(body)) },
+    intent: requireMergeQueueRemediationIntent({ ...body, revision: sha256(canonicalJson(body)) }),
   });
+}
+
+/**
+ * The effect identity: a pure function of the target and the desired end state, and nothing else.
+ *
+ * It must not include the authority grant — two concurrent remediators legitimately hold two
+ * grants, and two identities means two stamps and two rulesets. It must not include the
+ * precondition digest either, which moves whenever any unrelated ruleset does. One recipe here
+ * because the planner derives it and the verifier re-derives it, and a second implementation is
+ * how those two come to disagree about which intent this is.
+ */
+function remediationIntentId(repositoryId, defaultBranch) {
+  return sha256(canonicalJson({
+    repositoryId,
+    defaultBranch,
+    capability: 'MERGE_QUEUE',
+    desiredRuleDigest: DESIRED_RULE_DIGEST,
+  }));
+}
+
+/**
+ * Total verification of one `gaia-merge-queue-remediation-intent/1` value.
+ *
+ * The intent is the only object in this module that can reach a write, and it was the only sealed
+ * object nothing ever checked: the capability artifact is re-verified at every consumption seam
+ * while the intent's own revision was decorative, so any caller holding a mutated intent — one
+ * that crossed a process boundary, was persisted, or was edited — could put arbitrary rules into
+ * the request payload. Every field is re-derived rather than believed: the identity and the stamp
+ * from the target, the desired rule from the constant. Sixty-four hex characters of the wrong
+ * intent is still the wrong intent.
+ */
+export function requireMergeQueueRemediationIntent(value) {
+  const refuse = (message) => {
+    throw new MergeQueueCapabilityError('InvalidMergeQueueRemediationIntent', message);
+  };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    refuse('a Gaia merge queue remediation intent object is required');
+  }
+  for (const field of Object.keys(value)) {
+    if (!MERGE_QUEUE_REMEDIATION_INTENT_FIELDS.includes(field)) {
+      refuse(`the intent carries an unknown field ${JSON.stringify(field)}`);
+    }
+  }
+  for (const field of MERGE_QUEUE_REMEDIATION_INTENT_FIELDS) {
+    if (!Object.hasOwn(value, field)) refuse(`the intent is missing ${field}`);
+  }
+  if (value.schema !== MERGE_QUEUE_REMEDIATION_INTENT_SCHEMA) {
+    refuse('a Gaia merge queue remediation intent is required');
+  }
+  if (typeof value.repositoryId !== 'string' || !IDENTITY.test(value.repositoryId)) {
+    refuse('the repository identity must be a bounded identity, not a name');
+  }
+  if (typeof value.repository !== 'string' || !REPOSITORY_NAME.test(value.repository)) {
+    refuse('the repository must be owner/name');
+  }
+  if (typeof value.defaultBranch !== 'string' || !BRANCH.test(value.defaultBranch)) {
+    refuse('the default branch must be a bounded branch name');
+  }
+  if (!isExactInstant(value.observedAt)) {
+    refuse('the observation instant must be an exact ISO timestamp');
+  }
+  // Compared against the constant rather than pattern-matched. `additions` is what reaches the
+  // provider, so anything other than exactly the desired merge queue rule is a different effect
+  // wearing this intent's name.
+  if (canonicalJson(value.additions) !== canonicalJson([DESIRED_MERGE_QUEUE_RULE])
+      || value.desiredRuleDigest !== DESIRED_RULE_DIGEST) {
+    refuse('an intent may add exactly the desired merge queue rule and nothing else');
+  }
+  if (typeof value.expectedRulesetDigest !== 'string'
+      || value.expectedRulesetDigest !== value.expectedRulesetDigest.toLowerCase()
+      || !DIGEST.test(value.expectedRulesetDigest)) {
+    refuse('the precondition must be one ruleset digest');
+  }
+  requirePreservation(value.preserved, refuse);
+  const intentId = remediationIntentId(value.repositoryId, value.defaultBranch);
+  if (value.intentId !== intentId) {
+    refuse('the intent identity is not the identity its own target and desired end state derive');
+  }
+  if (value.stamp !== `gaia-mq-${intentId.slice(0, 16)}`) {
+    refuse('the stamp must name the effect identity it will be written with');
+  }
+  const { revision, ...body } = value;
+  if (typeof revision !== 'string' || revision !== sha256(canonicalJson(body))) {
+    refuse('the intent revision does not match its content');
+  }
+  return value;
+}
+
+/**
+ * The promise the intent makes by name, verified as a promise rather than accepted as a list.
+ *
+ * An emptied `preserved.rulesetIds` is the quiet forgery here: it passes every other check and
+ * makes the executor's destructive-replacement refusal unreachable, so a provider that replaced
+ * the configuration would seal a clean receipt.
+ */
+function requirePreservation(preserved, refuse) {
+  if (!preserved || typeof preserved !== 'object' || Array.isArray(preserved)
+      || Object.keys(preserved).length !== 1 || !Array.isArray(preserved.rulesetIds)
+      || preserved.rulesetIds.length > MAX_RULESETS) {
+    refuse(`the intent must name at most ${MAX_RULESETS} preserved rulesets and nothing else`);
+  }
+  for (const rulesetId of preserved.rulesetIds) {
+    if (typeof rulesetId !== 'string' || !IDENTITY.test(rulesetId)) {
+      refuse('every preserved ruleset must be named by a bounded identity');
+    }
+  }
+  for (let index = 1; index < preserved.rulesetIds.length; index += 1) {
+    if (ordinal(preserved.rulesetIds[index - 1], preserved.rulesetIds[index]) >= 0) {
+      refuse('preserved ruleset identities must be sorted and deduplicated');
+    }
+  }
 }
 
 function sealRefusal({ verified, observedAt, reasonCode }) {
@@ -699,6 +817,10 @@ function sealReceipt({ intent, verdict, rulesets }) {
  * look again; an effect whose outcome never arrived is `AMBIGUOUS`, not a reason to write twice.
  */
 export async function executeMergeQueueRemediation({ intent, readRulesets, applyRuleset }) {
+  // Verified here, before the single-flight and before any read, because this is the boundary at
+  // which an intent stops being data and becomes an effect. An unverifiable intent is refused
+  // rather than repaired, and it registers no execution.
+  const verified = requireMergeQueueRemediationIntent(intent);
   // Two remediators in one process share one execution per effect identity. This is a
   // single-flight, not a retry and not a queue: it holds the one in-flight promise for an
   // intentId and hands the same terminal receipt to every caller, so "at most one effect and one
@@ -706,11 +828,11 @@ export async function executeMergeQueueRemediation({ intent, readRulesets, apply
   // cannot be true by construction — GitHub's ruleset API is not transactional and does not
   // enforce unique names — and there the stamp and the reconciliation below detect the duplicate
   // instead, terminating at AMBIGUOUS rather than writing again.
-  const inFlight = EXECUTIONS.get(intent.intentId);
+  const inFlight = EXECUTIONS.get(verified.intentId);
   if (inFlight) return inFlight;
-  const execution = executeOnce({ intent, readRulesets, applyRuleset })
-    .finally(() => EXECUTIONS.delete(intent.intentId));
-  EXECUTIONS.set(intent.intentId, execution);
+  const execution = executeOnce({ intent: verified, readRulesets, applyRuleset })
+    .finally(() => EXECUTIONS.delete(verified.intentId));
+  EXECUTIONS.set(verified.intentId, execution);
   return execution;
 }
 
@@ -739,7 +861,10 @@ async function executeOnce({ intent, readRulesets, applyRuleset }) {
       target: 'branch',
       enforcement: 'active',
       conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } },
-      rules: intent.additions.map((rule) => ({ ...rule })),
+      // The constant, not `intent.additions`. The verifier has already refused any intent whose
+      // additions are not exactly this, and taking the payload from the constant means the write
+      // cannot drift even if that check is one day loosened.
+      rules: [{ ...DESIRED_MERGE_QUEUE_RULE }],
     });
   } catch {
     // The write left and its outcome is unknown. That is ambiguous, not failed: the next
@@ -765,11 +890,30 @@ async function executeOnce({ intent, readRulesets, applyRuleset }) {
       refusal: sealExecutionRefusal(intent, 'DESTRUCTIVE_REPLACEMENT'),
     });
   }
+  // A provider response that did not throw is not proof of the end state — that is the same
+  // "infer the fact from a proxy for the fact" move this module exists to refuse, and it sealed a
+  // terminal APPLIED receipt for a merge queue that did not exist. The verdict is whatever the
+  // configuration that came back actually says, decided by the one reconciler, so the executor
+  // and the reconciler can never give one read two opposite terminal answers.
+  const landed = reconcileMergeQueueRemediation({ intent, rulesets: after });
+  const settled = settledVerdict(landed.verdict);
   return deepFreeze({
-    receipt: sealReceipt({ intent, verdict: 'APPLIED', rulesets: after }),
+    receipt: sealReceipt({ intent, verdict: settled, rulesets: after }),
     writes: 1,
     refusal: null,
   });
+}
+
+/**
+ * The one place a post-write reading differs from a pre-write one.
+ *
+ * `NOT_APPLIED` before the write is a verdict that permits the effect. After a write that left
+ * this process and was accepted, a configuration carrying nothing is not "nothing happened" — it
+ * is an outcome the read cannot account for, which is what `AMBIGUOUS` names, and which
+ * terminates rather than authorising a second attempt.
+ */
+function settledVerdict(verdict) {
+  return verdict === 'NOT_APPLIED' ? 'AMBIGUOUS' : verdict;
 }
 
 function sealExecutionRefusal(intent, reasonCode) {
