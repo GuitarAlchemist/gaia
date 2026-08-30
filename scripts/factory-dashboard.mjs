@@ -116,35 +116,67 @@ function newestMtime(paths) {
 const serialize = (value) => `${JSON.stringify(value, null, 2)}\n`;
 
 /**
- * The instant from which a publisher can show it had already observed this exact projection
- * revision, read out of the control-room snapshot it published to `snapshotPath` last time.
+ * The last artifact this publisher wrote to `snapshotPath`, verified rather than trusted.
  *
- * The carrier is the published artifact and nothing else — no private state store — so an
- * ordinary process restart, or the next tick of a watch loop, resumes the window from bytes an
- * operator and every downstream consumer can read too. That the artifact is this publisher's own
- * is not an integrity property: the path can be written by a second publisher, by a rotation, or
- * by an editor. So it is verified rather than trusted, with the same total verifier the render
- * seam applies to these exact bytes — a reader of a published artifact must not be more credulous
- * than its renderer.
+ * That the artifact is this publisher's own is not an integrity property: the path can be written
+ * by a second publisher, by a rotation, or by an editor. So these exact bytes go through the same
+ * total verifier the render seam applies — a reader of a published artifact must not be more
+ * credulous than its renderer — and anything that fails is `null`, which every caller here reads
+ * as "no prior evidence" rather than as evidence of anything.
  *
- * A snapshot that fails that verification, that is pinned to a different projection revision, or
- * that claims to have observed evidence before that evidence existed, is "no prior observation",
- * and the window restarts. Every one of those directions delays a stall; none invents one. That
- * asymmetry is the whole point: an unverified carrier failed the other way, and one unsealed edit
- * of a single field bought a `THROUGHPUT_STALL` measured in years over seconds of observation.
+ * One definition, because two carriers are now read out of this file and a second implementation
+ * is how two readers come to disagree about what a verified publication is.
  */
-export function firstObservationOf(snapshotPath, projectionRevision) {
+function verifiedPublication(snapshotPath) {
   let published;
   try {
     published = requireControlRoomSnapshot(JSON.parse(readFileSync(snapshotPath, 'utf8')));
   } catch {
     return null;
   }
+  return published;
+}
+
+/**
+ * The instant from which a publisher can show it had already observed this exact projection
+ * revision, read out of the control-room snapshot it published to `snapshotPath` last time.
+ *
+ * The carrier is the published artifact and nothing else — no private state store — so an
+ * ordinary process restart, or the next tick of a watch loop, resumes the window from bytes an
+ * operator and every downstream consumer can read too.
+ *
+ * A snapshot that fails verification, that is pinned to a different projection revision, or that
+ * claims to have observed evidence before that evidence existed, is "no prior observation", and
+ * the window restarts. Every one of those directions delays a stall; none invents one. That
+ * asymmetry is the whole point: an unverified carrier failed the other way, and one unsealed edit
+ * of a single field bought a `THROUGHPUT_STALL` measured in years over seconds of observation.
+ */
+export function firstObservationOf(snapshotPath, projectionRevision) {
+  const published = verifiedPublication(snapshotPath);
+  if (published === null) return null;
   if (Date.parse(published.sourceChangedAt) > Date.parse(published.observedAt)
       || published.sourceRevision !== projectionRevision) {
     return null;
   }
   return published.sourceChangedAt;
+}
+
+/**
+ * The last engineering flow reading this publisher wrote, for the monotonicity check.
+ *
+ * The carrier is the published artifact and nothing else — the same carrier the observation window
+ * already uses — so no private state store is introduced and an operator can read the value the
+ * refusal is measured against. It is verified with the same total verifier the render seam
+ * applies, for the same reason: a reader of a published artifact must not be more credulous than
+ * its renderer, and this one decides whether a producer that went backwards gets displayed.
+ *
+ * A snapshot that fails that verification, or that carried no flow block, is "no prior
+ * observation" and the next artifact is accepted on its own terms. That direction delays a
+ * refusal; it never invents one.
+ */
+export function priorEngineeringFlowOf(snapshotPath) {
+  const block = verifiedPublication(snapshotPath)?.engineeringFlow;
+  return block === undefined ? null : { observedAt: block.observedAt, sequence: block.sequence };
 }
 
 /**
@@ -209,13 +241,15 @@ export function runFactoryDashboardCli(argv, {
   const historyPath = flags.history ? resolve(flags.history) : null;
   const telemetryPath = flags.telemetry ? resolve(flags.telemetry) : null;
   const localLanesPath = flags['local-lanes'] ? resolve(flags['local-lanes']) : null;
+  const engineeringFlowPath = flags['engineering-flow']
+    ? resolve(flags['engineering-flow']) : null;
   const htmlPath = resolve(flags['html-out']);
   const snapshotPath = resolve(flags['snapshot-out']);
   const activityPath = flags['activity-out'] ? resolve(flags['activity-out']) : null;
   const outputs = [htmlPath, snapshotPath, ...(activityPath === null ? [] : [activityPath])];
   const inputs = [
     projectionPath, portfolioPath, receiptsPath, holdsPath, dependenciesPath, progressPath,
-    historyPath, telemetryPath, localLanesPath,
+    historyPath, telemetryPath, localLanesPath, engineeringFlowPath,
   ].filter(Boolean);
   // Filesystem identity, not a spelling test. Comparing resolved STRINGS accepted
   // `--projection <dir>/projection.json --snapshot-out <dir>/Projection.json` on the platform this
@@ -258,6 +292,13 @@ export function runFactoryDashboardCli(argv, {
   // has been in force, so feeding its mtime into the window would restart a window it has no
   // evidence about and permanently suppress a throughput stall.
   const localLanes = localLanesPath === null ? null : readJson(localLanesPath, 'local lanes');
+  // Also deliberately absent from the observation-window evidence below, and for the same reason.
+  // A flow artifact's instant moves whenever its producer runs, which says nothing about how long
+  // this projection revision has been in force; feeding its mtime into the window would restart a
+  // window it has no evidence about and permanently suppress a throughput stall.
+  const engineeringFlow = engineeringFlowPath === null
+    ? null
+    : readJson(engineeringFlowPath, 'engineering flow');
   const windowStart = declaredBasis(resolveSourceChangedAt({
     projectionRevision: projection.revision,
     firstObservation: firstObservationOf(snapshotPath, projection.revision),
@@ -278,6 +319,13 @@ export function runFactoryDashboardCli(argv, {
       ? null
       : readJson(dependenciesPath, 'dependencies'),
     localLanes,
+    // One sealed, content-addressed artifact through one explicit flag. This adapter reads bytes
+    // off disk and hands them over; it fetches nothing, derives no event, and decides no
+    // lifecycle state from what it carries.
+    engineeringFlow,
+    priorEngineeringFlow: engineeringFlowPath === null
+      ? null
+      : priorEngineeringFlowOf(snapshotPath),
     observedAt,
     sourceChangedAt: windowStart.sourceChangedAt,
     sourceChangedAtBasis: windowStart.basis,

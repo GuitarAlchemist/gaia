@@ -44,7 +44,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 810 gates
+node --test                                   # 888 gates
 ```
 
 ### Functional factory tracer
@@ -434,6 +434,52 @@ publishing `null`, which is proved byte-for-byte against the entry commit: addin
 previously published revision. See
 [`docs/local-wmux-lanes.md`](docs/local-wmux-lanes.md).
 
+### Engineering flow throughput
+
+The control room could say *something is alive* and *nothing tracked is claimed*, and could not say
+whether the engineering queue moved. Six running panes and `Moving = 0` are both true; neither is
+throughput. A heartbeat, a token, a byte of stdout, a spinner or a live process proves a sensor or
+a process is alive and proves nothing at all about the queue.
+
+The evidence is one sealed, content-addressed `gaia-engineering-flow/1` artifact of discrete
+events — issues opened, reopened and closed; pull requests opened, reopened, merged and closed
+without merge; commits produced on a work branch and integrated into the default branch; factory
+runs completed and failed; evidence reviews approved and refused — consumed through one explicit
+flag, exactly as telemetry, declared dependencies and local lanes already are.
+
+```bash
+npm run factory:dashboard --   --projection ../state/gaia-drain-projection.json   --engineering-flow ../state/gaia-engineering-flow.json   --html-out ../state/gaia-control-room.html   --snapshot-out ../state/gaia-control-room.json
+# Gaia dashboard checked: PAUSED | obstruction NONE | next NONE | source b2a0…
+```
+
+The page renders a family x window matrix: five families, each over the last hour, 24 hours and 7
+days, with exact counts, per-outcome breakdowns, rates, inflow/outflow/net queue change where an
+inflow event actually exists, and a cycle-time median only where at least five closing events all
+carry a comparable start.
+
+The rule the whole section exists for is that **`0` and `UNKNOWN` are opposite readings**. A
+complete window with nothing in it reads `0 observed in a complete window`; a window the evidence
+does not cover reads `UNKNOWN` with the reason named, and carries `null` everywhere a count would
+go. They differ in word, in symbol and in `data-state`, in English and in French, so no operator,
+screen reader or test can conflate them. A dashboard that printed `0` for both would be
+confidently wrong in the reassuring direction.
+
+Nothing here can be moved by a running process. The vocabulary has no name for a heartbeat, a
+token, a byte count, a spinner or a process id, and an unknown family is refused — an activity
+signal is not weighted low, it is unsayable. Two snapshots differing only in their flow artifact
+carry a byte-identical headline, spinner decision, next action and obstruction. Nothing in the
+section animates: a count over a closed window is a standing fact, not something happening now.
+
+Lifecycle facts are never inferred. There are exactly nine per-event fields and an unknown one is
+refused, so there is no `updatedAt`-shaped field to derive a creation or a closure from. Duplicate
+identities, non-exact or future instants, unsupported kinds, contradictory terminal outcomes,
+tampered revisions and a source snapshot whose sequence went backwards all fail closed.
+`requireControlRoomSnapshot` re-derives the entire block from the events it carries, so a resealed
+snapshot cannot display a count its own evidence does not derive — including the quiet forgery of
+an unobserved window resealed as a measured zero. Without the flag the feature is absent and the
+document is byte-identical to one produced before it existed. See
+[`docs/engineering-flow-throughput.md`](docs/engineering-flow-throughput.md).
+
 ### Passive factory telemetry spine
 
 The control room truthfully reported `PAUSED` while real work was happening, because the
@@ -583,6 +629,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
 | `scripts/factory-agent.mjs` | Real Claude worker → Codex read-only review → optional one Claude repair → fresh Codex review tracer. Produces a fail-closed, content-addressed run receipt; never commits or publishes. |
 | `scripts/factory-dashboard.mjs` | One-command portfolio/drain projection → control-room snapshot + standalone HTML adapter, with optional bounded polling and no listener or authority. |
+| `src/engineering-flow.mjs` | The closed `gaia-engineering-flow/1` schema, its total verifier, the single digest recipe and the one derivation to the published throughput block. Pure; holds no clock; imports `node:crypto` and the shared exact-instant predicate. |
 | `src/local-lane-observation.mjs` | The closed `gaia-local-lane-observation/1` schema and its total verifier: bounded identities, a positive Unicode label allowlist, a three-value lifecycle and a three-value label state. Pure; imports `node:crypto` only. |
 | `src/local-lane-sensor.mjs` | Structured wmux agent metadata → one sealed observation, as a pure function that reads six named fields and can reach no seventh. |
 | `src/path-identity.mjs` | One definition of "is this output the same file as an input?", decided on filesystem identity rather than on path spelling. |
@@ -600,7 +647,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 810 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 888 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
