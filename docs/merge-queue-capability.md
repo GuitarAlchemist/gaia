@@ -21,7 +21,7 @@ Gaia held the third fact and read it as *the queue has not picked it up yet*. It
 facts that decide the question, and Gaia never asked them.
 
 The drain then did exactly what it was built to do with a published pull request that will not
-merge. `PUBLISHED` maps to `AUTHORITY_STARVATION` in `src/portfolio-drain-obstruction.mjs:75`, and
+merge. `PUBLISHED` maps to `AUTHORITY_STARVATION` in `src/portfolio-drain-obstruction.mjs:110`, and
 the operator was told to *ask a human for the explicit grant the item is waiting on*. There was no
 grant to ask for. Nothing was withheld, nothing was pending, nobody was slow: the mechanism the
 item was waiting on had never been created. An absent capability was reported as slow progress,
@@ -30,7 +30,7 @@ therefore never stops on its own.
 
 Worse, while a lane was alive the obstruction did not report even that much. The classifier
 short-circuits to `NONE` when any occupied lane is `ACTIVE`
-(`src/portfolio-drain-obstruction.mjs:456`). A live worker is exactly what Gaia had — a process
+(`src/portfolio-drain-obstruction.mjs:580`). A live worker is exactly what Gaia had — a process
 polling a queue that did not exist. Liveness masked the gap, which is the conflation
 `docs/engineering-flow-throughput.md` and `docs/local-wmux-lanes.md` have each already refused
 once in a different direction.
@@ -179,7 +179,7 @@ probe, a hand-written fixture and an operator's own export.
 | `observedAt` | Exact ISO instant, round-tripping through `Date#toISOString`. The canonical UTC instant the probe read GitHub. |
 | `repositoryId` | Bounded identity `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`. GitHub's own node identity, **not** the name. A repository can be renamed and a name can be transferred; an identity cannot. Evidence bound to a name alone can silently describe a different repository. |
 | `repository` | `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. Carried beside the identity for the operator to read, never used to decide anything. |
-| `defaultBranch` | Bounded branch name, 1 to 255 characters, no control characters. The exact branch the capability is claimed for. A merge queue on a branch nobody merges into is not the capability. |
+| `defaultBranch` | `^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$`. The exact branch the capability is claimed for. Bounded rather than merely non-empty: a branch name is the one field here that GitHub lets a human choose freely, and this is evidence that gets rendered. A merge queue on a branch nobody merges into is not the capability. |
 | `observation.rulesetsRead` | Closed: `OK`, `FORBIDDEN`, `RATE_LIMITED`, `NOT_FOUND`, `FAILED`. |
 | `observation.rulesetsComplete` | Boolean. Whether the listing was exhausted. A paginated or truncated read is not a complete one, and a merge queue rule on an unread page is indistinguishable from no merge queue rule at all. |
 | `observation.protectionRead` | Closed: `OK`, `FORBIDDEN`, `RATE_LIMITED`, `NOT_FOUND`, `FAILED`. |
@@ -285,6 +285,10 @@ Eight notes on why these rules are what they are:
   is not "more available"; it is a configuration whose effective behaviour Gaia cannot predict and
   whose remediation target is undecidable. `MISCONFIGURED` names that, and no write is prepared
   against it.
+- **Only `ABSENT` is remediable.** `MISCONFIGURED` is a positive finding and an obstruction, but it
+  is not a thing this design writes to fix: every repair for it modifies configuration a human
+  deliberately wrote, which refusal 4 below refuses anyway. Accepting it would mean a planner whose
+  only possible outcome is a refusal.
 - **`STALE` is a consumer verdict, never a probe verdict.** The producer records what it saw and
   when. Whether that is still usable depends on when it is read, which the producer cannot know.
   Every state decays, including `ABSENT`: an operator may have created the ruleset in the
@@ -467,14 +471,19 @@ Each is a typed refusal carrying its own reason code, and none of them is retrie
    it does not model, so it declines to promise.
 3. `INSUFFICIENT_AUTHORITY` — `adminPermission` is not `PRESENT`, or the supplied authority grant
    does not cover this repository.
-4. `AMBIGUOUS_CONFIGURATION` — more than one active ruleset targets the default branch, so the
-   remediation target is undecidable.
-5. `DESTRUCTIVE_REPLACEMENT` — the computed diff would remove or modify any existing rule, any
-   existing required status check, any bypass actor or any existing ruleset. GitHub's ruleset and
-   branch-protection writes are *replacements*, not merges: a `PUT` carrying a partial rules array
-   silently deletes every rule it omits, and a required status check dropped this way removes a
-   gate no one will notice is gone. The planner therefore computes the full resulting configuration
-   and refuses unless the existing set is a strict subset of it.
+4. `DESTRUCTIVE_REPLACEMENT` — a preserved ruleset did not survive the write. The plan is additive
+   *by construction*: it creates one new ruleset and modifies none, so no diff it computes can be
+   destructive. But that is a claim about the request, not about what the provider did with it.
+   GitHub's ruleset and branch-protection writes are *replacements* rather than merges — a `PUT`
+   carrying a partial rules array silently deletes every rule it omits, and a required status
+   check dropped that way removes a gate no one will notice is gone. So the promise `preserved`
+   makes by name is checked against the configuration that comes back, and a write that landed
+   the merge queue rule but lost an existing ruleset is `AMBIGUOUS`, never a success.
+
+There is deliberately no separate ambiguity refusal. A repository with two competing active merge
+queue carriers already decides `MISCONFIGURED`, and `MISCONFIGURED` is already not remediable; a
+second name for the same refusal would be unreachable, and an unreachable refusal is a claim no
+test can hold.
 
 ### The effect, and the one place it may happen
 
@@ -550,7 +559,7 @@ already publishes and re-derives — no new log, no new store, no new verb.
   refuses a resealed snapshot whose published state its own observation does not decide.
 - The obstruction carries the capability state, the affected item ids, its own evidence revision
   and one bounded recovery, and is bound to the snapshot by the existing
-  `evidenceRevision` / `observationWindow` check at `src/control-room.mjs:739`.
+  `evidenceRevision` / `observationWindow` check in `requireObstruction`.
 - Refusals are typed errors with stable codes, so a refused plan is as observable as an accepted
   one.
 - **Nothing is appended to the drain ledger or the telemetry log.** Capability evidence does not
@@ -571,18 +580,27 @@ the closed labels in this document, in English and in French.
 
 `src/merge-queue-capability.mjs`:
 
-- `MERGE_QUEUE_CAPABILITY_SCHEMA`, `MERGE_QUEUE_CAPABILITY_STATES`,
-  `MERGE_QUEUE_CAPABILITY_FRESH_MS`
-- `requireMergeQueueCapability(value)` — total verifier
+- `MERGE_QUEUE_CAPABILITY_SCHEMA`, `MERGE_QUEUE_CAPABILITY_SOURCE`,
+  `MERGE_QUEUE_CAPABILITY_STATES`, `MERGE_QUEUE_CAPABILITY_FRESH_MS`, and the closed field,
+  read-outcome, enforcement and permission vocabularies
+- `requireMergeQueueCapabilityArtifact(value)` — total verifier
 - `sealMergeQueueCapability({ observedAt, repositoryId, repository, defaultBranch, observation })`
 - `mergeQueueCapabilityRevision(body)` — the single digest recipe
-- `decideMergeQueueCapability({ artifact, observedAt })` — the one derivation
-- `planMergeQueueRemediation(...)`, `executeMergeQueueRemediation(...)`,
-  `reconcileMergeQueueRemediation(...)`
+- `mergeQueueRulesetDigest(rulesets)` — the single compare-and-swap recipe
+- `resolveTargetsDefaultBranch({ include, exclude, defaultBranch })`
+- `decideMergeQueueCapability({ artifact, observedAt })` — the one decision
+- `deriveMergeQueueCapabilityBlock({ artifact, observedAt })` — the one derivation the builder and
+  its render-seam verifier both call
+- `probeMergeQueueCapability({ repository, repositoryId, defaultBranch, read, observedAt })`
+- `planMergeQueueRemediation({ artifact, observedAt, authority })`,
+  `executeMergeQueueRemediation({ intent, readRulesets, applyRuleset })`,
+  `reconcileMergeQueueRemediation({ intent, rulesets })`
 - `MergeQueueCapabilityError`
 
-`classifyPortfolioDrainObstruction({ …, mergeQueueCapability })` and
-`buildControlRoomSnapshot({ …, mergeQueueCapability })` each take it as one explicit input.
+`buildControlRoomSnapshot({ …, mergeQueueCapability })` takes the sealed artifact as one explicit
+input and decides its state against the snapshot's own instant.
+`classifyPortfolioDrainObstruction({ …, mergeQueueCapability })` takes the reading *already
+decided*, exactly as it already takes liveness, so it still owns no clock and imports nothing new.
 `npm run factory:dashboard -- --merge-queue-capability <path>` is the only way it reaches the
 publisher.
 
@@ -671,8 +689,9 @@ In `tests/merge-queue-capability.test.mjs`:
 | M13 | The planner refuses every state except `ABSENT` — including `MISCONFIGURED` — with `CAPABILITY_NOT_REMEDIABLE`. |
 | M13a | Two different authority grants over the same target compute one identical `intentId` and one identical stamp. |
 | M13b | Two observations of the same absent capability taken at different instants, with different `expectedRulesetDigest` values, compute one identical `intentId`. |
-| M14 | The planner refuses an unknown rule type, insufficient authority and an ambiguous configuration. |
-| M15 | The planner refuses any diff that drops an existing rule or required check. |
+| M14 | The planner refuses an unknown rule type, an absent write permission, a missing grant and a grant for another repository. |
+| M15 | The intent is additive and names every ruleset it promises to preserve. |
+| M15a | A write that loses a preserved ruleset refuses as `DESTRUCTIVE_REPLACEMENT` and is never `APPLIED`. |
 | M16 | The executor performs no write when the observed digest differs from the expected one. |
 | M17 | The executor performs exactly one write when the digest matches. |
 | M18 | Reconciliation over a lost response after success reads `APPLIED` and writes nothing. |
@@ -690,7 +709,8 @@ In `tests/control-room-merge-queue-capability.test.mjs`:
 | K3 | An `ACTIVE` lane does not suppress a capability obstruction. |
 | K4 | `AVAILABLE`, and a capability with nothing waiting to merge, select no capability obstruction. |
 | K5 | `PERMISSION_DENIED`, `STALE` and `UNKNOWN` select `CAPABILITY_UNVERIFIED`. |
-| K5a | A capability obstruction reaches the headline detail in every headline state, including `ACTIVE` driven only by a local lane. |
+| K5a | A capability obstruction reaches the headline detail in a paused drain and in an `ACTIVE` one driven by a live worker — the incident's own condition. |
+| K5a2 | An occupied lane with no liveness evidence still outranks the capability, because `LANE_STALE` is a failure of the evidence Gaia holds about its own work. |
 | K5b | Every label, recovery, severity and translation table is total over `PORTFOLIO_DRAIN_OBSTRUCTION_STATES`, in both languages. |
 | K5c | No `FORECAST` eta is published while a capability obstruction stands. |
 | K5d | Twelve waiting items under one absent capability produce one obstruction and one recovery. |

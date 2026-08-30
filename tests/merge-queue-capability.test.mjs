@@ -777,6 +777,31 @@ test('M21: a stamped ruleset that is not active reconciles to AMBIGUOUS, never A
   );
 });
 
+test('M15: a write that loses a preserved ruleset refuses as DESTRUCTIVE_REPLACEMENT', async () => {
+  const existing = [ruleset({ rulesetId: '10', name: 'checks', mergeQueueRule: null })];
+  const intent = acceptedIntent({ rulesets: existing });
+  assert.deepEqual(intent.preserved.rulesetIds, ['10']);
+
+  let read = 0;
+  const writes = [];
+  const outcome = await executeMergeQueueRemediation({
+    intent,
+    // The precondition read sees the existing ruleset; the read after the write does not, which
+    // is a provider that replaced rather than added.
+    readRulesets: async () => (read++ === 0 ? existing.map((entry) => ({ ...entry })) : [
+      ruleset({ rulesetId: '4200', name: intent.stamp }),
+    ]),
+    applyRuleset: async (payload) => {
+      writes.push(payload);
+      return { applied: true };
+    },
+  });
+  assert.equal(writes.length, 1, 'the one write happened and was not repeated');
+  assert.equal(outcome.receipt.verdict, 'AMBIGUOUS',
+    'a configuration that lost a rule is not a successful remediation, even though the rule landed');
+  assert.equal(outcome.refusal.reasonCode, 'DESTRUCTIVE_REPLACEMENT');
+});
+
 test('M22: a failing effect leaves no partial configuration and issues no second write', async () => {
   const intent = acceptedIntent();
   const writes = [];

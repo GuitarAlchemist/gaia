@@ -243,13 +243,15 @@ export function runFactoryDashboardCli(argv, {
   const localLanesPath = flags['local-lanes'] ? resolve(flags['local-lanes']) : null;
   const engineeringFlowPath = flags['engineering-flow']
     ? resolve(flags['engineering-flow']) : null;
+  const mergeQueueCapabilityPath = flags['merge-queue-capability']
+    ? resolve(flags['merge-queue-capability']) : null;
   const htmlPath = resolve(flags['html-out']);
   const snapshotPath = resolve(flags['snapshot-out']);
   const activityPath = flags['activity-out'] ? resolve(flags['activity-out']) : null;
   const outputs = [htmlPath, snapshotPath, ...(activityPath === null ? [] : [activityPath])];
   const inputs = [
     projectionPath, portfolioPath, receiptsPath, holdsPath, dependenciesPath, progressPath,
-    historyPath, telemetryPath, localLanesPath, engineeringFlowPath,
+    historyPath, telemetryPath, localLanesPath, engineeringFlowPath, mergeQueueCapabilityPath,
   ].filter(Boolean);
   // Filesystem identity, not a spelling test. Comparing resolved STRINGS accepted
   // `--projection <dir>/projection.json --snapshot-out <dir>/Projection.json` on the platform this
@@ -299,6 +301,12 @@ export function runFactoryDashboardCli(argv, {
   const engineeringFlow = engineeringFlowPath === null
     ? null
     : readJson(engineeringFlowPath, 'engineering flow');
+  // Absent from the observation-window evidence for the same reason as the two above: a capability
+  // probe's instant moves whenever the probe runs, and says nothing about how long this projection
+  // revision has been in force.
+  const mergeQueueCapability = mergeQueueCapabilityPath === null
+    ? null
+    : readJson(mergeQueueCapabilityPath, 'merge queue capability');
   const windowStart = declaredBasis(resolveSourceChangedAt({
     projectionRevision: projection.revision,
     firstObservation: firstObservationOf(snapshotPath, projection.revision),
@@ -323,6 +331,10 @@ export function runFactoryDashboardCli(argv, {
     // off disk and hands them over; it fetches nothing, derives no event, and decides no
     // lifecycle state from what it carries.
     engineeringFlow,
+    // One sealed, content-addressed artifact through one explicit flag. This adapter reads bytes
+    // off disk and hands them over; it opens no network connection, reads no repository
+    // configuration itself, and administers nothing.
+    mergeQueueCapability,
     priorEngineeringFlow: engineeringFlowPath === null
       ? null
       : priorEngineeringFlowOf(snapshotPath),

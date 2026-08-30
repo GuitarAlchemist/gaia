@@ -39,6 +39,10 @@ import {
   PORTFOLIO_DRAIN_OBSTRUCTION_STATES,
   classifyPortfolioDrainObstruction,
 } from './portfolio-drain-obstruction.mjs';
+import {
+  MERGE_QUEUE_CAPABILITY_SCHEMA, MERGE_QUEUE_CAPABILITY_SOURCE, deriveMergeQueueCapabilityBlock,
+  mergeQueueCapabilityRevision, requireMergeQueueCapabilityArtifact,
+} from './merge-queue-capability.mjs';
 
 export const CONTROL_ROOM_SCHEMA = 'gaia-control-room/1';
 
@@ -485,6 +489,7 @@ export function requireControlRoomSnapshot(value) {
   requireTelemetryVocabulary(value);
   const localLanes = requireLocalLanes(value);
   requireEngineeringFlow(value);
+  requireMergeQueueCapabilityBlock(value);
   requireDerivedCounts(value, localLanes);
   return value;
 }
@@ -505,6 +510,66 @@ export function requireControlRoomSnapshot(value) {
  * because that spelling canonicalises into the digest and would move every previously published
  * snapshot revision for evidence that did not change.
  */
+/**
+ * Re-derive the published capability reading from the observation it carries.
+ *
+ * The state is the field an operator reads as "there is nothing wrong with the merge path", so it
+ * is the highest-value one to forge in a resealed snapshot: flipping ABSENT to AVAILABLE restores
+ * the exact silence that produced the incident. It is therefore never trusted as published, only
+ * re-decided from the carried observation and the snapshot's own instant.
+ *
+ * Absent means the key is omitted. A present `null` is refused rather than read as absence.
+ */
+function requireMergeQueueCapabilityBlock(value) {
+  if (!Object.hasOwn(value, 'mergeQueueCapability')) return null;
+  const refuse = (message) => {
+    throw new ControlRoomError('InvalidSnapshot', message);
+  };
+  const block = value.mergeQueueCapability;
+  if (block === null) {
+    refuse('an absent merge queue capability omits the field entirely, and never publishes null');
+  }
+  if (!block || typeof block !== 'object' || Array.isArray(block)
+      || block.source !== MERGE_QUEUE_CAPABILITY_SOURCE || block.binding !== 'NONE'
+      || !block.observation || typeof block.observation !== 'object') {
+    refuse('the snapshot merge queue capability block is not a Gaia capability reading');
+  }
+  const rebuilt = {
+    schema: MERGE_QUEUE_CAPABILITY_SCHEMA,
+    effect: 'NONE',
+    authority: 'NONE',
+    observedAt: block.observedAt,
+    repositoryId: block.repositoryId,
+    repository: block.repository,
+    defaultBranch: block.defaultBranch,
+    observation: block.observation,
+    revision: mergeQueueCapabilityRevision({
+      observedAt: block.observedAt,
+      repositoryId: block.repositoryId,
+      repository: block.repository,
+      defaultBranch: block.defaultBranch,
+      observation: block.observation,
+    }),
+  };
+  let artifact;
+  try {
+    artifact = requireMergeQueueCapabilityArtifact(rebuilt);
+  } catch (error) {
+    refuse(
+      'the snapshot merge queue capability block does not carry a verifiable artifact:'
+      + ` ${error?.message ?? 'unreadable'}`,
+    );
+  }
+  if (block.artifactRevision !== artifact.revision) {
+    refuse('the capability block names an artifact revision its own observation does not derive');
+  }
+  const expected = deriveMergeQueueCapabilityBlock({ artifact, observedAt: value.observedAt });
+  if (canonicalJson(expected) !== canonicalJson(block)) {
+    refuse('the capability block is not what its own observation and instants derive');
+  }
+  return expected;
+}
+
 function requireEngineeringFlow(value) {
   if (!Object.hasOwn(value, 'engineeringFlow')) return null;
   const refuse = (message) => {
@@ -934,6 +999,7 @@ export function buildControlRoomSnapshot({
   progressObservations = [], completedRuns = [], telemetryProjection = null,
   dependencies = null, localLanes = null,
   engineeringFlow = null, priorEngineeringFlow = null,
+  mergeQueueCapability = null,
 }) {
   const projection = requireProjection(drainProjection);
   const at = requireTimestamp(observedAt);
@@ -959,6 +1025,13 @@ export function buildControlRoomSnapshot({
   // decision and no next action; it is derived here only so that it is sealed into the same
   // revision as the evidence it sits beside.
   const engineeringFlowBlock = projectEngineeringFlow(engineeringFlow, at, priorEngineeringFlow);
+  // Decided here, against this snapshot's instant, because this is the consumer that owns the
+  // clock. A capability decided at production time and cached is exactly how an AVAILABLE reading
+  // outlives the configuration it described.
+  const capabilityBlock = mergeQueueCapability === null ? null
+    : deriveMergeQueueCapabilityBlock({
+      artifact: requireMergeQueueCapabilityArtifact(mergeQueueCapability), observedAt: at,
+    });
   const localLiveCount = localLaneBlock === null ? 0 : localLaneBlock.liveCount;
   const activeCount = items.filter(({ activity }) => activity.state === 'ACTIVE').length;
   const staleCount = items.filter(({ activity }) => activity.state === 'STALE').length;
@@ -992,7 +1065,19 @@ export function buildControlRoomSnapshot({
     windowStartedAt: changedAt,
     liveness: items.map(({ itemId, activity }) => ({ itemId, state: activity.state })),
     dependencies,
+    mergeQueueCapability: capabilityBlock === null ? null : {
+      state: capabilityBlock.state,
+      evidenceRevision: capabilityBlock.artifactRevision,
+      observationAgeMs: capabilityBlock.observationAgeMs,
+      repository: capabilityBlock.repository,
+      defaultBranch: capabilityBlock.defaultBranch,
+    },
   });
+  // A capability obstruction is not a lane fact and must not be reported only in the one headline
+  // state nobody was looking at. In the incident the headline read ACTIVE — a worker was alive —
+  // and the sentence naming the missing queue would never have been shown.
+  const capabilityObstructed = obstruction.state === 'CAPABILITY_ABSENT'
+    || obstruction.state === 'CAPABILITY_UNVERIFIED';
 
   const body = {
     schema: CONTROL_ROOM_SCHEMA,
@@ -1018,19 +1103,23 @@ export function buildControlRoomSnapshot({
       : state === 'ACTIVE' ? {
         state: 'ACTIVE',
         label: 'Active',
-        // Two sentences at most, and each names its own source. With no local lanes this is
-        // byte-identical to what it always was.
+        // Two sentences at most, and each names its own source. With no local lanes and no
+        // capability gap this is byte-identical to what it always was.
         detail: [
           activeCount > 0
             ? `${activeCount} Gaia ${activeCount === 1 ? 'run is' : 'runs are'} moving.` : null,
           localLiveCount > 0
             ? `${localLiveCount} local wmux ${localLiveCount === 1 ? 'lane is' : 'lanes are'}`
               + ' running; process liveness only, with no tracked portfolio binding.' : null,
+          capabilityObstructed ? obstruction.label : null,
         ].filter(Boolean).join(' '),
       } : {
         state: 'STALE',
         label: 'Needs attention',
-        detail: `${staleCount} recorded ${staleCount === 1 ? 'run has' : 'runs have'} no fresh heartbeat.`,
+        detail: [
+          `${staleCount} recorded ${staleCount === 1 ? 'run has' : 'runs have'} no fresh heartbeat.`,
+          capabilityObstructed ? obstruction.label : null,
+        ].filter(Boolean).join(' '),
       },
     activeCount,
     staleCount,
@@ -1042,7 +1131,9 @@ export function buildControlRoomSnapshot({
     showSpinner: items.some(({ activity }) => activity.showPulse)
       || (localLaneBlock !== null && localLaneBlock.showPulse),
     pace: measured.pace,
-    eta: forecast ?? (activeCount === 0
+    // An estimate of when something finishes is a claim that it is progressing, which is exactly
+    // the reading an absent capability must never produce.
+    eta: (capabilityObstructed ? null : forecast) ?? (activeCount === 0
       ? {
         state: 'UNKNOWN',
         label: 'Unknown',
@@ -1089,6 +1180,9 @@ export function buildControlRoomSnapshot({
     // consequence as the lane block above: a present `null` canonicalises into the digest and
     // would move every previously published snapshot revision for evidence that did not change.
     ...(engineeringFlowBlock === null ? {} : { engineeringFlow: engineeringFlowBlock }),
+    // Omitted entirely when there is no artifact, and never published as null, for the same
+    // digest-stability reason the flow block gives.
+    ...(capabilityBlock === null ? {} : { mergeQueueCapability: capabilityBlock }),
   };
   return deepFreeze({
     ...body,
@@ -1203,6 +1297,8 @@ const RENDER_COPY = Object.freeze({
       DEPENDENCY_DEADLOCK: 'Declared dependency cycle', REVIEW_STARVATION: 'Missing review',
       AUTHORITY_STARVATION: 'Missing authority', RECONCILE_REQUIRED: 'Reconcile required',
       THROUGHPUT_STALL: 'Throughput stalled',
+      CAPABILITY_ABSENT: 'Merge queue missing',
+      CAPABILITY_UNVERIFIED: 'Merge queue unverified',
     },
   }),
   fr: Object.freeze({
@@ -1309,6 +1405,8 @@ const RENDER_COPY = Object.freeze({
       DEPENDENCY_DEADLOCK: 'Cycle de dépendances déclaré', REVIEW_STARVATION: 'Review manquante',
       AUTHORITY_STARVATION: 'Autorité manquante', RECONCILE_REQUIRED: 'Réconciliation requise',
       THROUGHPUT_STALL: 'Débit à l’arrêt',
+      CAPABILITY_ABSENT: 'File d’attente de merge absente',
+      CAPABILITY_UNVERIFIED: 'File d’attente de merge non vérifiée',
     },
   }),
 });
@@ -1570,6 +1668,12 @@ function localizedObstructionLabel(obstruction, language) {
     RECONCILE_REQUIRED: `${count} élément${many} dont la preuve enregistrée contredit l’observation.`,
     THROUGHPUT_STALL: `${count} élément${many} éligible${many} et de la capacité libre immobiles`
       + ` depuis ${formatDuration(obstruction.observationWindow.durationMs)}.`,
+    CAPABILITY_ABSENT: obstruction.capability?.state === 'MISCONFIGURED'
+      ? `${count} élément${many} en attente d’une file d’attente de merge qui existe mais ne`
+        + ' régit pas la branche par défaut.'
+      : `${count} élément${many} en attente d’une file d’attente de merge que ce dépôt n’a pas.`,
+    CAPABILITY_UNVERIFIED: `${count} élément${many} en attente d’une file d’attente de merge que`
+      + ` Gaia n’a pas pu vérifier (${CAPABILITY_REASON_FR[obstruction.capability?.state]}).`,
   }[obstruction.state];
 }
 
@@ -1584,8 +1688,25 @@ function localizedRecoveryLabel(obstruction, language) {
     REQUEST_EXPLICIT_AUTHORITY: 'Demander à un humain l’autorisation explicite attendue.',
     RECONCILE_DRAIN_EVIDENCE: 'Ré-observer les éléments nommés et réconcilier la chaîne de reçus.',
     CLAIM_QUEUED_WORK: 'Autoriser une exécution bornée de la factory pour le travail éligible.',
+    CREATE_MERGE_QUEUE_RULE: 'Créer un ruleset actif portant une règle de file d’attente de merge'
+      + ' pour la branche par défaut, puis ré-observer.',
+    CORRECT_MERGE_QUEUE_RULE: 'Corriger le ruleset pour qu’exactement un ruleset actif porte une'
+      + ' règle de file d’attente de merge pour la branche par défaut, puis ré-observer.',
+    GRANT_CAPABILITY_READ: 'Accorder à l’identité de lecture le droit de lister les rulesets de ce'
+      + ' dépôt, puis ré-observer.',
+    REPROBE_CAPABILITY: 'Ré-observer la capacité de file d’attente de merge : cette lecture a'
+      + ' dépassé sa fenêtre de fraîcheur.',
+    REPORT_UNREADABLE_CAPABILITY: 'Signaler la configuration de file d’attente de merge illisible'
+      + ' et ré-observer : attendre ne la rendra pas lisible.',
   }[obstruction.recovery.kind] ?? obstruction.recovery.label;
 }
+
+/** Why a capability could not be established, in French, as closed tokens rather than prose. */
+const CAPABILITY_REASON_FR = Object.freeze({
+  PERMISSION_DENIED: 'permission refusée',
+  STALE: 'preuve périmée',
+  UNKNOWN: 'lecture incomplète',
+});
 
 const OBSTRUCTION_SEVERITY = Object.freeze({
   NONE: 'healthy',
@@ -1597,6 +1718,10 @@ const OBSTRUCTION_SEVERITY = Object.freeze({
   REVIEW_STARVATION: 'blocked',
   AUTHORITY_STARVATION: 'blocked',
   DEPENDENCY_DEADLOCK: 'blocked',
+  // Blocked, not warning. Neither resolves by waiting, which is the only thing a warning would
+  // invite an operator to do.
+  CAPABILITY_ABSENT: 'blocked',
+  CAPABILITY_UNVERIFIED: 'blocked',
 });
 
 /**

@@ -248,23 +248,49 @@ test('K5: MISCONFIGURED selects CAPABILITY_ABSENT with its own distinct action',
   assert.equal(snapshot.obstruction.recovery.kind, 'CORRECT_MERGE_QUEUE_RULE');
 });
 
-test('K5a: a capability obstruction reaches the headline in every headline state', () => {
-  const cases = [
-    ['PAUSED', [], []],
-    ['ACTIVE', [item('issue-9', 'RUNNING')], [{ itemId: 'issue-9', state: 'ACTIVE' }]],
-    ['STALE', [item('issue-9', 'RUNNING')], [{ itemId: 'issue-9', state: 'STALE' }]],
-  ];
-  for (const [, extraItems] of cases) {
-    const snapshot = buildControlRoomSnapshot({
-      drainProjection: projection([...WAITING, ...extraItems], { occupied: 1, available: 3 }),
-      observedAt: AT,
-      mergeQueueCapability: capability(),
-    });
-    assert.match(
-      snapshot.headline.detail, /merge queue/u,
-      `the ${snapshot.headline.state} headline names the capability gap rather than hiding it`,
-    );
-  }
+/** One live worker, so the headline reads ACTIVE exactly as it did during the incident. */
+const RUNNING_OBSERVATION = [{
+  itemId: 'issue-9',
+  capturedAt: at(-5_000),
+  record: {
+    schema: 'gaia-cli-progress/1',
+    stage: 'worker_running',
+    elapsedMs: 35_000,
+    remainingProviderInvocations: 4,
+    remainingProviderTimeUpperBoundMs: 2_400_000,
+    heartbeat: true,
+  },
+}];
+
+test('K5a: a capability obstruction reaches the headline in a paused and in an active drain', () => {
+  const paused = snapshotWith(capability());
+  assert.equal(paused.headline.state, 'PAUSED');
+  assert.match(paused.headline.detail, /merge queue/u);
+
+  const active = buildControlRoomSnapshot({
+    drainProjection: projection([...WAITING, item('issue-9', 'RUNNING')],
+      { occupied: 1, available: 3 }),
+    observedAt: AT,
+    progressObservations: RUNNING_OBSERVATION,
+    mergeQueueCapability: capability(),
+  });
+  assert.equal(active.headline.state, 'ACTIVE', 'a live worker, exactly as in the incident');
+  assert.equal(active.obstruction.state, 'CAPABILITY_ABSENT');
+  assert.match(
+    active.headline.detail, /merge queue/u,
+    'and the headline still names the gap, instead of reporting only that something is alive',
+  );
+});
+
+test('K5a: an occupied lane with no liveness evidence still outranks the capability', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([...WAITING, item('issue-9', 'RUNNING')],
+      { occupied: 1, available: 3 }),
+    observedAt: AT,
+    mergeQueueCapability: capability(),
+  });
+  assert.equal(snapshot.obstruction.state, 'LANE_STALE',
+    'a capability verdict computed beside evidence Gaia does not trust is not reported first');
 });
 
 test('K5b: every obstruction state has a label, a recovery, a severity and a translation', () => {
@@ -287,8 +313,9 @@ test('K5c: no forecast eta is published while a capability obstruction stands', 
       { occupied: 1, available: 3 }),
     observedAt: AT,
     mergeQueueCapability: capability(),
-    completedRuns: Array.from({ length: 8 }, (unused, index) => ({
-      itemId: `done-${index}`, startedAt: at(-60 * MINUTE_MS), completedAt: at(-30 * MINUTE_MS),
+    progressObservations: RUNNING_OBSERVATION,
+    completedRuns: Array.from({ length: 8 }, () => ({
+      workflow: 'portfolio-factory-run', outcome: 'COMPLETED', elapsedMs: 30 * MINUTE_MS,
     })),
   });
   assert.notEqual(snapshot.eta.state, 'FORECAST',
@@ -417,10 +444,8 @@ test('MR1: deciding capability below the live-lane short-circuit is what let a w
   const mutant = await importMutant(
     'portfolio-drain-obstruction.mjs', 'capability-below-moving',
     (source) => source.replace(
-      `    if (capabilityState !== null) return [capabilityState, idsOf(awaitingMerge)];
-    if (moving) return ['NONE', []];`,
-      `    if (moving) return ['NONE', []];
-    if (capabilityState !== null) return [capabilityState, idsOf(awaitingMerge)];`,
+      'if (capabilityState !== null) return [capabilityState, idsOf(awaitingMerge)];',
+      'if (capabilityState !== null && !moving) return [capabilityState, idsOf(awaitingMerge)];',
     ),
   );
   const input = {
