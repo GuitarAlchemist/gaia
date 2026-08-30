@@ -279,3 +279,220 @@ wrong and is withdrawn rather than patched.
 - It does not measure lane elapsed time, throughput or cost, and derives no forecast of any kind.
 - It changes nothing about the six bus verbs, provider routing, GitHub effects, IXQL, DuckDB truth
   or paid API behaviour.
+
+---
+
+# R0 pair-review amendment — decided before implementation
+
+An independent read-only pair reviewed the decision above and raised five blockers and seven
+significant findings. Each was replayed here before it was accepted; what follows supersedes the
+matching text above and was committed before a line of the implementation was written.
+
+## Blocker 1 — an absent observation must not move every published revision
+
+**Replayed and confirmed.** `canonicalJson` enumerates `Object.keys`, so a present `localLanes` key
+holding `null` canonicalises to `"localLanes":null` and enters the digest:
+
+```
+omitted   6acc1229921f956c81a331375baab0824ea70bc3f384f4a106b5532530373dbf
+null key  f71b83bf7a2923ad23486cc9008b651f68bc979f6d5975bd401c2f1f8594b750
+```
+
+The snapshot revision is rendered into the HTML Proof block and is bound by
+`activity.snapshotRevision`, so the original `localLanes: null | {...}` shape would have moved every
+previously published revision for unchanged evidence — the exact migration this repository
+already rejected once, by name, for the activity-summary seam.
+
+**Decided: resolution (a).** The key is **omitted entirely** when there is no observation. A
+snapshot built without `--local-lanes` is byte-identical to the entry commit's, and that is proved
+by a gate rather than asserted (T1). `requireControlRoomSnapshot` verifies the block only when the
+key is present, and refuses a present-but-`null` value rather than treating it as absent.
+
+## Blocker 2 — a sensor-cadence window is not a heartbeat window, and an interval must not outrun it
+
+**Accepted.** `HEARTBEAT_FRESH_MS` means "the worker proved it is alive within 30 s". For a local
+lane the same number would mean "the sensor ran within 30 s" — a different axis, and collapsing the
+two is the confusion this product's evidence lattice exists to prevent. Compounding it, the
+originally documented `1000-60000` interval range lets a legal configuration render `STALE` for
+half of every cycle while four panes are visibly running, which is a softer restatement of the
+operator failure this slice exists to fix.
+
+**Decided:**
+
+- The window is its own exported constant, `LOCAL_LANE_OBSERVATION_FRESH_MS`, defined in the
+  observation module and named for what it measures: how recently the **sensor** reported, never
+  how recently a worker proved liveness. Its value is 30 s and its meaning is not the heartbeat's.
+- The published block names the measurement `observationAgeMs`, not `ageMs`.
+- The watcher interval is bounded to **1000-15000 ms**, at most half the window, so no legal
+  configuration can produce a permanently stale display. Above that is a usage refusal (T3).
+
+## Blocker 3 — the headline is re-derived at the verify seam
+
+**Accepted.** Once the first sentence an operator reads depends on an externally supplied sensor
+input, it becomes the highest-value field to forge in a resealed snapshot, and every input needed
+to re-derive it is already in hand.
+
+**Decided:** `requireControlRoomSnapshot` re-derives `activeCount`, `staleCount`, `headline.state`,
+`showSpinner`, and the whole local-lane block — `laneCount`, `runningCount`, `liveCount`,
+`showPulse`, `state`, `observationAgeMs`, `overSupportedLaneLimit` and every lane's `live` — and
+refuses a mismatch. This closes the asymmetry the amendment introduces and tightens two fields
+that were previously trusted.
+
+## Blocker 4 — the label pattern is a positive Unicode allowlist, and the channel is named
+
+**Accepted.** Every label on this machine contains U+2014, so the pattern must admit general
+Unicode punctuation; once it does, an exclusion list is the wrong shape. Bidi controls (U+202E,
+U+2066-U+2069) and zero-width characters (U+200B, U+FEFF) are category `Cf`, not C0 controls, and
+labels are **already duplicated in reality on this machine**, which makes visual disambiguation
+load-bearing rather than cosmetic.
+
+**Decided:**
+
+- The label pattern is a positive allowlist: `\p{L}`, `\p{N}`, `\p{Zs}` and one named punctuation
+  set that includes U+2014 and U+2013. Every `\p{C}` code point is refused in full — `Cc`, `Cf`,
+  `Co`, `Cs` and `Cn`, not merely C0 — and a leading `\p{M}` is refused so a combining-mark stack
+  cannot break the row.
+- Length is bounded at 64 code points.
+- **The channel is stated rather than implied.** A wmux label is chosen by whoever spawns the
+  agent, and one agent may spawn another, so `label` must be treated as a channel an observed
+  process can influence. It has two named barriers and no others: the allowlist above, which the
+  schema enforces at the seam, and `escapeHtml` at every interpolation. That is why an unreadable
+  label is withheld rather than sanitised — sanitising would put an attacker-shaped string through
+  a transformation and then display the result.
+
+## Blocker 5 — over-capacity is reported, and the document bound is not a lane policy
+
+**Accepted.** The live machine already carries more running panes than
+`DEFAULT_MAX_LIVE_LANES = 4`, and a section that silently displays 6, 12 or 40 live lanes beside a
+product whose supported ceiling is 4 would be inventing a second, larger, unexplained number.
+
+**Decided:**
+
+- wmux panes and registered bus lanes are different populations — a pane is not a bus actor — so
+  the limit is not enforced. It is **reported**: the block publishes `overSupportedLaneLimit`,
+  true when any single workspace carries more live lanes than `DEFAULT_MAX_LIVE_LANES` imported
+  from `src/lanes.mjs`, following the existing `overSupportedLaneLimit` precedent in
+  `scripts/gaia-interagent.mjs`. The page states the observed count and the supported ceiling.
+- The 64 cap is renamed `MAX_OBSERVED_LANES` and documented as a **document-size bound**, not a
+  lane policy. It borrows no vocabulary from `src/lanes.mjs`.
+
+## S2 — `labelState` beside the label, adopted
+
+A lane genuinely labelled `UNKNOWN` must not be indistinguishable from a lane whose label was
+missing. The label carries a separate closed vocabulary field, modelled on `sourceChangedAtBasis`:
+
+| `labelState` | `label` |
+| --- | --- |
+| `OBSERVED` | the verbatim safe label |
+| `ABSENT` | `null` |
+| `WITHHELD_UNSAFE` | `null` |
+
+`label` is `null` in both non-`OBSERVED` cases, so the withholding is assertable in a test rather
+than inferable from a magic string, and no sentinel lives in the value space it describes.
+
+## S3 — the lane pulse is not a heartbeat, in the markup as well as in the words
+
+A local lane has no heartbeat instant; the only instant available is the sensor's `observedAt`.
+Reusing `data-heartbeat-at` would let the client-side ager treat a sensor poll as a heartbeat and
+re-create the "a ping is not progress" conflation removed one commit earlier.
+
+**Decided:** the lane pulse carries `data-observed-at`, never `data-heartbeat-at`; it uses its own
+`.lane-pulse` class with its own copy; and the `prefers-reduced-motion` media query names **every**
+animated class, `.lane-pulse` included. The rule that no keyframe is emitted at all when nothing is
+pulsing holds when the only pulse source is a local lane.
+
+## S4 — the responsive and accessibility contract for the new section
+
+The lane row is the worst case in the whole document for a phone: four opaque 40-character
+identifiers per lane. The section therefore inherits the existing normative rules, restated here
+because they now have a new subject:
+
+- every lane state carries a **word and a symbol** — the live, stale and neutral glyphs the rest of
+  the page already uses — and colour is never the meaning;
+- the section carries an `aria-label` and the pulse carries `role="status"`, matching the existing
+  `metrics` section and heartbeat chip;
+- identifiers wrap rather than push the page, inside `min-width: 0` grid children;
+- because labels are duplicated in reality, every row shows a short identity beside the label;
+- the section is fully translated in the `fr` document. An English literal inside the French
+  section is a test failure, not a residual.
+
+## S1 — the watcher is kept, and the reason is recorded
+
+**Rejected, with the disagreement stated.** The pair recommends dropping
+`scripts/local-lanes-watch.mjs` as new orchestration for no new truth. The operator brief this
+slice answers requires a one-command local watcher workflow as an acceptance criterion, so
+dropping it would fail the request rather than simplify it.
+
+The pair's underlying concern is accepted in full and constrains the script instead:
+
+- it holds **no mechanism** — one tick calls the two existing entry points in this process, and
+  spawns no subprocess of its own beyond the single `wmux agent list` the sensor already makes;
+- ticks are **non-overlapping**: the next tick is scheduled after the current one settles;
+- there is **no retry**. A failed tick prints its typed error, leaves the previous artifacts
+  untouched, and waits for the next interval;
+- the interval is explicit, bounded to 1000-15000 ms per Blocker 2, and stops on SIGINT/SIGTERM.
+
+## S5 — the golden fixture and the digest-bound receipt
+
+`tests/fixtures/wmux-agent-list-redacted.json` is one real `wmux agent list` payload from this
+machine, reduced to the six safe fields — `cmd`, `pid`, `spawnTime` and `exitCode` were stripped
+before it was written and appear nowhere in it. It carries 7 agents across 2 workspaces, 5
+`running` and 2 `exited`, with two labels that are byte-identical duplicates.
+
+```
+tests/fixtures/wmux-agent-list-redacted.json
+sha256 74541f35bf527b3bc4f226fe4e1815000497088d5337c5084bde211afa0d09ba
+```
+
+It is the sensor's golden input and the replayable "exact input" the original Decision Receipt
+lacked.
+
+## S6 and S7 — kept as written
+
+The drain-window carve-out stays, and gains a negative gate (T17) so a future adapter edit cannot
+quietly wire the observation file into the mtime scan. `requireProjection`'s weaker item
+re-validation is pre-existing and out of scope; staying on Seam 3 keeps that hole closed, and
+`itemKind` is not widened.
+
+## Amended Decision Receipt
+
+```json
+{
+  "receipt": "gaia-local-wmux-lanes-r0/1",
+  "selectedSensorSeam": "SEAM_3_BOUNDED_READ_ONLY_SENSOR_EXPLICIT_FILE",
+  "selectedDisplaySeam": "DISPLAY_3_SEPARATE_LOCAL_LANES_BLOCK",
+  "absentObservation": "KEY_OMITTED",
+  "observationWindowMs": 30000,
+  "watchIntervalMsRange": [1000, 15000],
+  "labelPolicy": "POSITIVE_UNICODE_ALLOWLIST_WITH_LABEL_STATE",
+  "laneLimitPolicy": "REPORTED_NOT_ENFORCED",
+  "maxObservedLanes": 64,
+  "reversibility": "FREELY_REVERSIBLE",
+  "effect": "NONE",
+  "authority": "NONE",
+  "goldenInput": {
+    "path": "tests/fixtures/wmux-agent-list-redacted.json",
+    "sha256": "74541f35bf527b3bc4f226fe4e1815000497088d5337c5084bde211afa0d09ba"
+  },
+  "baseCommit": "7cbb02670929b8ea8a4c14a55a86245c650a2d24",
+  "rejected": [
+    "SEAM_1_SYNTHETIC_TELEMETRY_RUNS",
+    "SEAM_2_CONTROL_ROOM_DRIVES_WMUX",
+    "DISPLAY_1_MERGE_INTO_ITEMS",
+    "DISPLAY_2_HEADLINE_COUNTER_ONLY",
+    "S1_DROP_THE_WATCHER"
+  ]
+}
+```
+
+## Gates this amendment commits to
+
+`T1` digest stability with the key omitted · `T2` freshness boundary at exactly the window ·
+`T3` interval above half the window refused · `T4` headline liveness term · `T5` exited-only stays
+paused · `T6` verify-seam re-derivation including `headline.state` · `T7` activity-summary
+inertness under local lanes · `T8` exact-equality status mapping · `T9` closed-key refusal both
+directions · `T10` adversarial label set · `T11` withholding never drops a lane · `T12` future
+observation refused, not clamped · `T13` ordering and duplicate identity · `T14` sensor argv ·
+`T15` content negative control · `T16` no portfolio binding · `T17` drain window untouched ·
+`T18` reduced motion and semantics · `T19` French parity. Each carries a mechanism-revert
+mutation where the pair named one.

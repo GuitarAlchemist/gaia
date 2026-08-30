@@ -527,3 +527,171 @@ or promise an ETA from provider timeout bounds. It does not yet persist a histor
 cycles; callers may supply that existing evidence as a JSON array. It also does not host the
 HTML. A local file viewer, wmux browser or separately governed static host may display the
 artifact without widening Gaia's stdio-only core.
+
+# R4 review-repair decision — decided before repairing anything
+
+Four independent reviews of the progress and ETA UX slice — Standards, Spec, a responsive and
+accessibility adversary, and an epistemic and security adversary — all returned `REQUEST_CHANGES`.
+Their blocker union is repaired here. Each finding was replayed against the shipped code before it
+was accepted, and every repair below was written into this document before the code changed.
+
+The reviews are advisory evidence, not authority. Where a finding is accepted, the mechanism is
+named; where one is narrowed or declined, the reason is recorded in the same place.
+
+## Blocker union, and the mechanism chosen for each
+
+### U1 — heartbeat inertness is asserted unconditionally and is true only inside the window
+
+*Standards B1, epistemic FINDING 4.* `contentRevision` digests `{ items, machine }`; each item
+carries `evidenceState`, which is derived from `activity.state`, which is pure clock arithmetic
+against a 30 s window. So a tick whose only new event is a heartbeat — and even a tick with **no**
+new event, where only the clock advanced — moves `contentRevision` whenever the tick crosses the
+freshness boundary. The existing gate pinned both of its ticks inside the window and then asserted
+that the state had not changed, which is a demonstration that cannot fail.
+
+**Two resolutions were offered and both are acceptable to the reviewers.** Taken: **narrow the
+claim to what is true, and gate the boundary.** Excluding `evidenceState` and the liveness sort key
+from `contentRevision` would make the unconditional sentence true, but it would also make the
+digest silent about a state change an operator cares about, and it would move a published digest
+for every consumer — a migration bought to rescue a sentence.
+
+The claim now reads, in the module, in the truth rules and in the README:
+
+> A tick whose only new events are heartbeats changes **not one sentence**. `contentRevision` also
+> covers the freshness lattice, which is clock-derived, so a tick that crosses the 30-second
+> boundary moves `contentRevision` while every sentence stays byte-identical.
+
+Gated three ways: sentences are byte-identical across a heartbeat-only tick **inside** the window
+and across one that **crosses** it; `contentRevision` is stable in the first case and moves in the
+second; and the existing tautological assertion is replaced by one that can fail.
+
+### U2 — two divergent orderings decide which run is "the current run"
+
+*Standards B2.* `renderCurrentRun` takes `activity.items[0]`; the work list sorts the same items
+with a different comparator that adds a lifecycle-percentage key and uses `localeCompare` where the
+activity module uses ordinal comparison. The same page can name `issue-3` the current run and
+`issue-7` the highest-priority work.
+
+**Repair:** one canonical ordering, exported from `src/control-room-activity.mjs` as
+`compareControlRoomItems` and used by both. The lifecycle-percentage key is dropped rather than
+added to the other side: it ranks a `RUNNING` item above a `CLAIMED` one for a reason that has
+nothing to do with liveness, and the activity module's order is the one that decides the Current
+run card today.
+
+### U3 — the activity verifier is not total
+
+*Standards B3 and B4, spec BLOCKER 3, epistemic FINDING 2.* Four separate holes with one shape:
+
+- `interpolate` substitutes on `Object.hasOwn` alone, so a `params.stage` outside `STAGE_SENTENCES`
+  interpolates the literal string `undefined` and the verifier accepts a sentence the producer can
+  never emit. The renderer's copy of the same rule already guards it — one rule, two
+  implementations, two behaviours.
+- `ACTION_CODES[runState]`, `RESULT_CODES[event]`, `CHECKPOINT_CODES[runState]` and
+  `TEMPLATES[code]` are plain-object lookups that reach `Object.prototype`, so a resealed snapshot
+  whose `runState` is `constructor` skips the `undefined` guard and throws a raw `TypeError`
+  instead of a typed refusal. `lastTransition: null` passes validation and then crashes the
+  renderer.
+- `requireControlRoomActivity` never inspects `evidenceRevision` or `observedAt`, so a resealed
+  summary carries attacker-chosen free text — a URL, a local path, key-shaped material — to the
+  operator's screen through fields the closed-phrasebook claim does not cover. HTML escaping holds
+  and there is no injection; this is a content-provenance failure, not a script hole.
+- `summarizeItem` copies `repository`, `itemId`, `itemNumber`, `drainState`, `runId`, `lane` and
+  `agent` out of the snapshot unvalidated, while the module's docstring and the truth rules claim
+  **no** field originates outside a closed set.
+
+**Repairs, in the order they close:**
+
+1. `interpolate` refuses to substitute an `undefined` value, matching the renderer exactly.
+2. The four lookup tables become null-prototype frozen maps, so a prototype key is not a vocabulary
+   member. `requireControlRoomSnapshot` additionally refuses a telemetry `runState` or
+   `lastTransition.event` outside its closed vocabulary, and refuses a missing `lastTransition`
+   where the renderer dereferences one.
+3. `requireControlRoomActivity` constrains `evidenceRevision` to 64 hex characters, the literal
+   `UNKNOWN`, or `null`, and `observedAt` to an exact ISO instant or `null` — and refuses one dated
+   after the summary's own observation instant, which is the producer's rule the verifier was
+   missing.
+4. The identity fields are **bound rather than pattern-matched**: `requireActivity` at the render
+   seam already holds the matching snapshot item, so `repository`, `itemNumber`, `drainState`,
+   `runId`, `lane` and `agent` must equal that item's values exactly. Pattern-matching them would
+   have invented a vocabulary; binding them uses the one already in hand.
+5. The two claims are narrowed to the bullets they are true of, in the module docstring and in the
+   truth rules, and the item identities are described as snapshot-bound rather than closed.
+
+### U4 — future and unparseable evidence renders as `0s ago`
+
+*Epistemic FINDING 3.* `bulletAge` subtracts and `formatDuration` clamps negatives to zero, so
+evidence stamped in the year 2999 renders as `0s ago` — the single most reassuring reading
+available, and the exact defect class `sourceChangedAtBasis` was built to eliminate one commit
+earlier. An unparseable instant renders `NaNs ago`.
+
+**Repair:** the verifier refuses a future-dated instant (U3.3), and `bulletAge` names an incoherent
+or unparseable instant instead of clamping it. Defence in depth on purpose: the refusal is the
+barrier, and the renderer stops producing a reassuring number even if something reaches it.
+
+### U5 — the dashboard adapter's alias guard is a spelling test
+
+*Spec BLOCKER 2, epistemic FINDING 1, confirmed destructive.* `scripts/factory-dashboard.mjs`
+compares `resolve()`d strings, which normalise separators and `..` but not case, 8.3 short names,
+junctions or UNC spellings. On the declared platform this accepted
+`--projection …/projection.json --snapshot-out …/Projection.json` and **overwrote the input drain
+projection with the snapshot**. The correct guard already ships twice in this tree, in
+`scripts/factory-dashboard-refresh.mjs` and, with its reasoning written out, in `src/inventory.mjs`.
+
+**Repair:** lift `pathIdentity` into `src/path-identity.mjs`, one definition, and use it from both
+adapters for both the outputs-must-differ and the output-aliases-input checks. Lifting rather than
+copying is the point — a third copy of a rule two copies already disagreed about is the defect.
+
+### U6 — one long token scrolls the page sideways at every viewport
+
+*Spec BLOCKER 1, responsive 3.1.* `overflow-wrap: anywhere` is declared on `code` alone. A CI-run
+URL in an issue title, a 140-character `org/repo`, or a maximum-length gate token in the Current
+run card's checkpoint sentence pushes `documentElement.scrollWidth` to 756, 778, 1091 and 2761 px
+at 375, 800, 1440 and 1920 px viewports. The shipped assertion checks only that the substring
+`overflow-wrap: anywhere` appears somewhere in the base stylesheet, so it passes on a rule scoped
+to `code`.
+
+**Repair:** declare the wrapping on `body`, which every rendered string inherits, and keep the
+`code` rule. The gate is replaced with one bound to the elements that actually carry
+operator-authored strings, over a fixture whose title, repository and gate token are long unbroken
+tokens.
+
+**Stated honestly:** no headless browser measurement was run in this lane. The repair is verified
+structurally — the declaration is on an ancestor of every operator-authored string, and no rule
+overrides it — and a browser re-measurement of the four viewports remains the reviewer's evidence
+to reproduce, not this lane's.
+
+### U7 — the artifact replaces itself every five seconds with no way to stop it
+
+*Responsive 3.2.* `<meta http-equiv="refresh" content="5">` is emitted unconditionally in both
+languages. The DOM, its `role="status"` live regions and any assistive-technology virtual buffer
+are destroyed and rebuilt every 5.00 s, and the page offers zero controls. This fails WCAG 2.2
+SC 2.2.1 (Level A), whose real-time exception does not apply to a dashboard whose interval could be
+a control. It is documented nowhere.
+
+**Repair, both halves of "remove or make controllable":**
+
+- The meta refresh is **removed**. The default document does not reload itself at all.
+- Auto-refresh becomes opt-in — `renderControlRoomHtml(..., { autoRefreshSeconds })` and
+  `--refresh-seconds` on the adapter — and the opt-in path is implemented as a script-driven
+  reload with a real, visible, focusable **Stop auto-refresh** button that cancels it. A meta
+  refresh cannot be cancelled once parsed, which is precisely why it is the wrong mechanism for a
+  control the standard requires to exist.
+
+### U8 — local wmux work stays separate from GitHub backlog
+
+The subject of this slice's own amendment, above. Local lanes enter no portfolio structure: not
+`items`, not `blockers`, not `capacity`, not the obstruction, not pace and not ETA.
+
+## Findings recorded and not repaired here
+
+- **Spec residual, `requireProjection` does not re-run `requireItem`** — pre-existing, out of this
+  slice's scope, and noted by the pair as the hole a "synthesize a LOCAL_WMUX item" shortcut would
+  fall through. Staying on the selected seam keeps it closed; `itemKind` is not widened.
+- **Responsive 3.3, the French document's landmark name is hardcoded English** — accepted as real.
+  Repaired for the new section only, whose `aria-label` is translated; the pre-existing English
+  landmark on `metrics` is left for its own slice rather than widened into this diff.
+- **Responsive 3.4, the progress meter has no accessible name**, and **3.5, the backlog silently
+  drops kinds past the eighth** — accepted as real, not repaired here. Both are pre-existing and
+  neither is in the blocker union the operator asked to close.
+- **Standards L1, inconsistent `?.` guarding around a missing `activity`** — closed as a
+  side-effect of U3.2, which validates the field rather than guarding at each use.
