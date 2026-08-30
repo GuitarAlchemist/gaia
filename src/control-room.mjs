@@ -22,6 +22,7 @@ import {
   isSafeLaneIdentity,
   isSafeLaneLabel,
   laneOrderKey,
+  localLaneObservationRevision,
   requireLocalLaneObservation,
 } from './local-lane-observation.mjs';
 import {
@@ -548,10 +549,27 @@ function requireLocalLanes(value) {
     }
     previous = key;
   }
+  // Provenance, and the one field of this block that used to escape re-derivation.
+  //
+  // `observationRevision` is what an operator reads as the identity of the evidence this page was
+  // built from. It was checked only for `typeof … === 'string'` and then handed back to the
+  // derivation below as its own expected value, so the comparison could never disagree with it and
+  // a resealed snapshot displayed a URL, a path or a fabricated progress sentence in its place.
+  // Escaping held throughout, so this was never an injection — it was a provenance failure, which
+  // is the harder one to notice. The block already carries the lanes and the instant the digest is
+  // taken over, so the honest value is re-derived from the schema's own recipe rather than
+  // pattern-matched: sixty-four hex characters of the wrong evidence is still the wrong evidence.
+  const observationRevision = localLaneObservationRevision({
+    observedAt: block.observedAt,
+    lanes: block.lanes,
+  });
+  if (block.observationRevision !== observationRevision) {
+    refuse('the snapshot local lane block names an observation revision its own lanes do not derive');
+  }
   const expected = deriveLocalLanes({
     lanes: block.lanes,
     observedAt: block.observedAt,
-    observationRevision: block.observationRevision,
+    observationRevision,
     observationAgeMs: Date.parse(value.observedAt) - Date.parse(block.observedAt),
   });
   if (canonicalJson(expected) !== canonicalJson(block)) {

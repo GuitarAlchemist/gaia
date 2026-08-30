@@ -133,6 +133,34 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
+/**
+ * The observation digest recipe, in one place, because three callers need it and a second
+ * implementation is how two verifiers come to disagree about what a revision means.
+ *
+ * `lanes` is projected to the seven observation fields on the way in, so a consumer holding a
+ * derived view of the same lanes — the control room's block adds a `live` flag — re-derives the
+ * same revision without having to know how to strip its own additions. Anything the projection
+ * does not name cannot enter the digest, which is the same construction the field lists are.
+ */
+export function localLaneObservationRevision({ observedAt, lanes = [] } = {}) {
+  return createHash('sha256').update(canonicalJson({
+    schema: LOCAL_LANE_OBSERVATION_SCHEMA,
+    source: LOCAL_LANE_SOURCE,
+    effect: 'NONE',
+    authority: 'NONE',
+    observedAt,
+    lanes: lanes.map((lane) => ({
+      workspaceId: lane.workspaceId,
+      paneId: lane.paneId,
+      surfaceId: lane.surfaceId,
+      agentId: lane.agentId,
+      label: lane.label,
+      labelState: lane.labelState,
+      lifecycle: lane.lifecycle,
+    })),
+  })).digest('hex');
+}
+
 export const isSafeLaneIdentity = (value) => typeof value === 'string' && IDENTITY.test(value);
 export const isSafeLaneLabel = (value) => typeof value === 'string' && LABEL.test(value);
 
@@ -221,8 +249,7 @@ export function requireLocalLaneObservation(value) {
     previous = key;
   }
 
-  const { revision, ...body } = value;
-  if (revision !== createHash('sha256').update(canonicalJson(body)).digest('hex')) {
+  if (value.revision !== localLaneObservationRevision(value)) {
     refuse('the observation revision does not match its content');
   }
   return deepFreeze(value);
@@ -266,16 +293,13 @@ export function sealLocalLaneObservation({ observedAt, lanes = [] } = {}) {
     })
     .sort((left, right) => ordinal(laneOrderKey(left), laneOrderKey(right)));
 
-  const body = {
+  return requireLocalLaneObservation({
     schema: LOCAL_LANE_OBSERVATION_SCHEMA,
     source: LOCAL_LANE_SOURCE,
     effect: 'NONE',
     authority: 'NONE',
     observedAt,
     lanes: ordered,
-  };
-  return requireLocalLaneObservation({
-    ...body,
-    revision: createHash('sha256').update(canonicalJson(body)).digest('hex'),
+    revision: localLaneObservationRevision({ observedAt, lanes: ordered }),
   });
 }
