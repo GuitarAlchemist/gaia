@@ -3,10 +3,11 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
-async function runGh(args) {
+async function runGh(args, { signal } = {}) {
   const { stdout } = await execFileAsync('gh', args, {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
+    signal,
     windowsHide: true,
   });
   const trimmed = stdout.trim();
@@ -36,18 +37,36 @@ function qualifiedReference(reference, repository) {
 function declaredRelationships(body, repository) {
   const dependencies = [];
   const duplicates = [];
+  let dependenciesAreEmpty = false;
+  let duplicatesAreEmpty = false;
   for (const line of String(body ?? '').split(/\r?\n/u)) {
-    const match = line.match(/^\s*(Depends-On|Blocked-By|Duplicate-Of):\s*((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[1-9]\d*)\s*$/iu);
+    const match = line.match(/^\s*(Depends-On|Blocked-By|Duplicate-Of):\s*(NONE|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[1-9]\d*)\s*$/iu);
     if (!match) continue;
+    const relationship = match[1].toLowerCase();
+    const isDuplicate = relationship === 'duplicate-of';
+    if (match[2].toUpperCase() === 'NONE') {
+      if (relationship === 'blocked-by') {
+        throw new TypeError('NONE is supported only for Depends-On and Duplicate-Of');
+      }
+      if (isDuplicate) duplicatesAreEmpty = true;
+      else if (relationship === 'depends-on') dependenciesAreEmpty = true;
+      continue;
+    }
     const reference = qualifiedReference(match[2], repository);
-    if (match[1].toLowerCase() === 'duplicate-of') duplicates.push(reference);
+    if (isDuplicate) duplicates.push(reference);
     else dependencies.push(reference);
   }
   const uniqueDuplicates = [...new Set(duplicates)];
   if (uniqueDuplicates.length > 1) dependencies.push(...uniqueDuplicates);
+  if ((dependenciesAreEmpty && dependencies.length > 0)
+      || (duplicatesAreEmpty && duplicates.length > 0)) {
+    throw new TypeError('NONE cannot be combined with a concrete relationship');
+  }
   return {
-    dependencies: dependencies.length > 0 ? [...new Set(dependencies)] : 'UNKNOWN',
-    duplicateOf: uniqueDuplicates.length === 1 ? uniqueDuplicates[0] : 'UNKNOWN',
+    dependencies: dependenciesAreEmpty ? []
+      : dependencies.length > 0 ? [...new Set(dependencies)] : 'UNKNOWN',
+    duplicateOf: duplicatesAreEmpty ? null
+      : uniqueDuplicates.length === 1 ? uniqueDuplicates[0] : 'UNKNOWN',
   };
 }
 
@@ -72,25 +91,26 @@ export function createGitHubReadAdapter({ run = runGh, resultLimit = 1000 } = {}
   }
 
   return Object.freeze({
-    async read({ organization }) {
+    async read({ organization, signal }) {
+      const read = (args) => run(args, { signal });
       const [repositoryRows, issueRows, pullRequestRows, issueMetadata, pullRequestMetadata]
         = await Promise.all([
-        run([
+        read([
           'repo', 'list', organization, '--limit', String(resultLimit),
           '--json', 'id,nameWithOwner,isArchived,defaultBranchRef',
         ]),
-        run([
+        read([
           'search', 'issues', '--owner', organization, '--state', 'open',
           '--limit', String(resultLimit),
           '--json', 'id,number,title,updatedAt,body,labels,repository',
         ]),
-        run([
+        read([
           'search', 'prs', '--owner', organization, '--state', 'open',
           '--limit', String(resultLimit),
           '--json', 'id,number,title,updatedAt,body,isDraft,labels,repository',
         ]),
-        run(['api', searchMetadataPath(organization, 'issue'), '--method', 'GET']),
-        run(['api', searchMetadataPath(organization, 'pr'), '--method', 'GET']),
+        read(['api', searchMetadataPath(organization, 'issue'), '--method', 'GET']),
+        read(['api', searchMetadataPath(organization, 'pr'), '--method', 'GET']),
       ]);
       if (!Array.isArray(repositoryRows) || !Array.isArray(issueRows)
           || !Array.isArray(pullRequestRows)) {
@@ -100,7 +120,7 @@ export function createGitHubReadAdapter({ run = runGh, resultLimit = 1000 } = {}
       const repositories = await Promise.all(repositoryRows.map(async (repository) => {
         const branch = repository.defaultBranchRef?.name;
         const defaultBranchOid = typeof branch === 'string'
-          ? await run([
+          ? await read([
             'api', `repos/${repository.nameWithOwner}/commits/${encodeURIComponent(branch)}`,
             '--jq', '.sha',
           ])

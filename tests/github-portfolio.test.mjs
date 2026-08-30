@@ -19,6 +19,7 @@ import {
   createAgentFactoryExecutionAdapter,
 } from '../src/github-portfolio-execution.mjs';
 import { createGitHubReadAdapter } from '../src/github-read-adapter.mjs';
+import { reconcilePortfolioDrain } from '../src/portfolio-drain.mjs';
 
 const completeSnapshot = (repositories) => ({
   schema: 'gaia-github-read-snapshot/1',
@@ -480,6 +481,79 @@ test('the gh adapter blocks exact declared dependencies from issue bodies', asyn
   assert.deepEqual(portfolio.repositories[0].issues[0].dependencies,
     ['GuitarAlchemist/ix#7']);
   assert.equal(portfolio.schedule.length, 0);
+});
+
+test('explicitly dependency-free ready work enters the portfolio pump', async () => {
+  let issueBody = 'Depends-On: NONE\nDuplicate-Of: NONE';
+  const run = async (args) => {
+    const metadata = searchMetadata(args, { issues: 1 });
+    if (metadata) return metadata;
+    if (args[0] === 'repo') return [{
+      id: 'repo-gaia', nameWithOwner: 'GuitarAlchemist/gaia', isArchived: false,
+      defaultBranchRef: { name: 'main' },
+    }];
+    if (args[1] === 'issues') return [{
+      id: 'issue-gaia-18', number: 18,
+      title: 'Pump: admit explicitly dependency-free ready work',
+      updatedAt: '2026-08-29T19:10:00Z',
+      body: issueBody,
+      labels: [{ name: 'ready-for-agent' }],
+      repository: { nameWithOwner: 'GuitarAlchemist/gaia' },
+    }];
+    if (args[1] === 'prs') return [];
+    if (args[0] === 'api') return 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    throw new Error(`unexpected gh call: ${args.join(' ')}`);
+  };
+  const factory = createPortfolioFactory({
+    githubRead: createGitHubReadAdapter({ run, resultLimit: 10 }),
+  });
+  const portfolio = await factory.survey({
+    organization: 'GuitarAlchemist', policyRevision: 'sha256:portfolio-policy-v1',
+  });
+  const drain = reconcilePortfolioDrain({ portfolio, receipts: [], holds: [], capacity: 4 });
+
+  assert.equal(portfolio.workItems[0].state, 'READY');
+  assert.deepEqual(portfolio.repositories[0].issues[0].dependencies, []);
+  assert.equal(portfolio.repositories[0].issues[0].duplicateOf, null);
+  assert.equal(drain.items[0].drainState, 'QUEUED');
+  assert.equal(drain.decisions[0].action, 'CLAIM_FACTORY_RUN');
+  assert.equal(drain.decisions[0].itemId, 'issue-gaia-18');
+
+  issueBody = 'Blocked-By: NONE\nDuplicate-Of: NONE';
+  await assert.rejects(factory.survey({
+    organization: 'GuitarAlchemist', policyRevision: 'sha256:portfolio-policy-v1',
+  }), /NONE is supported only for Depends-On and Duplicate-Of/u);
+});
+
+test('the gh adapter refuses NONE combined with a concrete relationship', async () => {
+  for (const body of [
+    'Depends-On: NONE\nDepends-On: GuitarAlchemist/ix#7\nDuplicate-Of: NONE',
+    'Depends-On: NONE\nDuplicate-Of: NONE\nDuplicate-Of: GuitarAlchemist/gaia#2',
+    'Depends-On: NONE\nDuplicate-Of: GuitarAlchemist/gaia#2\nDuplicate-Of: GuitarAlchemist/gaia#3',
+  ]) {
+    const run = async (args) => {
+      const metadata = searchMetadata(args, { issues: 1 });
+      if (metadata) return metadata;
+      if (args[0] === 'repo') return [{
+        id: 'repo-gaia', nameWithOwner: 'GuitarAlchemist/gaia', isArchived: false,
+        defaultBranchRef: { name: 'main' },
+      }];
+      if (args[1] === 'issues') return [{
+        id: 'issue-gaia-18', number: 18, title: 'Contradictory relationships',
+        updatedAt: '2026-08-29T19:10:00Z', body,
+        labels: [{ name: 'ready-for-agent' }],
+        repository: { nameWithOwner: 'GuitarAlchemist/gaia' },
+      }];
+      if (args[1] === 'prs') return [];
+      if (args[0] === 'api') return 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+
+    await assert.rejects(
+      createGitHubReadAdapter({ run, resultLimit: 10 }).read({ organization: 'GuitarAlchemist' }),
+      /NONE cannot be combined with a concrete relationship/u,
+    );
+  }
 });
 
 test('the gh adapter treats repeated identical duplicate declarations as one fact', async () => {

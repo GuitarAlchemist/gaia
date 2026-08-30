@@ -530,7 +530,10 @@ export function createPortfolioFactory({ githubRead, authority, factoryExecution
         organization: requireText(request?.organization, 'organization'),
         policyRevision: requireText(request?.policyRevision, 'policyRevision'),
       };
-      const snapshot = await githubRead.read(structuredClone(normalizedRequest));
+      const snapshot = await githubRead.read({
+        ...structuredClone(normalizedRequest),
+        ...(request?.signal === undefined ? {} : { signal: request.signal }),
+      });
       return buildPortfolio(snapshot, normalizedRequest);
     },
     async advance(request) {

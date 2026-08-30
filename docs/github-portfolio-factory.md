@@ -104,11 +104,15 @@ R1 recognizes only whole, anchored body lines in one of these forms:
 Depends-On: owner/repository#123
 Blocked-By: owner/repository#123
 Duplicate-Of: owner/repository#123
+Depends-On: NONE
+Duplicate-Of: NONE
 ```
 
 `#123` is also accepted and is qualified to the current repository. Matching is
 case-insensitive, but no prose inference, fuzzy reference, cross-line continuation, or
-LLM interpretation is allowed. Missing relationship evidence remains `UNKNOWN`.
+LLM interpretation is allowed. The exact `NONE` sentinel records known-empty evidence;
+omitting the corresponding declaration remains `UNKNOWN`. Combining `NONE` with a concrete
+relationship of the same kind is contradictory and refused rather than guessed.
 Multiple distinct `Duplicate-Of` declarations are contradictory: they block the item
 and leave its canonical duplicate target unknown.
 
