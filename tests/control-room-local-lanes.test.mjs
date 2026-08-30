@@ -23,7 +23,9 @@ import { summarizeControlRoomActivity } from '../src/control-room-activity.mjs';
 import {
   ControlRoomError, buildControlRoomSnapshot, renderControlRoomHtml, requireControlRoomSnapshot,
 } from '../src/control-room.mjs';
-import { sealLocalLaneObservation } from '../src/local-lane-observation.mjs';
+import {
+  localLaneObservationRevision, sealLocalLaneObservation,
+} from '../src/local-lane-observation.mjs';
 
 const SHA = 'a'.repeat(64);
 const AT = '2026-08-30T03:45:00.000Z';
@@ -941,4 +943,134 @@ test('T20: the observation digest recipe has exactly one implementation', () => 
     'the schema module hashes an observation in exactly one place',
   );
   assert.match(control, /localLaneObservationRevision/u, 'the control room imports that one recipe');
+});
+
+// ---------------------------------------------------------------------------
+// T21 — observedAt is provenance, and must be an exact instant
+//
+// R1.2 made `observationRevision` a derived value, which moved the whole trust of the block onto
+// its two inputs. The lanes are checked exhaustively; the instant was checked with `Date.parse`,
+// which reads a trailing parenthetical as a time-zone comment and accepts whatever it contains.
+// Escaping held throughout, so this was never an injection — the instant an operator reads as
+// when the evidence was current simply was not bound to anything.
+// ---------------------------------------------------------------------------
+
+/**
+ * Spellings V8 accepts for exactly the same millisecond as `AT`.
+ *
+ * Same millisecond is the whole point. Under every one of these the age, the freshness state,
+ * `liveCount`, `showPulse`, the headline and the counts are byte-identical to the honest snapshot,
+ * so a refusal cannot be some other re-derivation disagreeing: only the spelling is wrong.
+ */
+const FORGED_INSTANTS = Object.freeze({
+  'a fabricated progress claim':
+    'Sat Aug 30 2026 03:45:00 GMT+0000 (This run is 87% complete and will finish in 2h)',
+  'an exfiltration URL':
+    'Sat Aug 30 2026 03:45:00 GMT+0000 (https://exfil.invalid/?k=EXFILTRATED)',
+  'an RFC 1123 date': 'Sat, 30 Aug 2026 03:45:00 GMT',
+  'second precision': '2026-08-30T03:45:00Z',
+  'a zero offset spelled out': '2026-08-30T03:45:00.000+00:00',
+  'a non-zero offset naming the same instant': '2026-08-30T04:45:00.000+01:00',
+});
+
+/**
+ * Reseal a snapshot around a differently spelled instant, with provenance honestly re-derived over
+ * it — so the R1.2 gate cannot be what refuses this, and the instant is the only thing left.
+ */
+const withObservedAt = (snapshot, observedAt) => reseal({
+  ...snapshot,
+  localLanes: {
+    ...snapshot.localLanes,
+    observedAt,
+    observationRevision: localLaneObservationRevision({
+      observedAt, lanes: snapshot.localLanes.lanes,
+    }),
+  },
+});
+
+test('T21: a Date.parse-able but non-canonical observedAt is refused at both public seams', () => {
+  const honest = snapshotWith(observation([lane(1), lane(2)]));
+
+  for (const [why, forged] of Object.entries(FORGED_INSTANTS)) {
+    // The premise of this gate: V8 agrees these name the honest instant, so nothing downstream of
+    // the instant differs, and the exactness rule is the only thing that can refuse them.
+    assert.equal(Date.parse(forged), Date.parse(AT), `${why} does not name the honest instant`);
+
+    const resealed = withObservedAt(honest, forged);
+    assert.match(
+      resealed.localLanes.observationRevision, /^[a-f0-9]{64}$/u,
+      'the forgery carries a correctly derived revision, so R1.2 is not what refuses it',
+    );
+
+    for (const [seam, run] of [
+      ['requireControlRoomSnapshot', () => requireControlRoomSnapshot(resealed)],
+      ['renderControlRoomHtml', () => renderControlRoomHtml(resealed)],
+    ]) {
+      assert.throws(
+        run,
+        (error) => error instanceof ControlRoomError && error.code === 'InvalidSnapshot',
+        `${seam} accepted ${why} as the instant the lane evidence was current`,
+      );
+    }
+    // Refusal is the whole point: no document exists in either language for the string to reach.
+    assert.throws(() => renderControlRoomHtml(resealed, { language: 'fr' }));
+  }
+});
+
+test('T21 POSITIVE CONTROL: exact canonical instants still verify and are still rendered', () => {
+  const at = Date.parse(AT);
+  const honest = [
+    observation([lane(1)]),
+    observation([lane(1), lane(2)], new Date(at - 1).toISOString()),
+    observation([lane(1)], new Date(at - 30_000).toISOString()),
+    observation([lane(1)], new Date(at - 30_001).toISOString()),
+  ];
+
+  for (const one of honest) {
+    const snapshot = snapshotWith(one);
+    assert.equal(requireControlRoomSnapshot(snapshot), snapshot, 'an honest snapshot verifies');
+    assert.equal(
+      localSection(renderControlRoomHtml(snapshot))
+        .includes(`<time>${snapshot.localLanes.observedAt}</time>`),
+      true,
+      'the operator still reads back the instant the evidence was actually current',
+    );
+  }
+});
+
+test('T21 MECHANISM REVERT: exactness is what refuses the free text', async () => {
+  const forged = withObservedAt(
+    snapshotWith(observation([lane(1), lane(2)])),
+    FORGED_INSTANTS['a fabricated progress claim'],
+  );
+
+  // Exactly the R1.2 behaviour: any string V8 can parse is accepted as the instant.
+  const mutant = await importMutant('loose-observed-at', (source) => source.replace(
+    '  if (!isExactInstant(block.observedAt)',
+    "  if (typeof block.observedAt !== 'string' || !Number.isFinite(Date.parse(block.observedAt))",
+  ));
+
+  const rendered = mutant.renderControlRoomHtml(forged);
+  assert.equal(
+    rendered.includes('This run is 87% complete and will finish in 2h'), true,
+    'without exactness the fabricated sentence renders, which is why exactness is the mechanism',
+  );
+  assert.match(
+    rendered, /data-observed-at="Sat Aug 30 2026[^"]*87% complete[^"]*"/u,
+    'and reaches the attribute the document own liveness script parses back',
+  );
+  assert.throws(
+    () => renderControlRoomHtml(forged),
+    (error) => error instanceof ControlRoomError && error.code === 'InvalidSnapshot',
+  );
+});
+
+test('T21: the exact-instant rule has exactly one implementation', () => {
+  const control = readFileSync(join(ROOT, 'src', 'control-room.mjs'), 'utf8');
+
+  assert.match(control, /isExactInstant/u, 'the control room imports the one instant predicate');
+  assert.equal(
+    /toISOString\(\)\s*===/u.test(control), false,
+    'the control room does not respell the round-trip rule it imports',
+  );
 });

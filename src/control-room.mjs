@@ -19,6 +19,7 @@ import {
   LOCAL_LANE_LIVE_LIFECYCLE,
   LOCAL_LANE_OBSERVATION_FRESH_MS,
   LOCAL_LANE_SOURCE,
+  isExactInstant,
   isSafeLaneIdentity,
   isSafeLaneLabel,
   laneOrderKey,
@@ -528,7 +529,18 @@ function requireLocalLanes(value) {
       || !Array.isArray(block.lanes)) {
     refuse('the snapshot local lane block is not a Gaia local lane projection');
   }
-  if (typeof block.observedAt !== 'string' || !Number.isFinite(Date.parse(block.observedAt))
+  // The instant is the block's other derivation input, so it is checked as strictly as the lanes.
+  //
+  // `Date.parse` is not a validator. V8's fallback parser reads a trailing parenthetical as a
+  // time-zone comment and accepts whatever it holds, so a resealed snapshot could spell this
+  // instant as free text — a fabricated progress sentence, a URL — keep the very same
+  // millisecond, and therefore leave the age, the freshness state, the counts, the headline and
+  // the re-derived revision all in agreement while an operator read the sentence out of the
+  // `<time>` that says when this evidence was current. Escaping held throughout; the failure was
+  // that the field was bound to nothing. `isExactInstant` is the rule the sensor's own schema
+  // already applies to this field on the build path, imported rather than respelled: one rule with
+  // two implementations is the defect, not the fix.
+  if (!isExactInstant(block.observedAt)
       || typeof block.observationRevision !== 'string') {
     refuse('the snapshot local lane block names no observation it was derived from');
   }
