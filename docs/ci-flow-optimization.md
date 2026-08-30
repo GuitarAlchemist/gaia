@@ -319,10 +319,12 @@ one sixth, published as two thirds — and sends a team to spend a week on cachi
 *bound* calls a perfectly coherent producer `CORRUPT`, whose operator action is "fix the producer",
 and silently removes the caching lever from exactly the heavily parallel workflows where caching is
 most likely to pay. So each check's setup is bounded by that check's own span, the caching share is
-evaluated per check and names the check that earns it, and the same argument the contract already
-makes for cost — *parallel jobs bill concurrently, so a duration converted against one wall clock
-is always wrong and always plausible* — is applied here rather than stated one section earlier and
-forgotten. MR9 reverts it.
+evaluated per check and names the check that earns it. The published `setupMs` cell is therefore
+the *total setup work carried by the checks*, not a share of the run, and for a parallel run it
+legitimately exceeds the run's wall-clock span; nothing may divide it by `executionMs`. The same
+argument the contract already makes for cost — *parallel jobs bill concurrently, so a duration
+converted against one wall clock is always wrong and always plausible* — is applied here rather
+than stated one section earlier and forgotten. MR9 reverts it.
 
 **A dependency chain may not outlast the run it lies inside.** An edge set is verified as a DAG
 over the carried checks and nothing more: no rule requires an edge to imply temporal order, so two

@@ -211,6 +211,8 @@ function caching(observations) {
     // An unexposed setup is not a small setup, and an incoherent one is not evidence at all. A
     // cell that is UNKNOWN supports no candidate, so both are consulted as coherence gates only.
     if (setupMs.state !== 'MEASURED' || executionMs.state !== 'MEASURED') continue;
+    // Named, because the pairing of a numerator with its own denominator IS the mechanism; MR9
+    // reverts exactly this line to the summed-setup-over-one-wall-clock form.
     const share = (item) => [item.setupMs, spanOf(item)];
     for (const item of entry.checks) {
       const [setup, span] = share(item);
