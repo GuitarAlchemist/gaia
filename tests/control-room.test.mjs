@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { summarizeControlRoomActivity } from '../src/control-room-activity.mjs';
 import { buildControlRoomSnapshot, renderControlRoomHtml } from '../src/control-room.mjs';
 import {
   buildFactoryTelemetryEvent,
@@ -269,14 +270,23 @@ test('the selected dashboard seam is bound by a replayable Decision Receipt', ()
   const design = readFileSync(new URL('../docs/factory-control-room.md', import.meta.url), 'utf8');
   const bodies = [...design.matchAll(/Canonical receipt body:\s*```json\s*([^\n]+)\s*```/gu)]
     .map((match) => JSON.parse(match[1]));
-  assert.equal(bodies.length, 2);
-  const [body, fogBody] = bodies;
+  assert.equal(bodies.length, 3);
+  const [body, fogBody, activityBody] = bodies;
 
   assert.equal(body.selectedDesign, 'pure-content-addressed-control-room-read-model');
   assert.equal(body.reversibility, 'freely-reversible');
   assert.equal(fogBody.selectedDesign, 'snapshot-bound-fog-of-war-projection');
   assert.equal(fogBody.baseCommit, 'a17392d3cf967bf2d7906d2cbd77dbc01f5f3c87');
   assert.equal(fogBody.reversibility, 'freely-reversible');
+  assert.equal(
+    activityBody.selectedDesign, 'snapshot-bound-derived-control-room-activity-projection',
+  );
+  assert.equal(activityBody.baseCommit, 'e4d242abe10118bc63244d5973077fb665724db9');
+  assert.equal(activityBody.reversibility, 'freely-reversible');
+  assert.equal(
+    activityBody.inputBlobs.controlRoom, '13785627547556fb44e963244141768613251dcc',
+    'the design decision names the exact renderer blob it was taken against',
+  );
   for (const receipt of bodies) {
     const digest = createHash('sha256').update(canonicalJson(receipt)).digest('hex');
     assert.equal(design.includes(`Receipt SHA-256:\n\`${digest}\``), true);
@@ -1348,4 +1358,458 @@ test('MECHANISM REVERT: the UNOBSERVED coherence rule is what stops a dressed-up
   assert.throws(
     () => buildControlRoomSnapshot(dressedUp), { code: 'InvalidEvidenceBasis' },
   );
+});
+
+// ---------------------------------------------------------------------------
+// R3 — the current run, the activity bullets, the backlog, pace calibration
+// and a layout that uses the viewport it was given
+// ---------------------------------------------------------------------------
+
+const ACTIVE_GATE_RUN = [
+  { event: 'run.started', observedAt: '2026-08-29T18:39:00.000Z' },
+  { event: 'gate.entered', gate: 'WORKER', observedAt: '2026-08-29T18:39:05.000Z' },
+  {
+    event: 'gate.passed',
+    gate: 'WORKER',
+    observedAt: '2026-08-29T18:39:58.000Z',
+    evidenceRevision: 'b'.repeat(64),
+  },
+  { event: 'run.heartbeat', observedAt: '2026-08-29T18:40:10.000Z' },
+];
+
+const movingSnapshot = (overrides = {}) => buildControlRoomSnapshot({
+  drainProjection: projection([item({ drainState: 'RUNNING' })]),
+  observedAt: '2026-08-29T18:40:20.000Z',
+  telemetryProjection: telemetry(ACTIVE_GATE_RUN),
+  ...overrides,
+});
+
+function stylesheetOf(html) {
+  const match = html.match(/<style>([\s\S]*?)<\/style>/u);
+  assert.notEqual(match, null, 'the document carries exactly one inline stylesheet');
+  return match[1];
+}
+
+/** Split a flat stylesheet into its `@media` blocks and everything outside them. */
+function cssLayers(css) {
+  const blocks = [];
+  let base = '';
+  let cursor = 0;
+  const marker = /@media\s+([^{]+)\{/gu;
+  let match = marker.exec(css);
+  while (match !== null) {
+    base += css.slice(cursor, match.index);
+    let depth = 1;
+    let index = marker.lastIndex;
+    while (depth > 0 && index < css.length) {
+      if (css[index] === '{') depth += 1;
+      if (css[index] === '}') depth -= 1;
+      index += 1;
+    }
+    blocks.push({ query: match[1].trim(), body: css.slice(marker.lastIndex, index - 1) });
+    cursor = index;
+    marker.lastIndex = index;
+    match = marker.exec(css);
+  }
+  return { base: base + css.slice(cursor), blocks };
+}
+
+function declarationsFor(cssText, selector) {
+  const found = [];
+  const rule = /([^{}]+)\{([^{}]*)\}/gu;
+  let match = rule.exec(cssText);
+  while (match !== null) {
+    if (match[1].split(',').map((one) => one.trim()).includes(selector)) found.push(match[2]);
+    match = rule.exec(cssText);
+  }
+  return found;
+}
+
+/** How many columns a `grid-template-columns` value actually declares. */
+function trackCount(value) {
+  const repeated = value.trim().match(/^repeat\(\s*(\d+)\s*,/u);
+  if (repeated) return Number(repeated[1]);
+  let depth = 0;
+  let tracks = 0;
+  let inside = false;
+  for (const character of value.trim()) {
+    if (character === '(') depth += 1;
+    if (depth === 0 && /\s/u.test(character)) { inside = false; continue; }
+    if (!inside) { tracks += 1; inside = true; }
+    if (character === ')') depth -= 1;
+  }
+  return tracks;
+}
+
+function columnsFor(cssText, selector) {
+  return declarationsFor(cssText, selector)
+    .flatMap((body) => [...body.matchAll(/grid-template-columns:\s*([^;]+);/gu)])
+    .map(([, value]) => trackCount(value));
+}
+
+const LAYOUT_SELECTORS = Object.freeze([
+  '.hero', '.current-run-facts', '.metrics', '.work-list', '.lower-grid', '.evidence',
+  '.fog-grid', '.fog-counts',
+]);
+
+const bulletTextsOf = (html) => [
+  ...html.matchAll(/<span class="bullet-text">([^<]*)<\/span>/gu),
+].map(([, text]) => text
+  .replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"')
+  .replaceAll('&#39;', "'").replaceAll('&amp;', '&'));
+
+test('the rendered card states the three bullets, their evidence ages and their evidence state', () => {
+  const snapshot = movingSnapshot();
+
+  const html = renderControlRoomHtml(snapshot);
+
+  assert.match(html, /Running between gates\./u);
+  assert.match(html, /Gate WORKER passed\./u);
+  assert.match(html, /Next verifiable evidence: a gate\.entered record, or run\.completed\./u);
+  assert.match(html, /data-code="BETWEEN_GATES"/u);
+  assert.match(html, /data-kind="RESULT"/u);
+  assert.match(html, /data-evidence-state="FRESH"/u);
+  // The age beside a bullet is the age of that evidence, not of the page: gate.passed was
+  // recorded at 18:39:58 and the snapshot was observed at 18:40:20.
+  assert.match(html, /22s ago/u);
+  // A word and a symbol, never colour alone.
+  assert.match(html, /●.*Fresh/su);
+  assert.deepEqual(
+    bulletTextsOf(html).slice(0, 3),
+    [
+      'Running between gates.',
+      'Gate WORKER passed.',
+      'Next verifiable evidence: a gate.entered record, or run.completed.',
+    ],
+  );
+});
+
+test('NEGATIVE CONTROL: an activity value from another snapshot or instant is refused at the render seam', () => {
+  const snapshot = movingSnapshot();
+  const other = movingSnapshot({ observedAt: '2026-08-29T18:40:21.000Z' });
+  const honest = summarizeControlRoomActivity({ snapshot });
+
+  assert.doesNotThrow(() => renderControlRoomHtml(snapshot, { activity: honest }));
+  for (const [label, grafted] of [
+    ['another snapshot', summarizeControlRoomActivity({ snapshot: other })],
+    ['another instant', { ...honest, observedAt: '2026-08-29T18:40:21.000Z' }],
+    ['another projection', { ...honest, sourceRevision: 'f'.repeat(64) }],
+    ['an item this snapshot does not carry', {
+      ...honest,
+      items: honest.items.map((entry) => ({ ...entry, itemId: 'issue-999' })),
+    }],
+  ]) {
+    assert.throws(
+      () => renderControlRoomHtml(snapshot, { activity: grafted }),
+      (error) => error?.name === 'ControlRoomError' && error.code === 'InvalidActivity',
+      `${label} must be refused rather than displayed`,
+    );
+  }
+});
+
+test('an activity value edited after it was built is refused, not displayed', () => {
+  const snapshot = movingSnapshot();
+  const honest = summarizeControlRoomActivity({ snapshot });
+  const edited = structuredClone(honest);
+  edited.items[0].bullets[0].text = 'Everything is fine.';
+
+  for (const tampered of [
+    edited,
+    { ...honest, contentRevision: 'e'.repeat(64) },
+    { ...honest, revision: 'e'.repeat(64) },
+    { ...honest, effect: 'WRITE' },
+  ]) {
+    assert.throws(
+      () => renderControlRoomHtml(snapshot, { activity: tampered }),
+      (error) => error?.name === 'ControlRoomError' && error.code === 'InvalidActivity',
+    );
+  }
+  assert.doesNotMatch(
+    renderControlRoomHtml(snapshot), /Everything is fine/u,
+    'and the sentence the tamperer wanted never reaches the document',
+  );
+});
+
+test('supplying the activity the renderer would derive itself changes not one byte', () => {
+  for (const snapshot of [
+    movingSnapshot(),
+    buildControlRoomSnapshot({
+      drainProjection: projection([item({ drainState: 'CLAIMED' })]),
+      observedAt: '2026-08-29T18:40:20.000Z',
+    }),
+    buildControlRoomSnapshot({ drainProjection: projection(), observedAt: '2026-08-29T18:40:20.000Z' }),
+  ]) {
+    const activity = summarizeControlRoomActivity({ snapshot });
+    for (const language of ['en', 'fr']) {
+      assert.equal(
+        renderControlRoomHtml(snapshot, { language, activity }),
+        renderControlRoomHtml(snapshot, { language }),
+        'the option is additive: it may bind evidence, never change what is said',
+      );
+    }
+  }
+});
+
+test('the Current run card comes first and separates evidence freshness from elapsed work', () => {
+  const html = renderControlRoomHtml(movingSnapshot());
+
+  assert.match(html, /<section class="current-run"/u);
+  assert.equal(
+    html.indexOf('class="current-run"') < html.indexOf('class="next"'), true,
+    'the current run is the first thing inside the hero',
+  );
+  assert.equal(
+    html.indexOf('class="current-run"') < html.indexOf('Why the drain is not moving'), true,
+  );
+  assert.equal(html.indexOf('class="current-run"') < html.indexOf('Portfolio backlog'), true);
+  assert.match(html, /Current run/u);
+  assert.match(html, /Current stage or gate/u);
+  assert.match(html, /Elapsed work/u);
+  assert.match(html, /Last verified transition/u);
+  assert.match(html, /gate\.passed/u);
+  assert.match(html, /Next evidence checkpoint/u);
+  // Freshness is its own labelled fact, and says in words that it is not progress.
+  assert.match(html, /Evidence freshness/u);
+  assert.match(html, /A heartbeat proves the sensor is alive, not that work advanced\./u);
+  assert.match(html, /1m 10s/u, 'elapsed work is measured from the run, not from the heartbeat');
+  assert.match(html, /10s/u, 'and the heartbeat age is stated separately');
+});
+
+test('the portfolio backlog is a separately labelled section with scope, total, count and share', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item({ itemId: 'issue-17', itemNumber: 17, drainState: 'BLOCKED_EVIDENCE' }),
+      item({ itemId: 'issue-18', itemNumber: 18, drainState: 'BLOCKED_EVIDENCE' }),
+      item({ itemId: 'issue-19', itemNumber: 19, drainState: 'BLOCKED_HUMAN' }),
+      item({ itemId: 'issue-20', itemNumber: 20, drainState: 'BLOCKED_DRAFT' }),
+      item({ itemId: 'issue-21', itemNumber: 21, drainState: 'QUEUED' }),
+    ]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+  });
+
+  const html = renderControlRoomHtml(snapshot);
+
+  assert.match(html, /Portfolio backlog/u);
+  assert.match(html, /Scope: the whole tracked portfolio, 5 items/u);
+  assert.match(html, /as of/u);
+  assert.match(html, /2026-08-29T18:40:20\.000Z/u);
+  assert.match(html, /These counts are portfolio-wide and are not blockers of the current run\./u);
+  assert.match(html, /BLOCKED_EVIDENCE<\/code>[\s\S]{0,200}?40%/u);
+  assert.match(html, /BLOCKED_HUMAN<\/code>[\s\S]{0,200}?20%/u);
+  assert.match(html, /BLOCKED_DRAFT<\/code>[\s\S]{0,200}?20%/u);
+  assert.match(html, /4 of 5 items/u, 'the total is stated, not left to be added up');
+  assert.doesNotMatch(
+    html, /Why work is blocked/u,
+    'the aggregate mix no longer reads as the reason this run is not moving',
+  );
+});
+
+test('run-level telemetry signals stay with the run and are never counted as portfolio backlog', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'RUNNING' })]),
+    observedAt: '2026-08-29T18:40:41.000Z',
+    telemetryProjection: telemetry(ACTIVE_GATE_RUN),
+  });
+
+  const html = renderControlRoomHtml(snapshot);
+  const backlog = html.slice(html.indexOf('Portfolio backlog'));
+
+  assert.deepEqual(snapshot.blockers, [{ state: 'TELEMETRY_HEARTBEAT_EXPIRED', count: 1 }]);
+  assert.match(html, /Observed run signals/u);
+  assert.match(html, /TELEMETRY_HEARTBEAT_EXPIRED/u);
+  assert.doesNotMatch(
+    backlog, /TELEMETRY_HEARTBEAT_EXPIRED/u,
+    'an expired heartbeat is a fact about this run, not a portfolio backlog entry',
+  );
+  assert.match(backlog, /0 of 1 items/u);
+});
+
+test('pace calibration names n of 5 comparable runs and an unavailable ETA names its missing evidence', () => {
+  const two = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'RUNNING' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    telemetryProjection: telemetry(ACTIVE_GATE_RUN),
+    completedRuns: [1, 2].map((index) => ({
+      workflow: 'portfolio-factory-run', outcome: 'COMPLETED', elapsedMs: index * 600_000,
+    })),
+  });
+  const five = buildControlRoomSnapshot({
+    drainProjection: projection([item({ drainState: 'RUNNING' })]),
+    observedAt: '2026-08-29T18:40:20.000Z',
+    telemetryProjection: telemetry(ACTIVE_GATE_RUN),
+    completedRuns: [1, 2, 3, 4, 5].map((index) => ({
+      workflow: 'portfolio-factory-run', outcome: 'COMPLETED', elapsedMs: index * 600_000,
+    })),
+  });
+
+  const thin = renderControlRoomHtml(two);
+  const calibrated = renderControlRoomHtml(five);
+
+  assert.match(thin, /Pace calibration: 2\/5 comparable completed runs/u);
+  assert.match(
+    thin, /Missing evidence: 3 more comparable completed portfolio-factory-run samples/u,
+  );
+  assert.doesNotMatch(thin, /Insufficient comparable history/u);
+  assert.match(calibrated, /Pace calibration: 5\/5 comparable completed runs/u);
+  assert.match(calibrated, /interquartile range/u);
+  assert.doesNotMatch(calibrated, /Missing evidence/u);
+  // French keeps the same calibration ratio and derives no new fact.
+  assert.match(renderControlRoomHtml(two, { language: 'fr' }), /2\/5 exécutions comparables/u);
+  assert.match(renderControlRoomHtml(two, { language: 'fr' }), /Preuve manquante/u);
+});
+
+test('an operator forecast appears only when a human supplied it, under its own label', () => {
+  const snapshot = movingSnapshot();
+
+  assert.doesNotMatch(
+    renderControlRoomHtml(snapshot), /Operator forecast/u,
+    'a forecast nobody supplied is never invented',
+  );
+  const withForecast = renderControlRoomHtml(snapshot, {
+    operatorForecast: 'Expect the review to land before the end of the shift.',
+  });
+  assert.match(withForecast, /Operator forecast/u);
+  assert.match(withForecast, /Expect the review to land before the end of the shift\./u);
+  assert.match(withForecast, /Human-supplied; not measured from evidence/u);
+  for (const rejected of [
+    'see http://example.invalid/eta',
+    '<script>alert(1)</script>',
+    'line one\nline two',
+    '',
+    'x'.repeat(121),
+    42,
+  ]) {
+    assert.throws(
+      () => renderControlRoomHtml(snapshot, { operatorForecast: rejected }),
+      (error) => error?.name === 'ControlRoomError' && error.code === 'InvalidOperatorForecast',
+      `${JSON.stringify(rejected)} must be refused`,
+    );
+  }
+});
+
+test('the desktop layout expands into a bounded multi-column grid instead of a narrow strip', () => {
+  const { base, blocks } = cssLayers(stylesheetOf(renderControlRoomHtml(movingSnapshot())));
+  const wide = blocks.find(({ query }) => query.includes('min-width: 1440px'));
+
+  assert.notEqual(wide, undefined, 'a large-viewport breakpoint exists');
+  const widths = [...declarationsFor(base, 'main'), ...declarationsFor(wide.body, 'main')]
+    .flatMap((body) => [...body.matchAll(/max-width:\s*(\d+)px/gu)].map(([, px]) => Number(px)));
+  assert.equal(
+    Math.max(...widths) >= 1440, true,
+    `a 1440px viewport must not be padded down to a ${Math.max(...widths)}px strip`,
+  );
+  assert.equal(columnsFor(wide.body, '.hero').at(-1) >= 2, true);
+  assert.equal(columnsFor(wide.body, '.current-run-facts').at(-1) >= 3, true);
+  assert.equal(columnsFor(wide.body, '.work-list').at(-1) >= 3, true);
+
+  const everywhere = [...blocks.map(({ body }) => body)].join('\n');
+  for (const selector of LAYOUT_SELECTORS) {
+    assert.equal(
+      Math.max(0, ...columnsFor(everywhere, selector)) >= 2, true,
+      `${selector} never becomes multi-column on any viewport`,
+    );
+  }
+});
+
+test('the tablet range reflows without collapsing to one column and without becoming a desktop', () => {
+  const { blocks } = cssLayers(stylesheetOf(renderControlRoomHtml(movingSnapshot())));
+  const tablet = blocks.find(({ query }) => query.includes('min-width: 768px'));
+  const desktop = blocks.find(({ query }) => query.includes('min-width: 1024px'));
+
+  assert.notEqual(tablet, undefined, 'a tablet breakpoint exists');
+  assert.notEqual(desktop, undefined, 'and it is distinct from the desktop one');
+  assert.deepEqual(columnsFor(tablet.body, '.work-list'), [2], 'two work cards fit a tablet');
+  assert.deepEqual(columnsFor(tablet.body, '.metrics'), [2]);
+  assert.deepEqual(columnsFor(tablet.body, '.lower-grid'), [2]);
+  assert.deepEqual(
+    columnsFor(tablet.body, '.hero'), [],
+    'the hero stays stacked below 1024px, so the breakpoints are not one rule twice',
+  );
+  assert.equal(columnsFor(desktop.body, '.hero').at(-1) >= 2, true);
+  assert.equal(columnsFor(desktop.body, '.work-list').at(-1), 3);
+});
+
+test('the phone layout is one readable column, current run first, with nothing to scroll sideways', () => {
+  const html = renderControlRoomHtml(movingSnapshot());
+  const { base } = cssLayers(stylesheetOf(html));
+
+  for (const selector of LAYOUT_SELECTORS) {
+    assert.deepEqual(
+      columnsFor(base, selector).filter((count) => count > 1), [],
+      `${selector} is multi-column before any breakpoint, so a phone would scroll sideways`,
+    );
+  }
+  const fixedWidths = [...base.matchAll(/(?:^|[;{\s])(?:min-)?width:\s*(\d+)px/gu)]
+    .map(([, px]) => Number(px));
+  assert.deepEqual(
+    fixedWidths.filter((px) => px > 320), [],
+    'no base rule is wider than the narrowest supported viewport',
+  );
+  assert.match(base, /min-width:\s*0/u, 'grid children may shrink below their content');
+  assert.match(base, /overflow-wrap:\s*anywhere/u, 'long digests wrap instead of pushing the page');
+  assert.match(base, /overflow-x:\s*auto/u, 'wide content scrolls inside its own container');
+  assert.equal(
+    html.indexOf('class="current-run"') < html.indexOf('class="metrics"'), true,
+    'and the current run is still the first card in source order',
+  );
+});
+
+test('the only animation is a genuinely fresh heartbeat, and reduced motion switches it off', () => {
+  const pulsing = renderControlRoomHtml(movingSnapshot());
+  const expired = renderControlRoomHtml(movingSnapshot({ observedAt: '2026-08-29T18:40:41.000Z' }));
+
+  assert.match(pulsing, /class="heartbeat-pulse"/u);
+  assert.match(pulsing, /@keyframes heartbeat/u);
+  const reduced = cssLayers(stylesheetOf(pulsing)).blocks
+    .find(({ query }) => query.includes('prefers-reduced-motion: reduce'));
+  assert.notEqual(reduced, undefined, 'reduced motion is respected');
+  assert.match(reduced.body, /\.heartbeat-pulse\s*\{[^}]*animation:\s*none/u);
+  assert.match(pulsing, /Real heartbeat received/u, 'and the pulse also says so in words');
+
+  assert.doesNotMatch(expired, /@keyframes/u, 'a stale heartbeat animates nothing at all');
+  assert.doesNotMatch(expired, /class="heartbeat-pulse"/u);
+  assert.match(expired, /Stale heartbeat/u);
+});
+
+test('every activity bullet in the French document is translated and stays inside the size budget', () => {
+  const fixtures = [
+    movingSnapshot(),
+    movingSnapshot({ observedAt: '2026-08-29T18:40:41.000Z' }),
+    buildControlRoomSnapshot({
+      drainProjection: projection([item({ drainState: 'CLAIMED' })]),
+      observedAt: '2026-08-29T18:40:20.000Z',
+    }),
+    buildControlRoomSnapshot({
+      drainProjection: projection([item({ drainState: 'RUNNING' })]),
+      observedAt: '2026-08-29T18:40:20.000Z',
+      progressObservations: [{
+        itemId: 'issue-17', capturedAt: '2026-08-29T18:40:15.000Z',
+        record: {
+          schema: 'gaia-cli-progress/1', stage: 'final_review_running', elapsedMs: 35_000,
+          remainingProviderInvocations: 4, remainingProviderTimeUpperBoundMs: 2_400_000,
+          heartbeat: true,
+        },
+      }],
+    }),
+    buildControlRoomSnapshot({
+      drainProjection: projection([item({ drainState: 'RUNNING' })]),
+      observedAt: '2026-08-29T18:40:20.000Z',
+      telemetryProjection: telemetry([
+        ...ACTIVE_GATE_RUN,
+        { event: 'run.blocked', blocker: 'NEEDS_HUMAN', observedAt: '2026-08-29T18:40:11.000Z' },
+      ]),
+    }),
+  ];
+  let seen = 0;
+
+  for (const snapshot of fixtures) {
+    const french = renderControlRoomHtml(snapshot, { language: 'fr' });
+    const english = new Set(bulletTextsOf(renderControlRoomHtml(snapshot)));
+    for (const text of bulletTextsOf(french)) {
+      seen += 1;
+      assert.equal(text.length <= 120, true, `"${text}" is ${text.length} characters`);
+      assert.equal(english.has(text), false, `"${text}" was left untranslated`);
+    }
+  }
+  assert.equal(seen >= 15, true, `only ${seen} French bullets were rendered; the loop is vacuous`);
 });

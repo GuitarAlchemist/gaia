@@ -1,0 +1,60 @@
+{
+  "agents": [
+    {
+      "agentId": "agent-10b4b10e-574d-4f59-9ccc-ec95bb5e5d82",
+      "surfaceId": "surf-df2ed97a-5279-4974-895c-429fe9af6784",
+      "paneId": "pane-5776b48d-a49a-4751-8aa2-209c0d004ae1",
+      "workspaceId": "ws-bf81b3d4-378d-40b0-a880-16213bf4445b",
+      "label": "Gaia Dashboard UX R0 — Spec",
+      "status": "running"
+    },
+    {
+      "agentId": "agent-13ae5ce3-a019-4348-85af-c03d99a89367",
+      "surfaceId": "surf-c169f9b8-a8f9-45b3-ab31-e484c8678dc0",
+      "paneId": "pane-02b90b97-d82f-46c5-a1c6-e3593e745e9b",
+      "workspaceId": "ws-bf81b3d4-378d-40b0-a880-16213bf4445b",
+      "label": "Gaia Dashboard UX R0 — Responsive",
+      "status": "running"
+    },
+    {
+      "agentId": "agent-30a16155-4674-457b-9c21-659d289f6e89",
+      "surfaceId": "surf-c2cc889d-6ba7-4b5b-bb2f-1c8787114184",
+      "paneId": "pane-5b6fc653-c163-4996-83bf-7f8c8bf0ddc3",
+      "workspaceId": "ws-bf81b3d4-378d-40b0-a880-16213bf4445b",
+      "label": "Gaia Dashboard UX R0 — Standards",
+      "status": "running"
+    },
+    {
+      "agentId": "agent-819d8d58-c22d-4e7a-9578-6991d9bcc0cb",
+      "surfaceId": "surf-424aa850-8aa9-4bc2-9164-045d3acfcd8a",
+      "paneId": "pane-90ffc44f-a649-43ff-90fd-09a9546bee16",
+      "workspaceId": "ws-bf81b3d4-378d-40b0-a880-16213bf4445b",
+      "label": "Gaia Dashboard UX R0 — Spec",
+      "status": "exited"
+    },
+    {
+      "agentId": "agent-95e14ff6-0051-471c-b762-8260eb69c69b",
+      "surfaceId": "surf-bcee7c05-7dde-41e2-ae1a-3504ad58e12f",
+      "paneId": "pane-5b6fc653-c163-4996-83bf-7f8c8bf0ddc3",
+      "workspaceId": "ws-34bd14f7-70a7-4217-9d8e-8997fe71ccbc",
+      "label": "Gaia Telemetry R0 — Local Lanes Writer",
+      "status": "exited"
+    },
+    {
+      "agentId": "agent-b625f39a-5041-4225-b62e-64b2e60ca931",
+      "surfaceId": "surf-86aedc20-7f72-4db3-bcfc-07bd7b330520",
+      "paneId": "pane-4e5cb279-bf19-44a1-8ad7-775601640d6b",
+      "workspaceId": "ws-34bd14f7-70a7-4217-9d8e-8997fe71ccbc",
+      "label": "Gaia Telemetry R0 — Local Lanes Writer",
+      "status": "running"
+    },
+    {
+      "agentId": "agent-bf6a7dc8-237d-4131-a024-769d16b2ca4a",
+      "surfaceId": "surf-c55fbc03-62ff-47de-a9bd-663894f3c0ed",
+      "paneId": "pane-3fe4758d-140e-48d0-9ea6-c68043916a2b",
+      "workspaceId": "ws-bf81b3d4-378d-40b0-a880-16213bf4445b",
+      "label": "Gaia Dashboard UX R0 — Epistemic",
+      "status": "running"
+    }
+  ]
+}

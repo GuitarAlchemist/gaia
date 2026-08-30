@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
-  mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync,
+  existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +9,8 @@ import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { runFactoryDashboardCli } from '../scripts/factory-dashboard.mjs';
+import { runFactoryDashboardRefreshCli } from '../scripts/factory-dashboard-refresh.mjs';
+import { summarizeControlRoomActivity } from '../src/control-room-activity.mjs';
 import { renderControlRoomHtml } from '../src/control-room.mjs';
 
 const DASHBOARD_PATH = fileURLToPath(new URL('../scripts/factory-dashboard.mjs', import.meta.url));
@@ -780,4 +782,185 @@ test('MECHANISM REVERT: the carrier coherence bound is what refuses evidence obs
   const shipped = runFactoryDashboardCli(argv, options('2026-08-29T18:01:00.000Z'));
   assert.equal(shipped.sourceChangedAt, '2026-08-29T18:00:00.000Z');
   assert.equal(shipped.obstruction.state, 'NONE');
+});
+
+// ---------------------------------------------------------------------------
+// R3 — the derived activity summary as a published, separately addressed artifact
+// ---------------------------------------------------------------------------
+
+function activityScratch(name) {
+  const directory = mkdtempSync(join(scratch, `${name}-`));
+  const projectionPath = join(directory, 'projection.json');
+  writeFileSync(projectionPath, `${JSON.stringify(projection({
+    schema: 'gaia-portfolio-drain-projection/1',
+    portfolioRevision: 'a'.repeat(64),
+    effect: 'NONE', authority: 'NONE', capacity: 4,
+    counts: { occupied: 1, available: 3 },
+    items: [{
+      repository: 'GuitarAlchemist/gaia', itemKind: 'ISSUE', itemId: 'issue-17',
+      itemNumber: 17, title: 'Integrate the factory control room', sourceState: 'READY',
+      observedPortfolioRevision: 'a'.repeat(64), drainState: 'CLAIMED', hold: null,
+    }],
+    decisions: [],
+  }))}\n`, 'utf8');
+  const changedAt = new Date('2026-08-29T18:40:15.000Z');
+  utimesSync(projectionPath, changedAt, changedAt);
+  return {
+    projectionPath,
+    htmlPath: join(directory, 'control-room.html'),
+    snapshotPath: join(directory, 'control-room.json'),
+    activityPath: join(directory, 'control-room-activity.json'),
+  };
+}
+
+test('the adapter writes an activity file only when both activity flags are supplied', () => {
+  const paths = activityScratch('activity-flags');
+  const base = [
+    '--projection', paths.projectionPath,
+    '--html-out', paths.htmlPath,
+    '--snapshot-out', paths.snapshotPath,
+  ];
+  const options = { now: () => new Date('2026-08-29T18:40:20.000Z'), writeStdout: () => {} };
+
+  runFactoryDashboardCli(base, options);
+
+  assert.equal(existsSync(paths.activityPath), false, 'neither flag writes no extra file');
+  const withoutFlags = readFileSync(paths.htmlPath, 'utf8');
+
+  for (const [label, argv] of [
+    ['an output with no opt-in', [...base, '--activity-out', paths.activityPath]],
+    ['an opt-in with no output', [...base, '--activity', 'on']],
+    ['an opt-in outside the closed vocabulary', [
+      ...base, '--activity', 'yes', '--activity-out', paths.activityPath,
+    ]],
+  ]) {
+    assert.throws(
+      () => runFactoryDashboardCli(argv, options),
+      /--activity/u,
+      `${label} must be refused`,
+    );
+    assert.equal(existsSync(paths.activityPath), false, `${label} wrote a file anyway`);
+  }
+
+  runFactoryDashboardCli(
+    [...base, '--activity', 'on', '--activity-out', paths.activityPath], options,
+  );
+
+  assert.equal(existsSync(paths.activityPath), true);
+  assert.equal(
+    readFileSync(paths.htmlPath, 'utf8'), withoutFlags,
+    'the published document is the same either way: the flags publish evidence, not a view',
+  );
+});
+
+test('the snapshot and the activity written in one tick bind the same revision and instant', () => {
+  const paths = activityScratch('activity-binding');
+
+  const snapshot = runFactoryDashboardCli([
+    '--projection', paths.projectionPath,
+    '--html-out', paths.htmlPath,
+    '--snapshot-out', paths.snapshotPath,
+    '--activity', 'on',
+    '--activity-out', paths.activityPath,
+  ], { now: () => new Date('2026-08-29T18:40:20.000Z'), writeStdout: () => {} });
+
+  const published = JSON.parse(readFileSync(paths.activityPath, 'utf8'));
+  assert.equal(published.schema, 'gaia-control-room-activity/1');
+  assert.equal(published.effect, 'NONE');
+  assert.equal(published.authority, 'NONE');
+  assert.equal(published.snapshotRevision, snapshot.revision);
+  assert.equal(published.sourceRevision, snapshot.sourceRevision);
+  assert.equal(published.observedAt, snapshot.observedAt);
+  assert.deepEqual(published, summarizeControlRoomActivity({ snapshot }));
+  assert.deepEqual(
+    published.items.map(({ itemId }) => itemId), ['issue-17'],
+    'the occupied lane is summarized rather than silently omitted',
+  );
+  assert.match(
+    readFileSync(paths.htmlPath, 'utf8'), new RegExp(published.revision, 'u'),
+    'and the document quotes the exact activity value published beside it',
+  );
+});
+
+test('the adapter refuses an activity output that aliases another output or its input evidence', () => {
+  const paths = activityScratch('activity-alias');
+  const options = { now: () => new Date('2026-08-29T18:40:20.000Z'), writeStdout: () => {} };
+
+  for (const [label, activityOut] of [
+    ['the snapshot', paths.snapshotPath],
+    ['the HTML shell', paths.htmlPath],
+    ['the input projection', paths.projectionPath],
+  ]) {
+    assert.throws(
+      () => runFactoryDashboardCli([
+        '--projection', paths.projectionPath,
+        '--html-out', paths.htmlPath,
+        '--snapshot-out', paths.snapshotPath,
+        '--activity', 'on',
+        '--activity-out', activityOut,
+      ], options),
+      /outputs must differ|aliases an input evidence path/u,
+      `an activity output aliasing ${label} must be refused`,
+    );
+  }
+  assert.equal(
+    readFileSync(paths.projectionPath, 'utf8').includes('gaia-portfolio-drain-projection/1'),
+    true,
+    'and the input evidence it would have overwritten is untouched',
+  );
+});
+
+test('the GitHub refresh adapter publishes the activity beside the snapshot it belongs to', async (t) => {
+  const directory = mkdtempSync(join(scratch, 'activity-refresh-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const portfolioPath = join(directory, 'portfolio.json');
+  const snapshotPath = join(directory, 'control-room.json');
+  const htmlPath = join(directory, 'control-room.html');
+  const activityPath = join(directory, 'control-room-activity.json');
+  for (const path of [portfolioPath, snapshotPath, htmlPath, activityPath]) {
+    writeFileSync(path, 'stale bytes', 'utf8');
+  }
+  const surveyed = {
+    schema: 'gaia-github-portfolio/1',
+    policyRevision: 'sha256:portfolio-policy-v1',
+    workItems: [{
+      repository: 'GuitarAlchemist/gaia', itemKind: 'ISSUE', itemId: 'issue-17',
+      itemNumber: 17, title: 'Integrate the factory control room', state: 'READY',
+      updatedAt: '2026-08-29T18:00:00.000Z',
+    }],
+  };
+
+  const snapshot = await runFactoryDashboardRefreshCli([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', portfolioPath,
+    '--snapshot-out', snapshotPath,
+    '--html-out', htmlPath,
+    '--activity', 'on',
+    '--activity-out', activityPath,
+  ], {
+    now: () => new Date('2026-08-29T20:00:00.000Z'),
+    surveyPortfolio: async () => ({
+      ...surveyed,
+      revision: createHash('sha256').update(canonicalJson(surveyed)).digest('hex'),
+    }),
+    writeStdout: () => {},
+  });
+
+  const published = JSON.parse(readFileSync(activityPath, 'utf8'));
+  assert.equal(published.snapshotRevision, snapshot.revision);
+  assert.equal(published.observedAt, snapshot.observedAt);
+  assert.match(readFileSync(htmlPath, 'utf8'), new RegExp(published.revision, 'u'));
+  await assert.rejects(
+    () => runFactoryDashboardRefreshCli([
+      '--organization', 'GuitarAlchemist',
+      '--policy-revision', 'sha256:portfolio-policy-v1',
+      '--portfolio-out', portfolioPath,
+      '--snapshot-out', snapshotPath,
+      '--html-out', htmlPath,
+      '--activity-out', activityPath,
+    ], { surveyPortfolio: async () => surveyed, writeStdout: () => {} }),
+    /must be supplied together/u,
+    'the two flags stay paired through the refresh adapter too',
+  );
 });

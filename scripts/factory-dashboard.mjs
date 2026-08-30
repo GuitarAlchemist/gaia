@@ -4,6 +4,9 @@ import {
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { assertDistinctFiles } from '../src/path-identity.mjs';
+
+import { summarizeControlRoomActivity } from '../src/control-room-activity.mjs';
 import {
   buildControlRoomSnapshot, renderControlRoomHtml, requireControlRoomSnapshot,
 } from '../src/control-room.mjs';
@@ -44,6 +47,24 @@ function parseArgs(argv) {
   }
   if (flags.language !== undefined && !['en', 'fr'].includes(flags.language)) {
     throw new UsageError('--language must be en or fr');
+  }
+  // Off unless asked for. The page used to reload itself every five seconds unconditionally, with
+  // no way to pause, stop or hide it; when it is asked for, the rendered control that cancels it
+  // is what makes the opt-in legitimate rather than the interval.
+  if (flags['refresh-seconds'] !== undefined) {
+    const seconds = Number(flags['refresh-seconds']);
+    if (!Number.isSafeInteger(seconds) || seconds < 5 || seconds > 3600) {
+      throw new UsageError('--refresh-seconds must be an integer from 5 through 3600');
+    }
+  }
+  // The two activity flags are paired on purpose. An opt-in with nowhere to write publishes
+  // nothing and would look like it had; an output with no opt-in is a path this adapter was
+  // never told it may replace. Either half alone is a mistake, so either half alone is refused.
+  if (flags.activity !== undefined && flags.activity !== 'on') {
+    throw new UsageError('--activity must be on');
+  }
+  if ((flags.activity === undefined) !== (flags['activity-out'] === undefined)) {
+    throw new UsageError('--activity on and --activity-out must be supplied together');
   }
   return flags;
 }
@@ -187,9 +208,30 @@ export function runFactoryDashboardCli(argv, {
   const progressPath = flags.progress ? resolve(flags.progress) : null;
   const historyPath = flags.history ? resolve(flags.history) : null;
   const telemetryPath = flags.telemetry ? resolve(flags.telemetry) : null;
+  const localLanesPath = flags['local-lanes'] ? resolve(flags['local-lanes']) : null;
   const htmlPath = resolve(flags['html-out']);
   const snapshotPath = resolve(flags['snapshot-out']);
-  if (htmlPath === snapshotPath) throw new UsageError('HTML and snapshot outputs must differ');
+  const activityPath = flags['activity-out'] ? resolve(flags['activity-out']) : null;
+  const outputs = [htmlPath, snapshotPath, ...(activityPath === null ? [] : [activityPath])];
+  const inputs = [
+    projectionPath, portfolioPath, receiptsPath, holdsPath, dependenciesPath, progressPath,
+    historyPath, telemetryPath, localLanesPath,
+  ].filter(Boolean);
+  // Filesystem identity, not a spelling test. Comparing resolved STRINGS accepted
+  // `--projection <dir>/projection.json --snapshot-out <dir>/Projection.json` on the platform this
+  // product is documented for, and overwrote the input drain projection with the snapshot. The
+  // sibling refresh adapter always did this correctly; both now call one definition.
+  assertDistinctFiles({
+    outputs,
+    inputs,
+    refuse: (why) => {
+      throw new UsageError(
+        why === 'two outputs name the same file'
+          ? 'the HTML, snapshot and activity outputs must differ'
+          : why,
+      );
+    },
+  });
 
   const projection = projectionPath
     ? readJson(projectionPath, 'projection')
@@ -211,6 +253,11 @@ export function runFactoryDashboardCli(argv, {
   const telemetryProjection = telemetryPath === null
     ? null
     : projectFactoryTelemetryLog({ directory: telemetryPath, notAfter: observedAt }).projection;
+  // Deliberately NOT part of the observation-window evidence below. The lane observation's own
+  // instant moves on every sensor tick and says nothing about how long this projection revision
+  // has been in force, so feeding its mtime into the window would restart a window it has no
+  // evidence about and permanently suppress a throughput stall.
+  const localLanes = localLanesPath === null ? null : readJson(localLanesPath, 'local lanes');
   const windowStart = declaredBasis(resolveSourceChangedAt({
     projectionRevision: projection.revision,
     firstObservation: firstObservationOf(snapshotPath, projection.revision),
@@ -230,16 +277,27 @@ export function runFactoryDashboardCli(argv, {
     dependencies: dependenciesPath === null
       ? null
       : readJson(dependenciesPath, 'dependencies'),
+    localLanes,
     observedAt,
     sourceChangedAt: windowStart.sourceChangedAt,
     sourceChangedAtBasis: windowStart.basis,
   });
+  // Machine evidence first, presentation bytes last, exactly as the refresh adapter publishes:
+  // the document quotes the activity revision, so the value it names must already be on disk.
+  const activity = summarizeControlRoomActivity({ snapshot });
   writeFileSync(snapshotPath, serialize(snapshot), 'utf8');
+  if (activityPath !== null) writeFileSync(activityPath, serialize(activity), 'utf8');
   writeFileSync(htmlPath, renderControlRoomHtml(snapshot, {
+    activity,
     language: flags.language ?? 'en',
+    autoRefreshSeconds: flags['refresh-seconds'] === undefined
+      ? null : Number(flags['refresh-seconds']),
   }), 'utf8');
   writeStdout(`Gaia dashboard checked: ${snapshot.headline.state}`
     + ` | obstruction ${snapshot.obstruction.state}`
+    + (snapshot.localLanes === undefined ? ''
+      : ` | local lanes ${snapshot.localLanes.liveCount}/${snapshot.localLanes.laneCount}`
+        + ` ${snapshot.localLanes.state}`)
     + ` | next ${snapshot.nextAction.kind} | source ${snapshot.sourceRevision}\n`);
   return snapshot;
 }

@@ -114,6 +114,148 @@ The selected design is freely reversible. Its deliberate costs are a closed voca
 an unknown future drain state as an evidence gap, and a fixed precedence that reports one cause
 while carrying the full breakdown beside it.
 
+### Progress and ETA UX — Design It Twice
+
+R3 answers the question the R0 default view conflated. `Now`, the heartbeat chip, the blocker
+mix and the pace sentence sat in one visual register, so an operator could not tell **what is
+moving** from **what is merely being pinged**, could not tell a blocker *of the current run*
+from a portfolio-wide backlog count, and read `Unknown pace: fewer than 5 comparable completed
+runs.` without ever learning which evidence was missing. Two seams were compared before any
+production code was written.
+
+**(A) Embed all of it in the existing snapshot and renderer — rejected.**
+Put the three operator sentences, the freshness lattice and the backlog shares directly into
+`buildControlRoomSnapshot`'s body and into `renderProgress`. It is the smallest diff and cannot
+drift from the snapshot, because it *is* the snapshot. It was rejected on three specific grounds.
+It changes the `gaia-control-room/1` body, so every previously published `revision` for the same
+evidence moves and every machine consumer must re-verify — a presentation improvement becoming a
+migration. It binds no evidence of its own, so *"a heartbeat-only tick changes nothing"* could
+only be eyeballed across rendered bytes that also carry a moving `observedAt`; the single most
+important constraint of this slice would have no seam to assert it at. And the sentences would
+exist only as HTML, so a CLI status line, a bus payload or a DuckDB query would have to
+re-derive the rules or parse a document.
+
+**(B) A pure derived activity artifact bound to the snapshot — selected.**
+One new module, `src/control-room-activity.mjs`, exporting
+`summarizeControlRoomActivity({ snapshot })`. It re-verifies the published snapshot's own digest,
+reads nothing else, and returns one separately content-addressed, deeply frozen
+`gaia-control-room-activity/1` value: for each active item, exactly three bullets — current
+verified **action**, most recent concrete **result**, next evidence **checkpoint or blocker** —
+authored by a closed phrasebook keyed on tokens the snapshot already carries. It collects no
+evidence, spends no provider token, writes nothing, and imports only `node:crypto`.
+`gaia-control-room/1` is untouched: same schema, same body, same canonical-JSON recipe, same
+digest for the same inputs.
+
+The value carries **two digests**. `revision` covers the whole body and therefore moves on every
+tick, because it binds `observedAt`. `contentRevision` covers `{ machine, items }` only, and is
+what makes requirement 9 an assertion rather than an intention: **no wall-clock arithmetic and no
+heartbeat instant may enter a bullet.** The only instant a bullet may carry is the `observedAt` of
+a verified telemetry `lastTransition`, which the spine builds by construction to exclude
+`run.heartbeat` (`src/factory-telemetry.mjs`). Drain-sourced and progress-sourced bullets carry
+`observedAt: null` — the drain projection is identified by its revision, and `gaia-cli-progress/1`
+is unchained self-report that binds no verifiable instant at all. Ages are therefore derived at
+render time from `snapshot.observedAt`, never stored. A tick whose only new events are heartbeats
+therefore changes **not one sentence**. `contentRevision` also covers the freshness lattice, which
+is clock-derived, so a tick that crosses the 30-second boundary moves `contentRevision` while every
+sentence stays byte-identical.
+
+**The four-state evidence lattice, and what it deliberately does not mean.**
+`FRESH`, `PARTIAL`, `STALE` and `UNKNOWN` describe **the evidence**, never the motion.
+`UNKNOWN` is an occupied lane with no telemetry run and no progress record at all — absence of
+evidence, never rendered as health. `STALE` is `activity.state === 'STALE'`: evidence existed and
+expired. `PARTIAL` is a bullet whose source is unverified, or whose bound evidence carries the
+spine's honest `UNKNOWN` sentinel. `FRESH` is everything bound, named and verified. Liveness is
+carried separately, by the run-state sentence and by the existing heartbeat chip, so a blocked run
+whose block is recorded with a real digest reads `Evidence FRESH` beside `Stopped on <BLOCKER>` —
+which is exactly the split requirement 2 asks for. Nothing here re-measures a heartbeat: the
+lattice reads decisions `itemTelemetry` and `itemActivity` already made against one window.
+
+**Deviations from the advisory design, recorded exactly.**
+
+- `MAX_ACTIVITY_BYTES` is `16384`, not the advisory `8192`. Eight items × three bullets, each
+  bullet carrying a 64-hex `evidenceRevision`, an instant, a code, a source, a state and a
+  sentence, canonicalises to roughly 1.3 KB per item; `8192` would have made the documented
+  `MAX_ACTIVITY_ITEMS = 8` unreachable, turning a guard rail into a defect. The cap still exists
+  so that a future phrasebook edit that breaks the fragment budget fails a test, not a browser.
+- `src/cli-progress.mjs` does not export `HUMAN_STAGES` and is outside this slice's permitted
+  files, so the twelve stage sentences are restated as a closed table inside the activity module
+  and sealed into `rulesRevision`. A future rename in either place is a visible digest change,
+  not a silent divergence.
+- The renderer's `activity` option is **additive and optional, and the renderer computes the same
+  value itself when it is absent**, so the Current run card is complete for every caller. Supplied
+  activity is not trusted: it is verified for self-consistency and then for binding to *this*
+  snapshot. Consequently `renderControlRoomHtml(s)` and
+  `renderControlRoomHtml(s, { activity: summarizeControlRoomActivity({ snapshot: s }) })` are
+  byte-identical, which is the property the option is tested against.
+
+**Unavoidable deviation from byte-identical R0 output.** Requirements 1, 2, 4, 5 and 7 are
+statements about the committed control-room shell itself, not about the optional activity value,
+so the document changes whether or not activity is supplied. Exactly these shell changes are
+made, and nothing else:
+
+1. a **Current run** card is placed first inside `<main>`, carrying state, current stage or gate,
+   elapsed work, the last verified transition and the next evidence checkpoint or blocker;
+2. **evidence freshness is labelled separately from elapsed work**, with its own state word,
+   symbol and the sentence that a heartbeat proves the sensor is alive rather than that work
+   advanced;
+3. the aggregate `blockers` mix moves out of *"Why work is blocked"* into a separately labelled
+   **Portfolio backlog** section carrying scope, as-of instant, total, count and percentage, and
+   stating that those counts are not blockers of the current run; run-level `TELEMETRY_*` signals
+   stay with the run and are never counted as portfolio backlog;
+4. the pace sentence becomes **Pace calibration: n/5 comparable completed runs**, and an
+   unavailable ETA names the exact missing evidence instead of *"Insufficient comparable
+   history."*; a human forecast is rendered only from the explicit `operatorForecast` render
+   option and only under the label **Operator forecast**, never invented;
+5. the stylesheet is restructured from desktop-first `max-width` queries to a phone-first base
+   with `min-width` breakpoints at 768 px, 1024 px and 1440 px, and `main` widens to 1600 px, so a
+   large viewport is a bounded multi-column grid rather than a narrow central strip.
+
+`buildControlRoomSnapshot`, `requireControlRoomSnapshot`, the obstruction contract, the
+fog-of-war contract, the pace and ETA policy and every published digest are unchanged; the
+deviation is confined to the rendered document and to the new module.
+
+**Falsifiers, pre-committed.** F1 *(amended in R1; see "Heartbeat truth, restated" below)*: a
+tick carrying only heartbeats changes a rendered sentence, or `contentRevision` moves for any
+reason other than the freshness lattice crossing its 30-second boundary. The original F1 — "a tick
+carrying only heartbeats moves `contentRevision`" — was pre-committed against a claim that is
+false, and the shipped product fires it; it is retracted rather than left standing.
+F2: a bullet is displayed that the bound `snapshotRevision` alone does not support. F3: an
+unverified `gaia-cli-progress/1` record fills the RESULT slot. F4: fresh, partial, stale and
+unknown are not four distinct states each carrying a word and a symbol. F5: any byte of prose,
+prompt, log, URL or credential reaches a bullet. F6: a percentage, ETA or confidence score that
+is not copied from bound evidence appears in a bullet. F7: a self-consistent activity value from
+another snapshot, instant or projection renders. F8: a large viewport still renders one narrow
+column, or a phone viewport scrolls horizontally.
+
+**Rejection criterion.** Roll back to inline rendering with no module if the module acquires a
+clock, a provider, a network call, a filesystem read or any `effect` or `authority` other than
+`NONE`; if a bullet is emitted that is not derivable from the bound snapshot; if heartbeat
+inertness is satisfied by convention rather than by assertion; or if the `gaia-control-room/1`
+body has to change to make any of it work.
+
+**Reversibility: freely reversible.** Delete the module, its test, the renderer option and the
+new sections. No schema migrates, no persisted evidence changes, no user data is transformed.
+
+The extension is bound to Gaia base commit
+`e4d242abe10118bc63244d5973077fb665724db9`, Git blob
+`13785627547556fb44e963244141768613251dcc` for `src/control-room.mjs`, Git blob
+`237e337cbbcd75d2a7508b0bcb1d4d97dff7cc6a` for `src/factory-telemetry.mjs`, Git blob
+`82b7c1f441ede600f1a18fe774d4de22e844b70a` for `src/cli-progress.mjs`, and Git blob
+`4b4c3f0f8a8aaa2047d9284ffc279868b23d3479` for
+`docs/engineering-and-research-principles.md`.
+
+Canonical receipt body:
+
+```json
+{"baseCommit":"e4d242abe10118bc63244d5973077fb665724db9","inputBlobs":{"cliProgress":"82b7c1f441ede600f1a18fe774d4de22e844b70a","controlRoom":"13785627547556fb44e963244141768613251dcc","engineeringPrinciples":"4b4c3f0f8a8aaa2047d9284ffc279868b23d3479","factoryTelemetry":"237e337cbbcd75d2a7508b0bcb1d4d97dff7cc6a"},"reversibility":"freely-reversible","schema":"gaia-decision-receipt/1","selectedDesign":"snapshot-bound-derived-control-room-activity-projection","status":"SELECTED"}
+```
+
+Receipt SHA-256:
+`94fd98ebd41571aa49e0850609f30b909f3594d7960ee77d7f2fde92a2a787d5`.
+
+This receipt selects an implementation candidate; it grants no runtime, publication or merge
+authority and is not independent approval.
+
 ## Obstruction truth rules
 
 - Exactly one state is reported, from a closed vocabulary of nine: `NONE`, `NO_ELIGIBLE_WORK`,
@@ -206,15 +348,24 @@ Without it, no deadlock can ever be reported.
 
 Every visible element answers one operator question:
 
-1. **Now** — active, stale or paused. Stored `RUNNING` state alone is insufficient.
+1. **Current run** — first, and largest. State, current stage or gate, elapsed work, the last
+   verified transition, evidence freshness as its own labelled fact, and the next evidence
+   checkpoint or blocker. Stored `RUNNING` state alone is insufficient, and a fresh ping is
+   never shown as progress.
 2. **Next action** — one closed action from the drain projection, or a stale-run check.
 3. **Why the drain is not moving** — one named obstruction, the age of the evidence that named
    it, the items it affects and one bounded advisory recovery. An empty drain and a blocked drain
    never share a sentence.
-4. **Verifiable progress** — named gates for each bounded lifecycle.
-5. **Pace and ETA** — measured evidence, its sample size, or an explicit unknown.
-6. **Fog of war** — known, partial and unobserved evidence plus the next reconnaissance frontier.
-7. **Proof** — the content-addressed control-room snapshot and source projection revision.
+4. **Verifiable progress** — named gates for each bounded lifecycle, and at most three
+   deterministic activity bullets per live task: current verified action, most recent concrete
+   result, next evidence checkpoint or blocker.
+5. **Pace and ETA** — pace calibration as `n/5` comparable completed runs, a statistical ETA
+   only where the evidence supports one, otherwise the exact missing evidence, and an
+   **Operator forecast** only where a human explicitly supplied it.
+6. **Portfolio backlog** — the aggregate blocked mix with its scope, as-of instant, total, count
+   and percentage, stated as portfolio-wide and explicitly not blockers of the current run.
+7. **Fog of war** — known, partial and unobserved evidence plus the next reconnaissance frontier.
+8. **Proof** — the content-addressed control-room snapshot and source projection revision.
 
 The graph, Gantt and full state remain optional detail views. They are not required to
 understand the default page.
@@ -242,6 +393,58 @@ understand the default page.
 - `effect` and `authority` are both `NONE`. This module cannot start a lane, spend a grant,
   publish, merge, assign, label or mutate GitHub.
 
+## Activity summary truth rules
+
+- `summarizeControlRoomActivity({ snapshot })` in `src/control-room-activity.mjs` is pure, imports
+  only `node:crypto`, and returns one deeply frozen `gaia-control-room-activity/1` value with
+  `effect: NONE` and `authority: NONE`. It reads no clock, opens no file, calls no provider and
+  spends no token.
+- An item is summarized only when it is a live task: not terminal, and either occupying a lane
+  (`CLAIMED` or `RUNNING`) or carrying an observed telemetry run. Aggregate portfolio blockers are
+  not tasks and are counted in the Portfolio backlog section instead.
+- Exactly three bullets per item, in fixed slot order. Slot 1 `ACTION` is what the task is doing
+  now; slot 2 `RESULT` is the last **verified** transition, or the explicit `NO_VERIFIED_RESULT`
+  absence; slot 3 is `BLOCKER` when a blocker exists and `CHECKPOINT` otherwise. The blocker
+  displaces the checkpoint because `TRANSITIONS.BLOCKED` is empty — a blocked run admits no next
+  transition, so naming one would be a fabricated expectation.
+- An unverified source may never fill the RESULT slot. `gaia-cli-progress/1` is self-reported and
+  unchained, so it may say what is happening and never that something was produced.
+- `run.heartbeat` is named by no checkpoint, in any run state. It advances no state and produces
+  no evidence, so offering it as something to wait for would invite an operator to read the next
+  ping as progress.
+- Every sentence comes from the closed phrasebook sealed into `machine.rulesRevision`; every
+  interpolated value is a `TOKEN` matching `/^[A-Z][A-Z0-9_]{0,31}$/`. There is no field whose
+  content originates outside a closed set, so chain-of-thought, prompts, terminal or provider
+  logs, URLs, credentials and worker-authored prose have nowhere to live — by construction, not by
+  filtering.
+- The renderer refuses a supplied activity value whose own digests do not match its content, or
+  which is not bound to this snapshot's `revision`, `observedAt`, `sourceRevision` and telemetry
+  projection revision, or which names an item the snapshot does not carry. Internally consistent
+  is not the same as about this evidence.
+- Bullet ages are derived at render time from `snapshot.observedAt`. No age is stored, so a
+  heartbeat-only tick changes **not one sentence**. `contentRevision` also covers the freshness
+  lattice, which is clock-derived, so a tick that crosses the 30-second boundary moves
+  `contentRevision` while every sentence stays byte-identical — including a tick carrying no new
+  event at all, where only the clock advanced.
+
+## Responsive layout rules
+
+- The document is phone-first. The base stylesheet declares no multi-column
+  `grid-template-columns`, so a viewport narrower than 768 px is one readable column with the
+  Current run card first and nothing that can scroll horizontally: every grid child carries
+  `min-width: 0`, every identifier wraps with `overflow-wrap: anywhere`, and wide content scrolls
+  inside its own container rather than the page.
+- `min-width: 768px` reflows to two columns for the metrics, backlog, pace and evidence panels
+  while the hero stays stacked; `min-width: 1024px` opens the hero and the work list;
+  `min-width: 1440px` widens `main` to 1600 px and expands the Current run facts and the work list
+  to three columns, so a large desktop is a bounded multi-column grid and never a narrow central
+  strip.
+- Colour is never meaning. Every status carries a word and a symbol: `●` fresh or active, `◐`
+  partial, `▲` stale or needs attention, `■` blocked, `○` unknown, unobserved or neutral.
+- The one animation in the product remains `.heartbeat-pulse`, emitted only when the snapshot
+  carries a genuinely fresh recorded heartbeat, and disabled entirely under
+  `prefers-reduced-motion: reduce`. No keyframe is emitted at all when nothing is pulsing.
+
 ## Interfaces
 
 `buildControlRoomSnapshot({ drainProjection, observedAt, sourceChangedAt, sourceChangedAtBasis,
@@ -253,9 +456,20 @@ one content-addressed `gaia-control-room/1` value carrying a nested, separately 
 dependencies })` in `src/portfolio-drain-obstruction.mjs` is the obstruction truth Module. It is
 pure, imports only `node:crypto`, and is usable without the control room.
 
-`renderControlRoomHtml(snapshot)` returns one dependency-free HTML document. It embeds no
-remote resource. Browser-side code only ages the already displayed snapshot and stops a pulse
-when its heartbeat expires.
+`summarizeControlRoomActivity({ snapshot })` in `src/control-room-activity.mjs` is the activity
+truth Module. It is pure, imports only `node:crypto`, and returns one content-addressed, deeply
+frozen `gaia-control-room-activity/1` value carrying two digests: `revision` over the whole body,
+and `contentRevision` over what the summary actually says. `requireControlRoomActivity(value)`
+verifies one such value on its own terms, and is usable without the control room.
+
+`renderControlRoomHtml(snapshot, { language, activity, operatorForecast })` returns one
+dependency-free HTML document. It embeds no remote resource. Browser-side code only ages the
+already displayed snapshot and stops a pulse when its heartbeat expires. `activity` is additive
+and optional: when it is omitted the renderer derives the same value itself, and when it is
+supplied it is verified for self-consistency and for binding to this exact snapshot before a
+single bullet is displayed. `operatorForecast` is the only way a human forecast can appear; it is
+a bounded plain sentence, rendered under its own **Operator forecast** label, excluded from the
+statistical ETA, and never invented when absent.
 
 `npm run factory:dashboard` is the filesystem adapter. It accepts either an existing exact
 drain projection or a portfolio plus optional receipt and hold arrays, writes replaceable
@@ -322,3 +536,433 @@ or promise an ETA from provider timeout bounds. It does not yet persist a histor
 cycles; callers may supply that existing evidence as a JSON array. It also does not host the
 HTML. A local file viewer, wmux browser or separately governed static host may display the
 artifact without widening Gaia's stdio-only core.
+
+# R4 review-repair decision — decided before repairing anything
+
+Four independent reviews of the progress and ETA UX slice — Standards, Spec, a responsive and
+accessibility adversary, and an epistemic and security adversary — all returned `REQUEST_CHANGES`.
+Their blocker union is repaired here. Each finding was replayed against the shipped code before it
+was accepted, and every repair below was written into this document before the code changed.
+
+The reviews are advisory evidence, not authority. Where a finding is accepted, the mechanism is
+named; where one is narrowed or declined, the reason is recorded in the same place.
+
+## Blocker union, and the mechanism chosen for each
+
+### U1 — heartbeat inertness is asserted unconditionally and is true only inside the window
+
+*Standards B1, epistemic FINDING 4.* `contentRevision` digests `{ items, machine }`; each item
+carries `evidenceState`, which is derived from `activity.state`, which is pure clock arithmetic
+against a 30 s window. So a tick whose only new event is a heartbeat — and even a tick with **no**
+new event, where only the clock advanced — moves `contentRevision` whenever the tick crosses the
+freshness boundary. The existing gate pinned both of its ticks inside the window and then asserted
+that the state had not changed, which is a demonstration that cannot fail.
+
+**Two resolutions were offered and both are acceptable to the reviewers.** Taken: **narrow the
+claim to what is true, and gate the boundary.** Excluding `evidenceState` and the liveness sort key
+from `contentRevision` would make the unconditional sentence true, but it would also make the
+digest silent about a state change an operator cares about, and it would move a published digest
+for every consumer — a migration bought to rescue a sentence.
+
+The claim now reads, in the module, in the truth rules and in the README:
+
+> A tick whose only new events are heartbeats changes **not one sentence**. `contentRevision` also
+> covers the freshness lattice, which is clock-derived, so a tick that crosses the 30-second
+> boundary moves `contentRevision` while every sentence stays byte-identical.
+
+Gated three ways: sentences are byte-identical across a heartbeat-only tick **inside** the window
+and across one that **crosses** it; `contentRevision` is stable in the first case and moves in the
+second.
+
+**Correction, recorded in R1.** At R0 this section overstated its own closure. The narrowed claim
+reached the module docstring only; `README.md`, the two-digests narrative, the truth rule under
+"Bullet ages" and falsifier F1 kept the retracted wording, and none of the three gates named above
+was written — `tests/control-room-activity.test.mjs` was byte-identical to the entry commit. An
+independent Spec review reproduced both facts. The propagation and the gates land in **R1.1**
+below, which also records why the existing inside-window assertion is kept rather than replaced:
+it is the true half of a two-sided claim, and the boundary gates are the half that was missing.
+
+### U2 — two divergent orderings decide which run is "the current run"
+
+*Standards B2.* `renderCurrentRun` takes `activity.items[0]`; the work list sorts the same items
+with a different comparator that adds a lifecycle-percentage key and uses `localeCompare` where the
+activity module uses ordinal comparison. The same page can name `issue-3` the current run and
+`issue-7` the highest-priority work.
+
+**Repair:** one canonical ordering, exported from `src/control-room-activity.mjs` as
+`compareControlRoomItems` and used by both. The lifecycle-percentage key is dropped rather than
+added to the other side: it ranks a `RUNNING` item above a `CLAIMED` one for a reason that has
+nothing to do with liveness, and the activity module's order is the one that decides the Current
+run card today.
+
+### U3 — the activity verifier is not total
+
+*Standards B3 and B4, spec BLOCKER 3, epistemic FINDING 2.* Four separate holes with one shape:
+
+- `interpolate` substitutes on `Object.hasOwn` alone, so a `params.stage` outside `STAGE_SENTENCES`
+  interpolates the literal string `undefined` and the verifier accepts a sentence the producer can
+  never emit. The renderer's copy of the same rule already guards it — one rule, two
+  implementations, two behaviours.
+- `ACTION_CODES[runState]`, `RESULT_CODES[event]`, `CHECKPOINT_CODES[runState]` and
+  `TEMPLATES[code]` are plain-object lookups that reach `Object.prototype`, so a resealed snapshot
+  whose `runState` is `constructor` skips the `undefined` guard and throws a raw `TypeError`
+  instead of a typed refusal. `lastTransition: null` passes validation and then crashes the
+  renderer.
+- `requireControlRoomActivity` never inspects `evidenceRevision` or `observedAt`, so a resealed
+  summary carries attacker-chosen free text — a URL, a local path, key-shaped material — to the
+  operator's screen through fields the closed-phrasebook claim does not cover. HTML escaping holds
+  and there is no injection; this is a content-provenance failure, not a script hole.
+- `summarizeItem` copies `repository`, `itemId`, `itemNumber`, `drainState`, `runId`, `lane` and
+  `agent` out of the snapshot unvalidated, while the module's docstring and the truth rules claim
+  **no** field originates outside a closed set.
+
+**Repairs, in the order they close:**
+
+1. `interpolate` refuses to substitute an `undefined` value, matching the renderer exactly.
+2. The four lookup tables become null-prototype frozen maps, so a prototype key is not a vocabulary
+   member. `requireControlRoomSnapshot` additionally refuses a telemetry `runState` or
+   `lastTransition.event` outside its closed vocabulary, and refuses a missing `lastTransition`
+   where the renderer dereferences one.
+3. `requireControlRoomActivity` constrains `evidenceRevision` to 64 hex characters, the literal
+   `UNKNOWN`, or `null`, and `observedAt` to an exact ISO instant or `null` — and refuses one dated
+   after the summary's own observation instant, which is the producer's rule the verifier was
+   missing.
+4. The identity fields are **bound rather than pattern-matched**: `requireActivity` at the render
+   seam already holds the matching snapshot item, so `repository`, `itemNumber`, `drainState`,
+   `runId`, `lane` and `agent` must equal that item's values exactly. Pattern-matching them would
+   have invented a vocabulary; binding them uses the one already in hand.
+5. The two claims are narrowed to the bullets they are true of, in the module docstring and in the
+   truth rules, and the item identities are described as snapshot-bound rather than closed.
+
+### U4 — future and unparseable evidence renders as `0s ago`
+
+*Epistemic FINDING 3.* `bulletAge` subtracts and `formatDuration` clamps negatives to zero, so
+evidence stamped in the year 2999 renders as `0s ago` — the single most reassuring reading
+available, and the exact defect class `sourceChangedAtBasis` was built to eliminate one commit
+earlier. An unparseable instant renders `NaNs ago`.
+
+**Repair:** the verifier refuses a future-dated instant (U3.3), and `bulletAge` names an incoherent
+or unparseable instant instead of clamping it. Defence in depth on purpose: the refusal is the
+barrier, and the renderer stops producing a reassuring number even if something reaches it.
+
+### U5 — the dashboard adapter's alias guard is a spelling test
+
+*Spec BLOCKER 2, epistemic FINDING 1, confirmed destructive.* `scripts/factory-dashboard.mjs`
+compares `resolve()`d strings, which normalise separators and `..` but not case, 8.3 short names,
+junctions or UNC spellings. On the declared platform this accepted
+`--projection …/projection.json --snapshot-out …/Projection.json` and **overwrote the input drain
+projection with the snapshot**. The correct guard already ships twice in this tree, in
+`scripts/factory-dashboard-refresh.mjs` and, with its reasoning written out, in `src/inventory.mjs`.
+
+**Repair:** lift `pathIdentity` into `src/path-identity.mjs`, one definition, and use it from both
+adapters for both the outputs-must-differ and the output-aliases-input checks. Lifting rather than
+copying is the point — a third copy of a rule two copies already disagreed about is the defect.
+
+### U6 — one long token scrolls the page sideways at every viewport
+
+*Spec BLOCKER 1, responsive 3.1.* `overflow-wrap: anywhere` is declared on `code` alone. A CI-run
+URL in an issue title, a 140-character `org/repo`, or a maximum-length gate token in the Current
+run card's checkpoint sentence pushes `documentElement.scrollWidth` to 756, 778, 1091 and 2761 px
+at 375, 800, 1440 and 1920 px viewports. The shipped assertion checks only that the substring
+`overflow-wrap: anywhere` appears somewhere in the base stylesheet, so it passes on a rule scoped
+to `code`.
+
+**Repair:** declare the wrapping on `body`, which every rendered string inherits, and keep the
+`code` rule. The gate is replaced with one bound to the elements that actually carry
+operator-authored strings, over a fixture whose title, repository and gate token are long unbroken
+tokens.
+
+**Stated honestly:** no headless browser measurement was run in this lane. The repair is verified
+structurally — the declaration is on an ancestor of every operator-authored string, and no rule
+overrides it — and a browser re-measurement of the four viewports remains the reviewer's evidence
+to reproduce, not this lane's.
+
+### U7 — the artifact replaces itself every five seconds with no way to stop it
+
+*Responsive 3.2.* `<meta http-equiv="refresh" content="5">` is emitted unconditionally in both
+languages. The DOM, its `role="status"` live regions and any assistive-technology virtual buffer
+are destroyed and rebuilt every 5.00 s, and the page offers zero controls. This fails WCAG 2.2
+SC 2.2.1 (Level A), whose real-time exception does not apply to a dashboard whose interval could be
+a control. It is documented nowhere.
+
+**Repair, both halves of "remove or make controllable":**
+
+- The meta refresh is **removed**. The default document does not reload itself at all.
+- Auto-refresh becomes opt-in — `renderControlRoomHtml(..., { autoRefreshSeconds })` and
+  `--refresh-seconds` on the adapter — and the opt-in path is implemented as a script-driven
+  reload with a real, visible, focusable **Stop auto-refresh** button that cancels it. A meta
+  refresh cannot be cancelled once parsed, which is precisely why it is the wrong mechanism for a
+  control the standard requires to exist.
+
+### U8 — local wmux work stays separate from GitHub backlog
+
+The subject of this slice's own amendment, above. Local lanes enter no portfolio structure: not
+`items`, not `blockers`, not `capacity`, not the obstruction, not pace and not ETA.
+
+## Findings recorded and not repaired here
+
+- **Spec residual, `requireProjection` does not re-run `requireItem`** — pre-existing, out of this
+  slice's scope, and noted by the pair as the hole a "synthesize a LOCAL_WMUX item" shortcut would
+  fall through. Staying on the selected seam keeps it closed; `itemKind` is not widened.
+- **Responsive 3.3, the French document's landmark name is hardcoded English** — accepted as real.
+  Repaired for the new section only, whose `aria-label` is translated; the pre-existing English
+  landmark on `metrics` is left for its own slice rather than widened into this diff.
+- **Responsive 3.4, the progress meter has no accessible name**, and **3.5, the backlog silently
+  drops kinds past the eighth** — accepted as real, not repaired here. Both are pre-existing and
+  neither is in the blocker union the operator asked to close.
+- **Standards L1, inconsistent `?.` guarding around a missing `activity`** — closed as a
+  side-effect of U3.2, which validates the field rather than guarding at each use.
+
+# R1 — the two blockers an independent Spec review reproduced
+
+Entry commit `45e988fe63394e759dc4dc08c9cc052ed1fd8523`. The Standards review of R0 returned
+APPROVE; the Spec review returned REQUEST_CHANGES on exactly two findings, each reproduced against
+the shipped modules before it was accepted here, and each reproduced again in this lane before a
+line of repair was written. Everything below was written before the code changed.
+
+The scope is those two findings and nothing else. No bus verb, authority, effect, network call,
+retry, clock source, provider, install or configuration surface is added, widened or renamed by
+this repair, and the LOCAL_WMUX sensor stays separated from the GitHub portfolio exactly as U8
+left it.
+
+## R1.1 — Heartbeat truth, restated everywhere it was stated wrongly
+
+*Spec review section 4. The successor of U1, which narrowed the claim in one place and left three
+others standing.*
+
+**What was actually wrong.** U1 chose the right resolution and applied it to one location.
+`src/control-room-activity.mjs` carried the narrowed claim; `README.md`, the narrative under
+"The value carries two digests", the truth rule under "Bullet ages", and the pre-committed
+falsifier F1 all still carried the retracted one. A reader keying on any of those four read the
+same false invariant they read before, and the R0 repair section asserted a closure a reader could
+disprove with one `git diff`. That is worse than the original defect: an uncorrected claim is a
+mistake, and a claim documented as corrected while still false is a claim nobody will check again.
+
+**The claim, in the one wording now used in every normative location:**
+
+> A tick whose only new events are heartbeats changes **not one sentence** — every bullet kind,
+> code, parameter and text is byte-identical. `contentRevision` also covers the freshness lattice,
+> which is clock-derived, so a tick that crosses the 30-second boundary moves `contentRevision`
+> while every sentence stays byte-identical.
+
+Reproduced against the shipped kernel at the entry commit, with the last heartbeat at
+`18:40:10.000Z` and nothing else changing:
+
+```
+observedAt 18:40:40.000Z  age 30000ms  evidenceState FRESH
+observedAt 18:40:40.001Z  age 30001ms  evidenceState STALE
+sentences byte-identical : true
+contentRevision stable   : false
+```
+
+**The digest recipe is deliberately not changed.** Dropping `evidenceState` from
+`contentRevision` would make the shorter sentence true, and would buy it by making a published
+digest silent about a state change an operator reads off the page — and by moving that digest for
+every existing consumer. A migration bought to rescue a sentence is the wrong trade; the sentence
+is corrected instead.
+
+**Gates, and what each one is for.** Four assertions and one witness, in
+`tests/control-room-activity.test.mjs`:
+
+1. **The boundary is exact and inclusive, on a clock-only tick.** Two summaries one millisecond
+   apart over identical evidence and no new event at all: 30000 ms is `FRESH`, 30001 ms is
+   `STALE`, every sentence is byte-identical, and `contentRevision` **moves**. This is the
+   assertion the retracted claim would have failed.
+2. **A heartbeat-only tick that crosses the boundary** — the tick's only new event is a
+   `run.heartbeat` — likewise changes no sentence and moves `contentRevision`.
+3. **A heartbeat-only tick inside the window** keeps `contentRevision` byte-identical, so the
+   claim is bounded in both directions rather than merely permissive. A digest that moved on every
+   tick would fail this one; a digest that never moved would fail 1 and 2.
+4. **Mutation witness, mechanism-revert.** A one-expression mutant that excludes `evidenceState`
+   from `contentRevision` — the resolution this document declined — makes the boundary-crossing
+   digest stable. If gates 1 and 2 passed under that mutant they would be testing nothing about
+   the lattice; they fail under it, which is what makes them non-vacuous.
+5. **A truth gate over the prose itself.** `README.md`, this document and the module are read as
+   text; the retracted phrasings are asserted absent and the narrowed one asserted present in
+   each. The defect this repair closes was a documentation defect, so the gate that keeps it
+   closed has to read documentation. This gate is RED at the entry commit.
+
+**Falsifiers for this repair.** R1.1-F1: any shipped normative text asserts that a heartbeat-only
+or clock-only tick cannot move `contentRevision`. R1.1-F2: a boundary-crossing tick changes a
+rendered sentence. R1.1-F3: a tick inside the window moves `contentRevision`.
+
+## R1.2 — `localLanes.observationRevision` is provenance, and is re-derived
+
+*Spec review section 5. Introduced by R0.*
+
+**What was actually wrong.** `requireLocalLanes` re-derives the whole lane block and compares
+canonical JSON, which is why twenty-three resealing forgeries met twenty refusals. One field
+escaped: `observationRevision` was checked only for `typeof … === 'string'` and was then fed back
+into the derivation as its own expected value, so the comparison could not disagree with it. A
+resealed snapshot therefore carried arbitrary free text — a URL, a local path, key-shaped
+material, a fabricated progress sentence — into the LOCAL_WMUX evidence line an operator reads as
+the identity of the observation this page was built from. Reproduced at the entry commit: seven
+such values, seven acceptances, seven renders.
+
+**This is provenance, not injection.** `escapeHtml` holds at every interpolation and no markup
+escapes; the failure is that a field presented as the identity of the evidence was not bound to
+the evidence. That is the class `requireControlRoomActivity` already closes on `evidenceRevision`
+in this same commit, and the class U3 was raised to close. One rule with two implementations and
+two behaviours is the alias-guard shape `src/path-identity.mjs` exists to eliminate.
+
+**Repair: re-derive, do not pattern-match.** The field is fully determined by the block the
+snapshot already publishes. Confirmed at the entry commit:
+
+```
+published observationRevision : 0a185bdb0b2889d64649cb1768e8129562ee45e808d294817b1d502bcd69969d
+re-derived from the block     : 0a185bdb0b2889d64649cb1768e8129562ee45e808d294817b1d502bcd69969d
+```
+
+So `src/local-lane-observation.mjs` — the module that owns the schema, and the only module that
+may own its digest recipe — exports that recipe as `localLaneObservationRevision({ observedAt,
+lanes })`, and `sealLocalLaneObservation` is rewritten to call it. **One recipe, one
+implementation**: adding a second hasher in the control room would have reproduced the very defect
+being repaired. `requireLocalLanes` then re-derives the revision from `block.observedAt` and
+`block.lanes` — projected to the seven observation fields, so the derived `live` flag is excluded
+— refuses a published value that disagrees, and passes the *derived* value into the block rather
+than the published one.
+
+A pattern check (`/^[a-f0-9]{64}$/`, as the sibling module applies to `evidenceRevision`) was
+considered and rejected as the weaker of two available repairs: it would still accept sixty-four
+wrong hex characters as the identity of this evidence. Re-derivation refuses those too. The
+sibling module keeps its pattern check because `evidenceRevision` names evidence the summary does
+not carry and therefore cannot rebuild; this block carries its own lanes.
+
+**Gates, and what each one is for.** In `tests/control-room-local-lanes.test.mjs`:
+
+1. **T20 — free text is refused at both public seams.** Seven forged revisions — a URL, a path, a
+   fabricated progress sentence, markup, a bidi override, the empty string, and sixty-four wrong
+   hex characters — are each refused by `requireControlRoomSnapshot` and by
+   `renderControlRoomHtml` with a typed `ControlRoomError` / `InvalidSnapshot`, and none of the
+   seven strings reaches a rendered document.
+2. **T20 honest positive control.** The unedited snapshot still verifies and still renders its
+   revision, for one lane, for several lanes, for a withheld label and for a stale block. A
+   verifier that refused everything would pass gate 1 and fail this one; without it, gate 1 proves
+   nothing.
+3. **T20 binding, not merely well-formedness.** The honest revision of a *different* lane set — a
+   real digest, correctly derived, of the wrong evidence — is refused when spliced into this
+   block. This is what separates re-derivation from a pattern check.
+4. **T20 MECHANISM REVERT.** A one-expression mutant that removes the new comparison accepts the
+   free-text forgery and renders it. The gate therefore tests the mechanism rather than passing
+   for an unrelated reason.
+
+**Falsifiers for this repair.** R1.2-F1: any string that is not the digest of the published block
+is accepted in `observationRevision`. R1.2-F2: an honest snapshot is refused. R1.2-F3: the control
+room grows a second implementation of the observation digest recipe.
+
+**Rejection criterion.** Revert R1.2 if re-derivation ever refuses an observation the sensor
+itself sealed — that would mean the two implementations had drifted, which is exactly the failure
+this repair is shaped to make impossible.
+
+# R2 — the blocker an independent review reproduced in the shipped R1.2 seam
+
+Entry commit `e609461ca34f492bb61bc4eeb2cd12907b1d00cc`. R1.2 closed `observationRevision` and said
+so in this document. One field of the same block was left standing, and this section was written
+before a line of repair.
+
+The scope is that one finding and nothing else. No bus verb, authority, effect, network call,
+retry, clock source, provider, install or configuration surface is added, widened or renamed, and
+the LOCAL_WMUX sensor stays separated from the GitHub portfolio exactly as U8 left it.
+
+## R2.1 — `localLanes.observedAt` is provenance, and must be an exact instant
+
+*The successor of R1.2, which closed the field beside this one.*
+
+**What was actually wrong.** R1.2's repair made `observationRevision` a derived value: the control
+room now recomputes it from `block.observedAt` and `block.lanes`. That closed the field it names,
+and it moved the whole trust of the block onto its two inputs. `block.lanes` is checked
+exhaustively — four bounded identities, a closed lifecycle vocabulary, a closed label-state
+vocabulary, a human-safe label pattern and a strict ordering. `block.observedAt` was checked for
+`typeof value === 'string'` and a finite `Date.parse`.
+
+`Date.parse` is not a validator. V8's fallback parser reads a trailing parenthetical as a time-zone
+comment and accepts whatever it contains, so
+
+```
+Sat Aug 30 2026 03:45:00 GMT+0000 (This run is 87% complete and will finish in 2h)
+```
+
+parses to `1788061500000` — the same instant as `2026-08-30T03:45:00.000Z`. Because it is the same
+instant, `observationAgeMs` is unchanged, the freshness lattice is unchanged, `liveCount` and
+`showPulse` are unchanged, and the headline and counts are unchanged. The forged string therefore
+survives every existing re-derivation, and `localLaneObservationRevision` obligingly seals it into
+a well-formed sixty-four-character digest of the forgery. Reproduced at the entry commit:
+
+```
+Date.parse(forged) === Date.parse(canonical) : true
+isExactInstant(forged)                       : false
+requireControlRoomSnapshot(forged)           : accepted
+renderControlRoomHtml(forged)                : rendered
+
+<time>Sat Aug 30 2026 03:45:00 GMT+0000 (This run is 87% complete and will finish in 2h)</time>
+  · observation age 0s
+```
+
+**This is provenance, not injection.** `escapeHtml` holds at every interpolation, exactly as it did
+in R1.2; no markup escapes and the string arrives as text. The failure is that the field an
+operator reads as *the instant this evidence was current* carries an arbitrary sentence chosen by
+whoever resealed the snapshot — rendered inside `<time>`, beside a truthful-looking `observation
+age 0s`, in the one section of the page that exists to say whether work is happening right now. The
+same string is also published as `data-observed-at`, which the document's own liveness script reads
+back with `Date.parse` to decide whether a lane still counts as live. A fabricated progress claim
+in that position is the exact operator failure this feature was built to end: a control room
+stating something confident that nobody measured.
+
+**Repair: use the predicate that already exists.** `src/local-lane-observation.mjs` already exports
+`isExactInstant`, already documents why leniency is the defect — a partial date must not silently
+widen to midnight UTC — and is already the rule `requireLocalLaneObservation` applies to this same
+field on the build path. The verify path applied a weaker rule to the same field, which is the
+alias-guard shape `src/path-identity.mjs` exists to eliminate and the shape U3 and R1.2 were both
+raised to close. `requireLocalLanes` imports that predicate and applies it. **One rule, one
+implementation:** a second round-trip check written locally in the control room would reproduce the
+defect being repaired, so none is added.
+
+A pattern check over an ISO-shaped regular expression was considered and rejected for the reason
+R1.2 rejected one: it is a second spelling of an existing rule, and it would still admit
+`2026-02-30T00:00:00.000Z`, which is shaped correctly and is not a day. Round-tripping through
+`Date#toISOString` refuses that too, and refuses it by construction rather than by enumeration.
+
+**Gates, and what each one is for.** In `tests/control-room-local-lanes.test.mjs`:
+
+1. **T21 — a Date.parse-able but non-canonical instant is refused at both public seams.** Six
+   forged spellings — the fabricated progress sentence, an exfiltration URL in the same
+   parenthetical position, RFC 1123, a `Z` without milliseconds, a `+00:00` offset and a `+01:00`
+   offset naming the same instant — each carry a correctly re-derived `observationRevision`, so
+   nothing but the instant's spelling is wrong. Each is refused by `requireControlRoomSnapshot` and
+   by `renderControlRoomHtml` with a typed `ControlRoomError` / `InvalidSnapshot`, in both
+   languages, and none of the six strings reaches a rendered document. Every forgery parses to the
+   same millisecond as the honest instant, so no age, count, headline or pulse differs — the gate
+   cannot pass because some *other* re-derivation disagreed.
+2. **T21 positive control.** Exact canonical instants still verify and still render, and the
+   operator still reads the instant back off the page: the fresh instant, one inside the freshness
+   window, one on its boundary and one past it. A verifier that refused everything would pass gate
+   1 and fail this one; without it, gate 1 proves nothing.
+3. **T21 MECHANISM REVERT.** A one-expression mutant that restores the loose `Date.parse` guard
+   accepts the forgery and renders the fabricated progress sentence into the `<time>` element and
+   into `data-observed-at`. The gate therefore tests the mechanism rather than passing for an
+   unrelated reason.
+4. **T21 — one instant predicate.** The control room is read as text and asserted to import
+   `isExactInstant` and to contain no second `toISOString()` round-trip comparison, so the rule
+   cannot drift into two implementations with two behaviours.
+
+**Falsifiers for this repair.** R2.1-F1: any string that is not `new Date(value).toISOString()` is
+accepted in `localLanes.observedAt`. R2.1-F2: an honest snapshot is refused. R2.1-F3: the control
+room grows a second implementation of the exact-instant rule.
+
+**Rejection criterion.** Revert R2.1 if exactness ever refuses an observation the sensor itself
+sealed — the sensor validates the same field with the same predicate, so that would mean the two
+call sites had drifted, which is the failure this repair is shaped to make impossible.
+
+## Findings recorded and not repaired here
+
+- **The snapshot's own `observedAt` and `sourceChangedAt` accept the same lenient spellings.**
+  `requireControlRoomSnapshot` never re-checks them, and `requireTimestamp` on the build path uses
+  the same `Date.parse` test this section replaces inside the lane block. Reproduced at the entry
+  commit: resealing the snapshot *and* its obstruction observation window with the forged string is
+  accepted and rendered, so the fabricated sentence reaches the page header's "checked" and
+  "changed" times. This is the same class as R2.1 and is a real defect, but it is a different
+  field at a different seam with a wider blast radius — it would move published snapshot revisions
+  for any consumer whose timestamps are not already canonical, and the top-level instants have no
+  single owning schema module the way the lane block has `src/local-lane-observation.mjs`. It is
+  recorded here rather than repaired, because this lane is authorized for one reproduced blocker,
+  and closing a second one quietly is how a bounded repair stops being reviewable.

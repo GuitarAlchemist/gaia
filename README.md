@@ -44,7 +44,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 694 gates
+node --test                                   # 810 gates
 ```
 
 ### Functional factory tracer
@@ -293,15 +293,39 @@ npm run factory:dashboard -- \
   --watch-ms      5000
 ```
 
-The default view answers only five operator questions: what is moving now, what changed,
-what blocks it, what happens next, and which source revisions support those claims. A pulse
-is rendered only for a fresh, explicit `gaia-cli-progress/1` heartbeat. Stored `RUNNING`
-state without a fresh heartbeat is shown as stale. Each bounded lifecycle exposes named
-gates and a percentage; the open-ended portfolio itself deliberately has no fabricated
-completion percentage. ETA remains `UNKNOWN` until at least five comparable completed runs
-exist, then reports an interquartile range and sample size. The HTML has no remote assets and
-can be opened in wmux or shared as a standalone artifact. See
+A **Current run** card comes first and answers the operator's first question on its own: run
+state, the current stage or gate, elapsed work, the last verified transition with its digest, and
+the next evidence checkpoint or blocker. Evidence freshness is a separate labelled fact beside
+elapsed work, and says in words that a heartbeat proves the sensor is alive rather than that work
+advanced. A pulse is rendered only for a fresh, explicit `gaia-cli-progress/1` heartbeat, and is
+disabled entirely under `prefers-reduced-motion`. Stored `RUNNING` state without a fresh
+heartbeat is shown as stale. Each bounded lifecycle exposes named gates and a percentage; the
+open-ended portfolio itself deliberately has no fabricated completion percentage. Pace is stated
+as a calibration — `n/5` comparable completed runs — and an unavailable ETA names the exact
+missing evidence instead of a mood; a human forecast appears only when one is explicitly supplied,
+labelled **Operator forecast**, and is never invented. Aggregate `BLOCKED_*` counts live in a
+separately labelled **Portfolio backlog** section with their scope, as-of instant, total, count
+and share, because they are properties of the queue and not blockers of the run in front of you.
+The layout is phone-first: one readable column with the Current run card first and nothing that
+scrolls sideways, reflowing at 768 px and opening into a bounded multi-column grid up to 1600 px
+on a desktop. Status meaning always carries a word and a symbol, never colour alone. The HTML has
+no remote assets and can be opened in wmux or shared as a standalone artifact. See
 [`docs/factory-control-room.md`](docs/factory-control-room.md).
+
+Each live task also carries at most three deterministic sentences — what it is doing, what it last
+produced, and what would count as the next evidence — from
+`summarizeControlRoomActivity({ snapshot })` in `src/control-room-activity.mjs`. That module is
+pure, imports only `node:crypto`, and returns a separately content-addressed
+`gaia-control-room-activity/1` value. A tick whose only new events are heartbeats changes **not
+one sentence**: every bullet kind, code, parameter and text is byte-identical, which is what "do
+not generate text on a ten-second heartbeat" was ever about. `contentRevision` also covers the
+freshness lattice, which is clock-derived, so a tick that crosses the 30-second boundary moves
+`contentRevision` while every sentence stays byte-identical. An earlier wording here claimed the
+digest covered only the sentences and therefore never moved on a heartbeat; that was false in both
+directions and is retracted. Every sentence comes from a closed phrasebook and every
+interpolated value is a `TOKEN`, so chain-of-thought, prompts, logs, URLs and worker-authored
+prose have nowhere to live. `--activity on --activity-out <path>` publishes the value beside the
+snapshot on either dashboard command; the two flags are refused unless supplied together.
 
 ### Why the drain is not moving
 
@@ -364,6 +388,51 @@ or end, cannot be grafted into a resealed snapshot and displayed.
 The obstruction is not an actuator. It starts nothing, retries nothing, unblocks nothing and
 grants nothing. See [`docs/portfolio-drain-obstruction-design.md`](docs/portfolio-drain-obstruction-design.md)
 for the seams that were rejected, the falsifiers and the rejection criterion.
+
+### Local wmux lanes
+
+The control room said `PAUSED` while four real Claude/wmux reviews were visibly running in panes on
+this machine. It was truthful about its evidence and useless to the operator: every sensor it had
+projected through GitHub portfolio items, and a local review lane bound to no issue and no pull
+request was invisible to all of them.
+
+The fix is a sensor, not a fabricated binding. A bounded read-only sensor reads structured
+`wmux agent list` metadata — never a screen, a prompt, reasoning, stdout, a command line or source
+code — and writes one closed `gaia-local-lane-observation/1` file. The control room takes that file
+as an **explicit input**, exactly as it already takes telemetry and declared dependencies.
+
+```bash
+npm run lanes:sensor -- --out ../state/gaia-local-lanes.json
+
+npm run lanes:watch --   --lanes-out     ../state/gaia-local-lanes.json   --portfolio     ../state/gaia-github-portfolio.json   --html-out      ../state/gaia-control-room.html   --snapshot-out  ../state/gaia-control-room.json   --interval-ms   5000
+# Local wmux lanes observed: 7 | running 5 | workspaces 2 | observation 9c1f…
+# Gaia dashboard checked: ACTIVE | obstruction NO_ELIGIBLE_WORK | local lanes 5/7 FRESH | next OBSERVE_LOCAL_LANE | source b2a0…
+```
+
+A fresh observation carrying at least one `RUNNING` lane makes the headline `ACTIVE` and shows a
+real pulse, and the page calls that **process liveness** in words rather than progress. Lanes render
+in their own section labelled `LOCAL_WMUX`, separate from portfolio work, and carry no repository,
+issue, pull request, completion percentage, pace or ETA — a lane genuinely has none, and inventing
+one to make it fit the portfolio shape would trade a silent falsehood for a louder one. Exited lanes
+are shown and never make the headline active. A stale, missing or corrupt observation animates
+nothing: stale is an explicit labelled state with its measured age, missing means the section is
+absent, and corrupt or future-dated is a typed refusal that leaves the last artifacts intact.
+
+Every displayable field is bounded by construction. Identities admit no whitespace, quote, angle
+bracket or newline; the label is a positive Unicode allowlist that refuses every `\p{C}` code point,
+so a bidi override or a zero-width space cannot forge a duplicate of another lane's name. A label
+the allowlist refuses is **withheld** under its own `labelState` rather than sanitised or dropped,
+and the lane is still reported. The sensor's own window is `LOCAL_LANE_OBSERVATION_FRESH_MS`, named
+for what it measures — how recently the *sensor* ran — and never borrowed from the heartbeat
+constant, which measures something else. The watcher interval is capped at half of it, so no legal
+configuration can render a running lane permanently stale.
+
+`requireControlRoomSnapshot` re-derives the whole block — every count, the pulse, the freshness
+state, every lane's liveness and the headline itself — so a resealed snapshot cannot claim a pulse
+its own evidence refuses. A snapshot with no observation omits the field entirely rather than
+publishing `null`, which is proved byte-for-byte against the entry commit: adding a sensor moves no
+previously published revision. See
+[`docs/local-wmux-lanes.md`](docs/local-wmux-lanes.md).
 
 ### Passive factory telemetry spine
 
@@ -514,6 +583,11 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
 | `scripts/factory-agent.mjs` | Real Claude worker → Codex read-only review → optional one Claude repair → fresh Codex review tracer. Produces a fail-closed, content-addressed run receipt; never commits or publishes. |
 | `scripts/factory-dashboard.mjs` | One-command portfolio/drain projection → control-room snapshot + standalone HTML adapter, with optional bounded polling and no listener or authority. |
+| `src/local-lane-observation.mjs` | The closed `gaia-local-lane-observation/1` schema and its total verifier: bounded identities, a positive Unicode label allowlist, a three-value lifecycle and a three-value label state. Pure; imports `node:crypto` only. |
+| `src/local-lane-sensor.mjs` | Structured wmux agent metadata → one sealed observation, as a pure function that reads six named fields and can reach no seventh. |
+| `src/path-identity.mjs` | One definition of "is this output the same file as an input?", decided on filesystem identity rather than on path spelling. |
+| `scripts/local-lane-sensor.mjs` | The sensor's process boundary: one `wmux agent list`, no shell, no workspace filter, no mutating verb, one observation file. |
+| `scripts/local-lanes-watch.mjs` | One command that refreshes the observation and the control room on a bounded, stoppable, non-overlapping interval. Holds no mechanism of its own. |
 | `scripts/factory-telemetry-step.mjs` | One real, bounded, instrumented portfolio-drain transition: reads the ledger, records the closed telemetry arc, attempts exactly one compare-and-swap receipt, and publishes the three control-room views. No provider, no worker, no authority. |
 | `scripts/factory-telemetry-phase.mjs` | Records exactly one lifecycle phase of one run, then exits. The operator-facing half of the phase sensor; refuses to rebind a run's subject or to overwrite a durable evidence log. |
 | `scripts/hybrid-search.mjs` | One-command local corpus → content-addressed hybrid index → cited result tracer; reserves new outputs and never contacts a provider. |
@@ -526,7 +600,7 @@ by **absence**, not by a check that could be bypassed.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 694 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 810 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
