@@ -265,6 +265,62 @@ test('O2: an incomplete observation supports no candidate at all', () => {
   );
 });
 
+/** `count` checks that all ran at the same time, each a one-minute span inside a one-minute run. */
+const parallelRun = (setupMs, count = 4) => observation({
+  startedAt: at(50 * MINUTE),
+  completedAt: at(49 * MINUTE),
+  checks: Array.from({ length: count }, (_, index) => check({
+    checkId: `p${index}`,
+    name: `p${index}`,
+    setupMs,
+    startedAt: at(50 * MINUTE),
+    completedAt: at(49 * MINUTE),
+  })),
+});
+
+test('O2: caching is not raised by summing the setup of jobs that ran at the same time', () => {
+  // Four jobs, each spending ten seconds of its own sixty on setup. The true share is one sixth,
+  // below the published quarter. Summing the four numerators against ONE wall-clock denominator
+  // inflates the share by the fan-out and fires the lever on evidence that does not support it —
+  // the same wall-clock error this contract already refuses for cost.
+  assert.ok(!leversOf([parallelRun(10_000)]).includes('INTRODUCE_CACHING'),
+    'a sixth of each job is not a quarter of anything');
+});
+
+test('O2: caching names the check that earns it, not merely the run it ran in', () => {
+  const mixed = observation({
+    startedAt: at(50 * MINUTE),
+    completedAt: at(49 * MINUTE),
+    checks: [
+      check({
+        checkId: 'slow-setup', name: 'slow setup', setupMs: 30_000,
+        startedAt: at(50 * MINUTE), completedAt: at(49 * MINUTE),
+      }),
+      check({
+        checkId: 'lean', name: 'lean', setupMs: 1_000,
+        startedAt: at(50 * MINUTE), completedAt: at(49 * MINUTE),
+      }),
+    ],
+  });
+  const [raised] = deriveCiFlowCandidates({ artifact: sealed([mixed]) })
+    .filter((entry) => entry.lever === 'INTRODUCE_CACHING');
+  assert.ok(raised, 'a job spending half its own span on setup is a caching candidate');
+  assert.equal(raised.evidence.length, 1, 'only the check that clears the share is named');
+  assert.ok(raised.evidence[0].startsWith(ciFlowObservationIdentity(mixed)),
+    'the named check is anchored to the run it ran in');
+  assert.ok(raised.evidence[0].endsWith('slow-setup'));
+  assert.ok(!raised.evidence[0].includes('lean'),
+    'naming the whole run sends an operator to read four job logs to find the one that matters');
+});
+
+test('O2: a coherent parallel run is still readable, so the lever is not silently unreachable', () => {
+  // The dual of the inflated ratio: twenty seconds of setup in each of four one-minute jobs sums
+  // to eighty against a sixty-second run. Calling that CORRUPT withholds the caching lever from
+  // exactly the heavily parallel workflows where caching is most likely to pay.
+  assert.ok(leversOf([parallelRun(20_000)]).includes('INTRODUCE_CACHING'),
+    'a third of each job IS above the published share');
+});
+
 // -----------------------------------------------------------------------------------------------
 // O3, O5 — one lever, and a guard fixed before the reading.
 // -----------------------------------------------------------------------------------------------

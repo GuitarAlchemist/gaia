@@ -491,3 +491,112 @@ test('MR6: allowing a run-creation basis on a re-run publishes human latency as 
   assert.ok(fabricated.phases.queueLatencyMs.value > 24 * 60 * MINUTE,
     'the mutant reports two days of a human not clicking re-run as runner queue latency');
 });
+
+test('MR7: dropping the completeness guard publishes a partial read as the current gate', async () => {
+  const partial = [observation({ complete: false })];
+  const shipped = snapshotWith(ciFlow(partial));
+  assert.equal(shipped.ciFlow.gate.state, 'UNKNOWN');
+  assert.equal(shipped.ciFlow.gate.reasonCode, 'OBSERVATION_INCOMPLETE');
+  assert.equal(shipped.ciFlow.phases.executionMs.state, 'UNKNOWN');
+
+  const mutant = await importMutant('ci-flow.mjs', 'ci-flow-mr7', (source) => source.replace(
+    'gateObservation.complete ? null', 'true ? null',
+  ));
+  const published = mutant.deriveCiFlowBlock({
+    artifact: mutant.sealCiFlow({
+      observedAt: AT, windowStartedAt: WINDOW_START, sequence: 11, observations: partial,
+    }),
+    observedAt: AT,
+  });
+  assert.equal(published.gate.state, 'MEASURED');
+  assert.equal(published.phases.executionMs.state, 'MEASURED');
+  assert.equal(published.withheldCount, 1,
+    'the mutant publishes as the current gate the one observation it withholds as untrustworthy');
+});
+
+test('MR8: dropping the span bound lets a critical path outlast the run it lies inside', async () => {
+  // Two checks that each occupied the whole run, with an edge between them: the shape a collector
+  // produces when it reads edges from one source and timings from another.
+  const contradictory = [observation({
+    checks: [check({ checkId: 'a', name: 'a' }), check({ checkId: 'b', name: 'b' })],
+    dependencies: [['a', 'b']],
+  })];
+  const shipped = snapshotWith(ciFlow(contradictory));
+  assert.equal(shipped.ciFlow.criticalPath.state, 'UNKNOWN');
+  assert.equal(shipped.ciFlow.criticalPath.reasonCode, 'CORRUPT');
+
+  const mutant = await importMutant('ci-flow.mjs', 'ci-flow-mr8', (source) => source.replace(
+    'if (path.durationMs > spanOf(observation)) {', 'if (false) {',
+  ));
+  const published = mutant.deriveCiFlowBlock({
+    artifact: mutant.sealCiFlow({
+      observedAt: AT, windowStartedAt: WINDOW_START, sequence: 11, observations: contradictory,
+    }),
+    observedAt: AT,
+  });
+  assert.equal(published.criticalPath.state, 'MEASURED');
+  assert.equal(published.criticalPath.durationMs, 2 * published.phases.executionMs.value,
+    'the mutant publishes a ten-minute critical path for a five-minute run');
+});
+
+test('MR9: reading the setup share against one wall clock is what fires caching on parallel jobs', async () => {
+  // Four jobs, each spending a sixth of its own span on setup — below the published quarter.
+  const parallel = [observation({
+    startedAt: at(50 * MINUTE),
+    completedAt: at(49 * MINUTE),
+    checks: Array.from({ length: 4 }, (_, index) => check({
+      checkId: `p${index}`,
+      name: `p${index}`,
+      setupMs: 10_000,
+      startedAt: at(50 * MINUTE),
+      completedAt: at(49 * MINUTE),
+    })),
+  })];
+  const artifact = ciFlow(parallel);
+  const { deriveCiFlowCandidates } = await import('../src/ci-flow-optimization.mjs');
+  assert.deepEqual(
+    deriveCiFlowCandidates({ artifact }).map((entry) => entry.lever).filter(
+      (lever) => lever === 'INTRODUCE_CACHING',
+    ),
+    [],
+  );
+
+  const mutant = await importMutant('ci-flow-optimization.mjs', 'ci-flow-mr9',
+    (source) => source.replace(
+      'const share = (item) => [item.setupMs, spanOf(item)];',
+      'const share = () => [setupMs.value, executionMs.value];',
+    ));
+  const inflated = mutant.deriveCiFlowCandidates({ artifact }).map((entry) => entry.lever);
+  assert.ok(inflated.includes('INTRODUCE_CACHING'),
+    'summing four numerators against one denominator is what raises the lever falsely');
+});
+
+test('MR10: excluding cancelled runs from the bill is what makes cancelling look cheaper', async () => {
+  const billed = [
+    ...runs(CI_FLOW_MIN_SAMPLE, () => ({ billableMs: 10 * MINUTE })),
+    ...runs(6, (index) => ({
+      runId: `90${index}`,
+      conclusion: 'CANCELLED',
+      billableMs: 5 * MINUTE,
+      checks: [check({ conclusion: 'CANCELLED' })],
+    })),
+  ];
+  const shipped = snapshotWith(ciFlow(billed));
+  assert.equal(shipped.ciFlow.consumedRunner.state, 'MEASURED');
+  assert.equal(shipped.ciFlow.consumedRunner.totalMs, 80 * MINUTE);
+
+  const mutant = await importMutant('ci-flow.mjs', 'ci-flow-mr10', (source) => source.replace(
+    'function deriveConsumedRunner(observations) {',
+    'function deriveConsumedRunner(all) {\n  const observations = all.filter(isComparable);',
+  ));
+  const flattering = mutant.deriveCiFlowBlock({
+    artifact: mutant.sealCiFlow({
+      observedAt: AT, windowStartedAt: WINDOW_START, sequence: 11, observations: billed,
+    }),
+    observedAt: AT,
+  });
+  assert.ok(flattering.consumedRunner.totalMs < shipped.ciFlow.consumedRunner.totalMs,
+    'thirty minutes the provider really charged vanish from the only cost figure on the card');
+  assert.equal(flattering.cancellations.value, shipped.ciFlow.cancellations.value,
+    'the cancellations the mutant drops from the bill are still counted beside it');
+});

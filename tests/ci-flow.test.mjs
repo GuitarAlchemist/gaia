@@ -583,6 +583,51 @@ test('K14: a coherent setup decomposition is measured', () => {
   assert.equal(measured.phases.setupMs.value, 30_000);
 });
 
+/** `count` checks that all ran at the same time, inside a one-minute run. */
+const parallelChecks = (setupMs, count = 4) => Array.from({ length: count }, (_, index) => check({
+  checkId: `p${index}`,
+  name: `p${index}`,
+  setupMs,
+  startedAt: at(50 * MINUTE),
+  completedAt: at(49 * MINUTE),
+}));
+
+test('K14: checks that ran at the same time may sum past the wall clock without contradicting it', () => {
+  // Four jobs, each a one-minute span with twenty seconds of setup, inside a one-minute run.
+  // Every job is internally coherent and every check lies inside its run. Reading the SUM against
+  // one wall-clock span calls this producer broken and sends an operator to fix nothing.
+  const parallel = block([observation({
+    startedAt: at(50 * MINUTE),
+    completedAt: at(49 * MINUTE),
+    checks: parallelChecks(20_000),
+  })]);
+  assert.equal(parallel.phases.setupMs.state, 'MEASURED');
+  assert.equal(parallel.phases.setupMs.value, 80_000);
+  assert.equal(parallel.phases.executionMs.state, 'MEASURED');
+  assert.equal(parallel.phases.executionMs.value, MINUTE);
+});
+
+test('K14: a check whose setup exceeds its OWN span is still the bounded contradiction', () => {
+  // The run itself is five minutes, so the SUM of the two setups fits inside it comfortably. The
+  // contradiction is inside one job, and only a per-check reading can see it.
+  const overrun = block([observation({
+    checks: [
+      check({
+        checkId: 'p0', name: 'p0', setupMs: 90_000,
+        startedAt: at(50 * MINUTE), completedAt: at(49 * MINUTE),
+      }),
+      check({
+        checkId: 'p1', name: 'p1', setupMs: 10_000,
+        startedAt: at(50 * MINUTE), completedAt: at(49 * MINUTE),
+      }),
+    ],
+  })]);
+  assert.equal(overrun.phases.setupMs.state, 'UNKNOWN');
+  assert.equal(overrun.phases.setupMs.reasonCode, 'CORRUPT',
+    'ninety seconds of setup inside a sixty-second job is evidence contradicting itself');
+  assert.equal(overrun.phases.executionMs.state, 'MEASURED');
+});
+
 // -----------------------------------------------------------------------------------------------
 // K15 — a partial read reads NOT_EXPOSED, and contributes to no total.
 // -----------------------------------------------------------------------------------------------
@@ -615,6 +660,74 @@ test('K15: an absent phase array reads NOT_EXPOSED rather than attributing the w
   const noChecks = block([observation({ checks: [] })]);
   assert.equal(noChecks.phases.setupMs.state, 'UNKNOWN');
   assert.equal(noChecks.phases.setupMs.reasonCode, 'NOT_EXPOSED');
+});
+
+test('K15: an incomplete gate observation withholds every present-tense cell by name', () => {
+  // The single observation on the card is one the producer marked a partial read. It is withheld
+  // from the distribution as untrustworthy; publishing the gate, the four phases, the slowest
+  // check and the critical path derived from that SAME observation as MEASURED is the block
+  // contradicting itself in its own fields.
+  const partial = block([observation({
+    complete: false,
+    runnerAcquiredAt: at(51 * MINUTE),
+    checks: [
+      check({
+        checkId: 'a', name: 'a', setupMs: 30_000,
+        startedAt: at(50 * MINUTE), completedAt: at(48 * MINUTE),
+      }),
+      check({
+        checkId: 'b', name: 'b', setupMs: 30_000,
+        startedAt: at(48 * MINUTE), completedAt: at(45 * MINUTE),
+      }),
+    ],
+    dependencies: [['a', 'b']],
+  })]);
+
+  assert.equal(partial.gate.state, 'UNKNOWN');
+  assert.equal(partial.gate.reasonCode, 'OBSERVATION_INCOMPLETE');
+  assert.equal(partial.gate.conclusion, null);
+  assert.equal(partial.gate.runId, null);
+  for (const name of ['queueLatencyMs', 'runnerStartupMs', 'setupMs', 'executionMs']) {
+    assert.equal(partial.phases[name].state, 'UNKNOWN', name);
+    assert.equal(partial.phases[name].reasonCode, 'OBSERVATION_INCOMPLETE', name);
+    assert.equal(partial.phases[name].value, null, name);
+  }
+  assert.equal(partial.slowestCheck.state, 'UNKNOWN');
+  assert.equal(partial.slowestCheck.reasonCode, 'OBSERVATION_INCOMPLETE');
+  assert.equal(partial.slowestCheck.durationMs, null);
+  assert.equal(partial.criticalPath.state, 'UNKNOWN');
+  assert.equal(partial.criticalPath.reasonCode, 'OBSERVATION_INCOMPLETE');
+  assert.equal(partial.criticalPath.durationMs, null);
+  assert.equal(partial.withheldCount, 1,
+    'no cell may read MEASURED off an observation this block withholds as untrustworthy');
+});
+
+test('K15: OBSERVATION_INCOMPLETE is a reason the derivation can actually reach', () => {
+  const reached = new Set();
+  const partial = block([observation({ complete: false })]);
+  for (const cell of [partial.gate, partial.slowestCheck, partial.criticalPath,
+    ...Object.values(partial.phases)]) {
+    if (cell.reasonCode !== null) reached.add(cell.reasonCode);
+  }
+  assert.ok(reached.has('OBSERVATION_INCOMPLETE'),
+    'a named reason no derivation emits is an operator-facing constant that means nothing');
+});
+
+test('K15: the present tense survives when the most recently closed run is a complete read', () => {
+  const mixed = block([
+    observation({
+      runId: '1000',
+      complete: false,
+      completedAt: at(46 * MINUTE),
+      checks: [check({ completedAt: at(46 * MINUTE) })],
+    }),
+    observation({ runId: '1001' }),
+  ]);
+  assert.equal(mixed.gate.state, 'MEASURED');
+  assert.equal(mixed.gate.runId, '1001',
+    'one partial read elsewhere in the window does not withhold a complete gate');
+  assert.equal(mixed.phases.executionMs.state, 'MEASURED');
+  assert.equal(mixed.withheldCount, 1, 'the partial read is the one withheld from the distribution');
 });
 
 // -----------------------------------------------------------------------------------------------
@@ -669,6 +782,49 @@ test('K17: a provider-reported zero is a measured zero, not a missing reading', 
   assert.equal(selfHosted.consumedRunner.totalMs, 0);
 });
 
+/** Six cancelled runs the provider really billed for, five minutes each. */
+const billedCancellations = () => runs(6, (index) => ({
+  runId: `90${index}`,
+  conclusion: 'CANCELLED',
+  billableMs: 5 * MINUTE,
+  checks: [check({ conclusion: 'CANCELLED' })],
+}));
+
+test('K17: a cancelled run the provider billed for is counted, never dropped from the bill', () => {
+  const mixed = block([
+    ...runs(CI_FLOW_MIN_SAMPLE, () => ({ billableMs: 10 * MINUTE })),
+    ...billedCancellations(),
+  ]);
+  assert.equal(mixed.consumedRunner.state, 'MEASURED');
+  assert.equal(mixed.consumedRunner.totalMs, 80 * MINUTE,
+    'the runner ran and the account was charged; a truncated duration is not a truncated bill');
+  assert.equal(mixed.consumedRunner.minutes, 80);
+  assert.equal(mixed.consumedRunner.sampleSize, mixed.observationCount,
+    'the cost sample is the whole window, so nothing leaves the sum unannounced');
+});
+
+test('K17: cancelling more runs can never make the measured bill fall', () => {
+  const before = block(runs(CI_FLOW_MIN_SAMPLE, () => ({ billableMs: 10 * MINUTE })));
+  const after = block([
+    ...runs(CI_FLOW_MIN_SAMPLE, () => ({ billableMs: 10 * MINUTE })),
+    ...billedCancellations(),
+  ]);
+  assert.ok(after.cancellations.value > before.cancellations.value);
+  assert.ok(after.consumedRunner.totalMs > before.consumedRunner.totalMs,
+    'a lever that only cancels more runs must not make measured cost fall by exclusion');
+});
+
+test('K17: a partial read is not summed into the bill as though it were the whole charge', () => {
+  const partial = block([
+    ...runs(CI_FLOW_MIN_SAMPLE, () => ({ billableMs: 10 * MINUTE })),
+    ...runs(1, () => ({ runId: '960', complete: false, billableMs: MINUTE })),
+  ]);
+  assert.equal(partial.consumedRunner.state, 'UNKNOWN');
+  assert.equal(partial.consumedRunner.reasonCode, 'OBSERVATION_INCOMPLETE');
+  assert.equal(partial.consumedRunner.totalMs, null);
+  assert.equal(partial.consumedRunner.minutes, null);
+});
+
 test('K17: no operating-system multiplier table exists in the shipped source', () => {
   const source = readFileSync(join(ROOT, 'src', 'ci-flow.mjs'), 'utf8');
   assert.ok(!/UBUNTU|MACOS|WINDOWS_RUNNER|multiplier/iu.test(source),
@@ -712,9 +868,47 @@ test('K18: without a carried edge set the critical path is refused and the slowe
   assert.equal(ungraphed.slowestCheck.durationMs, 5 * MINUTE);
 });
 
+/**
+ * Two checks that each occupied the WHOLE run, with an edge between them.
+ *
+ * A DAG over carried checks is all the edge set is verified to be; nothing requires an edge to
+ * imply temporal order. A collector reading edges from one source and timings from another —
+ * which is what any real one will do — produces exactly this shape, and summing both spans
+ * publishes a ten-minute path inside a five-minute run.
+ */
+const concurrentContradiction = () => observation({
+  checks: [
+    check({ checkId: 'a', name: 'a' }),
+    check({ checkId: 'b', name: 'b' }),
+  ],
+  dependencies: [['a', 'b']],
+});
+
+test('K18: an edge set contradicting the timings reads CORRUPT, never a path longer than the run', () => {
+  const contradictory = block([concurrentContradiction()]);
+  assert.equal(contradictory.criticalPath.state, 'UNKNOWN');
+  assert.equal(contradictory.criticalPath.reasonCode, 'CORRUPT');
+  assert.equal(contradictory.criticalPath.durationMs, null);
+  assert.deepEqual([...contradictory.criticalPath.checkIds], []);
+  assert.equal(contradictory.phases.executionMs.state, 'MEASURED',
+    'the span itself is still evidence; only the decomposition is incoherent');
+  assert.equal(contradictory.phases.executionMs.value, 5 * MINUTE);
+  assert.equal(contradictory.slowestCheck.state, 'MEASURED',
+    'a vertex is not a path, and the vertex is still readable');
+});
+
 test('K18: the critical path never exceeds the run span it lies inside', () => {
-  const graphed = block([chained()]);
-  assert.ok(graphed.criticalPath.durationMs <= graphed.phases.executionMs.value);
+  // Asserted over an edge set that CONTRADICTS the timings as well as over one that agrees with
+  // them, so the gate is an invariant rather than an observation about one fixture.
+  for (const fixture of [chained(), concurrentContradiction()]) {
+    const derived = block([fixture]);
+    if (derived.criticalPath.state === 'MEASURED') {
+      assert.ok(derived.criticalPath.durationMs <= derived.phases.executionMs.value);
+    } else {
+      assert.equal(derived.criticalPath.reasonCode, 'CORRUPT');
+      assert.equal(derived.criticalPath.durationMs, null);
+    }
+  }
 });
 
 test('K18: an edge naming a check that is not carried is refused', () => {
