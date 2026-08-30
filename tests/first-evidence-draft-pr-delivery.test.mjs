@@ -16,12 +16,12 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   EMPTY_FIRST_EVIDENCE_LEDGER_REVISION,
@@ -52,9 +52,21 @@ const HEAD_OID = 'b'.repeat(40);
 const SOURCE_REVISION = 'd'.repeat(64);
 const REPOSITORY = 'GuitarAlchemist/gaia';
 const HEAD_BRANCH = 'codex/draft-pr-on-first-evidence-r0';
+const DELIVERY_MODULE = join(ROOT, 'src', 'first-evidence-draft-pr-delivery.mjs');
+
+// Ownership tokens are closed 32-hex, so no host name, pid or path can enter a durable record.
+const OWNER_A = 'a'.repeat(32);
+const OWNER_B = 'b'.repeat(32);
+const OWNER_C = 'c'.repeat(32);
 
 const at = (msBeforeObserved) => new Date(Date.parse(OBSERVED) - msBeforeObserved).toISOString();
 const now = () => new Date(OBSERVED);
+
+// Any instant after the observation. These gates measure that ownership is BOUNDED and that an
+// expired claim is an orphan, not that the pump picks one particular horizon; E27 pins the bound.
+const LEASE_MS = 120_000;
+const MAX_LEASE_MS = 3_600_000;
+const LEASE_AT = new Date(Date.parse(OBSERVED) + LEASE_MS).toISOString();
 
 const IDENTITY = firstEvidenceOperationIdentity({
   repository: REPOSITORY,
@@ -157,11 +169,48 @@ const deliver = (directory, over = {}, options = {}) => deliverFirstEvidenceDraf
   observation: observation(over.observation ?? {}),
 });
 
+/** One INTENT exactly as the delivery pump seals it. Used to stage crashes and lost updates. */
+const intentTransition = (over = {}) => ({
+  transition: 'INTENT',
+  operationIdentity: IDENTITY,
+  owner: OWNER_A,
+  leaseExpiresAt: LEASE_AT,
+  repository: REPOSITORY,
+  task: { kind: 'ISSUE', number: 35 },
+  baseBranch: 'main',
+  baseOid: BASE_OID,
+  headBranch: HEAD_BRANCH,
+  headBranchGeneration: 1,
+  evidenceHeadOid: HEAD_OID,
+  run: { runId: 'run-7', laneGeneration: 3 },
+  sourceRevision: SOURCE_REVISION,
+  recordedAt: OBSERVED,
+  pullRequest: null,
+  refusal: null,
+  ...over,
+});
+
+/** An INTENT a killed process left behind: its bounded lease ran out while nothing held it. */
+const orphanedIntent = () => intentTransition({
+  recordedAt: at(600_000), leaseExpiresAt: at(480_000),
+});
+
 const refusalCode = async (fn) => {
   try {
     await fn();
   } catch (error) {
     assert.ok(error instanceof FirstEvidenceDeliveryError, `expected a typed refusal, got ${error}`);
+    return error.code;
+  }
+  return assert.fail('expected a refusal');
+};
+
+/** The same, for a MUTANT module, whose error class is a different object than the shipped one. */
+const anyRefusalCode = async (fn) => {
+  try {
+    await fn();
+  } catch (error) {
+    assert.equal(typeof error.code, 'string', `expected a typed refusal, got ${error}`);
     return error.code;
   }
   return assert.fail('expected a refusal');
@@ -248,22 +297,7 @@ test('E3b: a different run or lane generation still reuses the same draft', asyn
 
 test('E4: duplicate delivery of an identical transition is a no-op, not a CAS failure', () => {
   const directory = scratch();
-  const transition = {
-    transition: 'INTENT',
-    operationIdentity: IDENTITY,
-    repository: REPOSITORY,
-    task: { kind: 'ISSUE', number: 35 },
-    baseBranch: 'main',
-    baseOid: BASE_OID,
-    headBranch: HEAD_BRANCH,
-    headBranchGeneration: 1,
-    evidenceHeadOid: HEAD_OID,
-    run: { runId: 'run-7', laneGeneration: 3 },
-    sourceRevision: SOURCE_REVISION,
-    recordedAt: OBSERVED,
-    pullRequest: null,
-    refusal: null,
-  };
+  const transition = intentTransition();
   const first = appendFirstEvidenceTransition({
     directory, transition, expectedLedgerRevision: EMPTY_FIRST_EVIDENCE_LEDGER_REVISION,
   });
@@ -306,22 +340,7 @@ test('E5: two concurrent creators from one observed head cannot both win', async
 
 test('E5b: a stale expected ledger head fails closed at the compare-and-swap', () => {
   const directory = scratch();
-  const transition = {
-    transition: 'INTENT',
-    operationIdentity: IDENTITY,
-    repository: REPOSITORY,
-    task: { kind: 'ISSUE', number: 35 },
-    baseBranch: 'main',
-    baseOid: BASE_OID,
-    headBranch: HEAD_BRANCH,
-    headBranchGeneration: 1,
-    evidenceHeadOid: HEAD_OID,
-    run: { runId: 'run-7', laneGeneration: 3 },
-    sourceRevision: SOURCE_REVISION,
-    recordedAt: OBSERVED,
-    pullRequest: null,
-    refusal: null,
-  };
+  const transition = intentTransition();
   appendFirstEvidenceTransition({
     directory, transition, expectedLedgerRevision: EMPTY_FIRST_EVIDENCE_LEDGER_REVISION,
   });
@@ -532,22 +551,125 @@ test('E15: the delivery result is deeply frozen and content-addressed', async ()
  * E16-E19 — mechanism-revert controls
  * ------------------------------------------------------------------------------------------ */
 
-const deliverySource = () => readFileSync(
-  join(ROOT, 'src', 'first-evidence-draft-pr-delivery.mjs'), 'utf8',
-);
+const deliverySource = () => readFileSync(DELIVERY_MODULE, 'utf8');
 
-test('E16 MECHANISM REVERT: the compare-and-swap is what makes E5 fail closed', () => {
-  const source = deliverySource();
-  assert.match(source, /LedgerCasMismatch/u);
-  const mutated = source.replace(/if \(before\.revision !== expectedLedgerRevision\)/u, 'if (false)');
-  assert.notEqual(mutated, source, 'the mutation targets the ledger-head comparison');
+const MUTANTS = mkdtempSync(join(tmpdir(), 'gaia-first-evidence-mutants-'));
+test.after(() => rmSync(MUTANTS, {
+  recursive: true, force: true, maxRetries: 12, retryDelay: 25,
+}));
+
+/**
+ * Write one mutated copy of a shipped module, IMPORT it, and hand back the live module.
+ *
+ * A control that only greps for a literal cannot fail when a mechanism is removed - it fails when
+ * a variable is renamed. Every control below therefore RUNS its mutant and asserts a behavioural
+ * divergence; `assert.notEqual` here is only the stale-find-string guard, never the assertion.
+ */
+async function importMutant(name, file, mutate) {
+  const source = readFileSync(join(ROOT, 'src', file), 'utf8');
+  const mutated = mutate(source);
+  assert.notEqual(mutated, source, `mutant ${name} changed nothing; its find-string is stale`);
+  const rewritten = mutated.replaceAll(
+    "from './", `from '${pathToFileURL(join(ROOT, 'src')).href}/`,
+  );
+  const path = join(MUTANTS, `${name}.mjs`);
+  writeFileSync(path, rewritten, 'utf8');
+  return import(pathToFileURL(path).href);
+}
+
+/** Drive one delivery through an arbitrary module object, shipped or mutant. */
+const deliverThrough = (module, directory, effects, over = {}) => module.deliverFirstEvidenceDraftPr({
+  directory,
+  observation: observation(),
+  grant: { grantId: 'grant-1' },
+  authority: fakeAuthority().port,
+  effects: effects.port,
+  now,
+  ...over,
 });
 
-test('E17 MECHANISM REVERT: the durable INTENT is what makes E6 and E7 recoverable', () => {
-  const source = deliverySource();
-  assert.match(source, /'INTENT'/u);
-  const mutated = source.replace(/transition: 'INTENT'/u, "transition: 'REFUSED'");
-  assert.notEqual(mutated, source, 'the mutation targets the pre-effect durable record');
+const SHIPPED = { deliverFirstEvidenceDraftPr, readFirstEvidenceLedger };
+
+const ledgerTransitions = (module, directory) => module
+  .readFirstEvidenceLedger({ directory }).transitions.map(({ transition }) => transition);
+
+test('E16 MECHANISM REVERT: reverting the compare-and-swap lets a lost update land', async () => {
+  const mutant = await importMutant(
+    'cas-reverted', 'first-evidence-draft-pr-delivery.mjs',
+    (source) => source.replace(
+      'const divergent = before.revision !== expectedLedgerRevision;',
+      'const divergent = false;',
+    ),
+  );
+
+  // The read-read-write-write interleaving E25 races across two OS processes, staged by hand:
+  // two callers hold ONE observed head and each seals a distinct INTENT for one operation.
+  const shipped = scratch();
+  appendFirstEvidenceTransition({
+    directory: shipped,
+    transition: intentTransition({ owner: OWNER_A }),
+    expectedLedgerRevision: EMPTY_FIRST_EVIDENCE_LEDGER_REVISION,
+  });
+  assert.throws(() => appendFirstEvidenceTransition({
+    directory: shipped,
+    transition: intentTransition({ owner: OWNER_B }),
+    expectedLedgerRevision: EMPTY_FIRST_EVIDENCE_LEDGER_REVISION,
+  }), (error) => error instanceof FirstEvidenceDeliveryError
+    && error.code === 'LedgerCasMismatch');
+  assert.equal(readFirstEvidenceLedger({ directory: shipped }).count, 1);
+
+  const reverted = scratch();
+  for (const owner of [OWNER_A, OWNER_B]) {
+    mutant.appendFirstEvidenceTransition({
+      directory: reverted,
+      transition: intentTransition({ owner }),
+      expectedLedgerRevision: EMPTY_FIRST_EVIDENCE_LEDGER_REVISION,
+    });
+  }
+  assert.equal(
+    mutant.readFirstEvidenceLedger({ directory: reverted }).count, 2,
+    'with the compare-and-swap reverted the loser writes anyway: two live claims, one operation',
+  );
+});
+
+test('E17 MECHANISM REVERT: recording the INTENT after the effect destroys recovery', async () => {
+  const mutant = await importMutant(
+    'intent-after-effect', 'first-evidence-draft-pr-delivery.mjs',
+    (source) => source
+      .replace(
+        'const withIntent = recordIntent(before.revision);',
+        'const withIntent = { ledger: before };',
+      )
+      .replace(
+        'expectedLedgerRevision: headAfterIntent, pullRequest: bound,',
+        'expectedLedgerRevision: recordIntent(headAfterIntent).ledger.revision,'
+        + ' pullRequest: bound,',
+      ),
+  );
+  const lost = () => fakeEffects({ open: () => { throw new Error('socket closed'); } });
+
+  // Shipped: the request fails, and the durable claim it left behind is what makes the next
+  // attempt ASK GitHub rather than create a second Draft.
+  const shipped = scratch();
+  await refusalCode(() => deliverThrough(SHIPPED, shipped, lost()));
+  assert.deepEqual(transitions(shipped), ['INTENT', 'REFUSED']);
+  const asking = fakeEffects({ found: () => [createdPullRequest()] });
+  assert.equal((await deliverThrough(SHIPPED, shipped, asking)).outcome, 'REUSED');
+  assert.equal(asking.counts('findDraftPullRequest'), 1);
+  assert.equal(asking.counts('openDraftPullRequest'), 0);
+
+  // The mutant writes the same INTENT, only after the effect. A failed request therefore leaves
+  // nothing to recover from, and the next attempt creates a second Draft without ever asking.
+  const reverted = scratch();
+  await anyRefusalCode(() => deliverThrough(mutant, reverted, lost()));
+  assert.deepEqual(
+    ledgerTransitions(mutant, reverted), ['REFUSED'],
+    'with the ordering reverted a crashed request leaves no durable claim',
+  );
+  const blind = fakeEffects({ found: () => [createdPullRequest()] });
+  assert.equal((await deliverThrough(mutant, reverted, blind)).outcome, 'CREATED');
+  assert.equal(blind.counts('findDraftPullRequest'), 0, 'GitHub is never asked');
+  assert.equal(blind.counts('openDraftPullRequest'), 1, 'a second Draft is created blind');
 });
 
 test('E18 MECHANISM REVERT: putting the run into the identity is what would duplicate PRs', () => {
@@ -559,11 +681,31 @@ test('E18 MECHANISM REVERT: putting the run into the identity is what would dupl
   assert.match(contract, /'evidenceHeadOid'/u);
 });
 
-test('E19 MECHANISM REVERT: reconciliation is what stands between a lost response and a duplicate', () => {
-  const source = deliverySource();
-  assert.match(source, /findDraftPullRequest/u);
-  const mutated = source.replace(/findDraftPullRequest/gu, 'openDraftPullRequest');
-  assert.notEqual(mutated, source, 'the mutation collapses the query into the creation');
+test('E19 MECHANISM REVERT: reverting reconciliation turns a lost response into a duplicate', async () => {
+  const mutant = await importMutant(
+    'reconciliation-reverted', 'first-evidence-draft-pr-delivery.mjs',
+    (source) => source.replace('  if (reconcilable) {', '  if (false) {'),
+  );
+  const lost = () => fakeEffects({ open: () => { throw new Error('socket closed'); } });
+  // GitHub did receive the request; only the response was lost, so the Draft is already there.
+  const answering = () => fakeEffects({ found: () => [createdPullRequest()] });
+
+  const shipped = scratch();
+  await refusalCode(() => deliverThrough(SHIPPED, shipped, lost()));
+  const asking = answering();
+  assert.equal((await deliverThrough(SHIPPED, shipped, asking)).outcome, 'REUSED');
+  assert.equal(asking.counts('findDraftPullRequest'), 1);
+  assert.equal(asking.counts('openDraftPullRequest'), 0);
+
+  const reverted = scratch();
+  await anyRefusalCode(() => deliverThrough(mutant, reverted, lost()));
+  const duplicating = answering();
+  assert.equal((await deliverThrough(mutant, reverted, duplicating)).outcome, 'CREATED');
+  assert.equal(duplicating.counts('findDraftPullRequest'), 0, 'GitHub is never asked');
+  assert.equal(
+    duplicating.counts('openDraftPullRequest'), 1,
+    'with reconciliation reverted the lost response becomes a second real Draft pull request',
+  );
 });
 
 /* ---------------------------------------------------------------------------------------------
@@ -709,4 +851,260 @@ test('E24b: a head that does not descend from the base is refused', () => {
     worktree: repo, baseRef: 'main', headRef: 'sibling', observedAt: new Date().toISOString(),
   }), (error) => error instanceof FirstEvidenceDeliveryError
     && error.code === 'EvidenceNotDescendedFromBase');
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * E25 - the interleaving no single-process barrier can stage: two real operating-system processes
+ *
+ * E5's barrier can only park a second caller AFTER the first caller's INTENT is already durable,
+ * because nothing awaits between the ledger read and the INTENT append. The interleaving that
+ * actually duplicates a Draft pull request is read-read-write-write, and reaching it needs two
+ * schedulers. Recovery from a prior failed attempt is where a real delivery does await between
+ * those two points - it asks GitHub - so that is where both processes are held until each has
+ * read the same durable head, and only then released to race for it.
+ * ------------------------------------------------------------------------------------------ */
+
+const RACE_CHILD = `
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const [modulePath, planPath, label] = process.argv.slice(2);
+const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+const { deliverFirstEvidenceDraftPr } = await import(pathToFileURL(modulePath).href);
+
+// A barrier, not a clock: it spins on a durable marker and never sleeps. The deadline exists only
+// so that a sibling which dies cannot hang the suite.
+const spin = (path) => {
+  const deadline = Date.now() + 60000;
+  while (!existsSync(path)) {
+    if (Date.now() > deadline) throw new Error('barrier timed out: ' + path);
+  }
+};
+const meet = (prefix, attempt) => {
+  writeFileSync(join(plan.root, prefix + attempt + '.' + label), label, 'utf8');
+  for (const other of plan.labels) spin(join(plan.root, prefix + attempt + '.' + other));
+};
+
+const results = [];
+for (let attempt = 0; attempt < plan.attempts; attempt += 1) {
+  meet('gate-', attempt);
+  let opens = 0;
+  let outcome = null;
+  let code = null;
+  try {
+    const delivered = await deliverFirstEvidenceDraftPr({
+      directory: join(plan.root, 'ledger-' + attempt),
+      observation: plan.observation,
+      grant: { grantId: 'grant-1' },
+      authority: {
+        async consume(request) {
+          return {
+            status: 'AUTHORIZED',
+            grantId: 'grant-1',
+            intentRevision: request.intent.intentRevision,
+          };
+        },
+      },
+      effects: {
+        async findDraftPullRequest() {
+          // Both processes have now read the same durable head. Release them together.
+          meet('read-', attempt);
+          return [];
+        },
+        async openDraftPullRequest() { opens += 1; return plan.pullRequest; },
+      },
+      owner: plan.owner,
+      leaseMs: plan.leaseMs,
+      now: () => new Date(plan.now),
+    });
+    outcome = delivered.outcome;
+  } catch (error) {
+    code = typeof error.code === 'string' ? error.code : error.name;
+  }
+  results.push({ attempt, opens, outcome, code });
+  meet('done-', attempt);
+}
+
+writeFileSync(join(plan.root, 'result.' + label + '.json'), JSON.stringify(results), 'utf8');
+`;
+
+test('E25 CROSS-PROCESS: two operating-system processes deliver exactly one Draft', async () => {
+  const root = scratch();
+  const child = join(root, 'race-child.mjs');
+  writeFileSync(child, RACE_CHILD, 'utf8');
+
+  const attempts = 6;
+  const labels = ['A', 'B'];
+  const owners = { A: OWNER_A, B: OWNER_B };
+  const ledger = (attempt) => join(root, `ledger-${attempt}`);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    // A prior attempt that reached the request and failed. Both racers must therefore reconcile,
+    // which is what puts an awaited port call between their ledger read and their INTENT append.
+    await refusalCode(() => deliver(
+      ledger(attempt), {},
+      { effects: fakeEffects({ open: () => { throw new Error('socket closed'); } }) },
+    ));
+    assert.deepEqual(transitions(ledger(attempt)), ['INTENT', 'REFUSED']);
+  }
+
+  const planPath = (label) => join(root, `plan-${label}.json`);
+  for (const label of labels) {
+    writeFileSync(planPath(label), JSON.stringify({
+      attempts,
+      labels,
+      root,
+      owner: owners[label],
+      leaseMs: LEASE_MS,
+      now: OBSERVED,
+      observation: observation(),
+      pullRequest: createdPullRequest(),
+    }), 'utf8');
+  }
+
+  const run = (label) => new Promise((settle, reject) => {
+    const racer = spawn(
+      process.execPath, [child, DELIVERY_MODULE, planPath(label), label],
+      { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
+    );
+    let diagnostics = '';
+    racer.stderr.on('data', (chunk) => { diagnostics += chunk; });
+    racer.on('error', reject);
+    racer.on('close', (code) => (code === 0
+      ? settle()
+      : reject(new Error(`race child ${label} exited ${code}: ${diagnostics}`))));
+  });
+  await Promise.all(labels.map(run));
+
+  const reported = Object.fromEntries(labels.map((label) => [
+    label, JSON.parse(readFileSync(join(root, `result.${label}.json`), 'utf8')),
+  ]));
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const round = labels.map((label) => reported[label][attempt]);
+    const seen = JSON.stringify(round);
+    assert.equal(
+      round.reduce((total, entry) => total + entry.opens, 0), 1,
+      `attempt ${attempt}: exactly one process may reach openDraftPullRequest; got ${seen}`,
+    );
+    assert.equal(
+      round.filter((entry) => entry.outcome === 'CREATED').length, 1,
+      `attempt ${attempt}: exactly one process may report CREATED; got ${seen}`,
+    );
+    const loser = round.find((entry) => entry.outcome !== 'CREATED');
+    assert.equal(
+      loser.code, 'DeliveryRaceLost',
+      `attempt ${attempt}: the process whose observed head moved must fail closed; got ${seen}`,
+    );
+    assert.deepEqual(
+      transitions(ledger(attempt)), ['INTENT', 'REFUSED', 'INTENT', 'CREATED'],
+      `attempt ${attempt}: the durable ledger records exactly one delivery; got ${seen}`,
+    );
+  }
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * E26-E29 - bounded ownership: telling a live owner from a claim its owner died holding
+ * ------------------------------------------------------------------------------------------ */
+
+test('E26: an orphaned INTENT left by a crash reconciles instead of wedging forever', async () => {
+  const directory = scratch();
+  appendFirstEvidenceTransition({
+    directory,
+    transition: orphanedIntent(),
+    expectedLedgerRevision: EMPTY_FIRST_EVIDENCE_LEDGER_REVISION,
+  });
+  assert.deepEqual(transitions(directory), ['INTENT'], 'exactly what a killed process leaves');
+
+  const recovering = fakeEffects({ found: () => [createdPullRequest()] });
+  const recovered = await deliver(directory, { owner: OWNER_B }, { effects: recovering });
+  assert.equal(recovered.outcome, 'REUSED');
+  assert.equal(recovered.pullRequest.number, 37);
+  assert.equal(recovering.counts('findDraftPullRequest'), 1, 'GitHub is asked exactly once');
+  assert.equal(recovering.counts('openDraftPullRequest'), 0, 'and nothing is blindly created');
+  assert.deepEqual(transitions(directory), ['INTENT', 'REUSED']);
+});
+
+test('E27: an orphaned INTENT whose request never arrived asks first, then creates once', async () => {
+  const directory = scratch();
+  appendFirstEvidenceTransition({
+    directory,
+    transition: orphanedIntent(),
+    expectedLedgerRevision: EMPTY_FIRST_EVIDENCE_LEDGER_REVISION,
+  });
+  const effects = fakeEffects({ found: () => [] });
+  const result = await deliver(directory, { owner: OWNER_B }, { effects });
+  assert.equal(result.outcome, 'CREATED');
+  assert.deepEqual(
+    effects.calls.map(([name]) => name), ['findDraftPullRequest', 'openDraftPullRequest'],
+    'the exact query precedes the creation; the creation is never blind',
+  );
+  const [, asked] = effects.calls[0];
+  assert.deepEqual(asked, {
+    repository: REPOSITORY,
+    baseBranch: 'main',
+    headBranch: HEAD_BRANCH,
+    operationIdentity: IDENTITY,
+  });
+  assert.deepEqual(transitions(directory), ['INTENT', 'INTENT', 'CREATED']);
+
+  // The claim this caller wrote is itself bounded, or the next crash wedges on it in turn.
+  const [, claimed] = transitions(directory);
+  assert.ok(
+    Date.parse(claimed.leaseExpiresAt) > Date.parse(claimed.recordedAt),
+    'an INTENT carries a lease that expires after it was recorded',
+  );
+  assert.ok(
+    Date.parse(claimed.leaseExpiresAt) - Date.parse(claimed.recordedAt) <= MAX_LEASE_MS,
+    'and the lease horizon is bounded, so no claim outlives its owner indefinitely',
+  );
+  assert.equal(transitions(directory).at(-1).leaseExpiresAt, null, 'a terminal holds no lease');
+});
+
+test('E28: an INTENT whose bounded lease is still live is a live owner, not an orphan', async () => {
+  const directory = scratch();
+  appendFirstEvidenceTransition({
+    directory,
+    transition: intentTransition({ owner: OWNER_A }),
+    expectedLedgerRevision: EMPTY_FIRST_EVIDENCE_LEDGER_REVISION,
+  });
+  const effects = fakeEffects({ found: () => [createdPullRequest()] });
+  assert.equal(
+    await refusalCode(() => deliver(directory, { owner: OWNER_B }, { effects })),
+    'DeliveryInFlight',
+  );
+  assert.equal(effects.counts('findDraftPullRequest'), 0, 'a live owner is not reconciled around');
+  assert.equal(effects.counts('openDraftPullRequest'), 0);
+  assert.deepEqual(transitions(directory), ['INTENT'], 'and the loser writes nothing');
+});
+
+test('E29: a caller whose observed head moved under it performs no effect and writes nothing', async () => {
+  const directory = scratch();
+  // An orphaned claim, so this caller enters reconciliation - the one place where an awaited port
+  // call separates its ledger read from its INTENT append, and therefore the one place a
+  // concurrent writer can be staged deterministically in a single process.
+  appendFirstEvidenceTransition({
+    directory,
+    transition: orphanedIntent(),
+    expectedLedgerRevision: EMPTY_FIRST_EVIDENCE_LEDGER_REVISION,
+  });
+  const observedHead = readFirstEvidenceLedger({ directory }).revision;
+  const effects = fakeEffects({
+    found: () => {
+      // Another process linearizes this operation while this caller is parked in its query.
+      appendFirstEvidenceTransition({
+        directory,
+        transition: intentTransition({ owner: OWNER_C }),
+        expectedLedgerRevision: observedHead,
+      });
+      return [];
+    },
+  });
+  assert.equal(
+    await refusalCode(() => deliver(directory, { owner: OWNER_B }, { effects })),
+    'DeliveryRaceLost',
+  );
+  assert.equal(
+    effects.counts('openDraftPullRequest'), 0, 'the stale loser performs no GitHub effect',
+  );
+  assert.deepEqual(transitions(directory), ['INTENT', 'INTENT'], 'and writes no receipt of its own');
 });
