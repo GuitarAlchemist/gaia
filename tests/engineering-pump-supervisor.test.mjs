@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -142,6 +142,7 @@ async function tick(directory, supplied = {}) {
     owner: supplied.owner ?? OWNER_A,
     now: () => new Date(supplied.now ?? AT),
     leaseMs: supplied.leaseMs ?? 120_000,
+    lockOptions: supplied.lockOptions,
   });
 }
 
@@ -291,6 +292,39 @@ test('R1 a fresh DRAFT_OPEN observation has no claim, action, or delivery INTENT
   assert.equal(result.delivery, null);
   assert.equal(port.calls.length, 0);
   assert.equal(readPortfolioDrainLedger({ directory }).count, 0);
+  assert.equal(readFirstEvidenceLedger({ directory }).count, 0);
+});
+
+test('R3 restart repairs a claim orphaned before correlation and blocks unproven adoption', async () => {
+  const directory = scratch();
+  const correlationLock = join(directory, 'engineering-pump-correlations.lock');
+  mkdirSync(correlationLock);
+  await assert.rejects(
+    tick(directory, { lockOptions: { timeoutMs: 20 } }),
+    (error) => error.code === 'GAIA_LOCK_TIMEOUT',
+  );
+  assert.equal(readPortfolioDrainLedger({ directory }).count, 1);
+  assert.equal(readFirstEvidenceLedger({ directory }).count, 0);
+  rmSync(correlationLock, { recursive: true });
+
+  const operationIdentity = firstEvidenceOperationIdentity({
+    repository: 'GuitarAlchemist/gaia', task: { kind: 'ISSUE', number: 40 },
+    baseBranch: 'main', headBranch: 'codex/shared-pump-branch', headBranchGeneration: 1,
+    evidenceHeadOid: '0000000000000000000000000000000000000040',
+  });
+  const observed = observation({ subjects: [{
+    readyItemId: 'issue-40', subjectRevision: SUBJECT,
+    draftObservation: draftObservation(40, SUBJECT, { drafts: [draft(operationIdentity)] }),
+  }] });
+  const port = effects();
+  const restarted = await tick(directory, { observation: observed, effects: port, owner: OWNER_B });
+  assert.equal(restarted.gate.state, 'BLOCKED');
+  assert.equal(restarted.gate.reason, 'DELIVERY_INTENT_MISSING');
+  assert.equal(restarted.delivery, null);
+  assert.equal(restarted.checklist.currentGate, 'BLOCKED');
+  assert.equal(port.calls.length, 0);
+  assert.equal(readEngineeringPumpCorrelations({ directory }).count, 1);
+  assert.equal(readPortfolioDrainLedger({ directory }).count, 1);
   assert.equal(readFirstEvidenceLedger({ directory }).count, 0);
 });
 
@@ -635,6 +669,12 @@ test('R0 deterministic replay and DuckDB derive from exact stable source generat
   });
   assert.deepEqual(right, left);
   assert.equal(JSON.stringify(calls), bytes);
+  const metaInsert = calls.find(([sql]) => sql.includes('gaia_engineering_pump_projection VALUES'));
+  assert.deepEqual(metaInsert[1].slice(1, 4), [
+    first.sourceRevisions.portfolioDrain,
+    first.sourceRevisions.draftDelivery,
+    first.sourceRevisions.pumpCorrelation,
+  ]);
   assert.equal(left.authority, 'NONE');
 });
 
@@ -645,6 +685,7 @@ test('R0 MECHANISM REVERT: existing machines own reservation, intent and reconci
   assert.match(source, /operationForClaim/u);
   assert.match(source, /stablePumpSourceSnapshot/u);
   assert.match(source, /claim\.evidenceRevision === witness\.actionIdentity/u);
+  assert.match(source, /DELIVERY_INTENT_MISSING/u);
   assert.equal(source.includes('operations.at(-1)'), false);
   for (const forbidden of [
     'engineering-pump.jsonl', 'ENGINEERING_PUMP_LEDGER', 'openDraftPullRequest({',
