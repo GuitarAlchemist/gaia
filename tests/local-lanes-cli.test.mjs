@@ -12,7 +12,9 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -20,12 +22,15 @@ import { fileURLToPath } from 'node:url';
 
 import { runFactoryDashboardCli } from '../scripts/factory-dashboard.mjs';
 import {
-  WMUX_LANE_ARGV, runLocalLaneSensorCli,
+  SensorRefusalError, WMUX_LANE_ARGV, readArtifactEvidence, runLocalLaneSensorCli,
 } from '../scripts/local-lane-sensor.mjs';
 import {
   MAX_WATCH_INTERVAL_MS, parseArgs, runLocalLanesTick,
 } from '../scripts/local-lanes-watch.mjs';
-import { requireLocalLaneObservation } from '../src/local-lane-observation.mjs';
+import {
+  MAX_ARTIFACT_BYTES, laneArtifactBindingRevision, requireLocalLaneObservation,
+  sealLaneArtifactBindings, sealLocalLaneObservation,
+} from '../src/local-lane-observation.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FAKE_WMUX = join(HERE, 'fixtures', 'fake-wmux-cli.mjs');
@@ -387,4 +392,412 @@ test('U7: the page does not replace itself, and an opt-in refresh carries a stop
     ], { now: clock(), writeStdout: () => {} }),
     /--refresh-seconds must be an integer from 5 through 3600/u,
   );
+});
+
+// ===========================================================================
+// ARTIFACT COMPLETION SIGNALS R0 — the process boundary
+//
+// docs/artifact-completion-signals.md is the normative contract. Everything in
+// this section is server-side: the binding file arrives through one explicit
+// CLI flag, the artifact is opened here and nowhere else, and the browser is
+// never in the picture. The pure derivation these gates feed is covered in
+// tests/local-lane-observation.test.mjs.
+// ===========================================================================
+
+const MARKER = 'GAIA_TRACER_ARTIFACT_COMPLETE';
+const COMPLETE_TEXT = `writer handoff\n\nentry d44de19\n\n${MARKER}\n`;
+const SOURCE_REVISION = 'c'.repeat(64);
+
+/** A scratch artifact root, its binding file, and the artifact the binding names. */
+function bound(space, n, { text = COMPLETE_TEXT, overrides = {}, write = true } = {}) {
+  const root = space.path(`artifacts-${n}`);
+  mkdirSync(root, { recursive: true });
+  const artifactPath = join(root, `handoff-${n}.md`);
+  if (write) writeFileSync(artifactPath, text, 'utf8');
+  return {
+    root,
+    artifactPath,
+    binding: {
+      workspaceId: 'ws-alpha',
+      paneId: `pane-${n}`,
+      surfaceId: `surf-${n}`,
+      agentId: `agent-${n}`,
+      allowedRoot: root,
+      artifactPath,
+      completionMarker: MARKER,
+      sourceRevision: SOURCE_REVISION,
+      ...overrides,
+    },
+  };
+}
+
+/** Write a sealed binding document, or a hand-broken one, and return its path. */
+function bindingsFile(space, bindings, { name = 'bindings.json', tamper = null } = {}) {
+  const sealed = sealLaneArtifactBindings({ bindings });
+  const document = tamper === null ? sealed : tamper(structuredClone(sealed));
+  const path = space.path(name);
+  writeFileSync(path, `${JSON.stringify(document, null, 2)}\n`, 'utf8');
+  return path;
+}
+
+const digestOf = (text) => createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
+const entryFor = (observation, agentId) => observation.taskStates.find(
+  (state) => state.agentId === agentId,
+);
+
+// ---------------------------------------------------------------------------
+// the flag, and the transition it makes possible
+// ---------------------------------------------------------------------------
+
+test('the sensor takes its bindings through one explicit flag and publishes the transition', () => {
+  const space = workspace([agent(1), agent(2)]);
+  const one = bound(space, 1);
+  const two = bound(space, 2, { text: 'still working on it\n' });
+  const bindings = bindingsFile(space, [one.binding, two.binding]);
+  const out = space.path('observation.json');
+
+  const observation = runLocalLaneSensorCli(
+    ['--out', out, '--wmux', FAKE_WMUX, '--bindings', bindings],
+    { now: clock(), writeStdout: () => {} },
+  );
+
+  assert.deepEqual(space.argv(), [['agent', 'list']], 'still exactly one read-only wmux call');
+  const completed = entryFor(observation, 'agent-1');
+  assert.equal(completed.taskState, 'COMPLETED_EVIDENCE');
+  assert.equal(completed.evidenceReason, 'MARKER_VERIFIED');
+  assert.equal(completed.artifactDigest, digestOf(COMPLETE_TEXT));
+  assert.equal(completed.completionObservedAt, AT.toISOString());
+  assert.equal(completed.bindingRevision, laneArtifactBindingRevision(one.binding));
+  assert.equal(
+    completed.processLifecycle, 'RUNNING',
+    'the wrapper is still running, and the observation says both things at once',
+  );
+  assert.equal(entryFor(observation, 'agent-2').taskState, 'RUNNING');
+  assert.equal(entryFor(observation, 'agent-2').evidenceReason, 'ARTIFACT_IN_PROGRESS');
+
+  // The file on disk is the live truth source, and it verifies against the shipped schema.
+  const written = requireLocalLaneObservation(JSON.parse(readFileSync(out, 'utf8')));
+  assert.equal(written.revision, observation.revision);
+  assert.equal(
+    readFileSync(out, 'utf8').includes(one.artifactPath), false,
+    'and the local artifact path is never published',
+  );
+});
+
+test('without the flag nothing is bound, and nothing is inferred', () => {
+  const space = workspace([agent(1)]);
+  bound(space, 1);
+  const out = space.path('observation.json');
+
+  const observation = runLocalLaneSensorCli(
+    ['--out', out, '--wmux', FAKE_WMUX], { now: clock(), writeStdout: () => {} },
+  );
+
+  assert.equal(observation.taskStates.length, 1);
+  assert.equal(observation.taskStates[0].taskState, 'UNBOUND');
+  assert.equal(observation.taskStates[0].evidenceReason, 'NO_BINDING');
+  assert.equal(observation.taskStates[0].processLifecycle, 'RUNNING');
+  // No cwd, branch, process tree, label or timing search happened, and none is available to.
+  const source = readFileSync(join(HERE, '..', 'scripts', 'local-lane-sensor.mjs'), 'utf8');
+  for (const inference of ['cwd(', 'GAIA_LANE_BINDINGS', 'git ', 'branch', 'homedir']) {
+    assert.equal(source.includes(inference), false, `${inference} must not reach the sensor`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// a malformed operator statement refuses the whole tick
+// ---------------------------------------------------------------------------
+
+test('a missing, corrupt or tampered binding file refuses the tick and changes nothing', () => {
+  const space = workspace([agent(1)]);
+  const one = bound(space, 1);
+  const out = space.path('observation.json');
+
+  runLocalLaneSensorCli(
+    ['--out', out, '--wmux', FAKE_WMUX, '--bindings', bindingsFile(space, [one.binding])],
+    { now: clock(), writeStdout: () => {} },
+  );
+  const before = readFileSync(out, 'utf8');
+
+  const broken = [
+    space.path('there-is-no-such-file.json'),
+    (() => {
+      const path = space.path('corrupt.json');
+      writeFileSync(path, '{ "schema": "gaia-lane-artifact-bindings/1", ', 'utf8');
+      return path;
+    })(),
+    bindingsFile(space, [one.binding], {
+      name: 'resealed.json',
+      tamper: (doc) => ({
+        ...doc,
+        bindings: [{ ...doc.bindings[0], sourceRevision: 'd'.repeat(64) }],
+      }),
+    }),
+    bindingsFile(space, [one.binding], {
+      name: 'unknown-field.json',
+      tamper: (doc) => ({ ...doc, reapOnComplete: true }),
+    }),
+  ];
+
+  for (const path of broken) {
+    assert.throws(
+      () => runLocalLaneSensorCli(
+        ['--out', out, '--wmux', FAKE_WMUX, '--bindings', path],
+        { now: clock(), writeStdout: () => {} },
+      ),
+      (error) => error instanceof SensorRefusalError,
+      `${path} must refuse the tick rather than degrade to no bindings`,
+    );
+  }
+  assert.equal(readFileSync(out, 'utf8'), before, 'and the previous observation is untouched');
+});
+
+test('a corrupt or future-dated previous observation refuses the tick', () => {
+  const space = workspace([agent(1)]);
+  const one = bound(space, 1);
+  const bindings = bindingsFile(space, [one.binding]);
+
+  const corrupt = space.path('corrupt-previous.json');
+  writeFileSync(corrupt, '{ "schema": "gaia-local-lane-observation/1" }', 'utf8');
+  assert.throws(
+    () => runLocalLaneSensorCli(
+      ['--out', corrupt, '--wmux', FAKE_WMUX, '--bindings', bindings],
+      { now: clock(), writeStdout: () => {} },
+    ),
+    (error) => error instanceof SensorRefusalError,
+    'treating a corrupt history as absence is the edit that resets a refusal to running',
+  );
+
+  const future = space.path('future-previous.json');
+  writeFileSync(future, `${JSON.stringify(sealLocalLaneObservation({
+    observedAt: '2026-08-30T04:45:00.000Z',
+    lanes: [{
+      workspaceId: 'ws-alpha',
+      paneId: 'pane-1',
+      surfaceId: 'surf-1',
+      agentId: 'agent-1',
+      label: null,
+      labelState: 'ABSENT',
+      lifecycle: 'RUNNING',
+    }],
+  }), null, 2)}\n`, 'utf8');
+  assert.throws(
+    () => runLocalLaneSensorCli(
+      ['--out', future, '--wmux', FAKE_WMUX, '--bindings', bindings],
+      { now: clock(), writeStdout: () => {} },
+    ),
+    (error) => error instanceof SensorRefusalError && /after/u.test(error.message),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// a malformed artifact refuses one entry, and the other lanes stay observable
+// ---------------------------------------------------------------------------
+
+test('an artifact that escapes its allowed root once links resolve is refused evidence', (t) => {
+  const space = workspace([agent(1)]);
+  const one = bound(space, 1, { write: false });
+
+  // A directory junction needs no elevation on Windows, so the PHYSICAL fence is exercised on
+  // every host rather than only on one that grants file-symlink creation.
+  const elsewhere = space.path('outside-the-fence');
+  mkdirSync(elsewhere, { recursive: true });
+  writeFileSync(join(elsewhere, 'handoff-1.md'), COMPLETE_TEXT, 'utf8');
+  const doorway = join(one.root, 'doorway');
+  try {
+    symlinkSync(elsewhere, doorway, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch {
+    t.skip('this host grants neither a junction nor a directory symlink');
+    return;
+  }
+  const escaping = {
+    ...one.binding, artifactPath: join(doorway, 'handoff-1.md'),
+  };
+
+  assert.deepEqual(
+    readArtifactEvidence(escaping),
+    { outcome: 'REFUSED', reason: 'PATH_ESCAPES_ALLOWED_ROOT' },
+    'a lexically safe path is not a physically safe path',
+  );
+  // The same bytes, reached inside the fence, are read: this is a fence and not a ban.
+  writeFileSync(one.artifactPath, COMPLETE_TEXT, 'utf8');
+  assert.equal(readArtifactEvidence(one.binding).outcome, 'READ');
+});
+
+test('a non-regular, oversized, unreadable or unstable artifact is refused evidence', () => {
+  const space = workspace([agent(1)]);
+
+  const directory = bound(space, 11, { write: false });
+  mkdirSync(directory.artifactPath, { recursive: true });
+  assert.equal(readArtifactEvidence(directory.binding).reason, 'NOT_A_REGULAR_FILE');
+
+  const large = bound(space, 12, { write: false });
+  writeFileSync(large.artifactPath, Buffer.alloc(MAX_ARTIFACT_BYTES + 1, 0x61));
+  assert.equal(readArtifactEvidence(large.binding).reason, 'ARTIFACT_TOO_LARGE');
+
+  const invalid = bound(space, 13, { write: false });
+  writeFileSync(invalid.artifactPath, Buffer.from([0xff, 0xfe, 0xff, 0x0a]));
+  assert.equal(readArtifactEvidence(invalid.binding).reason, 'ARTIFACT_UNREADABLE');
+
+  const absent = bound(space, 14, { write: false });
+  assert.deepEqual(readArtifactEvidence(absent.binding), { outcome: 'ABSENT' });
+
+  // Two reads, and a provider that is still writing between them is caught rather than believed.
+  const moving = bound(space, 15);
+  let call = 0;
+  assert.deepEqual(
+    readArtifactEvidence(moving.binding, {
+      readBytes: () => Buffer.from(`${COMPLETE_TEXT}${call += 1}`, 'utf8'),
+    }),
+    { outcome: 'REFUSED', reason: 'ARTIFACT_UNSTABLE' },
+  );
+  assert.deepEqual(readArtifactEvidence(moving.binding), {
+    outcome: 'READ', digest: digestOf(COMPLETE_TEXT), text: COMPLETE_TEXT,
+  });
+});
+
+test('a refused artifact refuses one lane, and the others stay truthfully observed', () => {
+  const space = workspace([agent(1), agent(2)]);
+  const one = bound(space, 1, { write: false });
+  mkdirSync(one.artifactPath, { recursive: true });
+  const two = bound(space, 2);
+  const out = space.path('observation.json');
+
+  const observation = runLocalLaneSensorCli(
+    [
+      '--out', out, '--wmux', FAKE_WMUX,
+      '--bindings', bindingsFile(space, [one.binding, two.binding]),
+    ],
+    { now: clock(), writeStdout: () => {} },
+  );
+
+  assert.equal(entryFor(observation, 'agent-1').taskState, 'REFUSED_EVIDENCE');
+  assert.equal(entryFor(observation, 'agent-1').evidenceReason, 'NOT_A_REGULAR_FILE');
+  assert.equal(entryFor(observation, 'agent-2').taskState, 'COMPLETED_EVIDENCE');
+  assert.equal(observation.lanes.length, 2, 'and no lane was dropped from the process axis');
+});
+
+// ---------------------------------------------------------------------------
+// across ticks: generations, monotonicity, replay
+// ---------------------------------------------------------------------------
+
+test('a restarted agent starts a new generation and inherits no completion', () => {
+  const space = workspace([agent(1)]);
+  const one = bound(space, 1);
+  const bindings = bindingsFile(space, [one.binding]);
+  const out = space.path('observation.json');
+  const run = (at) => runLocalLaneSensorCli(
+    ['--out', out, '--wmux', FAKE_WMUX, '--bindings', bindings],
+    { now: clock(at), writeStdout: () => {} },
+  );
+
+  const first = run(AT);
+  assert.equal(entryFor(first, 'agent-1').taskState, 'COMPLETED_EVIDENCE');
+  assert.equal(entryFor(first, 'agent-1').generation, 0);
+
+  workspace([agent(1, { status: 'exited' })]);
+  const stopped = run(new Date('2026-08-30T03:46:00.000Z'));
+  assert.equal(entryFor(stopped, 'agent-1').generation, 0, 'leaving RUNNING is not a new run');
+  assert.equal(
+    entryFor(stopped, 'agent-1').completionObservedAt, AT.toISOString(),
+    'and the first sighting is still the first sighting',
+  );
+
+  workspace([agent(1)]);
+  writeFileSync(one.artifactPath, 'the next run has only just begun\n', 'utf8');
+  const restarted = run(new Date('2026-08-30T03:47:00.000Z'));
+  assert.equal(entryFor(restarted, 'agent-1').generation, 1);
+  assert.equal(entryFor(restarted, 'agent-1').taskState, 'RUNNING');
+  assert.equal(entryFor(restarted, 'agent-1').completionObservedAt, null);
+});
+
+test('a completion that stops matching becomes refused evidence, never running again', () => {
+  const space = workspace([agent(1)]);
+  const one = bound(space, 1);
+  const bindings = bindingsFile(space, [one.binding]);
+  const out = space.path('observation.json');
+  const run = (at) => runLocalLaneSensorCli(
+    ['--out', out, '--wmux', FAKE_WMUX, '--bindings', bindings],
+    { now: clock(at), writeStdout: () => {} },
+  );
+
+  assert.equal(entryFor(run(AT), 'agent-1').taskState, 'COMPLETED_EVIDENCE');
+  writeFileSync(one.artifactPath, 'someone rewrote the handoff\n', 'utf8');
+  const after = entryFor(run(new Date('2026-08-30T03:46:00.000Z')), 'agent-1');
+
+  assert.equal(after.taskState, 'REFUSED_EVIDENCE');
+  assert.equal(after.evidenceReason, 'COMPLETION_EVIDENCE_CONTRADICTED');
+  assert.equal(after.artifactDigest, null);
+});
+
+test('one tick replays deterministically: identical inputs write identical bytes', () => {
+  const space = workspace([agent(1), agent(2)]);
+  const one = bound(space, 1);
+  const two = bound(space, 2, { text: 'in progress\n' });
+  const bindings = bindingsFile(space, [one.binding, two.binding]);
+
+  const first = space.path('first.json');
+  const second = space.path('second.json');
+  const run = (out) => runLocalLaneSensorCli(
+    ['--out', out, '--wmux', FAKE_WMUX, '--bindings', bindings],
+    { now: clock(), writeStdout: () => {} },
+  );
+  run(first);
+  run(second);
+
+  assert.equal(readFileSync(second, 'utf8'), readFileSync(first, 'utf8'));
+  // And a second tick over an unchanged world is a fixed point, not a drifting one.
+  run(first);
+  assert.equal(readFileSync(first, 'utf8'), readFileSync(second, 'utf8'));
+});
+
+// ---------------------------------------------------------------------------
+// the watcher forwards the flag, and this slice still holds no destructive verb
+// ---------------------------------------------------------------------------
+
+test('the watcher owns --bindings, forwards it to the sensor, and never to the dashboard', () => {
+  const space = workspace([agent(1)]);
+  const one = bound(space, 1);
+  const bindingsPath = bindingsFile(space, [one.binding]);
+  const projection = projectionFile(space.dir);
+
+  const { own, forwarded } = parseArgs([
+    '--lanes-out', space.path('lanes.json'), '--bindings', bindingsPath,
+    '--projection', projection,
+  ]);
+  assert.equal(own.bindings, bindingsPath);
+  assert.equal(forwarded.includes('--bindings'), false, 'the dashboard never sees a binding file');
+
+  const { observation, snapshot } = runLocalLanesTick([
+    '--lanes-out', space.path('lanes.json'), '--bindings', bindingsPath,
+    '--projection', projection,
+    '--html-out', space.path('room.html'), '--snapshot-out', space.path('room.json'),
+    '--wmux', FAKE_WMUX,
+  ], { now: clock(), writeStdout: () => {} });
+
+  assert.equal(entryFor(observation, 'agent-1').taskState, 'COMPLETED_EVIDENCE');
+  assert.equal(
+    JSON.stringify(snapshot).includes('COMPLETED_EVIDENCE'), false,
+    'R0 publishes the transition in the observation; the control room is not changed by it',
+  );
+});
+
+test('NEGATIVE CONTROL: this slice emits state and holds no reaper', () => {
+  for (const file of [
+    join(HERE, '..', 'scripts', 'local-lane-sensor.mjs'),
+    join(HERE, '..', 'scripts', 'local-lanes-watch.mjs'),
+    join(HERE, '..', 'src', 'local-lane-sensor.mjs'),
+    join(HERE, '..', 'src', 'local-lane-observation.mjs'),
+  ]) {
+    const source = readFileSync(file, 'utf8');
+    for (const destructive of [
+      'agent kill', 'agent stop', 'pane close', 'surface close', 'send-keys',
+      'process.kill', 'unlinkSync', 'rmSync', 'writeFileSync(binding',
+    ]) {
+      assert.equal(
+        source.includes(destructive), false,
+        `${file} must contain no ${destructive}: R0 emits truthful state for a later reaper`,
+      );
+    }
+  }
 });
