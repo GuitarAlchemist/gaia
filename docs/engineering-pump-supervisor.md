@@ -66,6 +66,8 @@ stable pair can be measured; it never combines independently sampled heads.
 The sealed nested portfolio revision is validated before capacity, provider, CI, or empty-work early
 gates. An early gate is a conclusion over verified evidence, never a shortcut around evidence
 validation.
+After that validation, a genuinely empty work set is healthy `EXPECTED_NONE` even when every
+measured execution slot is zero; saturation gates describe blocked work, not an empty queue.
 
 R0 must deterministically force:
 
@@ -90,14 +92,16 @@ R0 must deterministically force:
 
 ## Self-contained work projection
 
-The stable issue-body projection answers, compactly: outcome, value/urgency and audience; owner and
-parent; scope, exclusions and authority; short plan; deliverables and acceptance evidence;
+The stable issue-body projection answers, compactly: outcome, value/urgency and audience; owner,
+lane, and parent; scope, exclusions and authority; short plan; deliverables and acceptance evidence;
 repositories/components/surfaces; tools and external dependencies; constraints; failure/escalation
-outcome; and evidence links. It is stable after creation.
+outcome. It is stable after creation. An unmeasured owner or lane is `UNKNOWN` with a reason; the
+delivery journal's opaque lease token is never presented as a responsible human or agent identity.
 
 One marker-bound dynamic status-comment projection contains state/current gate, a short `[x]`/`[ ]`
 checklist, exactly one `Next:`, ETA range plus confidence, latest evidence, a two- or three-word
-origin, `updatedAt`, and revision. It also separates an estimated execution profile from observed
+origin, `updatedAt`, transition-bound evidence links, and revision. It also separates an estimated
+execution profile from observed
 telemetry:
 
 - profile: complexity, uncertainty, estimated token range and confidence, parallelism ceiling,
