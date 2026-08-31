@@ -449,7 +449,7 @@ test('R3 MECHANISM REVERT: stable identity and receipt reconciliation prevent du
       },
       runWorker: async () => {}, runReviewer: async () => {}, runRepair: async () => {},
     });
-    await assert.rejects(reconcileAdapter.execute({ intent, idempotencyKey: key }));
+    await reconcileAdapter.execute({ intent, idempotencyKey: key });
     assert.equal(duplicateEffects, 1, 'without reconciliation the provider effect is repeated');
   } finally {
     rmSync(stablePath, { force: true });

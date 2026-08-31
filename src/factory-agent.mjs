@@ -849,6 +849,7 @@ export async function executeAgentFactory({
   runWorker,
   runReviewer,
   runRepair,
+  persistReceipt,
 }) {
   const worktree = resolve(suppliedWorktree ?? '');
   if (typeof task !== 'string' || task.trim() === '') {
@@ -919,7 +920,10 @@ export async function executeAgentFactory({
     },
   };
 
-  if (reviewerResult.verdict === 'APPROVE') return receipt;
+  if (reviewerResult.verdict === 'APPROVE') {
+    if (typeof persistReceipt === 'function') await persistReceipt(receipt);
+    return receipt;
+  }
   if (typeof runRepair !== 'function') {
     throw new FactoryAgentError(
       'RepairAdapterRequired', 'REQUEST_CHANGES requires one explicit repair adapter',
@@ -974,7 +978,7 @@ export async function executeAgentFactory({
     verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged',
     verdict: finalReviewerResult.verdict,
   };
-  return {
+  const finalReceipt = {
     ...receipt,
     status: finalReviewerResult.verdict === 'APPROVE' ? 'completed' : 'rejected',
     changeSet: repairedCandidate,
@@ -992,4 +996,6 @@ export async function executeAgentFactory({
       final: finalReview,
     },
   };
+  if (typeof persistReceipt === 'function') await persistReceipt(finalReceipt);
+  return finalReceipt;
 }

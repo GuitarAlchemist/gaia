@@ -683,8 +683,13 @@ export async function runPrReviewThreadRepairPump({
   // effect it is about to perform, so the record that precedes a comment and the record that
   // precedes a resolution are different records and cannot be mistaken for one replay.
   const intent = plan.action;
-  ordered({ transition: 'CLAIMED', intent, lease: leaseExpiresAt, reading: plan });
-  const intentRevision = lastRecord.revision;
+  const pendingClaim = mine().find((entry) => (
+    entry.transition === 'CLAIMED' && entry.intent === intent
+  ));
+  if (pendingClaim === undefined) {
+    ordered({ transition: 'CLAIMED', intent, lease: leaseExpiresAt, reading: plan });
+  }
+  const intentRevision = pendingClaim?.revision ?? lastRecord.revision;
 
   // Terminal, unlike a failed request: no request was made, so there is nothing that may have
   // arrived and nothing to reconcile. The refusal names what actually happened rather than
@@ -695,7 +700,6 @@ export async function runPrReviewThreadRepairPump({
     fail(errorCode, message);
   };
 
-  let authorization;
   const authorizationIntent = {
     intentRevision,
     action: intent === 'COMMENT' ? 'POST_REVIEW_THREAD_COMMENT' : 'RESOLVE_REVIEW_THREAD',
@@ -705,14 +709,28 @@ export async function runPrReviewThreadRepairPump({
     itemNumber: observed.pullRequest.number,
     snapshotRevision: observed.sourceRevision,
   };
+  let exactGrant;
   try {
-    const exactGrant = typeof acquireGrant === 'function'
+    exactGrant = typeof acquireGrant === 'function'
       ? await acquireGrant(authorizationIntent)
       : grant;
-    authorization = await authority.consume({
-      grant: exactGrant,
-      intent: authorizationIntent,
-    });
+  } catch (error) {
+    if (error?.code === 'WaitingAuthority') {
+      return report(plan, { state: 'WAITING_AUTHORITY', outcome: settled() });
+    }
+    abandon('AuthorityRefused', 'authority refused without exposing diagnostics');
+  }
+
+  // A later tick may reuse the stable authority intent, but it may not reuse the authority to
+  // perform the effect without first winning a fresh durable CAS. This second CLAIMED record is
+  // the execution linearization point after WAITING_AUTHORITY and closes same-owner processes.
+  if (pendingClaim !== undefined) {
+    ordered({ transition: 'CLAIMED', intent, lease: leaseExpiresAt, reading: plan });
+  }
+
+  let authorization;
+  try {
+    authorization = await authority.consume({ grant: exactGrant, intent: authorizationIntent });
   } catch {
     abandon('AuthorityRefused', 'authority refused without exposing diagnostics');
   }

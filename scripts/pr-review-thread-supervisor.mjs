@@ -1,6 +1,8 @@
-/** One production PR review-thread reconciliation tick. No daemon, merge, push or config effect. */
+/** Production PR review-thread reconciliation: one bounded tick or a serialized watch. */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import {
+  closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync,
+} from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -15,6 +17,14 @@ import {
 import { assertDistinctFiles } from '../src/path-identity.mjs';
 
 class UsageError extends Error {}
+
+export class GrantRegistryError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'GrantRegistryError';
+    this.code = code;
+  }
+}
 
 function flags(argv) {
   const result = {};
@@ -36,6 +46,32 @@ function flags(argv) {
 
 const readJson = (path) => JSON.parse(readFileSync(resolve(path), 'utf8'));
 
+function splitWatchArgv(argv) {
+  const tickArgv = [];
+  let watchMs = null;
+  for (let index = 0; index < argv.length; index += 2) {
+    if (argv[index] === '--watch-ms') {
+      watchMs = Number(argv[index + 1]);
+    } else {
+      tickArgv.push(argv[index], argv[index + 1]);
+    }
+  }
+  if (watchMs !== null && (!Number.isSafeInteger(watchMs) || watchMs < 10_000 || watchMs > 300_000)) {
+    throw new UsageError('--watch-ms must be an integer from 10000 through 300000');
+  }
+  return { tickArgv, watchMs };
+}
+
+const delay = (milliseconds, signal) => new Promise((resolvePromise) => {
+  if (signal?.aborted) { resolvePromise(); return; }
+  let handle;
+  const done = () => {
+    clearTimeout(handle); signal?.removeEventListener('abort', done); resolvePromise();
+  };
+  handle = setTimeout(done, milliseconds);
+  signal?.addEventListener('abort', done, { once: true });
+});
+
 export function createGrantRegistryAcquirer(registry) {
   const grants = Array.isArray(registry) ? registry : [registry];
   return async (intent) => {
@@ -51,6 +87,82 @@ export function createGrantRegistryAcquirer(registry) {
       throw new UsageError('grant registry must contain exactly one grant for the exact effect intent');
     }
     return matches[0];
+  };
+}
+
+function exactGrant(registry, intent) {
+  const grants = Array.isArray(registry) ? registry : [registry];
+  if (grants.some((grant) => !grant || typeof grant !== 'object' || Array.isArray(grant)
+      || typeof grant.intentRevision !== 'string' || typeof grant.action !== 'string')) {
+    throw new GrantRegistryError('GrantRegistryInvalid', 'grant registry contains a malformed grant');
+  }
+  const revisionMatches = grants.filter((grant) => grant.intentRevision === intent.intentRevision);
+  const matches = grants.filter((grant) => grant
+    && grant.intentRevision === intent.intentRevision
+    && grant.action === intent.action
+    && grant.repository === intent.repository
+    && grant.itemKind === intent.itemKind
+    && grant.itemId === intent.itemId
+    && grant.itemNumber === intent.itemNumber
+    && grant.snapshotRevision === intent.snapshotRevision);
+  if (matches.length > 1) {
+    throw new GrantRegistryError('GrantRegistryAmbiguous',
+      'grant registry contains more than one grant for the exact effect intent');
+  }
+  if (revisionMatches.length > 0 && matches.length === 0) {
+    throw new GrantRegistryError('GrantIntentMismatch',
+      'a grant names this intent revision but mismatches its exact effect fields');
+  }
+  return matches[0] ?? null;
+}
+
+/** Persist the exact late-bound authority request, then re-read the registry on every tick. */
+export function createLazyGrantRegistryAcquirer({ registryPath, requestDirectory }) {
+  const path = resolve(registryPath);
+  const requests = resolve(requestDirectory);
+  mkdirSync(requests, { recursive: true });
+  return async (intent) => {
+    const request = {
+      schema: 'gaia-pr-review-thread-grant-request/1',
+      intentRevision: intent.intentRevision,
+      action: intent.action,
+      repository: intent.repository,
+      itemKind: intent.itemKind,
+      itemId: intent.itemId,
+      itemNumber: intent.itemNumber,
+      snapshotRevision: intent.snapshotRevision,
+    };
+    const requestPath = resolve(requests, `${intent.intentRevision}.json`);
+    if (!existsSync(requestPath)) {
+      let descriptor;
+      try {
+        descriptor = openSync(requestPath, 'wx', 0o600);
+        writeFileSync(descriptor, `${JSON.stringify(request)}\n`, 'utf8');
+        fsyncSync(descriptor);
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error;
+      } finally {
+        if (descriptor !== undefined) closeSync(descriptor);
+      }
+    }
+    let durable;
+    try { durable = readJson(requestPath); } catch {
+      throw new GrantRegistryError('GrantRequestCorrupt', 'grant request is not closed JSON');
+    }
+    if (JSON.stringify(durable) !== JSON.stringify(request)) {
+      throw new GrantRegistryError('GrantRequestMismatch',
+        'durable grant request does not bind the exact effect intent');
+    }
+    let registry;
+    try { registry = readJson(path); } catch {
+      throw new GrantRegistryError('GrantRegistryInvalid', 'grant registry is not closed JSON');
+    }
+    const grant = exactGrant(registry, intent);
+    if (grant === null) {
+      throw new GrantRegistryError('WaitingAuthority',
+        'the exact effect intent is durably waiting for a single-use grant');
+    }
+    return grant;
   };
 }
 
@@ -96,7 +208,6 @@ export async function runPrReviewThreadSupervisorCli(argv, {
     ],
     refuse: (message) => { throw new UsageError(`gate output path identity refused: ${message}`); },
   });
-  const grantRegistry = readJson(args.grant);
   const execution = createExecution({
     expectedRepository: args.repository,
     worktree: resolve(args.worktree),
@@ -115,7 +226,10 @@ export async function runPrReviewThreadSupervisorCli(argv, {
       ledgerDir: resolve(args['authority-ledger']),
       now,
     }),
-    acquireGrant: createGrantRegistryAcquirer(grantRegistry),
+    acquireGrant: createLazyGrantRegistryAcquirer({
+      registryPath: resolve(args.grant),
+      requestDirectory: resolve(directory, 'pr-review-thread-grant-requests'),
+    }),
     now,
     synchronizeTelemetry: () => synchronize({
       directory,
@@ -134,10 +248,44 @@ export async function runPrReviewThreadSupervisorCli(argv, {
   return result.gate.blocksMerge ? 3 : 0;
 }
 
+/** Sequential automatic invocation. The durable outboxes, not this scheduler, own correctness. */
+export async function runPrReviewThreadSupervisorLoop(argv, {
+  signal,
+  wait = delay,
+  runTick,
+  consumeGate = async (gate) => {
+    if (!gate || gate.schema !== 'gaia-pr-review-thread-merge-gate/1') {
+      throw new UsageError('the supervisor published no closed merge gate for control-room consumption');
+    }
+  },
+  ...dependencies
+} = {}) {
+  const { tickArgv, watchMs } = splitWatchArgv(argv);
+  const tick = runTick ?? (async () => {
+    const code = await runPrReviewThreadSupervisorCli(tickArgv, dependencies);
+    const gatePath = flags(tickArgv)['gate-out'];
+    return { code, gate: readJson(gatePath) };
+  });
+  let lastCode = 0;
+  do {
+    if (signal?.aborted) break;
+    const result = await tick(tickArgv, dependencies);
+    const gate = result?.gate ?? result;
+    lastCode = Number.isSafeInteger(result?.code) ? result.code : (gate?.blocksMerge ? 3 : 0);
+    await consumeGate(gate);
+    if (watchMs === null || signal?.aborted) break;
+    await wait(watchMs, signal);
+  } while (!signal?.aborted);
+  return watchMs === null ? lastCode : 0;
+}
+
 const direct = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 if (direct) {
-  runPrReviewThreadSupervisorCli(process.argv.slice(2)).then((code) => {
+  const controller = new AbortController();
+  process.once('SIGINT', () => controller.abort());
+  process.once('SIGTERM', () => controller.abort());
+  runPrReviewThreadSupervisorLoop(process.argv.slice(2), { signal: controller.signal }).then((code) => {
     process.exitCode = code;
   }).catch((error) => {
     process.stderr.write(`${error?.message ?? 'review-thread supervisor failed'}\n`);

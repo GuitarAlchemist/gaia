@@ -231,6 +231,13 @@ async function ensureLane({
         intentRevision: intent.operationIdentity,
       }),
     });
+  } catch (error) {
+    if (error?.code === 'WaitingAuthority') {
+      return Object.freeze({ state: 'WAITING_AUTHORITY', idempotencyKey });
+    }
+    throw error;
+  }
+  try {
     return settle(path, intent, await lanes.startRepairLane(request));
   } catch {
     // The request may have arrived. Preserve the durable intent; the next tick reconciles first.
@@ -274,13 +281,18 @@ async function ensureChecklist({
   }
   if (found) {
     if (found.body === body) return settle(path, intent, found);
-    await authorize({
-      authority, acquireGrant,
-      intent: authorityIntent({
-        action: 'UPSERT_REVIEW_THREAD_CHECKLIST', observation,
-        intentRevision: intent.operationIdentity,
-      }),
-    });
+    try {
+      await authorize({
+        authority, acquireGrant,
+        intent: authorityIntent({
+          action: 'UPSERT_REVIEW_THREAD_CHECKLIST', observation,
+          intentRevision: intent.operationIdentity,
+        }),
+      });
+    } catch (error) {
+      if (error?.code === 'WaitingAuthority') return Object.freeze({ state: 'WAITING_AUTHORITY', marker });
+      throw error;
+    }
     const updated = await github.updateChecklist({
       repository: observation.repository, pullRequest: observation.pullRequest.number,
       commentId: found.id, marker, body,
@@ -295,6 +307,11 @@ async function ensureChecklist({
         intentRevision: intent.operationIdentity,
       }),
     });
+  } catch (error) {
+    if (error?.code === 'WaitingAuthority') return Object.freeze({ state: 'WAITING_AUTHORITY', marker });
+    throw error;
+  }
+  try {
     return settle(path, intent, await github.createChecklist({
       repository: observation.repository, pullRequest: observation.pullRequest.number, marker, body,
     }));
@@ -406,7 +423,7 @@ export async function runPrReviewThreadSupervisorTick({
         directory, lanes, observation, threadIdentity, observedAt, authority, acquireGrant,
       });
       let currentObservation = observation;
-      if (lane.state !== 'PENDING') {
+      if (!['PENDING', 'WAITING_AUTHORITY'].includes(lane.state)) {
         currentObservation = await github.readRepairEvidence({ observation, laneReceipt: lane });
         try {
           result = await runPrReviewThreadRepairPump({

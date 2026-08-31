@@ -242,6 +242,18 @@ export function createAgentFactoryExecutionAdapter({
         const existing = readBoundReceipt(existingReceiptPath, { intent, idempotencyKey });
         return existing.factory;
       }
+      const persistReceipt = async (factory) => {
+        mkdirSync(join(physicalEvidenceRoot, idempotencyKey), { recursive: true });
+        if (!existsSync(existingReceiptPath)) {
+          writeDurableExclusive(existingReceiptPath, {
+            schema: 'gaia-portfolio-execution-receipt/2',
+            ...receiptBinding(intent, idempotencyKey),
+            factory,
+            addressedCommentIds: measuredAddressedCommentIds(intent, factory),
+          });
+        }
+        return readBoundReceipt(existingReceiptPath, { intent, idempotencyKey });
+      };
       const receipt = await executeFactory({
         worktree: candidateWorktree,
         evidenceDir: join(physicalEvidenceRoot, idempotencyKey),
@@ -249,17 +261,11 @@ export function createAgentFactoryExecutionAdapter({
         runWorker,
         runReviewer,
         runRepair,
+        persistReceipt,
       });
-      // The evidence directory is reserved by the factory before any agent effect. Persisting the
-      // final receipt here lets a new process reconcile an acknowledged execution after the
-      // caller loses the response, without issuing the effect again.
-      mkdirSync(join(physicalEvidenceRoot, idempotencyKey), { recursive: true });
-      writeDurableExclusive(join(physicalEvidenceRoot, idempotencyKey, 'receipt.json'), {
-        schema: 'gaia-portfolio-execution-receipt/2',
-        ...receiptBinding(intent, idempotencyKey),
-        factory: receipt,
-        addressedCommentIds: measuredAddressedCommentIds(intent, receipt),
-      });
+      // The authoritative factory can commit through `persistReceipt` before returning. Keep the
+      // fallback for older injected factories, but reconciliation always reads the same binding.
+      await persistReceipt(receipt);
       return receipt;
     },
   });

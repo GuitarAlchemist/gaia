@@ -51,12 +51,9 @@ const collect = (adapter) => adapter.collectReviewThreads({
   run: { runId: 'review-r2', laneGeneration: 1 },
 });
 
-test('R2 a hidden 101st review comment makes the collection incomplete and blocks merge', async () => {
+test('R2 a hidden 101st review comment fails closed when its nested page cannot be proven', async () => {
   const adapter = createGitGhPrReviewThreadEffects({ run: async () => graph({ commentTotal: 101 }) });
-  const collection = await collect(adapter);
-  assert.equal(collection.complete, false);
-  assert.deepEqual(collection.observations, []);
-  assert.equal(derivePrReviewThreadMergeGate(collection).blocksMerge, true);
+  await assert.rejects(collect(adapter), (error) => error.code === 'NestedPaginationIdentityMismatch');
 });
 
 test('R2 absent GitHub dispute evidence is UNKNOWN and can never reach a claim or resolution', async () => {

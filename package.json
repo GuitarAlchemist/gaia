@@ -23,6 +23,7 @@
     "requests:frame": "node scripts/framing-execution-contract.mjs",
     "portfolio:survey": "node scripts/github-portfolio.mjs",
     "portfolio:operator": "node scripts/github-portfolio-operator.mjs",
+    "pr-review:watch": "node scripts/pr-review-thread-supervisor.mjs",
     "lanes:sensor": "node scripts/local-lane-sensor.mjs",
     "lanes:watch": "node scripts/local-lanes-watch.mjs"
   },

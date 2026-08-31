@@ -37,6 +37,15 @@ const REVIEW_THREADS_QUERY = `query GaiaReviewThreads($owner:String!,$name:Strin
   }
 }`;
 
+const REVIEW_THREAD_COMMENTS_QUERY = `query GaiaReviewThreadComments($threadId:ID!,$cursor:String){
+  node(id:$threadId){... on PullRequestReviewThread{
+    id comments(first:100,after:$cursor){
+      totalCount pageInfo{hasNextPage endCursor}
+      nodes{id body review{id state submittedAt commit{oid}}}
+    }
+  }}
+}`;
+
 const DISPUTE_WINDOW_QUERY = `query GaiaReviewThreadDisputes($owner:String!,$name:String!,$number:Int!,$cursor:String){
   repository(owner:$owner,name:$name){pullRequest(number:$number){
     comments(first:100,after:$cursor){
@@ -70,6 +79,16 @@ const sha256 = (value) => createHash('sha256').update(canonicalJson(value)).dige
 function fail(message) {
   throw new TypeError(message);
 }
+
+export class GitGhPrReviewThreadError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'GitGhPrReviewThreadError';
+    this.code = code;
+  }
+}
+
+const typedFail = (code, message) => { throw new GitGhPrReviewThreadError(code, message); };
 
 function repository(value) {
   if (typeof value !== 'string' || !REPOSITORY.test(value)) fail('repository must be owner/name');
@@ -258,6 +277,60 @@ export function createGitGhPrReviewThreadEffects({
     positiveInteger(number, 'pullRequest');
     instant(observedAt, 'observedAt');
     const boundedRun = requireRun(runBinding);
+    const completeThreadComments = async (thread) => {
+      const first = thread.comments;
+      if (!first || !Array.isArray(first.nodes)
+          || typeof first.pageInfo?.hasNextPage !== 'boolean'
+          || !Number.isSafeInteger(first.totalCount) || first.totalCount < first.nodes.length) {
+        typedFail('NestedPaginationInvalid', 'GitHub returned no closed nested comment page');
+      }
+      const byId = new Map();
+      const add = (row) => {
+        const id = nodeId(row?.id, 'comment.id');
+        const prior = byId.get(id);
+        if (prior !== undefined && canonicalJson(prior) !== canonicalJson(row)) {
+          typedFail('NestedPaginationConflict', 'duplicate comment id changed across nested pages');
+        }
+        byId.set(id, row);
+      };
+      first.nodes.forEach(add);
+      let pageInfo = first.pageInfo;
+      let cursor = pageInfo.endCursor;
+      for (let page = 0; pageInfo.hasNextPage && page < 100; page += 1) {
+        if (typeof cursor !== 'string' || cursor.length === 0) {
+          typedFail('NestedPaginationCursorMissing', 'nested comment pagination cursor is absent');
+        }
+        let response;
+        try {
+          response = await invoke(graphqlArgs(REVIEW_THREAD_COMMENTS_QUERY, {
+            threadId: thread.id, cursor,
+          }), { signal });
+        } catch {
+          typedFail('NestedPaginationFailed', 'GitHub nested comment pagination failed');
+        }
+        const node = response?.data?.node;
+        const comments = node?.comments;
+        if (node?.id !== thread.id || !comments || !Array.isArray(comments.nodes)
+            || comments.totalCount !== first.totalCount
+            || typeof comments.pageInfo?.hasNextPage !== 'boolean') {
+          typedFail('NestedPaginationIdentityMismatch', 'nested page changed thread or count identity');
+        }
+        comments.nodes.forEach(add);
+        pageInfo = comments.pageInfo;
+        cursor = pageInfo.endCursor;
+      }
+      if (pageInfo.hasNextPage || byId.size !== first.totalCount) {
+        typedFail('NestedPaginationIncomplete', 'nested comment window did not reach its exact count');
+      }
+      return {
+        ...thread,
+        comments: {
+          totalCount: first.totalCount,
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [...byId.values()].sort((left, right) => left.id.localeCompare(right.id, 'en')),
+        },
+      };
+    };
     const { owner, name } = splitRepository(repo);
     const nodes = [];
     let cursor = null;
@@ -274,21 +347,9 @@ export function createGitGhPrReviewThreadEffects({
       nodes.push(...current.reviewThreads.nodes);
       const { hasNextPage, endCursor } = current.reviewThreads.pageInfo;
       if (!hasNextPage) {
-        const commentsComplete = nodes.every((thread) => (
-          thread.comments?.pageInfo?.hasNextPage === false
-          && thread.comments?.totalCount === thread.comments?.nodes?.length
-        ));
-        if (!commentsComplete) {
-          return Object.freeze({
-            schema: 'gaia-pr-review-thread-collection/1', repository: repo,
-            pullRequest: number, observedAt, complete: false,
-            sourceRevision: sha256(nodes.map(({ id, comments }) => ({
-              id, totalCount: comments?.totalCount ?? 'UNKNOWN',
-              visibleCount: comments?.nodes?.length ?? 0,
-            }))),
-            observations: Object.freeze([]),
-          });
-        }
+        const completedNodes = [];
+        for (const thread of nodes) completedNodes.push(await completeThreadComments(thread));
+        nodes.splice(0, nodes.length, ...completedNodes);
         const disputeThreads = nodes.map((thread) => ({
           id: thread.id,
           sourceRevision: disputeRevision({
