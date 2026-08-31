@@ -312,10 +312,13 @@ test('R3 restart repairs a claim orphaned before correlation and blocks unproven
     baseBranch: 'main', headBranch: 'codex/shared-pump-branch', headBranchGeneration: 1,
     evidenceHeadOid: '0000000000000000000000000000000000000040',
   });
-  const observed = observation({ subjects: [{
-    readyItemId: 'issue-40', subjectRevision: SUBJECT,
-    draftObservation: draftObservation(40, SUBJECT, { drafts: [draft(operationIdentity)] }),
-  }] });
+  const observed = observation({
+    capacity: { writerSlots: 0, providerSlots: 0, ciSlots: 0 },
+    subjects: [{
+      readyItemId: 'issue-40', subjectRevision: SUBJECT,
+      draftObservation: draftObservation(40, SUBJECT, { drafts: [draft(operationIdentity)] }),
+    }],
+  });
   const port = effects();
   const restarted = await tick(directory, { observation: observed, effects: port, owner: OWNER_B });
   assert.equal(restarted.gate.state, 'BLOCKED');
@@ -686,6 +689,9 @@ test('R0 MECHANISM REVERT: existing machines own reservation, intent and reconci
   assert.match(source, /stablePumpSourceSnapshot/u);
   assert.match(source, /claim\.evidenceRevision === witness\.actionIdentity/u);
   assert.match(source, /DELIVERY_INTENT_MISSING/u);
+  const recovery = source.indexOf('recoverClaimOutbox({');
+  assert.ok(recovery >= 0);
+  assert.ok(recovery < source.indexOf('observed.capacity.providerSlots'));
   assert.equal(source.includes('operations.at(-1)'), false);
   for (const forbidden of [
     'engineering-pump.jsonl', 'ENGINEERING_PUMP_LEDGER', 'openDraftPullRequest({',
