@@ -144,11 +144,31 @@ test('R0 public seam: one drain claim delegates START_DRAFT to the existing deli
   assert.equal(result.gate.nextAction.kind, 'START_DRAFT');
   assert.equal(result.gate.nextAction.readyItemId, 'issue-40');
   assert.equal(result.delivery.outcome, 'CREATED');
-  assert.deepEqual(readPortfolioDrainLedger({ directory }).receipts.map((x) => x.event), ['CLAIMED']);
+  const [claim] = readPortfolioDrainLedger({ directory }).receipts;
+  assert.deepEqual([claim.event], ['CLAIMED']);
+  assert.equal(claim.evidenceRevision, result.gate.nextAction.actionIdentity);
   assert.deepEqual(readFirstEvidenceLedger({ directory }).transitions.map((x) => x.transition),
     ['INTENT', 'CREATED']);
   assert.equal(result.checklist.origin, 'GAIA PUMP');
   assert.equal(result.checklist.currentGate, 'DRAFT_OPEN');
+});
+
+test('R0 active reservation cannot be inherited across a changed subject or policy', async () => {
+  for (const changed of [
+    observation({ policyRevision: 'd'.repeat(64) }),
+    observation({ subjects: [{
+      readyItemId: 'issue-40', subjectRevision: 'e'.repeat(64),
+      draftObservation: draftObservation(40, 'e'.repeat(64)),
+    }] }),
+  ]) {
+    const directory = scratch();
+    await tick(directory);
+    const port = effects();
+    await assert.rejects(tick(directory, { observation: changed, effects: port, owner: OWNER_B }),
+      (error) => error.code === 'ReservationBindingMismatch');
+    assert.equal(port.calls.length, 0);
+    assert.equal(readPortfolioDrainLedger({ directory }).count, 1);
+  }
 });
 
 test('R0 simultaneous refill has one durable target/capacity reservation and one effect', async () => {
@@ -224,6 +244,25 @@ test('R0 lost GitHub response is reconciled by stable provider marker before ret
   assert.equal(adopted.delivery.outcome, 'REUSED');
   assert.equal(opens, 1);
   assert.deepEqual(recovery.calls.map(([name]) => name), ['findDraftPullRequest']);
+});
+
+test('R0 next observation that already sees the lost-response Draft records REUSED', async () => {
+  const directory = scratch();
+  let remote = null;
+  let opens = 0;
+  const lost = effects({ open: async (intent) => {
+    opens += 1; remote = draft(intent.operationIdentity); throw new Error('response lost');
+  } });
+  await assert.rejects(tick(directory, { effects: lost }), (error) => error.code === 'EffectFailed');
+  const observed = observation({ subjects: [{
+    readyItemId: 'issue-40', subjectRevision: SUBJECT,
+    draftObservation: draftObservation(40, SUBJECT, { drafts: [remote] }),
+  }] });
+  const result = await tick(directory, { observation: observed, effects: effects(), owner: OWNER_B,
+    now: LATER });
+  assert.equal(result.delivery.outcome, 'REUSED');
+  assert.equal(opens, 1);
+  assert.equal(readFirstEvidenceLedger({ directory }).transitions.at(-1).transition, 'REUSED');
 });
 
 test('R0 restart after grant consumption fails closed without a duplicate effect', async () => {
