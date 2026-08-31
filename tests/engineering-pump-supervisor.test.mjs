@@ -302,15 +302,33 @@ test('R0 checklist is bounded, self-sufficient, and has one managed status comme
   await tick(directory);
   const projected = projectEngineeringPumpChecklist({ directory });
   assert.deepEqual(Object.keys(projected.issueBody), [
-    'outcome', 'owner', 'reportsTo', 'scope', 'exclusions', 'plan', 'deliverables',
-    'doneWhen', 'authorityBoundary', 'evidenceLinks',
+    'outcome', 'why', 'forWhom', 'owner', 'reportsTo', 'scope', 'exclusions', 'plan',
+    'deliverables', 'doneWhen', 'where', 'withWhat', 'authorityBoundary', 'evidenceLinks',
+    'ifFailure', 'executionProfile',
   ]);
+  assert.deepEqual(Object.keys(projected.issueBody.executionProfile), [
+    'complexity', 'uncertainty', 'estimatedTokens', 'parallelismCeiling',
+    'missingCapabilities', 'constraints', 'externalServices', 'risk',
+  ]);
+  assert.deepEqual(Object.keys(projected.observedTelemetry), [
+    'actualTokens', 'agentWallTimeMs', 'ciWallTimeMs', 'retries', 'queueDelayMs',
+    'blockers', 'estimateVariance',
+  ]);
+  for (const unknown of [
+    projected.issueBody.executionProfile.estimatedTokens,
+    projected.observedTelemetry.actualTokens,
+    projected.observedTelemetry.ciWallTimeMs,
+  ]) assert.deepEqual(Object.keys(unknown), ['value', 'reason']);
+  assert.equal(projected.observedTelemetry.actualTokens.value, null);
+  assert.match(projected.observedTelemetry.actualTokens.reason, /^[A-Z][A-Z0-9_]{2,63}$/u);
   assert.match(projected.statusComment, /<!-- gaia:pump-status:/u);
   assert.match(projected.statusComment, /Origin: GAIA PUMP/u);
   assert.equal((projected.statusComment.match(/^Next:/gmu) ?? []).length, 1);
   assert.match(projected.statusComment, /ETA: UNKNOWN \(low confidence\)/u);
   assert.match(projected.statusComment, /- \[x\] Observe/u);
   assert.ok(projected.statusComment.length <= 1200);
+  assert.ok(Object.keys(projected.issueBody).length <= 16);
+  assert.ok(JSON.stringify(projected.issueBody).length <= 3000);
   assert.equal(projected.revision, projectEngineeringPumpChecklist({ directory }).revision);
 });
 
@@ -320,6 +338,8 @@ test('R0 deterministic replay and DuckDB derive only from the two existing ledge
   const first = projectEngineeringPumpTransitions({ directory });
   assert.deepEqual(projectEngineeringPumpTransitions({ directory }), first);
   assert.deepEqual(Object.keys(first.sourceRevisions).sort(), ['draftDelivery', 'portfolioDrain']);
+  assert.ok(first.rows.every((row) => Object.hasOwn(row, 'executionProfile')
+    && Object.hasOwn(row, 'observedTelemetry')));
   const calls = [];
   const openClient = async () => ({
     run: async (sql, params = []) => { calls.push([sql, params]); }, close() {},
