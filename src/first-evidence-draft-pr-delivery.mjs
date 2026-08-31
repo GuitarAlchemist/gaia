@@ -332,8 +332,11 @@ export function appendFirstEvidenceTransition({
 }
 
 /** Replay the durable ledger into one passive projection. Read-only at every seam. */
-export function projectFirstEvidenceDraftPr({ directory, lockOptions } = {}) {
-  const ledger = readFirstEvidenceLedger({ directory, lockOptions });
+export function projectFirstEvidenceLedgerSnapshot(ledger) {
+  if (!ledger || ledger.schema !== FIRST_EVIDENCE_LEDGER_SCHEMA
+      || !Array.isArray(ledger.transitions)) {
+    fail('LedgerSnapshotInvalid', 'a verified first-evidence ledger snapshot is required');
+  }
   const byOperation = new Map();
   for (const transition of ledger.transitions) {
     const current = byOperation.get(transition.operationIdentity) ?? {
@@ -366,6 +369,10 @@ export function projectFirstEvidenceDraftPr({ directory, lockOptions } = {}) {
     effect: 'NONE',
     authority: 'NONE',
   });
+}
+
+export function projectFirstEvidenceDraftPr({ directory, lockOptions } = {}) {
+  return projectFirstEvidenceLedgerSnapshot(readFirstEvidenceLedger({ directory, lockOptions }));
 }
 
 const REFUSAL_TOKEN = /^[A-Z][A-Z0-9_]{0,31}$/u;
@@ -485,7 +492,17 @@ export async function deliverFirstEvidenceDraftPr({
     // The next complete provider observation may already carry the Draft whose create response
     // was lost. That exact identity-bound observation is stronger evidence than retrying a query:
     // adopt it durably and perform no authority consumption or provider effect.
-    if (decided.state === 'DRAFT_OPEN' && mine.some(({ transition }) => transition === 'INTENT')) {
+    const terminated = mine.some(({ transition }) => transition === 'REFUSED');
+    const claims = mine.filter(({ transition }) => transition === 'INTENT');
+    const heldByLiveOwner = !terminated && claims.some(
+      (entry) => entry.owner !== owner
+        && entry.leaseExpiresAt !== null
+        && Date.parse(entry.leaseExpiresAt) > Date.parse(recordedAt),
+    );
+    if (heldByLiveOwner) {
+      fail('DeliveryInFlight', 'a live owner holds an unexpired claim for this operation');
+    }
+    if (decided.state === 'DRAFT_OPEN' && claims.length > 0) {
       const bound = boundPullRequest(decided.pullRequest);
       const after = record({
         transition: 'REUSED', expectedLedgerRevision: before.revision, pullRequest: bound,

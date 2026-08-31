@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 
 import {
   deliverFirstEvidenceDraftPr,
-  projectFirstEvidenceDraftPr,
+  projectFirstEvidenceLedgerSnapshot,
   readFirstEvidenceLedger,
 } from './first-evidence-draft-pr-delivery.mjs';
 import {
@@ -23,7 +23,7 @@ import {
   readPortfolioDrainLedger,
   tickPortfolioDrain,
 } from './portfolio-drain-ledger.mjs';
-import { buildPortfolioDrainReceipt } from './portfolio-drain.mjs';
+import { buildPortfolioDrainReceipt, reconcilePortfolioDrain } from './portfolio-drain.mjs';
 
 export const ENGINEERING_PUMP_OBSERVATION_SCHEMA = 'gaia-engineering-pump-observation/1';
 export const ENGINEERING_PUMP_CHECKLIST_SCHEMA = 'gaia-engineering-pump-checklist/1';
@@ -228,6 +228,8 @@ export async function runEngineeringPumpSupervisorTick({
   lockOptions,
 }) {
   const observed = verifyObservation(observation, now);
+  // Every gate, including a capacity early return, is a conclusion over the exact nested source.
+  reconcilePortfolioDrain({ portfolio: observed.portfolio, capacity: 1 });
   requireBindings(observed);
   if (observed.capacity.providerSlots === 0) {
     return deepFreeze({ gate: noAction('PROVIDER_SATURATED', 'NO_PROVIDER_SLOT'), delivery: null,
@@ -269,6 +271,16 @@ export async function runEngineeringPumpSupervisorTick({
   const draftPlan = planFirstEvidenceDraftPr({ observation: subject.draftObservation });
   if (!['CREATE_OR_REUSE', 'NONE'].includes(draftPlan.action)) {
     fail('DraftPlanRefused', 'first-evidence plan refused this subject');
+  }
+  if (draftPlan.action === 'NONE' && draftPlan.state === 'DRAFT_OPEN') {
+    const priorIntent = readFirstEvidenceLedger({ directory, lockOptions }).transitions.some(
+      (entry) => entry.operationIdentity === draftPlan.operationIdentity
+        && entry.transition === 'INTENT',
+    );
+    if (!priorIntent) {
+      return deepFreeze({ gate: noAction('EXPECTED_NONE', 'DRAFT_ALREADY_VISIBLE'), delivery: null,
+        checklist: projectEngineeringPumpChecklist({ directory, lockOptions }) });
+    }
   }
   if (draftPlan.action === 'NONE' && draftPlan.state !== 'DRAFT_OPEN') {
     return deepFreeze({ gate: noAction(draftPlan.state, 'NO_DRAFT_ACTION'), delivery: null,
@@ -340,11 +352,43 @@ function observedTelemetry(operation) {
   });
 }
 
-export function projectEngineeringPumpChecklist({ directory, lockOptions } = {}) {
-  const drain = readPortfolioDrainLedger({ directory, lockOptions });
-  const delivery = projectFirstEvidenceDraftPr({ directory, lockOptions });
+const DEFAULT_SOURCE_READERS = Object.freeze({
+  readDrain: readPortfolioDrainLedger,
+  readDraft: readFirstEvidenceLedger,
+});
+
+function stablePumpSourceSnapshot({
+  directory, lockOptions, sourceReaders = DEFAULT_SOURCE_READERS, maxAttempts = 4,
+}) {
+  if (!sourceReaders || typeof sourceReaders.readDrain !== 'function'
+      || typeof sourceReaders.readDraft !== 'function') {
+    fail('ProjectionAdapterInvalid', 'both exact pump ledger readers are required');
+  }
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const leftDrain = sourceReaders.readDrain({ directory, lockOptions });
+    const leftDraft = sourceReaders.readDraft({ directory, lockOptions });
+    const rightDrain = sourceReaders.readDrain({ directory, lockOptions });
+    const rightDraft = sourceReaders.readDraft({ directory, lockOptions });
+    if (leftDrain.revision === rightDrain.revision
+        && leftDraft.revision === rightDraft.revision) {
+      return deepFreeze({ drain: rightDrain, draft: rightDraft });
+    }
+  }
+  fail('ProjectionSnapshotUnstable', 'pump source ledgers changed throughout the bounded read window');
+}
+
+function operationForClaim(claim, operations) {
+  if (claim === null) return null;
+  return operations.filter((operation) => operation.repository === claim.repository
+    && operation.task?.kind === claim.itemKind
+    && operation.task?.number === claim.itemNumber).at(-1) ?? null;
+}
+
+export function projectEngineeringPumpChecklist({ directory, lockOptions, sourceReaders } = {}) {
+  const { drain, draft } = stablePumpSourceSnapshot({ directory, lockOptions, sourceReaders });
+  const delivery = projectFirstEvidenceLedgerSnapshot(draft);
   const claim = drain.receipts.at(-1) ?? null;
-  const operation = delivery.projection.operations.at(-1) ?? null;
+  const operation = operationForClaim(claim, delivery.projection.operations);
   const profile = executionProfile();
   const telemetry = observedTelemetry(operation);
   const currentGate = ['CREATED', 'REUSED'].includes(operation?.outcome) ? 'DRAFT_OPEN'
@@ -394,11 +438,10 @@ export function projectEngineeringPumpChecklist({ directory, lockOptions } = {})
   return deepFreeze({ ...body, revision: sha256(body) });
 }
 
-export function projectEngineeringPumpTransitions({ directory, lockOptions } = {}) {
-  const drain = readPortfolioDrainLedger({ directory, lockOptions });
-  const draft = readFirstEvidenceLedger({ directory, lockOptions });
+export function projectEngineeringPumpTransitions({ directory, lockOptions, sourceReaders } = {}) {
+  const { drain, draft } = stablePumpSourceSnapshot({ directory, lockOptions, sourceReaders });
   const profile = executionProfile();
-  const operations = projectFirstEvidenceDraftPr({ directory, lockOptions }).projection.operations;
+  const operations = projectFirstEvidenceLedgerSnapshot(draft).projection.operations;
   const byIdentity = new Map(operations.map((operation) => [operation.operationIdentity, operation]));
   const rows = [
     ...drain.receipts.map((receipt, ordinal) => ({
