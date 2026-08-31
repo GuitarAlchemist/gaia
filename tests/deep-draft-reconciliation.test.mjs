@@ -191,7 +191,7 @@ test('R0-09 future, corrupt, stale, and mismatched evidence is refused', async (
     observation({ observedAt: '2026-09-01T00:00:00.000Z' }),
     observation({ sourceRevision: 'not-a-revision' }),
     observation({ reconciliationGeneration: 0 }),
-    observation({ repository: 'other' }),
+    observation({ requestedEffect: 'MERGE' }),
   ]) {
     const store = mod.createMemoryDraftReconciliationStore();
     const remote = provider();
