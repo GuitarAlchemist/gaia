@@ -205,6 +205,18 @@ test('LICENSE, NOTICE, and the engineering doctrine ship', () => {
   ]) {
     assert.ok(doctrine.includes(requiredPhrase), `doctrine retains: ${requiredPhrase}`);
   }
+
+  const reconciliationDesignPath = join(ROOT, 'docs', 'deep-draft-reconciliation.md');
+  assert.ok(existsSync(reconciliationDesignPath), 'the deep Draft reconciliation design ships');
+  const reconciliationDesign = readFileSync(reconciliationDesignPath, 'utf8');
+  for (const requiredPhrase of [
+    'One module owns identity, durable intent, fencing, provider reconciliation, and projection.',
+    'The compare-and-set append of the durable intent is the only linearization point.',
+    'A stale loser returns a typed refusal and performs no provider effect.',
+  ]) {
+    assert.ok(reconciliationDesign.includes(requiredPhrase),
+      `deep reconciliation design retains: ${requiredPhrase}`);
+  }
 });
 
 test('the shipped skill links holdout-safe reporting doctrine, and the doctrine states its two load-bearing rules', () => {
