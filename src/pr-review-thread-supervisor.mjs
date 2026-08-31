@@ -27,6 +27,8 @@ import {
 import { PR_REVIEW_CHECKLIST_MARKER_PREFIX } from './git-gh-pr-review-thread-effects.mjs';
 
 const sha256 = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const EXACT_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const OPERATION_LEASE_MS = 120_000;
 
 export class PrReviewThreadSupervisorError extends Error {
   constructor(code, message) {
@@ -122,9 +124,33 @@ function readIntent(path) {
   return JSON.parse(readFileSync(intentPath(path), 'utf8'));
 }
 
+function exactInstantMilliseconds(value) {
+  if (typeof value !== 'string' || !EXACT_INSTANT.test(value)) return null;
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value) return null;
+  return milliseconds;
+}
+
+function validateDurableIntentClocks(existing, candidate) {
+  const observed = exactInstantMilliseconds(existing?.observedAt);
+  const expires = exactInstantMilliseconds(existing?.expiresAt);
+  const current = exactInstantMilliseconds(candidate?.observedAt);
+  if (observed === null || expires === null || current === null
+      || expires !== observed + OPERATION_LEASE_MS || observed > current) {
+    fail('OperationIntentCorrupt', 'operation intent has invalid durable clock evidence');
+  }
+  if (existing.kind === 'LANE_START') {
+    const nested = exactInstantMilliseconds(existing.request?.observedAt);
+    if (nested === null || nested !== observed) {
+      fail('OperationIntentCorrupt', 'lane intent request clock does not bind its durable intent');
+    }
+  }
+}
+
 function resumeIntent(path, candidate) {
   const existing = readIntent(path);
   if (existing === null) return null;
+  validateDurableIntentClocks(existing, candidate);
   const rebound = { ...candidate, observedAt: existing.observedAt, expiresAt: existing.expiresAt };
   if (candidate.kind === 'LANE_START' && candidate.request && existing.request) {
     rebound.request = { ...candidate.request, observedAt: existing.request.observedAt };
@@ -211,32 +237,35 @@ async function ensureLane({
     operationIdentity: sha256({ kind: 'lane', threadIdentity }), kind: 'LANE_START',
     threadIdentity, idempotencyKey, expectedRevision: observation.sourceRevision, request,
     observedAt,
-    expiresAt: new Date(Date.parse(observedAt) + 120_000).toISOString(),
+    expiresAt: new Date(Date.parse(observedAt) + OPERATION_LEASE_MS).toISOString(),
   };
   let operationIntent = resumeIntent(path, intent);
   const durable = operationIntent === null ? null : readReceipt(path, operationIntent);
   if (durable) return durable;
-  const found = await lanes.findRepairLane(request);
+  const lookupRequest = operationIntent?.request ?? request;
+  const found = await lanes.findRepairLane(lookupRequest);
   if (found) {
     if (operationIntent === null) {
       if (reserve(path, intent)) operationIntent = intent;
       else operationIntent = resumeIntent(path, intent);
     }
-    return settle(path, operationIntent, found);
+    const bound = JSON.stringify(operationIntent.request) === JSON.stringify(lookupRequest)
+      ? found : await lanes.findRepairLane(operationIntent.request);
+    if (bound) return settle(path, operationIntent, bound);
   }
   if (operationIntent === null) {
     if (reserve(path, intent)) operationIntent = intent;
     else operationIntent = resumeIntent(path, intent);
   } else {
-    const reconciled = await lanes.findRepairLane(request);
+    const reconciled = await lanes.findRepairLane(operationIntent.request);
     if (reconciled) return settle(path, operationIntent, reconciled);
     if (Date.parse(observedAt) >= Date.parse(operationIntent.expiresAt)) {
       fail('LaneStartUncertain', 'lane start remains ambiguous after its bounded lease');
     }
-    // A prior tick may have stopped only because its exact grant was not present. Re-enter the
-    // same authorization/effect path with the same operation identity. The single-use authority
-    // consumption admits one actor; every actor reconciles the provider before reaching it.
   }
+  // A prior tick may have stopped only because its exact grant was not present. Re-enter the
+  // same authorization/effect path with the same operation identity. The single-use authority
+  // consumption admits one actor; every actor reconciles the provider before reaching it.
   try {
     await authorize({
       authority, acquireGrant,
@@ -252,7 +281,7 @@ async function ensureLane({
     throw error;
   }
   try {
-    return settle(path, operationIntent, await lanes.startRepairLane(request));
+    return settle(path, operationIntent, await lanes.startRepairLane(operationIntent.request));
   } catch {
     // The request may have arrived. Preserve the durable intent; the next tick reconciles first.
     fail('LaneStartFailed', 'lane start failed after durable intent; reconciliation is required');
@@ -271,7 +300,7 @@ async function ensureChecklist({
     kind: 'CHECKLIST_UPSERT', threadIdentity, marker, bodyDigest,
     idempotencyKey: sha256({ kind: 'checklist', threadIdentity, bodyDigest }),
     expectedRevision: observation.sourceRevision, observedAt,
-    expiresAt: new Date(Date.parse(observedAt) + 120_000).toISOString(),
+    expiresAt: new Date(Date.parse(observedAt) + OPERATION_LEASE_MS).toISOString(),
   };
   let operationIntent = resumeIntent(path, intent);
   const durable = operationIntent === null ? null : readReceipt(path, operationIntent);
