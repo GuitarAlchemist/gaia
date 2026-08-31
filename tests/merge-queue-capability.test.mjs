@@ -432,6 +432,8 @@ function transport(answers) {
     calls.push(path);
     const answer = answers[path];
     if (!answer) throw new Error(`unexpected capability read: ${path}`);
+    // A transport that rejects rather than answering, which is a different fact from any status.
+    if (answer.throws) throw new Error('transport failure');
     return answer;
   };
   return { read, calls };
@@ -439,6 +441,68 @@ function transport(answers) {
 
 const RULESETS_PATH = `repos/${REPOSITORY}/rulesets`;
 const PROTECTION_PATH = `repos/${REPOSITORY}/branches/${DEFAULT_BRANCH}/protection`;
+const detailPath = (rulesetId) => `repos/${REPOSITORY}/rulesets/${rulesetId}`;
+const UNPROTECTED = { status: 404, body: { message: 'Branch not protected' } };
+
+/**
+ * One repository ruleset exactly as `GET /repos/{owner}/{repo}/rulesets/{id}` returns it.
+ *
+ * The rules and the ref conditions live here and only here. Every fixture that put them in the
+ * listing was describing an endpoint GitHub does not serve.
+ */
+const rulesetDetail = ({
+  id = 4110,
+  name = 'gaia-merge-queue',
+  enforcement = 'active',
+  sourceType = 'Repository',
+  include = ['~DEFAULT_BRANCH'],
+  exclude = [],
+  rules = [{ type: 'merge_queue' }],
+} = {}) => ({
+  id,
+  name,
+  target: 'branch',
+  source_type: sourceType,
+  source: REPOSITORY,
+  enforcement,
+  node_id: `RRS_lACkUmVwb${id}`,
+  conditions: { ref_name: { include, exclude } },
+  rules,
+});
+
+/**
+ * The same ruleset exactly as `GET /repos/{owner}/{repo}/rulesets` returns it: identity, target,
+ * source and enforcement, with no `rules` array and no `conditions` object anywhere in it.
+ */
+const listedRuleset = (detail) => {
+  const { conditions, rules, ...listed } = detail;
+  return listed;
+};
+
+/**
+ * A realistic two-endpoint transport: one listing that carries no rules, and one detail read per
+ * listed ruleset. `detailAnswers` replaces a detail answer by ruleset id, so a test can say
+ * exactly how one detail read fell short without touching the listing.
+ */
+function rulesetsTransport(details, {
+  detailAnswers = {}, complete = true, protection = UNPROTECTED, listing = null,
+} = {}) {
+  const answers = {
+    [RULESETS_PATH]: { status: 200, complete, body: listing ?? details.map(listedRuleset) },
+    [PROTECTION_PATH]: protection,
+  };
+  for (const detail of details) answers[detailPath(detail.id)] = { status: 200, body: detail };
+  for (const [id, answer] of Object.entries(detailAnswers)) answers[detailPath(id)] = answer;
+  return transport(answers);
+}
+
+/** The probe, always over the same repository, so no test spells the identity twice. */
+const probe = (read) => probeMergeQueueCapability({
+  repository: REPOSITORY, repositoryId: REPOSITORY_ID, defaultBranch: DEFAULT_BRANCH,
+  read, observedAt: OBSERVED_AT,
+});
+
+const decideProbed = (artifact) => decideMergeQueueCapability({ artifact, observedAt: OBSERVED_AT });
 
 test('the probe turns a zero-ruleset repository with an unprotected branch into ABSENT', async () => {
   const { read } = transport({
@@ -481,27 +545,12 @@ test('the probe distinguishes 403, rate-limited 403, 404 and 200 from the same t
 });
 
 test('the probe records an unmodelled rule type rather than dropping it', async () => {
-  const { read } = transport({
-    [RULESETS_PATH]: {
-      status: 200,
-      complete: true,
-      body: [{
-        id: 4110,
-        name: 'gaia-merge-queue',
-        enforcement: 'active',
-        source_type: 'Repository',
-        conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } },
-        rules: [{ type: 'merge_queue' }, { type: 'file_path_restriction' }],
-      }],
-    },
-    [PROTECTION_PATH]: { status: 404, body: { message: 'Branch not protected' } },
-  });
-  const artifact = await probeMergeQueueCapability({
-    repository: REPOSITORY, repositoryId: REPOSITORY_ID, defaultBranch: DEFAULT_BRANCH,
-    read, observedAt: OBSERVED_AT,
-  });
+  const { read } = rulesetsTransport([rulesetDetail({
+    rules: [{ type: 'merge_queue' }, { type: 'file_path_restriction' }],
+  })]);
+  const artifact = await probe(read);
   assert.deepEqual(artifact.observation.unknownRuleTypes, ['file_path_restriction']);
-  assert.equal(decideMergeQueueCapability({ artifact, observedAt: OBSERVED_AT }), 'UNKNOWN');
+  assert.equal(decideProbed(artifact), 'UNKNOWN');
 });
 
 test('the probe ignores an organization ruleset, which this repository cannot write', async () => {
@@ -529,25 +578,10 @@ test('the probe ignores an organization ruleset, which this repository cannot wr
 });
 
 test('the probe records a ruleset name it cannot represent as absent rather than as free text', async () => {
-  const { read } = transport({
-    [RULESETS_PATH]: {
-      status: 200,
-      complete: true,
-      body: [{
-        id: 4110,
-        name: 'protect main — see https://example.invalid/policy',
-        enforcement: 'active',
-        source_type: 'Repository',
-        conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } },
-        rules: [{ type: 'merge_queue' }],
-      }],
-    },
-    [PROTECTION_PATH]: { status: 404, body: { message: 'Branch not protected' } },
-  });
-  const artifact = await probeMergeQueueCapability({
-    repository: REPOSITORY, repositoryId: REPOSITORY_ID, defaultBranch: DEFAULT_BRANCH,
-    read, observedAt: OBSERVED_AT,
-  });
+  const { read } = rulesetsTransport([rulesetDetail({
+    name: 'protect main — see https://example.invalid/policy',
+  })]);
+  const artifact = await probe(read);
   assert.equal(artifact.observation.rulesets[0].name, null,
     'a name this schema cannot bound carries no free text into the evidence');
   assert.equal(JSON.stringify(artifact).includes('example.invalid'), false,
@@ -1068,4 +1102,242 @@ test('MRM3: reverting the intent boundary lets a forged rule reach the provider'
   });
   assert.deepEqual(writes[0].rules, [{ type: 'deletion' }],
     'the mutant writes whatever a mutated intent happened to carry, which is the defect');
+});
+
+// ---------------------------------------------------------------------------------------------
+// M26 — the listing carries no rules, so the listing cannot decide the capability.
+//
+// `GET /repos/{owner}/{repo}/rulesets` returns each ruleset's identity, target, source and
+// enforcement. It returns no `rules` array and no `conditions` object. A probe that parses that
+// response for a `merge_queue` rule finds none in *every* repository — including one whose merge
+// queue is configured, active and governing the default branch — and rule 5 then reads a working
+// queue as `ABSENT`. That is the exact false absence this module exists to refuse, arriving
+// through the shape of the response rather than through its status.
+// ---------------------------------------------------------------------------------------------
+
+test('M26: a configured merge queue is AVAILABLE, read from the detail endpoint that carries it', async () => {
+  const detail = rulesetDetail();
+  const { read, calls } = rulesetsTransport([detail]);
+  const artifact = await probe(read);
+
+  assert.equal(
+    JSON.stringify(listedRuleset(detail)).includes('merge_queue'), false,
+    'the listing this fixture serves carries no rules at all, exactly as GitHub’s does',
+  );
+  assert.deepEqual(calls, [RULESETS_PATH, PROTECTION_PATH, detailPath(4110)],
+    'one detail read per listed repository ruleset, at a path derived from the listed id alone');
+  assert.deepEqual(artifact.observation.rulesets, [{
+    rulesetId: '4110',
+    name: 'gaia-merge-queue',
+    enforcement: 'active',
+    targetsDefaultBranch: true,
+    mergeQueueRule: { enabled: true },
+  }]);
+  assert.deepEqual(artifact.observation.unknownRuleTypes, []);
+  assert.equal(decideProbed(artifact), 'AVAILABLE',
+    'a repository whose merge queue is configured must never be reported as having none');
+});
+
+test('M26: NEGATIVE CONTROL — a detail that genuinely carries no merge queue rule is still ABSENT', async () => {
+  const { read } = rulesetsTransport([rulesetDetail({ rules: [] })]);
+  const artifact = await probe(read);
+
+  assert.equal(artifact.observation.rulesetsRead, 'OK');
+  assert.deepEqual(artifact.observation.unknownRuleTypes, []);
+  assert.equal(decideProbed(artifact), 'ABSENT',
+    'reading the detail must establish absence honestly, not replace every answer with UNKNOWN');
+
+  const empty = await probe(rulesetsTransport([]).read);
+  assert.equal(decideProbed(empty), 'ABSENT',
+    'and a repository with no rulesets at all still needs no detail read to decide ABSENT');
+});
+
+test('M26: no detail read that fell short can decide ABSENT', async () => {
+  const cases = [
+    ['a transport that rejected', { throws: true }, 'FAILED', 'UNKNOWN'],
+    ['a permission 403', { status: 403, body: { message: 'Resource not accessible' } },
+      'FORBIDDEN', 'PERMISSION_DENIED'],
+    ['a rate-limited 403',
+      { status: 403, rateLimited: true, body: { message: 'API rate limit exceeded' } },
+      'RATE_LIMITED', 'UNKNOWN'],
+    ['a 404', { status: 404, body: { message: 'Not Found' } }, 'NOT_FOUND', 'UNKNOWN'],
+    ['a 500', { status: 500, body: { message: 'Server Error' } }, 'FAILED', 'UNKNOWN'],
+  ];
+  for (const [why, answer, expectedRead, expectedState] of cases) {
+    const { read } = rulesetsTransport([rulesetDetail()], { detailAnswers: { 4110: answer } });
+    const artifact = await probe(read);
+
+    assert.equal(artifact.observation.rulesetsRead, expectedRead, why);
+    assert.deepEqual(artifact.observation.rulesets, [],
+      `${why}: a read that did not succeed carries no rulesets`);
+    assert.equal(artifact.observation.rulesetDigest, null, why);
+    assert.equal(artifact.observation.rulesetsComplete, false,
+      `${why}: an exhausted listing whose details are unread is not a complete observation`);
+    assert.equal(decideProbed(artifact), expectedState,
+      `${why} is an evidence gap, and an evidence gap is never an absence`);
+  }
+});
+
+test('M26: a partial detail read — one ruleset answered, one not — decides UNKNOWN', async () => {
+  const { read } = rulesetsTransport(
+    [rulesetDetail({ id: 11, name: 'checks', rules: [] }), rulesetDetail({ id: 4110 })],
+    { detailAnswers: { 4110: { status: 500, body: { message: 'Server Error' } } } },
+  );
+  const artifact = await probe(read);
+
+  assert.equal(artifact.observation.rulesetsRead, 'FAILED');
+  assert.deepEqual(artifact.observation.rulesets, [],
+    'the ruleset that did answer is not evidence about the one that did not');
+  assert.equal(decideProbed(artifact), 'UNKNOWN',
+    'a partially read configuration cannot say the merge queue is missing from all of it');
+});
+
+test('M26: a malformed, ambiguous or incomplete detail body decides UNKNOWN', async () => {
+  const { rules, ...ruleless } = rulesetDetail();
+  const { conditions, ...conditionless } = rulesetDetail();
+  const malformed = {
+    'a body that is not an object at all': [],
+    'a body naming another ruleset': rulesetDetail({ id: 9999 }),
+    'a body carrying no rules array': ruleless,
+    'a body whose rules are not an array': { ...rulesetDetail(), rules: { type: 'merge_queue' } },
+    'a body carrying no ref condition': conditionless,
+    'a body whose ref condition is not a pair of arrays':
+      { ...rulesetDetail(), conditions: { ref_name: { include: '~ALL' } } },
+    'a body whose source moved off this repository':
+      rulesetDetail({ sourceType: 'Organization' }),
+  };
+  for (const [why, body] of Object.entries(malformed)) {
+    const { read } = rulesetsTransport([rulesetDetail()], {
+      detailAnswers: { 4110: { status: 200, body } },
+    });
+    const artifact = await probe(read);
+
+    assert.equal(artifact.observation.rulesetsRead, 'OK',
+      `${why}: the transport succeeded, so the read outcome is honest about that`);
+    assert.deepEqual(artifact.observation.rulesets, [],
+      `${why}: a detail this module cannot model is never sealed as a modelled ruleset`);
+    assert.deepEqual(artifact.observation.unknownRuleTypes, ['unreadable_ruleset_detail'],
+      `${why}: the discard is recorded rather than dropped`);
+    assert.equal(decideProbed(artifact), 'UNKNOWN',
+      `${why} is a shape this version cannot read, which is an evidence gap and never an absence`);
+  }
+});
+
+test('M26: a listed ruleset with no usable identity is never addressed and never decides ABSENT', async () => {
+  for (const id of [null, 0, -4110, 1.5, 'main/../../secrets', '4110?x=1', {}]) {
+    const listing = [{ ...listedRuleset(rulesetDetail()), id }];
+    const { read, calls } = rulesetsTransport([], { listing });
+    const artifact = await probe(read);
+
+    assert.deepEqual(calls, [RULESETS_PATH, PROTECTION_PATH],
+      `an id of ${JSON.stringify(id)} is not a path this probe will construct`);
+    assert.deepEqual(artifact.observation.rulesets, []);
+    assert.deepEqual(artifact.observation.unknownRuleTypes, ['unreadable_ruleset_detail']);
+    assert.equal(decideProbed(artifact), 'UNKNOWN',
+      'a ruleset that exists and cannot be read is not a ruleset that does not exist');
+  }
+});
+
+test('M26: a ruleset governed elsewhere costs no detail read, and still decides UNKNOWN', async () => {
+  const { read, calls } = rulesetsTransport([], {
+    listing: [listedRuleset(rulesetDetail({ id: 99, name: 'org-wide', sourceType: 'Organization' }))],
+  });
+  const artifact = await probe(read);
+
+  assert.deepEqual(calls, [RULESETS_PATH, PROTECTION_PATH],
+    'a ruleset this repository cannot administer is discarded before a request is spent on it');
+  assert.deepEqual(artifact.observation.unknownRuleTypes, ['unmodelled_governing_ruleset']);
+  assert.equal(decideProbed(artifact), 'UNKNOWN');
+});
+
+test('M26: the detail reads are bounded, ordered and deterministic', async () => {
+  const details = [
+    rulesetDetail({ id: 4110, name: 'gaia-merge-queue' }),
+    rulesetDetail({ id: 11, name: 'checks', rules: [] }),
+  ];
+  const first = rulesetsTransport(details);
+  const second = rulesetsTransport(details);
+  const left = await probe(first.read);
+  const right = await probe(second.read);
+
+  assert.deepEqual(first.calls, [RULESETS_PATH, PROTECTION_PATH, detailPath(4110), detailPath(11)],
+    'listing order, one read each, and no read for anything that was not listed');
+  assert.deepEqual(first.calls, second.calls, 'the read path is the same on every replay');
+  assert.equal(left.revision, right.revision, 'and so is the sealed revision');
+  assert.equal(
+    left.observation.rulesetDigest, right.observation.rulesetDigest,
+    'and so is the compare-and-swap digest the remediation plan is built against',
+  );
+
+  // 64 is the artifact bound. A listing beyond it cannot be sealed, so spending one network read
+  // per unsealable entry is not boundedness.
+  const oversized = Array.from({ length: 65 }, (unused, index) => rulesetDetail({
+    id: index + 1, name: `ruleset-${index + 1}`,
+  }));
+  const bounded = rulesetsTransport(oversized);
+  await assert.rejects(() => probe(bounded.read), MergeQueueCapabilityError);
+  assert.deepEqual(bounded.calls, [RULESETS_PATH, PROTECTION_PATH],
+    'the bound is applied before the first detail read, not after sixty-five of them');
+});
+
+test('M26: the contract decides the detail read rather than leaving it to a test', () => {
+  const document = readFileSync(join(ROOT, 'docs', 'merge-queue-capability.md'), 'utf8');
+  assert.match(document, /rulesets\/\{ruleset_id\}/u,
+    'a behaviour asserted by a test and decided by no contract is a behaviour nobody agreed to');
+  assert.match(document, /unreadable_ruleset_detail/u);
+});
+
+test('MRM4: reverting the detail read restores the false ABSENT', async () => {
+  const mutant = await importMutant('mq-listing-only', (source) => source.replace(
+    '    ? await readRulesetDetails(read, repository, rulesets.answer.body)',
+    "    ? { outcome: 'OK', entries: rulesets.answer.body, unreadable: false }",
+  ));
+  const { read } = rulesetsTransport([rulesetDetail()]);
+  const artifact = await mutant.probeMergeQueueCapability({
+    repository: REPOSITORY, repositoryId: REPOSITORY_ID, defaultBranch: DEFAULT_BRANCH,
+    read, observedAt: OBSERVED_AT,
+  });
+
+  assert.equal(
+    mutant.decideMergeQueueCapability({ artifact, observedAt: OBSERVED_AT }), 'ABSENT',
+    'the mutant asserts absence about a repository whose merge queue is active, which is the defect',
+  );
+});
+
+test('MRM5: reverting the fail-closed detail outcome restores the false ABSENT', async () => {
+  const mutant = await importMutant('mq-detail-optimism', (source) => source.replace(
+    '      outcome = worseReadOutcome(outcome, detail.outcome);\n      continue;\n',
+    '      continue;\n',
+  ));
+  const { read } = rulesetsTransport([rulesetDetail()], {
+    detailAnswers: { 4110: { status: 403, body: { message: 'Resource not accessible' } } },
+  });
+  const artifact = await mutant.probeMergeQueueCapability({
+    repository: REPOSITORY, repositoryId: REPOSITORY_ID, defaultBranch: DEFAULT_BRANCH,
+    read, observedAt: OBSERVED_AT,
+  });
+
+  assert.equal(
+    mutant.decideMergeQueueCapability({ artifact, observedAt: OBSERVED_AT }), 'ABSENT',
+    'the mutant turns "I was not allowed to read it" into "it is not there", which is the defect',
+  );
+});
+
+test('MRM6: reverting the recorded unreadable detail restores the false ABSENT', async () => {
+  const mutant = await importMutant('mq-detail-silent-discard', (source) => source.replace(
+    "  if (unreadableDetail) unknown.add('unreadable_ruleset_detail');\n", '',
+  ));
+  const { rules, ...ruleless } = rulesetDetail();
+  const { read } = rulesetsTransport([rulesetDetail()], {
+    detailAnswers: { 4110: { status: 200, body: ruleless } },
+  });
+  const artifact = await mutant.probeMergeQueueCapability({
+    repository: REPOSITORY, repositoryId: REPOSITORY_ID, defaultBranch: DEFAULT_BRANCH,
+    read, observedAt: OBSERVED_AT,
+  });
+
+  assert.equal(
+    mutant.decideMergeQueueCapability({ artifact, observedAt: OBSERVED_AT }), 'ABSENT',
+    'the mutant drops a detail it could not read and calls the silence an absence',
+  );
 });

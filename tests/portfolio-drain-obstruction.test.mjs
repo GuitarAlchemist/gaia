@@ -733,3 +733,134 @@ test('the exported outranking states are exactly those that may stand above a ca
   assert.equal(outranked.capability.state, 'ABSENT',
     'and the outranked reading is still carried, so nothing downstream has to guess it was there');
 });
+
+// ---------------------------------------------------------------------------------------------
+// A capability observation is repository-scoped, and so is every item it may classify.
+//
+// `gaia-merge-queue-capability/1` names exactly one repository and one default branch. A drain,
+// by construction, spans a portfolio. Selecting every merge-dependent item in the drain against
+// one repository's reading tells an operator that a pull request in another repository is waiting
+// on a merge queue nobody has looked at — a fabricated finding, and a suppressed real one, from
+// evidence that says nothing about it either way.
+// ---------------------------------------------------------------------------------------------
+
+const REPO_A = 'GuitarAlchemist/gaia';
+const REPO_B = 'GuitarAlchemist/wayfinder';
+
+const capabilityFor = (repository, state = 'ABSENT') => ({
+  state, evidenceRevision: SHA, observationAgeMs: 0, repository, defaultBranch: 'main',
+});
+
+/** Two repositories, each with one pull request whose next transition is a merge. */
+const TWO_REPOSITORIES = () => projection([
+  item('pr-34', 'PUBLISHED', { repository: REPO_A }),
+  item('pr-77', 'PUBLISHED', { repository: REPO_B }),
+], { occupied: 0, available: 4 });
+
+test('P1: a capability reading classifies only the repository it observed', () => {
+  const drainProjection = TWO_REPOSITORIES();
+
+  const obstruction = classifyPortfolioDrainObstruction({
+    drainProjection, ...LONG_WINDOW, mergeQueueCapability: capabilityFor(REPO_A),
+  });
+
+  assert.equal(obstruction.state, 'CAPABILITY_ABSENT');
+  assert.deepEqual(obstruction.affectedItemIds, ['pr-34'],
+    'an observation of one repository is not evidence about a pull request in another');
+  assert.equal(obstruction.affectedCount, 1);
+  assert.deepEqual(
+    obstruction.breakdown.find(({ state }) => state === 'CAPABILITY_ABSENT'),
+    { state: 'CAPABILITY_ABSENT', count: 1 },
+    'and the breakdown counts the bound items rather than every merge-dependent item in the drain',
+  );
+});
+
+test('P1: each repository is classified by its own evidence, and by nobody else’s', () => {
+  const drainProjection = TWO_REPOSITORIES();
+
+  const forA = classifyPortfolioDrainObstruction({
+    drainProjection, ...LONG_WINDOW, mergeQueueCapability: capabilityFor(REPO_A),
+  });
+  const forB = classifyPortfolioDrainObstruction({
+    drainProjection, ...LONG_WINDOW, mergeQueueCapability: capabilityFor(REPO_B),
+  });
+
+  assert.deepEqual(forA.affectedItemIds, ['pr-34']);
+  assert.deepEqual(forB.affectedItemIds, ['pr-77']);
+  assert.notEqual(forA.revision, forB.revision,
+    'two readings about two repositories are two different findings, not one');
+});
+
+test('P1: repo A evidence neither contaminates nor suppresses repo B', () => {
+  // Only repo B has work waiting to merge. Repo A's absent queue obstructs nothing here.
+  const drainProjection = projection([
+    item('pr-77', 'PUBLISHED', { repository: REPO_B }),
+  ], { occupied: 0, available: 4 });
+
+  const withA = classifyPortfolioDrainObstruction({
+    drainProjection, ...LONG_WINDOW, mergeQueueCapability: capabilityFor(REPO_A),
+  });
+  const withoutEvidence = classifyPortfolioDrainObstruction({ drainProjection, ...LONG_WINDOW });
+
+  assert.equal(withA.state, 'AUTHORITY_STARVATION',
+    'repo B keeps exactly the obstruction it reported before repo A evidence existed');
+  assert.deepEqual(withA.affectedItemIds, ['pr-77']);
+  assert.equal(withA.state, withoutEvidence.state,
+    'unrelated evidence changes no answer: it neither invents a finding nor hides one');
+  assert.equal(withA.capability.state, 'ABSENT',
+    'and the reading is still published, so an operator sees the repo A fact without it spreading');
+  assert.equal(
+    withA.breakdown.some(({ state }) => state === 'CAPABILITY_ABSENT'), false,
+    'a capability obstruction over zero bound items is not an obstruction',
+  );
+});
+
+test('P1: an item carrying no repository is bound to no capability reading', () => {
+  const { repository, ...unbound } = item('pr-34', 'PUBLISHED');
+  const drainProjection = projection([unbound], { occupied: 0, available: 4 });
+
+  const obstruction = classifyPortfolioDrainObstruction({
+    drainProjection, ...LONG_WINDOW, mergeQueueCapability: capabilityFor(REPO_A),
+  });
+
+  assert.equal(obstruction.state, 'AUTHORITY_STARVATION',
+    'an item Gaia cannot place in a repository is not an item this reading may speak for');
+  assert.deepEqual(obstruction.affectedItemIds, ['pr-34']);
+});
+
+test('P1: NEGATIVE CONTROL — a same-repository reading still classifies every one of its items', () => {
+  const drainProjection = projection([
+    item('pr-34', 'PUBLISHED', { repository: REPO_A }),
+    item('pr-35', 'AWAITING_MERGE_AUTHORITY', { repository: REPO_A }),
+    item('pr-77', 'PUBLISHED', { repository: REPO_B }),
+  ], { occupied: 0, available: 4 });
+
+  const obstruction = classifyPortfolioDrainObstruction({
+    drainProjection, ...LONG_WINDOW, mergeQueueCapability: capabilityFor(REPO_A),
+  });
+
+  assert.equal(obstruction.state, 'CAPABILITY_ABSENT');
+  assert.deepEqual(obstruction.affectedItemIds, ['pr-34', 'pr-35'],
+    'the binding narrows the selection to one repository; it does not narrow it to one item');
+});
+
+test('MUTATION WITNESS: binding merge-dependent items to the capability repository is load-bearing', async () => {
+  const mutant = await importMutant(
+    'capability-repository-scope',
+    "  const awaitingMerge = capability === null ? [] : live.filter(\n"
+      + "    ({ drainState, repository }) => MERGE_DEPENDENT_STATES.has(drainState)\n"
+      + '      && repository === capability.repository,\n  );',
+    '  const awaitingMerge = live.filter(({ drainState }) => MERGE_DEPENDENT_STATES.has(drainState));',
+  );
+  const input = {
+    drainProjection: TWO_REPOSITORIES(),
+    ...LONG_WINDOW,
+    mergeQueueCapability: capabilityFor(REPO_A),
+  };
+
+  assert.deepEqual(classifyPortfolioDrainObstruction(input).affectedItemIds, ['pr-34']);
+  assert.deepEqual(
+    mutant.classifyPortfolioDrainObstruction(input).affectedItemIds, ['pr-34', 'pr-77'],
+    'reverting the binding restores the defect: one repository’s reading names another’s work',
+  );
+});

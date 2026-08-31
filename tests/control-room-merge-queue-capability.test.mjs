@@ -781,3 +781,49 @@ test('MR7: reverting the binding accepts a capability beside an obstruction that
   assert.equal(mutant.requireControlRoomSnapshot(forged), forged,
     'the mutant accepts an ABSENT capability beside "ask a human for a grant" — the incident restored');
 });
+
+// ---------------------------------------------------------------------------------------------
+// K10 — the binding seam is repository-scoped too.
+//
+// The seam refuses an obstruction that contradicts the published capability. It decided "is there
+// work waiting to merge?" across the whole portfolio, so a capability reading about one repository
+// made a *correct*, repository-bound obstruction about another look like a contradiction, and the
+// snapshot was refused. Two copies of the same question must answer it over the same items.
+// ---------------------------------------------------------------------------------------------
+
+const OTHER_REPOSITORY = 'GuitarAlchemist/wayfinder';
+
+test('K10: a capability for one repository does not refuse another repository’s obstruction', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection(
+      [item('pr-77', 'PUBLISHED', { repository: OTHER_REPOSITORY })],
+      { occupied: 1, available: 3 },
+    ),
+    observedAt: AT,
+    mergeQueueCapability: capability(),
+  });
+
+  assert.equal(snapshot.obstruction.state, 'AUTHORITY_STARVATION',
+    'the other repository keeps the obstruction its own evidence supports');
+  assert.deepEqual(snapshot.obstruction.affectedItemIds, ['pr-77']);
+  assert.equal(snapshot.mergeQueueCapability.state, 'ABSENT',
+    'and the reading about this repository is still published beside it');
+  assert.equal(requireControlRoomSnapshot(snapshot), snapshot,
+    'a published pair that agrees must verify, and here they never disagreed');
+});
+
+test('K10: the capability still binds the items in its own repository', () => {
+  const snapshot = buildControlRoomSnapshot({
+    drainProjection: projection([
+      item('pr-34', 'PUBLISHED', { repository: REPOSITORY }),
+      item('pr-77', 'PUBLISHED', { repository: OTHER_REPOSITORY }),
+    ], { occupied: 2, available: 2 }),
+    observedAt: AT,
+    mergeQueueCapability: capability(),
+  });
+
+  assert.equal(snapshot.obstruction.state, 'CAPABILITY_ABSENT');
+  assert.deepEqual(snapshot.obstruction.affectedItemIds, ['pr-34'],
+    'the incident is still named, and it is named about exactly the repository that was observed');
+  assert.equal(requireControlRoomSnapshot(snapshot), snapshot);
+});
