@@ -48,6 +48,14 @@ performs no effect. After an ambiguous response, the existing delivery seam reco
 operation marker before deciding whether an effect remains outstanding. A retry never establishes
 uniqueness.
 
+A fresh `DRAFT_OPEN` observation is already satisfied work. It cannot reserve capacity and cannot
+announce `START_DRAFT`. It may reach the delivery adoption path only when the first-evidence journal
+already contains an exact matching `INTENT` whose provider response may have been lost.
+
+Checklist replay joins the latest drain claim to a delivery operation by exact repository, item kind,
+and item number. A delivery for another claimed item is not "latest status" for this one: absent an
+exact match, delivery-derived fields remain honestly unknown and no foreign PR evidence is shown.
+
 R0 must deterministically force:
 
 - simultaneous refill attempts;
