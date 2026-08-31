@@ -69,7 +69,8 @@ test('R1 collector builds a COMMENTED P1 observation from actual GraphQL review-
     run: { runId: 'review-44', laneGeneration: 1 },
   });
 
-  assert.equal(calls.length, 2, 'review threads and the complete dispute registry are separate reads');
+  assert.equal(calls.length, 3,
+    'review threads, the complete dispute registry, and the final head confirmation are separate reads');
   assert.deepEqual(calls[0].slice(0, 2), ['api', 'graphql']);
   assert.deepEqual(calls[1].slice(0, 2), ['api', 'graphql']);
   assert.equal(observations.complete, true);
@@ -172,16 +173,22 @@ test('R1 concurrent ticks never duplicate a lane start while the first provider 
       return receipt;
     },
   };
+  let laneAdmissionConsumed = false;
+  const authority = { async consume({ intent }) {
+    if (intent.action !== 'CLAIM_REVIEW_THREAD') return { status: 'AUTHORIZED' };
+    if (laneAdmissionConsumed) return { status: 'REFUSED' };
+    laneAdmissionConsumed = true;
+    return { status: 'AUTHORIZED' };
+  } };
   const tick = () => runPrReviewThreadSupervisorTick({
     directory, repository: 'GuitarAlchemist/gaia', pullRequest: 44,
-    github, lanes, authority: { consume: async () => ({ status: 'AUTHORIZED' }) },
+    github, lanes, authority,
     grant: null, now: () => new Date(AT), synchronizeTelemetry: async () => ({ rowCount: 3 }),
   });
 
   const first = tick();
   await started;
-  const second = await tick();
-  assert.equal(second.results[0].lane.state, 'PENDING');
+  await assert.rejects(tick(), { code: 'AuthorityRefused' });
   assert.equal(starts, 1);
   release();
   await first;

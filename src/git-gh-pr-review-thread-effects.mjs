@@ -37,13 +37,18 @@ const REVIEW_THREADS_QUERY = `query GaiaReviewThreads($owner:String!,$name:Strin
   }
 }`;
 
-const REVIEW_THREAD_COMMENTS_QUERY = `query GaiaReviewThreadComments($threadId:ID!,$cursor:String){
+const REVIEW_THREAD_COMMENTS_QUERY = `query GaiaReviewThreadComments($owner:String!,$name:String!,$number:Int!,$threadId:ID!,$cursor:String){
+  repository(owner:$owner,name:$name){pullRequest(number:$number){number headRefOid}}
   node(id:$threadId){... on PullRequestReviewThread{
     id comments(first:100,after:$cursor){
       totalCount pageInfo{hasNextPage endCursor}
       nodes{id body review{id state submittedAt commit{oid}}}
     }
   }}
+}`;
+
+const REVIEW_THREAD_HEAD_QUERY = `query GaiaReviewThreadHead($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){pullRequest(number:$number){number headRefOid}}
 }`;
 
 const DISPUTE_WINDOW_QUERY = `query GaiaReviewThreadDisputes($owner:String!,$name:String!,$number:Int!,$cursor:String){
@@ -152,7 +157,7 @@ function normalizeThread({ repository: repo, pullRequest, thread, disputed, obse
     id: nodeId(comment.id, 'comment.id'),
     body: typeof comment.body === 'string' ? comment.body : fail('comment.body must be text'),
   }));
-  const review = thread.comments.nodes[0].review;
+  const review = thread.originatingReview ?? thread.comments.nodes[0].review;
   if (!review || !REVIEW_STATES.has(review.state)) fail('GitHub review state is unsupported');
   const reviewedHeadOid = review.commit?.oid;
   if (typeof reviewedHeadOid !== 'string' || !/^[a-f0-9]{40}$/u.test(reviewedHeadOid)) {
@@ -277,13 +282,14 @@ export function createGitGhPrReviewThreadEffects({
     positiveInteger(number, 'pullRequest');
     instant(observedAt, 'observedAt');
     const boundedRun = requireRun(runBinding);
-    const completeThreadComments = async (thread) => {
+    const completeThreadComments = async (thread, initialPullRequest) => {
       const first = thread.comments;
       if (!first || !Array.isArray(first.nodes)
           || typeof first.pageInfo?.hasNextPage !== 'boolean'
           || !Number.isSafeInteger(first.totalCount) || first.totalCount < first.nodes.length) {
         typedFail('NestedPaginationInvalid', 'GitHub returned no closed nested comment page');
       }
+      const originatingReview = first.nodes[0]?.review;
       const byId = new Map();
       const add = (row) => {
         const id = nodeId(row?.id, 'comment.id');
@@ -303,14 +309,17 @@ export function createGitGhPrReviewThreadEffects({
         let response;
         try {
           response = await invoke(graphqlArgs(REVIEW_THREAD_COMMENTS_QUERY, {
-            threadId: thread.id, cursor,
+            owner, name, number, threadId: thread.id, cursor,
           }), { signal });
         } catch {
           typedFail('NestedPaginationFailed', 'GitHub nested comment pagination failed');
         }
         const node = response?.data?.node;
+        const pagePullRequest = response?.data?.repository?.pullRequest;
         const comments = node?.comments;
-        if (node?.id !== thread.id || !comments || !Array.isArray(comments.nodes)
+        if (pagePullRequest?.number !== initialPullRequest.number
+            || pagePullRequest?.headRefOid !== initialPullRequest.headRefOid
+            || node?.id !== thread.id || !comments || !Array.isArray(comments.nodes)
             || comments.totalCount !== first.totalCount
             || typeof comments.pageInfo?.hasNextPage !== 'boolean') {
           typedFail('NestedPaginationIdentityMismatch', 'nested page changed thread or count identity');
@@ -324,10 +333,11 @@ export function createGitGhPrReviewThreadEffects({
       }
       return {
         ...thread,
+        originatingReview,
         comments: {
           totalCount: first.totalCount,
           pageInfo: { hasNextPage: false, endCursor: null },
-          nodes: [...byId.values()].sort((left, right) => left.id.localeCompare(right.id, 'en')),
+          nodes: [...byId.values()],
         },
       };
     };
@@ -348,7 +358,9 @@ export function createGitGhPrReviewThreadEffects({
       const { hasNextPage, endCursor } = current.reviewThreads.pageInfo;
       if (!hasNextPage) {
         const completedNodes = [];
-        for (const thread of nodes) completedNodes.push(await completeThreadComments(thread));
+        for (const thread of nodes) {
+          completedNodes.push(await completeThreadComments(thread, pullRequest));
+        }
         nodes.splice(0, nodes.length, ...completedNodes);
         const disputeThreads = nodes.map((thread) => ({
           id: thread.id,
@@ -378,6 +390,14 @@ export function createGitGhPrReviewThreadEffects({
         const providerDisputes = disputeComplete
           ? parseDisputeWindow(disputeComments, disputeThreads)
           : new Map(disputeThreads.map(({ id }) => [id, 'UNKNOWN']));
+        const freshResponse = await invoke(graphqlArgs(REVIEW_THREAD_HEAD_QUERY, {
+          owner, name, number,
+        }), { signal });
+        const freshPullRequest = freshResponse?.data?.repository?.pullRequest;
+        if (freshPullRequest?.number !== pullRequest.number
+            || freshPullRequest?.headRefOid !== pullRequest.headRefOid) {
+          typedFail('CollectionHeadChanged', 'pull-request head changed during review-thread collection');
+        }
         const observations = [];
         for (const thread of nodes) {
           const disputeSourceRevision = disputeRevision({

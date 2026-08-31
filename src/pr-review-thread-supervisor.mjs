@@ -122,6 +122,16 @@ function readIntent(path) {
   return JSON.parse(readFileSync(intentPath(path), 'utf8'));
 }
 
+function resumeIntent(path, candidate) {
+  const existing = readIntent(path);
+  if (existing === null) return null;
+  const rebound = { ...candidate, observedAt: existing.observedAt, expiresAt: existing.expiresAt };
+  if (JSON.stringify(existing) !== JSON.stringify(rebound)) {
+    fail('OperationIntentCorrupt', 'operation intent does not bind its exact stable identity');
+  }
+  return existing;
+}
+
 function reserve(path, intent) {
   let descriptor;
   try {
@@ -200,35 +210,36 @@ async function ensureLane({
     observedAt,
     expiresAt: new Date(Date.parse(observedAt) + 120_000).toISOString(),
   };
-  const durable = readReceipt(path, intent);
+  let operationIntent = resumeIntent(path, intent);
+  const durable = operationIntent === null ? null : readReceipt(path, operationIntent);
   if (durable) return durable;
   const found = await lanes.findRepairLane(request);
   if (found) {
-    if (!readIntent(path)) reserve(path, intent);
-    return settle(path, intent, found);
-  }
-  if (!reserve(path, intent)) {
-    const reconciled = await lanes.findRepairLane(request);
-    if (reconciled) return settle(path, intent, reconciled);
-    const existing = readIntent(path);
-    if (!existing || existing.schema !== intent.schema
-        || existing.operationIdentity !== intent.operationIdentity) {
-      fail('OperationIntentCorrupt', 'lane operation intent is absent or corrupt');
+    if (operationIntent === null) {
+      if (reserve(path, intent)) operationIntent = intent;
+      else operationIntent = resumeIntent(path, intent);
     }
-    if (Date.parse(observedAt) >= Date.parse(existing.expiresAt)) {
+    return settle(path, operationIntent, found);
+  }
+  if (operationIntent === null) {
+    if (reserve(path, intent)) operationIntent = intent;
+    else operationIntent = resumeIntent(path, intent);
+  } else {
+    const reconciled = await lanes.findRepairLane(request);
+    if (reconciled) return settle(path, operationIntent, reconciled);
+    if (Date.parse(observedAt) >= Date.parse(operationIntent.expiresAt)) {
       fail('LaneStartUncertain', 'lane start remains ambiguous after its bounded lease');
     }
-    // A concurrent owner may still be inside the provider call. The durable intent is already
-    // the linearization point, so this observer performs no effect and reports pending rather
-    // than either failing the whole tick or issuing a second start.
-    return Object.freeze({ state: 'PENDING', idempotencyKey });
+    // A prior tick may have stopped only because its exact grant was not present. Re-enter the
+    // same authorization/effect path with the same operation identity. The single-use authority
+    // consumption admits one actor; every actor reconciles the provider before reaching it.
   }
   try {
     await authorize({
       authority, acquireGrant,
       intent: authorityIntent({
         action: 'CLAIM_REVIEW_THREAD', observation,
-        intentRevision: intent.operationIdentity,
+        intentRevision: operationIntent.operationIdentity,
       }),
     });
   } catch (error) {
@@ -238,7 +249,7 @@ async function ensureLane({
     throw error;
   }
   try {
-    return settle(path, intent, await lanes.startRepairLane(request));
+    return settle(path, operationIntent, await lanes.startRepairLane(request));
   } catch {
     // The request may have arrived. Preserve the durable intent; the next tick reconciles first.
     fail('LaneStartFailed', 'lane start failed after durable intent; reconciliation is required');
@@ -259,25 +270,24 @@ async function ensureChecklist({
     expectedRevision: observation.sourceRevision, observedAt,
     expiresAt: new Date(Date.parse(observedAt) + 120_000).toISOString(),
   };
-  const durable = readReceipt(path, intent);
+  let operationIntent = resumeIntent(path, intent);
+  const durable = operationIntent === null ? null : readReceipt(path, operationIntent);
   if (durable) return durable;
-  const found = await github.findChecklist({
+  let found = await github.findChecklist({
     repository: observation.repository, pullRequest: observation.pullRequest.number, marker,
   });
-  if (!reserve(path, intent)) {
+  if (operationIntent === null) {
+    if (reserve(path, intent)) operationIntent = intent;
+    else operationIntent = resumeIntent(path, intent);
+  } else {
     const reconciled = await github.findChecklist({
       repository: observation.repository, pullRequest: observation.pullRequest.number, marker,
     });
-    if (reconciled?.body === body) return settle(path, intent, reconciled);
-    const existing = readIntent(path);
-    if (!existing || existing.schema !== intent.schema
-        || existing.operationIdentity !== intent.operationIdentity) {
-      fail('OperationIntentCorrupt', 'checklist operation intent is absent or corrupt');
-    }
-    if (Date.parse(observedAt) >= Date.parse(existing.expiresAt)) {
+    if (reconciled?.body === body) return settle(path, operationIntent, reconciled);
+    if (Date.parse(observedAt) >= Date.parse(operationIntent.expiresAt)) {
       fail('ChecklistUncertain', 'checklist upsert remains ambiguous after its bounded lease');
     }
-    return Object.freeze({ state: 'PENDING', marker });
+    found = reconciled ?? found;
   }
   if (found) {
     if (found.body === body) return settle(path, intent, found);
@@ -286,7 +296,7 @@ async function ensureChecklist({
         authority, acquireGrant,
         intent: authorityIntent({
           action: 'UPSERT_REVIEW_THREAD_CHECKLIST', observation,
-          intentRevision: intent.operationIdentity,
+          intentRevision: operationIntent.operationIdentity,
         }),
       });
     } catch (error) {
@@ -297,14 +307,14 @@ async function ensureChecklist({
       repository: observation.repository, pullRequest: observation.pullRequest.number,
       commentId: found.id, marker, body,
     });
-    return settle(path, intent, updated ?? found);
+    return settle(path, operationIntent, updated ?? found);
   }
   try {
     await authorize({
       authority, acquireGrant,
       intent: authorityIntent({
         action: 'UPSERT_REVIEW_THREAD_CHECKLIST', observation,
-        intentRevision: intent.operationIdentity,
+        intentRevision: operationIntent.operationIdentity,
       }),
     });
   } catch (error) {
@@ -312,7 +322,7 @@ async function ensureChecklist({
     throw error;
   }
   try {
-    return settle(path, intent, await github.createChecklist({
+    return settle(path, operationIntent, await github.createChecklist({
       repository: observation.repository, pullRequest: observation.pullRequest.number, marker, body,
     }));
   } catch {

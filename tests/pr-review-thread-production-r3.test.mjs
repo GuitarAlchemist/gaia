@@ -461,7 +461,10 @@ test('R3 MECHANISM REVERT: removing intent-before-effect starts a lane without d
   const sourcePath = new URL('../src/pr-review-thread-supervisor.mjs', import.meta.url);
   const mutantPath = new URL('../src/.r3-intent-before-effect-mutant.mjs', import.meta.url);
   const source = readFileSync(sourcePath, 'utf8');
-  const mutantSource = source.replace('if (!reserve(path, intent)) {', 'if (false) {');
+  const mutantSource = source.replace(
+    'if (reserve(path, intent)) operationIntent = intent;',
+    'if (true) operationIntent = intent;',
+  );
   assert.notEqual(mutantSource, source);
   writeFileSync(mutantPath, mutantSource);
   try {
@@ -484,7 +487,7 @@ test('R3 MECHANISM REVERT: removing intent-before-effect starts a lane without d
       async createChecklist({ body }) { return { id: 'IC_r3', body }; },
       async updateChecklist({ body }) { return { id: 'IC_r3', body }; },
     };
-    await mutant.runPrReviewThreadSupervisorTick({
+    await assert.rejects(mutant.runPrReviewThreadSupervisorTick({
       directory, repository: 'GuitarAlchemist/gaia', pullRequest: 44, github,
       lanes: {
         async findRepairLane() { return null; },
@@ -498,7 +501,7 @@ test('R3 MECHANISM REVERT: removing intent-before-effect starts a lane without d
       },
       authority: { async consume() { return { status: 'AUTHORIZED' }; } }, grant: null,
       synchronizeTelemetry: async () => ({ rowCount: 0 }), now: () => new Date(OBSERVED),
-    });
+    }), { code: 'LaneStartFailed' });
     assert.equal(started, 1);
   } finally {
     rmSync(mutantPath, { force: true });

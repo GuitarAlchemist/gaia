@@ -32,10 +32,13 @@ test('R4 fully paginates more than 100 nested comments and converges duplicate p
       const query = String(args.find((entry) => entry.startsWith('query=')) ?? '');
       if (query.includes('GaiaReviewThreadComments')) {
         nestedCalls += 1;
-        return { data: { node: { id: 'PRRT_r4', comments: {
+        return { data: {
+          repository: { pullRequest: { number: 44, headRefOid: HEAD } },
+          node: { id: 'PRRT_r4', comments: {
           totalCount: 101, pageInfo: { hasNextPage: false, endCursor: null },
           nodes: [comment(99), comment(100)],
-        } } } };
+        } },
+        } };
       }
       if (query.includes('GaiaReviewThreadDisputes')) {
         return { data: { repository: { pullRequest: { comments: {
