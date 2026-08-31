@@ -10,7 +10,5 @@ const pending = () => {
 
 export const sealEngineeringPumpObservation = pending;
 export const runEngineeringPumpSupervisorTick = pending;
-export const readEngineeringPumpJournal = pending;
 export const projectEngineeringPumpChecklist = pending;
 export const projectEngineeringPumpTransitions = pending;
-

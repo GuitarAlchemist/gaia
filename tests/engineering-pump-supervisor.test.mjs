@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,11 +10,13 @@ import {
   ENGINEERING_PUMP_OBSERVATION_SCHEMA,
   projectEngineeringPumpChecklist,
   projectEngineeringPumpTransitions,
-  readEngineeringPumpJournal,
   runEngineeringPumpSupervisorTick,
   sealEngineeringPumpObservation,
 } from '../src/engineering-pump-supervisor.mjs';
 import { synchronizeEngineeringPumpDuckDb } from '../src/duckdb-engineering-pump-supervisor.mjs';
+import { readFirstEvidenceLedger } from '../src/first-evidence-draft-pr-delivery.mjs';
+import { FIRST_EVIDENCE_OBSERVATION_SCHEMA } from '../src/first-evidence-draft-pr.mjs';
+import { readPortfolioDrainLedger } from '../src/portfolio-drain-ledger.mjs';
 
 const AT = '2026-08-31T18:00:00.000Z';
 const LATER = '2026-08-31T18:03:00.000Z';
@@ -22,254 +25,324 @@ const SOURCE = 'b'.repeat(64);
 const SUBJECT = 'c'.repeat(64);
 const OWNER_A = '1'.repeat(32);
 const OWNER_B = '2'.repeat(32);
+const BASE = '0'.repeat(40);
 
 const scratch = () => mkdtempSync(join(tmpdir(), 'gaia-engineering-pump-r0-'));
+const canonicalJson = (value) => {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(
+      (key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`,
+    ).join(',')}}`;
+  }
+  return JSON.stringify(value);
+};
+const sha256 = (value) => createHash('sha256').update(canonicalJson(value)).digest('hex');
 
-function observation(overrides = {}) {
-  const body = {
+function portfolio(items) {
+  const body = { schema: 'gaia-github-portfolio/1', policyRevision: 'policy-a', workItems: items };
+  return { ...body, revision: sha256(body) };
+}
+
+function item(number, overrides = {}) {
+  return {
+    repository: 'GuitarAlchemist/gaia', itemKind: 'ISSUE', itemId: `issue-${number}`,
+    itemNumber: number, title: `Deliver pump slice ${number}`, state: 'READY', updatedAt: AT,
+    ...overrides,
+  };
+}
+
+function draftObservation(number, subjectRevision = SUBJECT, overrides = {}) {
+  const head = String(number).padStart(40, '0');
+  return {
+    schema: FIRST_EVIDENCE_OBSERVATION_SCHEMA,
+    observedAt: AT,
+    repository: 'GuitarAlchemist/gaia',
+    task: { kind: 'ISSUE', number },
+    baseBranch: 'main', baseOid: BASE, headBranch: 'codex/shared-pump-branch',
+    headBranchGeneration: 1,
+    run: { runId: `pump-${number}`, laneGeneration: 1 },
+    sourceRevision: subjectRevision,
+    claim: 'CLAIMED',
+    evidence: {
+      headOid: head, baseOid: BASE, committedAt: AT,
+      durability: 'COMMITTED', commitsAheadOfBase: 1,
+    },
+    drafts: [],
+    ...overrides,
+  };
+}
+
+function observation({ items = [item(40)], subjects, capacity, ...overrides } = {}) {
+  return sealEngineeringPumpObservation({
     schema: ENGINEERING_PUMP_OBSERVATION_SCHEMA,
     observedAt: AT,
     repository: 'GuitarAlchemist/gaia',
     policyRevision: POLICY,
     sourceRevision: SOURCE,
-    capacity: { writerSlots: 2, providerSlots: 2, ciSlots: 2 },
-    readyItems: [{
-      readyItemId: 'issue-40', subjectRevision: SUBJECT,
-      draftState: 'NONE', writerState: 'NONE',
-    }],
+    capacity: capacity ?? { writerSlots: 1, providerSlots: 1, ciSlots: 1 },
+    portfolio: portfolio(items),
+    subjects: subjects ?? items.map(({ itemId, itemNumber }) => ({
+      readyItemId: itemId,
+      subjectRevision: SUBJECT,
+      draftObservation: draftObservation(itemNumber),
+    })),
     ...overrides,
-  };
-  return sealEngineeringPumpObservation(body);
+  });
 }
 
 const draft = (operationIdentity, number = 45) => ({
-  number,
-  url: `https://github.com/GuitarAlchemist/gaia/pull/${number}`,
-  state: 'OPEN',
-  isDraft: true,
-  operationIdentity,
+  number, url: `https://github.com/GuitarAlchemist/gaia/pull/${number}`,
+  headOid: '0000000000000000000000000000000000000040', baseBranch: 'main',
+  state: 'OPEN', isDraft: true, operationIdentity,
 });
 
-function executor({ reconcile = async () => null, execute } = {}) {
+function effects({ found = async () => [], open } = {}) {
   const calls = [];
   return {
     calls,
-    async reconcile(intent) {
-      calls.push(['reconcile', intent]);
-      return reconcile(intent);
+    async findDraftPullRequest(request) {
+      calls.push(['findDraftPullRequest', request]);
+      return found(request);
     },
-    async execute(intent) {
-      calls.push(['execute', intent]);
-      return (execute ?? (async (value) => draft(value.operationIdentity)))(intent);
+    async openDraftPullRequest(request) {
+      calls.push(['openDraftPullRequest', request]);
+      return (open ?? (async (value) => draft(value.operationIdentity)))(request);
     },
   };
 }
 
-const tick = (directory, supplied = {}) => runEngineeringPumpSupervisorTick({
-  directory,
-  observation: supplied.observation ?? observation(),
-  executor: supplied.executor ?? executor(),
-  owner: supplied.owner ?? OWNER_A,
-  now: () => new Date(supplied.now ?? AT),
-  leaseMs: supplied.leaseMs ?? 120_000,
-});
+function authority(result = { status: 'AUTHORIZED', grantId: 'grant-r0' }) {
+  const calls = [];
+  return {
+    calls,
+    async consume(request) {
+      calls.push(request);
+      if (result instanceof Error) throw result;
+      return result;
+    },
+  };
+}
 
-test('R0 public seam: a ready item yields one evidence-bound START_DRAFT action', async () => {
+async function tick(directory, supplied = {}) {
+  return runEngineeringPumpSupervisorTick({
+    directory,
+    observation: supplied.observation ?? observation(),
+    grant: supplied.grant ?? { grantId: 'grant-r0' },
+    authority: supplied.authority ?? authority(),
+    effects: supplied.effects ?? effects(),
+    owner: supplied.owner ?? OWNER_A,
+    now: () => new Date(supplied.now ?? AT),
+    leaseMs: supplied.leaseMs ?? 120_000,
+  });
+}
+
+test('R0 public seam: one drain claim delegates START_DRAFT to the existing delivery machine', async () => {
   const directory = scratch();
   const result = await tick(directory);
   assert.equal(result.gate.state, 'READY');
   assert.equal(result.gate.nextAction.kind, 'START_DRAFT');
   assert.equal(result.gate.nextAction.readyItemId, 'issue-40');
   assert.equal(result.delivery.outcome, 'CREATED');
-  assert.equal(result.gate.observationRevision, observation().observationRevision);
-  assert.equal(result.checklist.origin, 'GAIA_PUMP');
-  assert.equal(result.checklist.currentStep, 'DRAFT_OPEN');
-  assert.equal(result.checklist.next, 'REVIEW');
-  assert.deepEqual(result.checklist.steps.map(({ done }) => done), [true, true, true]);
+  assert.deepEqual(readPortfolioDrainLedger({ directory }).receipts.map((x) => x.event), ['CLAIMED']);
+  assert.deepEqual(readFirstEvidenceLedger({ directory }).transitions.map((x) => x.transition),
+    ['INTENT', 'CREATED']);
+  assert.equal(result.checklist.origin, 'GAIA PUMP');
+  assert.equal(result.checklist.currentGate, 'DRAFT_OPEN');
 });
 
-test('R0 simultaneous refill: exclusive intent admits one actor and no second effect', async () => {
+test('R0 simultaneous refill has one durable target/capacity reservation and one effect', async () => {
   const directory = scratch();
   let release;
-  const barrier = new Promise((resolve) => { release = resolve; });
+  const blocked = new Promise((resolve) => { release = resolve; });
   let reached;
   const firstReached = new Promise((resolve) => { reached = resolve; });
-  let creates = 0;
-  const firstExecutor = executor({
-    reconcile: async () => { reached(); await barrier; return null; },
-    execute: async (intent) => { creates += 1; return draft(intent.operationIdentity); },
+  let opens = 0;
+  const firstAuthority = authority();
+  firstAuthority.consume = async (request) => {
+    firstAuthority.calls.push(request); reached(); await blocked;
+    return { status: 'AUTHORIZED', grantId: 'grant-r0' };
+  };
+  const first = tick(directory, {
+    authority: firstAuthority,
+    effects: effects({ open: async (intent) => { opens += 1; return draft(intent.operationIdentity); } }),
   });
-  const secondExecutor = executor({
-    execute: async (intent) => { creates += 1; return draft(intent.operationIdentity, 46); },
-  });
-  const first = tick(directory, { executor: firstExecutor, owner: OWNER_A });
   await firstReached;
-  await assert.rejects(
-    tick(directory, { executor: secondExecutor, owner: OWNER_B }),
-    (error) => error.code === 'PumpInFlight',
-  );
+  await assert.rejects(tick(directory, { owner: OWNER_B }),
+    (error) => error.code === 'DeliveryInFlight');
   release();
   await first;
-  assert.equal(creates, 1);
-  assert.deepEqual(readEngineeringPumpJournal({ directory }).transitions.map((x) => x.transition),
-    ['INTENT', 'CREATED']);
+  assert.equal(opens, 1);
+  assert.deepEqual(readPortfolioDrainLedger({ directory }).receipts.map((x) => x.itemId), ['issue-40']);
 });
 
-test('R0 duplicate, delayed and replayed observations converge to one terminal receipt', async () => {
+test('R0 capacity=1 never reserves a second item on the same repository and branch', async () => {
   const directory = scratch();
-  const effects = executor();
-  const first = await tick(directory, { executor: effects });
-  const replay = await tick(directory, { executor: effects, owner: OWNER_B });
-  assert.equal(replay.delivery.operationIdentity, first.delivery.operationIdentity);
-  assert.equal(replay.delivery.outcome, 'CREATED');
-  assert.equal(effects.calls.filter(([name]) => name === 'execute').length, 1);
-  assert.deepEqual(readEngineeringPumpJournal({ directory }).transitions.map((x) => x.transition),
-    ['INTENT', 'CREATED']);
+  const observed = observation({ items: [item(40), item(41)] });
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let reached;
+  const firstReached = new Promise((resolve) => { reached = resolve; });
+  const slowAuthority = authority();
+  slowAuthority.consume = async (request) => {
+    slowAuthority.calls.push(request); reached(); await blocked;
+    return { status: 'AUTHORIZED', grantId: 'grant-r0' };
+  };
+  const first = tick(directory, { observation: observed, authority: slowAuthority });
+  await firstReached;
+  await assert.rejects(tick(directory, { observation: observed, owner: OWNER_B }),
+    (error) => error.code === 'DeliveryInFlight');
+  release(); await first;
+  const claims = readPortfolioDrainLedger({ directory }).receipts;
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0].itemId, 'issue-40');
 });
 
-test('R0 lost GitHub response is reconciled by stable marker before any retry', async () => {
+test('R0 duplicate, delayed and replayed observations converge through the existing receipt', async () => {
+  const directory = scratch();
+  const port = effects();
+  const first = await tick(directory, { effects: port });
+  const replay = await tick(directory, { effects: port, owner: OWNER_B });
+  assert.equal(replay.delivery.operationIdentity, first.delivery.operationIdentity);
+  assert.equal(replay.delivery.outcome, 'REUSED');
+  assert.equal(port.calls.filter(([name]) => name === 'openDraftPullRequest').length, 1);
+});
+
+test('R0 lost GitHub response is reconciled by stable provider marker before retry', async () => {
   const directory = scratch();
   let remote = null;
-  let executes = 0;
-  const lost = executor({
-    execute: async (intent) => {
-      executes += 1;
-      remote = draft(intent.operationIdentity);
-      throw Object.assign(new Error('response lost'), { code: 'ResponseLost' });
-    },
-  });
-  await assert.rejects(tick(directory, { executor: lost }), /response lost/u);
-  const recovery = executor({
-    reconcile: async () => remote,
-    execute: async () => { executes += 1; throw new Error('blind retry'); },
-  });
-  const adopted = await tick(directory, { executor: recovery, owner: OWNER_B, now: LATER });
-  assert.equal(adopted.delivery.outcome, 'RECONCILED');
-  assert.equal(executes, 1);
-  assert.deepEqual(recovery.calls.map(([name]) => name), ['reconcile']);
-});
-
-test('R0 crash after intent restarts with empty memory, reconciles, then executes once', async () => {
-  const directory = scratch();
-  const crashing = executor({ reconcile: async () => {
-    throw Object.assign(new Error('process crashed'), { code: 'CrashAfterIntent' });
+  let opens = 0;
+  const lost = effects({ open: async (intent) => {
+    opens += 1; remote = draft(intent.operationIdentity); throw new Error('response lost');
   } });
-  await assert.rejects(tick(directory, { executor: crashing }), /process crashed/u);
-  assert.deepEqual(readEngineeringPumpJournal({ directory }).transitions.map((x) => x.transition),
-    ['INTENT']);
-  let creates = 0;
-  const restarted = executor({
-    reconcile: async () => null,
-    execute: async (intent) => { creates += 1; return draft(intent.operationIdentity); },
+  await assert.rejects(tick(directory, { effects: lost }), (error) => error.code === 'EffectFailed');
+  const recovery = effects({
+    found: async () => [remote],
+    open: async () => { opens += 1; throw new Error('blind retry'); },
   });
-  const result = await tick(directory, { executor: restarted, owner: OWNER_B, now: LATER });
-  assert.equal(result.delivery.outcome, 'CREATED');
-  assert.equal(creates, 1);
-  assert.deepEqual(restarted.calls.map(([name]) => name), ['reconcile', 'execute']);
+  const adopted = await tick(directory, { effects: recovery, owner: OWNER_B, now: LATER });
+  assert.equal(adopted.delivery.outcome, 'REUSED');
+  assert.equal(opens, 1);
+  assert.deepEqual(recovery.calls.map(([name]) => name), ['findDraftPullRequest']);
 });
 
-test('R0 stale, future and corrupt evidence fail closed before journal or effect', async () => {
+test('R0 restart after grant consumption fails closed without a duplicate effect', async () => {
+  const directory = scratch();
+  let consumed = 0;
+  const consuming = authority();
+  consuming.consume = async (request) => {
+    consuming.calls.push(request); consumed += 1;
+    return { status: 'AUTHORIZED', grantId: 'grant-r0' };
+  };
+  await assert.rejects(tick(directory, {
+    authority: consuming,
+    effects: effects({ open: async () => { throw new Error('crash after consume'); } }),
+  }), (error) => error.code === 'EffectFailed');
+  const used = authority(Object.assign(new Error('grant consumed'), { code: 'GrantConsumed' }));
+  const retryPort = effects({ found: async () => [] });
+  await assert.rejects(tick(directory, {
+    authority: used, effects: retryPort, owner: OWNER_B, now: LATER,
+  }), (error) => error.code === 'AuthorityRefused');
+  assert.equal(consumed, 1);
+  assert.equal(retryPort.calls.filter(([name]) => name === 'openDraftPullRequest').length, 0);
+});
+
+test('R0 stale, future, corrupt and mismatched observations refuse before durable claims', async () => {
+  const valid = observation();
   for (const [label, supplied, code] of [
     ['stale', observation({ observedAt: '2026-08-31T17:00:00.000Z' }), 'ObservationStale'],
     ['future', observation({ observedAt: '2026-08-31T18:01:00.000Z' }), 'ObservationFromFuture'],
-    ['corrupt', { ...observation(), sourceRevision: 'd'.repeat(64) }, 'ObservationRevisionMismatch'],
+    ['corrupt', { ...valid, sourceRevision: 'd'.repeat(64) }, 'ObservationRevisionMismatch'],
+    ['mismatch', observation({ subjects: [{
+      readyItemId: 'issue-99', subjectRevision: SUBJECT, draftObservation: draftObservation(40),
+    }] }), 'ObservationSubjectMismatch'],
   ]) {
     const directory = scratch();
-    const effects = executor();
-    await assert.rejects(tick(directory, { observation: supplied, executor: effects }),
+    await assert.rejects(tick(directory, { observation: supplied }),
       (error) => error.code === code, label);
-    assert.equal(effects.calls.length, 0, label);
-    assert.equal(readEngineeringPumpJournal({ directory }).count, 0, label);
+    assert.equal(readPortfolioDrainLedger({ directory }).count, 0, label);
+    assert.equal(readFirstEvidenceLedger({ directory }).count, 0, label);
+  }
+});
+
+test('R0 stale, mismatched and consumed grants are refused by the existing authority seam', async () => {
+  for (const code of ['GrantExpired', 'GrantScopeMismatch', 'GrantConsumed']) {
+    const directory = scratch();
+    const rejected = authority(Object.assign(new Error(code), { code }));
+    await assert.rejects(tick(directory, { authority: rejected }),
+      (error) => error.code === 'AuthorityRefused');
+    assert.equal(rejected.calls[0].intent.action, 'OPEN_DRAFT_PULL_REQUEST');
+    assert.equal(readFirstEvidenceLedger({ directory }).transitions.at(-1).transition, 'REFUSED');
   }
 });
 
 test('R0 provider and CI saturation are explicit effect-free gates', async () => {
   for (const [capacity, state] of [
-    [{ writerSlots: 2, providerSlots: 0, ciSlots: 2 }, 'PROVIDER_SATURATED'],
-    [{ writerSlots: 2, providerSlots: 2, ciSlots: 0 }, 'CI_SATURATED'],
-    [{ writerSlots: 0, providerSlots: 2, ciSlots: 2 }, 'CAPACITY_FULL'],
+    [{ writerSlots: 1, providerSlots: 0, ciSlots: 1 }, 'PROVIDER_SATURATED'],
+    [{ writerSlots: 1, providerSlots: 1, ciSlots: 0 }, 'CI_SATURATED'],
+    [{ writerSlots: 0, providerSlots: 1, ciSlots: 1 }, 'CAPACITY_FULL'],
   ]) {
-    const effects = executor();
-    const result = await tick(scratch(), { observation: observation({ capacity }), executor: effects });
+    const directory = scratch();
+    const result = await tick(directory, { observation: observation({ capacity }) });
     assert.equal(result.gate.state, state);
     assert.equal(result.gate.nextAction.kind, 'NONE');
-    assert.equal(result.delivery, null);
-    assert.equal(effects.calls.length, 0);
+    assert.equal(readPortfolioDrainLedger({ directory }).count, 0);
   }
 });
 
-test('R0 EXPECTED_NONE is healthy idle and conflicting ownership is a named no-op', async () => {
-  const empty = await tick(scratch(), { observation: observation({ readyItems: [] }) });
-  assert.equal(empty.gate.state, 'EXPECTED_NONE');
-  assert.equal(empty.gate.nextAction.kind, 'NONE');
-  const owned = await tick(scratch(), { observation: observation({ readyItems: [{
-    readyItemId: 'issue-40', subjectRevision: SUBJECT,
-    draftState: 'NONE', writerState: 'OWNED',
-  }] }) });
-  assert.equal(owned.gate.state, 'WRITER_OWNED');
-  assert.equal(owned.gate.nextAction.kind, 'NONE');
+test('R0 EXPECTED_NONE is healthy idle', async () => {
+  const result = await tick(scratch(), { observation: observation({ items: [] }) });
+  assert.equal(result.gate.state, 'EXPECTED_NONE');
+  assert.equal(result.gate.nextAction.kind, 'NONE');
+  assert.equal(result.delivery, null);
 });
 
-test('R0 deterministic replay rebuilds the same transitions and checklist bytes', async () => {
+test('R0 checklist is bounded, self-sufficient, and has one managed status comment', async () => {
   const directory = scratch();
   await tick(directory);
-  assert.equal(
-    JSON.stringify(projectEngineeringPumpTransitions({ directory })),
-    JSON.stringify(projectEngineeringPumpTransitions({ directory })),
-  );
-  assert.equal(
-    JSON.stringify(projectEngineeringPumpChecklist({ directory })),
-    JSON.stringify(projectEngineeringPumpChecklist({ directory })),
-  );
+  const projected = projectEngineeringPumpChecklist({ directory });
+  assert.deepEqual(Object.keys(projected.issueBody), [
+    'outcome', 'owner', 'reportsTo', 'scope', 'exclusions', 'plan', 'deliverables',
+    'doneWhen', 'authorityBoundary', 'evidenceLinks',
+  ]);
+  assert.match(projected.statusComment, /<!-- gaia:pump-status:/u);
+  assert.match(projected.statusComment, /Origin: GAIA PUMP/u);
+  assert.equal((projected.statusComment.match(/^Next:/gmu) ?? []).length, 1);
+  assert.match(projected.statusComment, /ETA: UNKNOWN \(low confidence\)/u);
+  assert.match(projected.statusComment, /- \[x\] Observe/u);
+  assert.ok(projected.statusComment.length <= 1200);
+  assert.equal(projected.revision, projectEngineeringPumpChecklist({ directory }).revision);
 });
 
-test('R0 DuckDB is a deterministic projection and never the claim authority', async () => {
+test('R0 deterministic replay and DuckDB derive only from the two existing ledgers', async () => {
   const directory = scratch();
   await tick(directory);
+  const first = projectEngineeringPumpTransitions({ directory });
+  assert.deepEqual(projectEngineeringPumpTransitions({ directory }), first);
+  assert.deepEqual(Object.keys(first.sourceRevisions).sort(), ['draftDelivery', 'portfolioDrain']);
   const calls = [];
   const openClient = async () => ({
-    run: async (sql, params = []) => { calls.push([sql, params]); },
-    close() {},
+    run: async (sql, params = []) => { calls.push([sql, params]); }, close() {},
   });
-  const first = await synchronizeEngineeringPumpDuckDb({
+  const left = await synchronizeEngineeringPumpDuckDb({
     directory, databasePath: join(directory, 'pump.duckdb'), openClient,
   });
-  const firstCalls = JSON.stringify(calls);
-  calls.length = 0;
-  const second = await synchronizeEngineeringPumpDuckDb({
+  const bytes = JSON.stringify(calls); calls.length = 0;
+  const right = await synchronizeEngineeringPumpDuckDb({
     directory, databasePath: join(directory, 'pump.duckdb'), openClient,
   });
-  assert.deepEqual(second, first);
-  assert.equal(JSON.stringify(calls), firstCalls);
-  assert.equal(first.rowCount, 2);
-  assert.equal(first.authority, 'NONE');
+  assert.deepEqual(right, left);
+  assert.equal(JSON.stringify(calls), bytes);
+  assert.equal(left.authority, 'NONE');
 });
 
-test('R0 MECHANISM REVERT: removing reconciliation duplicates a lost-response Draft', async () => {
-  const sourcePath = new URL('../src/engineering-pump-supervisor.mjs', import.meta.url);
-  const source = readFileSync(sourcePath, 'utf8');
-  const needle = 'const reconciled = await executor.reconcile(operationIntent);';
-  assert.equal(source.includes(needle), true, 'the shipped mechanism must be present');
-  const mutantPath = join(scratch(), 'engineering-pump-supervisor-mutant.mjs');
-  writeFileSync(mutantPath, source.replace(needle, 'const reconciled = null;'));
-  const mutant = await import(`${new URL(`file:///${mutantPath.replaceAll('\\', '/')}`)}?mutant=1`);
-  const directory = scratch();
-  let remote = null;
-  let executes = 0;
-  await assert.rejects(mutant.runEngineeringPumpSupervisorTick({
-    directory, observation: observation(), owner: OWNER_A, now: () => new Date(AT),
-    executor: executor({ execute: async (intent) => {
-      executes += 1; remote = draft(intent.operationIdentity); throw new Error('lost');
-    } }),
-  }));
-  await mutant.runEngineeringPumpSupervisorTick({
-    directory, observation: observation(), owner: OWNER_B, now: () => new Date(LATER),
-    executor: executor({
-      reconcile: async () => remote,
-      execute: async (intent) => { executes += 1; return draft(intent.operationIdentity, 46); },
-    }),
-  });
-  assert.equal(executes, 2, 'the mutant performs a blind duplicate effect');
+test('R0 MECHANISM REVERT: existing machines own reservation, intent and reconciliation', () => {
+  const source = readFileSync(new URL('../src/engineering-pump-supervisor.mjs', import.meta.url), 'utf8');
+  assert.match(source, /deliverFirstEvidenceDraftPr/u);
+  assert.match(source, /appendPortfolioDrainReceipt/u);
+  for (const forbidden of [
+    'engineering-pump.jsonl', 'ENGINEERING_PUMP_LEDGER', 'openDraftPullRequest({',
+  ]) assert.equal(source.includes(forbidden), false, forbidden);
 });
 
 test('R0 preserves the six unprivileged bus verbs', () => {
