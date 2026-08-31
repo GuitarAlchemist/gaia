@@ -296,3 +296,38 @@ Required RED proof adds forced interleavings for duplicate collector deliveries,
 lane starts, two checklist upserts, a lost checklist response, a lost resolution response, and
 DuckDB replay. Mechanism-revert controls must fail if stable identity, CAS, intent-before-effect,
 provider reconciliation, or the merge-gate consumer is removed.
+
+## R2 production closure
+
+R1's operation directory was only a durable mutex. R2 makes it a closed outbox record whose stable
+identity is `sha256(kind, threadIdentity)`. Creating that exact operation directory is the named
+linearization point; `intent.json` is durably written before a provider effect and `receipt.json`
+is durably written after it. A restart reads the intent, reconciles GitHub or factory evidence, and
+only then either adopts a receipt or emits a typed terminal uncertainty. Process-local maps are not
+correctness state. A caller never retries an ambiguous effect merely because memory is empty.
+
+GitHub collection is complete only when both thread pagination and each thread's comment
+pagination are complete. A page carrying more comments than the bounded read returns produces an
+incomplete merge gate and no claim. GitHub exposes no dispute bit; the collector therefore carries
+`UNKNOWN`, and the repair contract refuses resolution until a separate bounded evidence reader
+returns an explicit boolean bound to the exact thread and source revision. Absence is not false.
+
+The production tick re-reads three evidence domains after a lane exists: the current pull-request
+head and comparison to the reviewed head, the anchored path digests at both commits, and required
+check conclusions bound to exactly the repair head. The lane receipt names the exact addressed
+comment ids. Only their conjunction can construct `repair` and `checks`; neither is defaulted to a
+successful shape. Cancellation, incomplete checks, a foreign head, corrupt evidence, or a future
+observation produces a named refusal and no comment or resolution.
+
+The runtime entry is one bounded CLI tick. It composes the real `gh` Adapter, durable outbox, repair
+ledger, canonical factory telemetry log and optional pinned `@duckdb/node-api` projection. Its
+merge gate is a sealed control-room input: `BLOCKED` and `UNKNOWN` both block readiness, while only
+a complete collection with no actionable thread is `READY`. It starts no daemon, adds no bus verb,
+and grants no merge, approval, push, configuration or credential authority.
+
+R2 RED tests force two actors at one revision, duplicate and replayed delivery, winner and loser,
+effect success with a lost response, crash after intent, restart with empty memory, concurrent
+checklist upserts, cancellation, corrupt/future evidence, and completion. Mechanism reverts remove
+stable identity, intent-before-effect and reconciliation one at a time and must each produce a
+duplicate or unsafe resolution. The optional DuckDB dependency and its explicit absence behavior
+are documented; the canonical locked logs remain replay authority.
