@@ -252,6 +252,41 @@ function ensureCorrelation({ directory, observed, subject, draftPlan, actionIden
   return claim;
 }
 
+function recoverClaimOutbox({ directory, observed, lockOptions }) {
+  const drainTick = tickPortfolioDrain({
+    directory, portfolio: observed.portfolio, capacity: 1, lockOptions,
+  });
+  const { subject, item, needsClaim } = chooseSubject(observed, drainTick);
+  if (!subject || !item || needsClaim) return null;
+
+  const desiredActionIdentity = actionIdentity(observed, subject);
+  const activeReceipt = readPortfolioDrainLedger({ directory, lockOptions }).receipts
+    .filter(({ itemId }) => itemId === subject.readyItemId).at(-1);
+  if (activeReceipt?.evidenceRevision !== desiredActionIdentity) {
+    fail(
+      'ReservationBindingMismatch',
+      'active reservation does not bind this exact subject and policy action',
+    );
+  }
+
+  const draftPlan = planFirstEvidenceDraftPr({ observation: subject.draftObservation });
+  if (draftPlan.action !== 'NONE' || draftPlan.state !== 'DRAFT_OPEN') return null;
+  const priorIntent = readFirstEvidenceLedger({ directory, lockOptions }).transitions.some(
+    (entry) => entry.operationIdentity === draftPlan.operationIdentity
+      && entry.transition === 'INTENT',
+  );
+  if (priorIntent) return null;
+
+  ensureCorrelation({
+    directory, observed, subject, draftPlan,
+    actionIdentity: desiredActionIdentity, lockOptions,
+  });
+  return deepFreeze({
+    gate: noAction('BLOCKED', 'DELIVERY_INTENT_MISSING'), delivery: null,
+    checklist: projectEngineeringPumpChecklist({ directory, lockOptions }),
+  });
+}
+
 export async function runEngineeringPumpSupervisorTick({
   directory, observation, grant, authority, effects, now = () => new Date(), owner, leaseMs,
   lockOptions,
@@ -264,6 +299,8 @@ export async function runEngineeringPumpSupervisorTick({
     return deepFreeze({ gate: noAction('EXPECTED_NONE', 'NO_READY_WORK'), delivery: null,
       checklist: projectEngineeringPumpChecklist({ directory }) });
   }
+  const recovered = recoverClaimOutbox({ directory, observed, lockOptions });
+  if (recovered !== null) return recovered;
   if (observed.capacity.providerSlots === 0) {
     return deepFreeze({ gate: noAction('PROVIDER_SATURATED', 'NO_PROVIDER_SLOT'), delivery: null,
       checklist: projectEngineeringPumpChecklist({ directory }) });
