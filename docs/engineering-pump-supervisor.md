@@ -54,9 +54,11 @@ already contains an exact matching `INTENT` whose provider response may have bee
 unexpired matching `INTENT` owned by another actor remains live: observing its Draft does not permit
 a second actor to settle or reinterpret it.
 
-Checklist replay joins the latest drain claim to a delivery operation by exact repository, item kind,
-and item number. A delivery for another claimed item is not "latest status" for this one: absent an
-exact match, delivery-derived fields remain honestly unknown and no foreign PR evidence is shown.
+Checklist replay joins the latest drain claim to a delivery operation only through a durable
+correlation witness carried by the first-evidence transition. The witness must equal the claim's
+exact action identity in addition to matching repository, item kind, and item number. A delivery for
+another claim generation is not "latest status" for this one: absent an exact match,
+delivery-derived fields remain honestly unknown and no old PR evidence is shown.
 The projection derives both the checklist and DuckDB rows from one stable pair of exact ledger
 snapshots. It retries when either head changes across the read window and typed-refuses when no
 stable pair can be measured; it never combines independently sampled heads.
@@ -88,8 +90,8 @@ R0 must deterministically force:
 
 ## Self-contained work projection
 
-The stable issue-body projection answers, compactly: outcome, value/urgency and audience; owner,
-lane and parent; scope, exclusions and authority; short plan; deliverables and acceptance evidence;
+The stable issue-body projection answers, compactly: outcome, value/urgency and audience; owner and
+parent; scope, exclusions and authority; short plan; deliverables and acceptance evidence;
 repositories/components/surfaces; tools and external dependencies; constraints; failure/escalation
 outcome; and evidence links. It is stable after creation.
 
