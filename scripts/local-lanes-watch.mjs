@@ -51,8 +51,16 @@ export const MAX_WATCH_INTERVAL_MS = LOCAL_LANE_OBSERVATION_FRESH_MS / 2;
 export const MIN_WATCH_INTERVAL_MS = 1_000;
 export const DEFAULT_WATCH_INTERVAL_MS = 5_000;
 
-/** Consumed here; everything else is forwarded to the dashboard adapter untouched. */
-const OWN_FLAGS = new Set(['lanes-out', 'interval-ms', 'wmux']);
+/**
+ * Consumed here; everything else is forwarded to the dashboard adapter untouched.
+ *
+ * `--bindings` is owned rather than forwarded on purpose. An artifact binding names a local path,
+ * an allowed root and a completion marker, and every one of those belongs to the server-side
+ * sensor. The dashboard adapter renders a page a browser reads: handing it a binding file would
+ * be the first step towards a page that opens local files, which docs/artifact-completion-signals.md
+ * rules out by name.
+ */
+const OWN_FLAGS = new Set(['lanes-out', 'interval-ms', 'wmux', 'bindings']);
 
 export class UsageError extends Error {}
 
@@ -90,7 +98,11 @@ export function runLocalLanesTick(argv, options = {}) {
   const { own, forwarded } = parseArgs(argv);
   const lanesOut = resolve(own['lanes-out']);
   const observation = runLocalLaneSensorCli(
-    ['--out', lanesOut, ...(own.wmux ? ['--wmux', own.wmux] : [])],
+    [
+      '--out', lanesOut,
+      ...(own.bindings ? ['--bindings', own.bindings] : []),
+      ...(own.wmux ? ['--wmux', own.wmux] : []),
+    ],
     options,
   );
   const snapshot = runFactoryDashboardCli([...forwarded, '--local-lanes', lanesOut], options);
