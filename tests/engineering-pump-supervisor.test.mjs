@@ -682,7 +682,7 @@ test('R0 MECHANISM REVERT: existing machines own reservation, intent and reconci
   const source = readFileSync(new URL('../src/engineering-pump-supervisor.mjs', import.meta.url), 'utf8');
   assert.match(source, /deliverFirstEvidenceDraftPr/u);
   assert.match(source, /appendPortfolioDrainReceipt/u);
-  assert.match(source, /operationForClaim/u);
+  assert.match(source, /bindingForClaim/u);
   assert.match(source, /stablePumpSourceSnapshot/u);
   assert.match(source, /claim\.evidenceRevision === witness\.actionIdentity/u);
   assert.match(source, /DELIVERY_INTENT_MISSING/u);

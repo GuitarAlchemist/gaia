@@ -228,6 +228,30 @@ function chooseSubject(observed, drainTick) {
     };
 }
 
+function ensureCorrelation({ directory, observed, subject, draftPlan, actionIdentity, lockOptions }) {
+  const claim = readPortfolioDrainLedger({ directory, lockOptions }).receipts
+    .find(({ event, itemId, evidenceRevision }) => event === 'CLAIMED'
+      && itemId === subject.readyItemId && evidenceRevision === actionIdentity);
+  if (!claim) fail('ReservationLost', 'the exact durable claim is not readable');
+  appendEngineeringPumpCorrelation({
+    directory,
+    witness: {
+      schema: ENGINEERING_PUMP_CORRELATION_SCHEMA,
+      actionIdentity,
+      claimRevision: claim.revision,
+      deliveryOperationIdentity: draftPlan.operationIdentity,
+      repository: claim.repository,
+      itemKind: claim.itemKind,
+      itemId: claim.itemId,
+      itemNumber: claim.itemNumber,
+      subjectRevision: subject.subjectRevision,
+      policyRevision: observed.policyRevision,
+    },
+    lockOptions,
+  });
+  return claim;
+}
+
 export async function runEngineeringPumpSupervisorTick({
   directory, observation, grant, authority, effects, now = () => new Date(), owner, leaseMs,
   lockOptions,
@@ -282,6 +306,16 @@ export async function runEngineeringPumpSupervisorTick({
         && entry.transition === 'INTENT',
     );
     if (!priorIntent) {
+      if (!needsClaim) {
+        ensureCorrelation({
+          directory, observed, subject, draftPlan,
+          actionIdentity: desiredActionIdentity, lockOptions,
+        });
+        return deepFreeze({
+          gate: noAction('BLOCKED', 'DELIVERY_INTENT_MISSING'), delivery: null,
+          checklist: projectEngineeringPumpChecklist({ directory, lockOptions }),
+        });
+      }
       return deepFreeze({ gate: noAction('EXPECTED_NONE', 'DRAFT_ALREADY_VISIBLE'), delivery: null,
         checklist: projectEngineeringPumpChecklist({ directory, lockOptions }) });
     }
@@ -319,26 +353,9 @@ export async function runEngineeringPumpSupervisorTick({
   }
 
   const gate = readyGate(observed, subject);
-  const activeClaim = readPortfolioDrainLedger({ directory, lockOptions }).receipts
-    .find(({ event, itemId, evidenceRevision }) => event === 'CLAIMED'
-      && itemId === subject.readyItemId
-      && evidenceRevision === gate.nextAction.actionIdentity);
-  if (!activeClaim) fail('ReservationLost', 'the exact durable claim is not readable');
-  appendEngineeringPumpCorrelation({
-    directory,
-    witness: {
-      schema: ENGINEERING_PUMP_CORRELATION_SCHEMA,
-      actionIdentity: gate.nextAction.actionIdentity,
-      claimRevision: activeClaim.revision,
-      deliveryOperationIdentity: draftPlan.operationIdentity,
-      repository: activeClaim.repository,
-      itemKind: activeClaim.itemKind,
-      itemId: activeClaim.itemId,
-      itemNumber: activeClaim.itemNumber,
-      subjectRevision: subject.subjectRevision,
-      policyRevision: observed.policyRevision,
-    },
-    lockOptions,
+  ensureCorrelation({
+    directory, observed, subject, draftPlan,
+    actionIdentity: gate.nextAction.actionIdentity, lockOptions,
   });
   const delivery = await deliverFirstEvidenceDraftPr({
     directory, observation: subject.draftObservation, grant, authority, effects,
@@ -412,21 +429,23 @@ function stablePumpSourceSnapshot({
   fail('ProjectionSnapshotUnstable', 'pump source ledgers changed throughout the bounded read window');
 }
 
-function operationForClaim(claim, receipts, operations, correlations) {
-  if (claim === null) return null;
+function bindingForClaim(claim, receipts, operations, correlations) {
+  if (claim === null) return { witness: null, operation: null };
   const witness = correlations.witnesses.find(({ actionIdentity, repository, itemKind, itemId,
     itemNumber }) => actionIdentity === claim.evidenceRevision
       && repository === claim.repository && itemKind === claim.itemKind
       && itemId === claim.itemId && itemNumber === claim.itemNumber) ?? null;
-  if (witness === null) return null;
+  if (witness === null) return { witness: null, operation: null };
   const originatingClaim = receipts.find(({ revision }) => revision === witness.claimRevision);
   if (!originatingClaim || originatingClaim.event !== 'CLAIMED'
       || originatingClaim.evidenceRevision !== witness.actionIdentity
-      || originatingClaim.itemId !== witness.itemId) return null;
+      || originatingClaim.itemId !== witness.itemId) return { witness: null, operation: null };
   const operation = operations.find(
     ({ operationIdentity }) => operationIdentity === witness.deliveryOperationIdentity,
   ) ?? null;
-  return claim.evidenceRevision === witness.actionIdentity ? operation : null;
+  return claim.evidenceRevision === witness.actionIdentity
+    ? { witness, operation }
+    : { witness: null, operation: null };
 }
 
 export function projectEngineeringPumpChecklist({ directory, lockOptions, sourceReaders } = {}) {
@@ -435,14 +454,16 @@ export function projectEngineeringPumpChecklist({ directory, lockOptions, source
   });
   const delivery = projectFirstEvidenceLedgerSnapshot(draft);
   const claim = drain.receipts.at(-1) ?? null;
-  const operation = operationForClaim(
+  const binding = bindingForClaim(
     claim, drain.receipts, delivery.projection.operations, correlation,
   );
+  const { operation } = binding;
   const profile = executionProfile();
   const telemetry = observedTelemetry(operation);
   const currentGate = ['CREATED', 'REUSED'].includes(operation?.outcome) ? 'DRAFT_OPEN'
-    : (claim === null ? 'EXPECTED_NONE' : 'START_DRAFT');
-  const next = currentGate === 'DRAFT_OPEN' ? 'REVIEW' : 'START_DRAFT';
+    : (claim === null ? 'EXPECTED_NONE' : (binding.witness ? 'BLOCKED' : 'START_DRAFT'));
+  const next = currentGate === 'DRAFT_OPEN' ? 'REVIEW'
+    : (currentGate === 'BLOCKED' ? 'RECONCILE_DELIVERY_INTENT' : 'START_DRAFT');
   const updatedAt = operation?.recordedAt ?? claim?.sourceUpdatedAt ?? null;
   const marker = operation?.operationIdentity ?? claim?.revision ?? drain.revision;
   const issueBody = {
@@ -465,7 +486,8 @@ export function projectEngineeringPumpChecklist({ directory, lockOptions, source
   };
   const statusComment = [
     `<!-- gaia:pump-status:${marker} -->`,
-    `State: ${operation?.outcome ?? (claim === null ? 'IDLE' : 'CLAIMED')}`,
+    `State: ${operation?.outcome ?? (currentGate === 'BLOCKED' ? 'BLOCKED'
+      : (claim === null ? 'IDLE' : 'CLAIMED'))}`,
     `Current gate: ${currentGate}`,
     `- [${claim === null ? ' ' : 'x'}] Observe`,
     `- [${claim === null ? ' ' : 'x'}] Claim`,

@@ -1,4 +1,4 @@
-/** Rebuildable DuckDB projection of the two authoritative engineering-pump journals. */
+/** Rebuildable DuckDB projection of the exact stable engineering-pump source generations. */
 
 import { resolve } from 'node:path';
 
@@ -15,12 +15,13 @@ const SQL = Object.freeze({
     + 'execution_profile VARCHAR NOT NULL, observed_telemetry VARCHAR NOT NULL)',
   createMeta: 'CREATE TABLE IF NOT EXISTS gaia_engineering_pump_projection ('
     + 'schema VARCHAR NOT NULL, portfolio_revision VARCHAR NOT NULL,'
-    + 'draft_revision VARCHAR NOT NULL, row_count INTEGER NOT NULL)',
+    + 'draft_revision VARCHAR NOT NULL, correlation_revision VARCHAR NOT NULL,'
+    + 'row_count INTEGER NOT NULL)',
+  dropMeta: 'DROP TABLE IF EXISTS gaia_engineering_pump_projection',
   begin: 'BEGIN TRANSACTION',
   deleteRows: 'DELETE FROM gaia_engineering_pump_transition',
-  deleteMeta: 'DELETE FROM gaia_engineering_pump_projection',
   insertRow: 'INSERT INTO gaia_engineering_pump_transition VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-  insertMeta: 'INSERT INTO gaia_engineering_pump_projection VALUES (?, ?, ?, ?)',
+  insertMeta: 'INSERT INTO gaia_engineering_pump_projection VALUES (?, ?, ?, ?, ?)',
   commit: 'COMMIT',
 });
 
@@ -77,16 +78,17 @@ export async function synchronizeEngineeringPumpDuckDb({
   const projection = projectEngineeringPumpTransitions({ directory, lockOptions });
   const client = await openClient(path, { readOnly: false });
   try {
-    await client.run(SQL.createRows);
-    await client.run(SQL.createMeta);
     await client.run(SQL.begin);
+    await client.run(SQL.createRows);
+    await client.run(SQL.dropMeta);
+    await client.run(SQL.createMeta);
     await client.run(SQL.deleteRows);
-    await client.run(SQL.deleteMeta);
     for (const row of projection.rows) await client.run(SQL.insertRow, wire(row));
     await client.run(SQL.insertMeta, [
       ENGINEERING_PUMP_DUCKDB_SCHEMA,
       projection.sourceRevisions.portfolioDrain,
       projection.sourceRevisions.draftDelivery,
+      projection.sourceRevisions.pumpCorrelation,
       projection.rows.length,
     ]);
     await client.run(SQL.commit);
