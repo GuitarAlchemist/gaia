@@ -50,11 +50,20 @@ uniqueness.
 
 A fresh `DRAFT_OPEN` observation is already satisfied work. It cannot reserve capacity and cannot
 announce `START_DRAFT`. It may reach the delivery adoption path only when the first-evidence journal
-already contains an exact matching `INTENT` whose provider response may have been lost.
+already contains an exact matching `INTENT` whose provider response may have been lost. An
+unexpired matching `INTENT` owned by another actor remains live: observing its Draft does not permit
+a second actor to settle or reinterpret it.
 
 Checklist replay joins the latest drain claim to a delivery operation by exact repository, item kind,
 and item number. A delivery for another claimed item is not "latest status" for this one: absent an
 exact match, delivery-derived fields remain honestly unknown and no foreign PR evidence is shown.
+The projection derives both the checklist and DuckDB rows from one stable pair of exact ledger
+snapshots. It retries when either head changes across the read window and typed-refuses when no
+stable pair can be measured; it never combines independently sampled heads.
+
+The sealed nested portfolio revision is validated before capacity, provider, CI, or empty-work early
+gates. An early gate is a conclusion over verified evidence, never a shortcut around evidence
+validation.
 
 R0 must deterministically force:
 
