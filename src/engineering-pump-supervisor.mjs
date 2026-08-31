@@ -255,11 +255,22 @@ export async function runEngineeringPumpSupervisorTick({
     return deepFreeze({ gate: noAction('EXPECTED_NONE', 'NO_ELIGIBLE_WORK'), delivery: null,
       checklist: projectEngineeringPumpChecklist({ directory }) });
   }
+  const desiredActionIdentity = actionIdentity(observed, subject);
+  if (!needsClaim) {
+    const activeReceipt = readPortfolioDrainLedger({ directory, lockOptions }).receipts
+      .filter(({ itemId }) => itemId === subject.readyItemId).at(-1);
+    if (activeReceipt?.evidenceRevision !== desiredActionIdentity) {
+      fail(
+        'ReservationBindingMismatch',
+        'active reservation does not bind this exact subject and policy action',
+      );
+    }
+  }
   const draftPlan = planFirstEvidenceDraftPr({ observation: subject.draftObservation });
   if (!['CREATE_OR_REUSE', 'NONE'].includes(draftPlan.action)) {
     fail('DraftPlanRefused', 'first-evidence plan refused this subject');
   }
-  if (draftPlan.action === 'NONE') {
+  if (draftPlan.action === 'NONE' && draftPlan.state !== 'DRAFT_OPEN') {
     return deepFreeze({ gate: noAction(draftPlan.state, 'NO_DRAFT_ACTION'), delivery: null,
       checklist: projectEngineeringPumpChecklist({ directory }) });
   }
@@ -270,7 +281,7 @@ export async function runEngineeringPumpSupervisorTick({
       item,
       previous: null,
       event: 'CLAIMED',
-      evidenceRevision: observed.observationRevision,
+      evidenceRevision: desiredActionIdentity,
     });
     try {
       appendPortfolioDrainReceipt({

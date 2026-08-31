@@ -453,15 +453,6 @@ export async function deliverFirstEvidenceDraftPr({
     authority: consumed,
   });
 
-  if (decided.action === 'NONE') {
-    const head = readFirstEvidenceLedger({ directory: root, lockOptions }).revision;
-    return reading(
-      'NONE',
-      decided.pullRequest === null ? null : boundPullRequest(decided.pullRequest),
-      'NONE', 'NONE', head, head,
-    );
-  }
-
   const record = ({
     transition, expectedLedgerRevision, pullRequest = null, refusal = null, lease = null,
   }) => appendFirstEvidenceTransition({
@@ -479,6 +470,34 @@ export async function deliverFirstEvidenceDraftPr({
     expectedLedgerRevision,
     lockOptions,
   });
+
+  if (decided.action === 'NONE') {
+    const before = readFirstEvidenceLedger({ directory: root, lockOptions });
+    const mine = before.transitions.filter(
+      (entry) => entry.operationIdentity === decided.operationIdentity,
+    );
+    const settled = mine.find(
+      (entry) => entry.transition === 'CREATED' || entry.transition === 'REUSED',
+    );
+    if (settled) {
+      return reading('REUSED', settled.pullRequest, 'NONE', 'NONE', before.revision, before.revision);
+    }
+    // The next complete provider observation may already carry the Draft whose create response
+    // was lost. That exact identity-bound observation is stronger evidence than retrying a query:
+    // adopt it durably and perform no authority consumption or provider effect.
+    if (decided.state === 'DRAFT_OPEN' && mine.some(({ transition }) => transition === 'INTENT')) {
+      const bound = boundPullRequest(decided.pullRequest);
+      const after = record({
+        transition: 'REUSED', expectedLedgerRevision: before.revision, pullRequest: bound,
+      });
+      return reading('REUSED', bound, 'NONE', 'NONE', before.revision, after.ledger.revision);
+    }
+    return reading(
+      'NONE',
+      decided.pullRequest === null ? null : boundPullRequest(decided.pullRequest),
+      'NONE', 'NONE', before.revision, before.revision,
+    );
+  }
 
   /**
    * Claim this operation durably, under the compare-and-swap that orders it. A caller whose
