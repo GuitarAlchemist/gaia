@@ -60,6 +60,12 @@ a second authority path.
 This passive recovery runs after complete nested evidence validation but before provider, CI, or
 writer admission gates. It consumes none of those capacities: saturation governs new work, not
 reconciliation of a durable outbox already accepted at the claim linearization point.
+The same ordering applies when the exact delivery journal already carries an `INTENT` but no
+successful terminal receipt. If a complete provider observation now proves the exact Draft, the
+supervisor delegates to the existing delivery reconciliation path before admission. That path may
+append one effect-free `REUSED` terminal; it consumes no grant, calls no provider effect, creates no
+claim, and preserves the existing correlation witness. A `REFUSED` receipt after an ambiguous
+response does not erase the earlier durable intent or turn reconciliation into new work.
 
 A fresh `DRAFT_OPEN` observation is already satisfied work. It cannot reserve capacity and cannot
 announce `START_DRAFT`. It may reach the delivery adoption path only when the first-evidence journal
