@@ -38,6 +38,20 @@ Alternative generation is advisory. Multiple variants from one context are not i
 
 A module should expose a small, coherent interface while hiding substantial policy or mechanism. Decompose around information likely to change, not merely around execution steps. A seam is justified when it localizes change, enables independent verification, or contains authority; speculative layers and pass-through wrappers are rejected.
 
+A faithful abstraction compresses caller-visible complexity without erasing a distinction that carries an invariant, authority, failure mode, or material cost. An abstraction may discard implementation detail only when it is lossless with respect to its declared interface. Two concrete cases belong to the same abstract case only when every observation promised by that interface treats them equivalently.
+
+Refuse a concrete case that cannot satisfy the interface; never coerce it into a reassuring approximation. Provider capabilities, identity, freshness, uncertainty, ordering, idempotency, and authority remain explicit whenever they can change the promised result. An abstraction that repeatedly makes callers inspect adapter type, provider payload, storage layout, or retry state is leaking its implementation rather than hiding it.
+
+Before accepting a load-bearing abstraction:
+
+1. name its callers and the complete observable interface they may rely on;
+2. enumerate representative concrete cases and classify each difference as hidden or invariant-bearing;
+3. run one black-box contract suite against every production-shaped and deterministic in-memory adapter;
+4. include positive equivalence cases, typed refusal cases, and mutation controls that expose erased invariants or adapter leakage;
+5. apply the deletion test: removing the module should cause its hidden complexity to reappear at callers, not simply disappear.
+
+Passing the contract suite proves only the enumerated interface. A newly discovered counterexample either extends the interface honestly, moves the seam, splits the abstraction, or remains an explicit unsupported case; it must not be patched away with caller-specific knowledge.
+
 ### ENG-04 — Separate concerns and authority
 
 Keep domain decisions, transport, persistence, policy, observation, and privileged effects distinct. Use least privilege, fail-safe defaults, complete mediation at authority boundaries, and explicit separation of privilege for irreversible actions. The six non-privileged bus verbs carry references and requests; they do not become hidden deployment, spending, routing, or approval verbs.

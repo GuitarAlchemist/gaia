@@ -200,6 +200,8 @@ test('LICENSE, NOTICE, and the engineering doctrine ship', () => {
     'Freshness, quality, acceptance, and authority remain independent axes.',
     'A marker is evidence that work stopped, not evidence that its claims are true.',
     'Alternative generation is advisory.',
+    'An abstraction may discard implementation detail only when it is lossless with respect to its declared interface.',
+    'Refuse a concrete case that cannot satisfy the interface; never coerce it into a reassuring approximation.',
   ]) {
     assert.ok(doctrine.includes(requiredPhrase), `doctrine retains: ${requiredPhrase}`);
   }
