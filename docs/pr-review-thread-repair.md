@@ -421,3 +421,31 @@ child-process kill after factory receipt durability but before wrapper receipt; 
 ticks with gate consumption; and a thread with more than one hundred nested comments across
 duplicate/reordered pages. Each must fail when intent-before-grant, provider receipt reconciliation,
 serialized scheduling, or cursor continuation is reverted.
+
+## R5 stable collection windows and resumable admission effects
+
+R5 keeps the R4 operation identities and linearization points. It closes two observation windows
+that could otherwise look complete while the world or the authority state moved underneath them.
+
+The GitHub collection resource is `(repository, pull request, initial head, review thread, root
+review, initial nested total)`. Every outer and nested page must bind that same identity. After the
+last nested and dispute page, the collector re-reads the pull request and publishes `complete:true`
+only when the current head equals the initial head. A head change typed-refuses and produces no
+claim. Comment deduplication preserves provider/root order; an opaque reply node id can never sort
+ahead of the originating review and silently replace its reviewed head or review state.
+
+The lane-start and checklist resources retain their existing content-addressed operation identities.
+Their authoritative state is the fsynced operation intent plus the authority ledger and provider
+receipt. The exclusive intent create remains the reservation linearization point; authority's
+single-use consumption is the effect-admission linearization point. When an earlier tick persisted
+an intent and returned `WAITING_AUTHORITY`, a later tick first reconciles provider state, then
+re-enters authorization with that same identity and performs at most one effect. It must not return
+`PENDING` merely because the durable reservation already exists. Concurrent resumptions converge
+through the one grant consumption and provider reconciliation; no process-local owner or timeout
+establishes uniqueness.
+
+R5 RED proof uses the public GitHub collector and supervisor tick seams. It forces head movement
+after nested pagination, a reply id that sorts before the root review id, and separate late grants
+for lane start and checklist creation across later ticks. The expected outcomes are respectively a
+typed refusal/no collection, stable root review classification, and exactly one lane plus one
+checklist under the original operation identities.
