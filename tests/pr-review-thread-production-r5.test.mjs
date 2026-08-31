@@ -167,12 +167,16 @@ test('R5 later lane and checklist grants resume their durable intents exactly on
       return lane;
     },
   };
-  const tick = () => runPrReviewThreadSupervisorTick({
-    directory, repository: observation.repository, pullRequest: 44,
-    github, lanes, authority, acquireGrant,
-    synchronizeTelemetry: async () => ({ schema: 'sync', rowCount: 0 }),
-    now: () => new Date(AT), run: observation.run,
-  });
+  let tickNumber = 0;
+  const tick = () => {
+    const tickAt = new Date(Date.parse(AT) + tickNumber * 1_000); tickNumber += 1;
+    return runPrReviewThreadSupervisorTick({
+      directory, repository: observation.repository, pullRequest: 44,
+      github, lanes, authority, acquireGrant,
+      synchronizeTelemetry: async () => ({ schema: 'sync', rowCount: 0 }),
+      now: () => tickAt, run: observation.run,
+    });
+  };
 
   await tick();
   assert.equal(effects.laneStarts, 0); assert.equal(effects.checklistCreates, 0);
