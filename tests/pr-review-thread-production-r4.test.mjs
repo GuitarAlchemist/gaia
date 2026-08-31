@@ -79,6 +79,10 @@ test('R4 lazy exact-intent grant acquisition persists WAITING_AUTHORITY then re-
   await assert.rejects(acquire(intent), (error) => error.code === 'WaitingAuthority');
   const request = JSON.parse(readFileSync(join(requestDirectory, `${intent.intentRevision}.json`), 'utf8'));
   assert.equal(request.intentRevision, intent.intentRevision);
+  writeFileSync(registryPath, `${JSON.stringify([{
+    ...intent, action: 'RESOLVE_REVIEW_THREAD', grantId: 'mismatched-r4', signature: 'invalid-for-intent',
+  }])}\n`);
+  await assert.rejects(acquire(intent), (error) => error.code === 'GrantIntentMismatch');
   const commentGrant = { ...intent, grantId: 'comment-r4', signature: 'deferred-to-authority' };
   writeFileSync(registryPath, `${JSON.stringify([commentGrant])}\n`);
   assert.deepEqual(await acquire(intent), commentGrant);
