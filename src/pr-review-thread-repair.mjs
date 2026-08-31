@@ -393,6 +393,7 @@ export function projectPrReviewRepairLedger({ directory, lockOptions } = {}) {
   const ledger = readPrReviewRepairLedger({ directory, lockOptions });
   const rows = ledger.transitions.map((transition, ordinal) => ({
     threadIdentity: transition.threadIdentity,
+    transitionRevision: transition.revision,
     ordinal,
     transition: transition.transition,
     intent: transition.intent,
@@ -721,7 +722,7 @@ export async function runPrReviewThreadRepairPump({
     const lanes = projectPrReviewRepairLedger({ directory: root, lockOptions }).projection.lanes
       .filter((lane) => lane.threadIdentity !== threadIdentity);
     const body = renderRepairChecklist({
-      reading: plan, observation: observed, eta: estimateRepairEta(lanes),
+      reading: plan, observation: observed, eta: estimateRepairEta(lanes), history: history(),
     });
     let posted;
     try {

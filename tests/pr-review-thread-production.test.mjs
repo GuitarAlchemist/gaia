@@ -18,6 +18,7 @@ import {
   PR_REVIEW_THREAD_DUCKDB_STATEMENTS,
   synchronizePrReviewThreadDuckDb,
 } from '../src/duckdb-pr-review-thread-telemetry.mjs';
+import { readFactoryTelemetryLog } from '../src/factory-telemetry-log.mjs';
 import {
   EMPTY_PR_REVIEW_REPAIR_LEDGER_REVISION,
   appendPrReviewRepairTransition,
@@ -139,6 +140,41 @@ test('R1 duplicate collector ticks converge to one bounded lane and one claim ch
   assert.equal(transitions.filter(({ transition }) => transition === 'CLAIMED').length, 1);
 });
 
+test('R1 concurrent ticks never duplicate a lane start while the first provider call is open', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'gaia-pr-review-production-race-'));
+  const github = supervisorGithub();
+  let release;
+  let entered;
+  const started = new Promise((resolve) => { entered = resolve; });
+  const hold = new Promise((resolve) => { release = resolve; });
+  let starts = 0;
+  const receipt = { id: 'lane-held', idempotencyKey: null };
+  const lanes = {
+    async findRepairLane() { return null; },
+    async startRepairLane(request) {
+      starts += 1;
+      receipt.idempotencyKey = request.idempotencyKey;
+      entered();
+      await hold;
+      return receipt;
+    },
+  };
+  const tick = () => runPrReviewThreadSupervisorTick({
+    directory, repository: 'GuitarAlchemist/gaia', pullRequest: 44,
+    github, lanes, authority: { consume: async () => ({ status: 'AUTHORIZED' }) },
+    grant: null, now: () => new Date(AT), synchronizeTelemetry: async () => ({ rowCount: 3 }),
+  });
+
+  const first = tick();
+  await started;
+  const second = await tick();
+  assert.equal(second.results[0].lane.state, 'PENDING');
+  assert.equal(starts, 1);
+  release();
+  await first;
+  assert.equal(starts, 1, 'the durable intent is the unique lane-start linearization point');
+});
+
 test('R1 merge gate consumes unresolved P1 and refuses an incomplete collector window', async () => {
   const adapter = createGitGhPrReviewThreadEffects({ run: async () => graph() });
   const complete = await adapter.collectReviewThreads({
@@ -194,6 +230,17 @@ test('R1 DuckDB synchronization persists all seven lifecycle transitions transac
   assert.equal(calls[0].sql, PR_REVIEW_THREAD_DUCKDB_STATEMENTS.createRows);
   assert.ok(calls.some(({ sql }) => sql === PR_REVIEW_THREAD_DUCKDB_STATEMENTS.begin));
   assert.ok(calls.some(({ sql }) => sql === PR_REVIEW_THREAD_DUCKDB_STATEMENTS.commit));
+  const factory = readFactoryTelemetryLog({ directory });
+  assert.equal(factory.events.filter(({ event }) => event === 'gate.passed').length, 7);
+  assert.deepEqual(
+    factory.events.filter(({ event }) => event === 'gate.passed').map(({ gate }) => gate),
+    lifecycle,
+    'every PR lifecycle fact reaches the canonical locked factory telemetry log',
+  );
+  const repeated = await synchronizePrReviewThreadDuckDb({
+    directory, databasePath: join(directory, 'telemetry.duckdb'), openClient,
+  });
+  assert.equal(repeated.mirroredFactoryEvents, 0, 'replay is idempotent at the canonical seam');
 });
 
 test('R1 exact resolved thread is the only resolution effect target', async () => {
@@ -210,5 +257,5 @@ test('R1 exact resolved thread is the only resolution effect target', async () =
     idempotencyKey: 'e'.repeat(64),
   });
   assert.deepEqual(result, { isResolved: true });
-  assert.ok(calls[0].includes('PRRT_thread_44'));
+  assert.ok(calls[0].some((argument) => argument === 'threadId=PRRT_thread_44'));
 });

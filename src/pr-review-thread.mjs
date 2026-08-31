@@ -654,14 +654,13 @@ const hours = (milliseconds) => `${Math.round(milliseconds / 360_000) / 10} hour
  * is reachable from here, so a credential or a path pasted into a review cannot be republished by
  * the thing that answers it.
  */
-export function renderRepairChecklist({ reading, observation, eta }) {
+export function renderRepairChecklist({ reading, observation, eta, history = [] }) {
   const observed = requirePrReviewThreadObservation(observation);
-  const done = new Set();
-  for (const verb of PR_REVIEW_THREAD_LIFECYCLE) {
-    if (verb === 'COMMENTED' || verb === 'RESOLVED') break;
-    done.add(verb);
+  if (!Array.isArray(history)
+      || history.some((verb) => !PR_REVIEW_THREAD_TRANSITIONS.includes(verb))) {
+    throw new PrReviewThreadError('HistoryInvalid', 'checklist history must use lifecycle verbs');
   }
-  if (reading.action === 'RESOLVE') done.add('COMMENTED');
+  const done = new Set(history);
   const currentStep = PR_REVIEW_THREAD_LIFECYCLE.find((verb) => !done.has(verb)) ?? 'RESOLVED';
   const checklist = PR_REVIEW_THREAD_LIFECYCLE.map(
     (verb) => `- [${done.has(verb) ? 'x' : ' '}] ${verb.toLowerCase()}`,

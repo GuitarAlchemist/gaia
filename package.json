@@ -25,5 +25,8 @@
     "portfolio:operator": "node scripts/github-portfolio-operator.mjs",
     "lanes:sensor": "node scripts/local-lane-sensor.mjs",
     "lanes:watch": "node scripts/local-lanes-watch.mjs"
+  },
+  "optionalDependencies": {
+    "@duckdb/node-api": "1.5.5-r.4"
   }
 }
