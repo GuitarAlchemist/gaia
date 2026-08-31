@@ -17,6 +17,7 @@ const ALLOWED_OPTIONS = new Set([
   'organization', 'policy-revision', 'portfolio-out', 'snapshot-out', 'html-out',
   'receipts', 'holds', 'progress', 'history', 'telemetry', 'capacity', 'language',
   'activity', 'activity-out', 'watch-ms',
+  'pr-review-thread-gate',
 ]);
 /**
  * `MAX_PATH_DEPTH` and `pathIdentity` used to live here. They now live in `src/path-identity.mjs`,
@@ -103,6 +104,7 @@ function dashboardArgs(flags, portfolioPath, snapshotPath, htmlPath, activityPat
   ];
   for (const name of [
     'receipts', 'holds', 'progress', 'history', 'telemetry', 'capacity', 'language',
+    'pr-review-thread-gate',
   ]) {
     if (flags[name] !== undefined) result.push(`--${name}`, flags[name]);
   }
@@ -115,7 +117,9 @@ function assertPathConstraints(flags, outputPaths) {
   if (new Set(outputIdentities).size !== outputPaths.length) {
     throw new UsageError('portfolio, snapshot, and HTML outputs must differ');
   }
-  const inputIdentities = ['receipts', 'holds', 'progress', 'history', 'telemetry']
+  const inputIdentities = [
+    'receipts', 'holds', 'progress', 'history', 'telemetry', 'pr-review-thread-gate',
+  ]
     .filter((name) => flags[name] !== undefined)
     .map((name) => pathIdentity(flags[name]));
   if (outputIdentities.some((identity) => inputIdentities.includes(identity))) {

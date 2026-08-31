@@ -245,6 +245,8 @@ export function runFactoryDashboardCli(argv, {
     ? resolve(flags['engineering-flow']) : null;
   const mergeQueueCapabilityPath = flags['merge-queue-capability']
     ? resolve(flags['merge-queue-capability']) : null;
+  const prReviewThreadGatePath = flags['pr-review-thread-gate']
+    ? resolve(flags['pr-review-thread-gate']) : null;
   const htmlPath = resolve(flags['html-out']);
   const snapshotPath = resolve(flags['snapshot-out']);
   const activityPath = flags['activity-out'] ? resolve(flags['activity-out']) : null;
@@ -252,6 +254,7 @@ export function runFactoryDashboardCli(argv, {
   const inputs = [
     projectionPath, portfolioPath, receiptsPath, holdsPath, dependenciesPath, progressPath,
     historyPath, telemetryPath, localLanesPath, engineeringFlowPath, mergeQueueCapabilityPath,
+    prReviewThreadGatePath,
   ].filter(Boolean);
   // Filesystem identity, not a spelling test. Comparing resolved STRINGS accepted
   // `--projection <dir>/projection.json --snapshot-out <dir>/Projection.json` on the platform this
@@ -307,6 +310,8 @@ export function runFactoryDashboardCli(argv, {
   const mergeQueueCapability = mergeQueueCapabilityPath === null
     ? null
     : readJson(mergeQueueCapabilityPath, 'merge queue capability');
+  const prReviewThreadGate = prReviewThreadGatePath === null
+    ? null : readJson(prReviewThreadGatePath, 'PR review-thread gate');
   const windowStart = declaredBasis(resolveSourceChangedAt({
     projectionRevision: projection.revision,
     firstObservation: firstObservationOf(snapshotPath, projection.revision),
@@ -335,6 +340,7 @@ export function runFactoryDashboardCli(argv, {
     // off disk and hands them over; it opens no network connection, reads no repository
     // configuration itself, and administers nothing.
     mergeQueueCapability,
+    prReviewThreadGate,
     priorEngineeringFlow: engineeringFlowPath === null
       ? null
       : priorEngineeringFlowOf(snapshotPath),

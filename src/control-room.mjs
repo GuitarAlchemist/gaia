@@ -504,7 +504,31 @@ export function requireControlRoomSnapshot(value) {
   const localLanes = requireLocalLanes(value);
   requireEngineeringFlow(value);
   requireCiFlow(value);
+  requirePrReviewThreadGate(value.prReviewThreadGate ?? null);
   requireDerivedCounts(value, localLanes);
+  return value;
+}
+
+function requirePrReviewThreadGate(value) {
+  if (value === null) return null;
+  const keys = Object.keys(value).sort();
+  const expected = [
+    'authority', 'blockingThreadIds', 'blocksMerge', 'effect', 'reason', 'schema',
+    'sourceRevision', 'state',
+  ].sort();
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || canonicalJson(keys) !== canonicalJson(expected)
+      || value.schema !== 'gaia-pr-review-thread-merge-gate/1'
+      || !['READY', 'BLOCKED', 'UNKNOWN'].includes(value.state)
+      || typeof value.blocksMerge !== 'boolean'
+      || value.blocksMerge !== (value.state !== 'READY')
+      || !Array.isArray(value.blockingThreadIds)
+      || value.blockingThreadIds.some((id) => typeof id !== 'string')
+      || value.effect !== 'NONE' || value.authority !== 'NONE'
+      || (value.sourceRevision !== 'UNKNOWN'
+        && !/^[a-f0-9]{64}$/u.test(value.sourceRevision))) {
+    throw new ControlRoomError('InvalidSnapshot', 'review-thread merge gate is not closed evidence');
+  }
   return value;
 }
 
@@ -1178,6 +1202,7 @@ export function buildControlRoomSnapshot({
   engineeringFlow = null, priorEngineeringFlow = null,
   ciFlow = null, priorCiFlow = null,
   mergeQueueCapability = null,
+  prReviewThreadGate = null,
 }) {
   const projection = requireProjection(drainProjection);
   const at = requireTimestamp(observedAt);
@@ -1214,6 +1239,8 @@ export function buildControlRoomSnapshot({
     : deriveMergeQueueCapabilityBlock({
       artifact: requireMergeQueueCapabilityArtifact(mergeQueueCapability), observedAt: at,
     });
+  const reviewThreadGateBlock = requirePrReviewThreadGate(prReviewThreadGate);
+  const reviewThreadsBlockMerge = reviewThreadGateBlock?.blocksMerge === true;
   const localLiveCount = localLaneBlock === null ? 0 : localLaneBlock.liveCount;
   const activeCount = items.filter(({ activity }) => activity.state === 'ACTIVE').length;
   const staleCount = items.filter(({ activity }) => activity.state === 'STALE').length;
@@ -1278,9 +1305,12 @@ export function buildControlRoomSnapshot({
         label: 'Paused',
         // An empty drain and a systemically blocked drain are operationally opposite and
         // used to share this one sentence. They no longer do.
-        detail: obstruction.state === 'NONE'
-          ? 'No tracked factory run is moving right now.'
-          : `No tracked factory run is moving. ${obstruction.label}`,
+        detail: [
+          obstruction.state === 'NONE'
+            ? 'No tracked factory run is moving right now.'
+            : `No tracked factory run is moving. ${obstruction.label}`,
+          reviewThreadsBlockMerge ? 'PR review-thread evidence blocks merge.' : null,
+        ].filter(Boolean).join(' '),
       }
       : state === 'ACTIVE' ? {
         state: 'ACTIVE',
@@ -1294,6 +1324,7 @@ export function buildControlRoomSnapshot({
             ? `${localLiveCount} local wmux ${localLiveCount === 1 ? 'lane is' : 'lanes are'}`
               + ' running; process liveness only, with no tracked portfolio binding.' : null,
           capabilityObstructed ? obstruction.label : null,
+          reviewThreadsBlockMerge ? 'PR review-thread evidence blocks merge.' : null,
         ].filter(Boolean).join(' '),
       } : {
         state: 'STALE',
@@ -1301,6 +1332,7 @@ export function buildControlRoomSnapshot({
         detail: [
           `${staleCount} recorded ${staleCount === 1 ? 'run has' : 'runs have'} no fresh heartbeat.`,
           capabilityObstructed ? obstruction.label : null,
+          reviewThreadsBlockMerge ? 'PR review-thread evidence blocks merge.' : null,
         ].filter(Boolean).join(' '),
       },
     activeCount,
@@ -1319,7 +1351,9 @@ export function buildControlRoomSnapshot({
     // named a data gap that did not exist, and rendered it as "-3 more comparable completed
     // portfolio-factory-run samples (8 of 5 recorded)" — a next move that is both impossible and
     // irrelevant to the actual blocker.
-    eta: capabilityObstructed
+    eta: reviewThreadsBlockMerge
+      ? { state: 'UNKNOWN', label: 'Unknown', reason: 'Resolve verified PR review-thread blockers first.' }
+      : capabilityObstructed
       ? { state: 'UNKNOWN', label: 'Unknown', reason: CAPABILITY_ETA_REASON }
       : forecast ?? (activeCount === 0
         ? {
@@ -1356,10 +1390,15 @@ export function buildControlRoomSnapshot({
       freshnessWindowMs: HEARTBEAT_FRESH_MS,
       projectionRevision: spine === null ? null : spine.revision,
     },
-    nextAction: nextActionFor(
-      items, projection.decisions, blockers, localLaneBlock,
-      capabilityObstructed ? obstruction : null,
-    ),
+    nextAction: reviewThreadsBlockMerge
+      ? {
+        kind: 'RESOLVE_PR_REVIEW_THREADS', itemId: null,
+        label: 'Resolve the verified P0/P1 review threads before merge.',
+      }
+      : nextActionFor(
+        items, projection.decisions, blockers, localLaneBlock,
+        capabilityObstructed ? obstruction : null,
+      ),
     items,
     // Omitted entirely when there is no observation, never published as `null`. A present key
     // holding `null` canonicalises into the digest, and the snapshot revision is rendered into the
@@ -1375,6 +1414,7 @@ export function buildControlRoomSnapshot({
     // Omitted entirely when there is no artifact, and never published as null, for the same
     // digest-stability reason the flow block gives.
     ...(capabilityBlock === null ? {} : { mergeQueueCapability: capabilityBlock }),
+    ...(reviewThreadGateBlock === null ? {} : { prReviewThreadGate: reviewThreadGateBlock }),
   };
   return deepFreeze({
     ...body,
