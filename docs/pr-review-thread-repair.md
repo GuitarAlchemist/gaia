@@ -469,3 +469,26 @@ The forced R6 public-seam test performs real GitHub collection on successive inj
 with byte-identical provider facts and an unchanged source revision. Lane and checklist authority
 arrive on later ticks; the original durable intents must resume to exactly one lane and one
 checklist rather than fail because the observer clock advanced.
+
+## R7 durable-clock validation and sealed lane requests
+
+R7 preserves R6 observer-clock normalization, but validation precedes normalization. A durable
+operation intent is admissible only when its `observedAt` and `expiresAt` are exact canonical
+instants, its expiry is exactly the declared two-minute lease after its observation, and its
+observation is not in the future relative to the current injected tick. A lane intent additionally
+requires `request.observedAt` to be canonical and byte-equal to the top-level observation instant.
+Malformed, non-finite, future, or incoherent durable clocks are typed corruption; they can neither
+bypass lease expiry nor be hidden by restoring the old clock into a fresh candidate.
+
+The exclusive durable intent remains the reservation linearization point, and the provider's
+durable factory receipt remains the effect-success linearization point. Once a lane intent exists,
+its sealed `request` is the only request passed to provider lookup, reconciliation, and execution.
+A later observation may advance its non-semantic observer clock, but it cannot silently change the
+factory intent or its receipt binding. After factory success followed by a lost supervisor response,
+a fresh process reconstructs the stable operation identity and adopts the exact original receipt
+without a second effect.
+
+R7 RED proof mutates durable expiry, future observation, and nested request time independently, and
+uses the real bounded factory adapter across a response-loss restart. The clock mutations must
+typed-refuse before any effect, while the restart must reconcile one receipt for the sealed original
+request and perform exactly one factory execution.
