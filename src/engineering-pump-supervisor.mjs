@@ -19,6 +19,11 @@ import {
 } from './first-evidence-draft-pr.mjs';
 import { isExactInstant } from './local-lane-observation.mjs';
 import {
+  appendEngineeringPumpCorrelation,
+  ENGINEERING_PUMP_CORRELATION_SCHEMA,
+  readEngineeringPumpCorrelations,
+} from './engineering-pump-correlation.mjs';
+import {
   appendPortfolioDrainReceipt,
   readPortfolioDrainLedger,
   tickPortfolioDrain,
@@ -231,6 +236,10 @@ export async function runEngineeringPumpSupervisorTick({
   // Every gate, including a capacity early return, is a conclusion over the exact nested source.
   reconcilePortfolioDrain({ portfolio: observed.portfolio, capacity: 1 });
   requireBindings(observed);
+  if (observed.portfolio.workItems.length === 0) {
+    return deepFreeze({ gate: noAction('EXPECTED_NONE', 'NO_READY_WORK'), delivery: null,
+      checklist: projectEngineeringPumpChecklist({ directory }) });
+  }
   if (observed.capacity.providerSlots === 0) {
     return deepFreeze({ gate: noAction('PROVIDER_SATURATED', 'NO_PROVIDER_SLOT'), delivery: null,
       checklist: projectEngineeringPumpChecklist({ directory }) });
@@ -243,11 +252,6 @@ export async function runEngineeringPumpSupervisorTick({
     return deepFreeze({ gate: noAction('CAPACITY_FULL', 'NO_WRITER_SLOT'), delivery: null,
       checklist: projectEngineeringPumpChecklist({ directory }) });
   }
-  if (observed.portfolio.workItems.length === 0) {
-    return deepFreeze({ gate: noAction('EXPECTED_NONE', 'NO_READY_WORK'), delivery: null,
-      checklist: projectEngineeringPumpChecklist({ directory }) });
-  }
-
   let drainTick = tickPortfolioDrain({
     directory, portfolio: observed.portfolio,
     capacity: Math.min(4, observed.capacity.writerSlots), lockOptions,
@@ -315,6 +319,27 @@ export async function runEngineeringPumpSupervisorTick({
   }
 
   const gate = readyGate(observed, subject);
+  const activeClaim = readPortfolioDrainLedger({ directory, lockOptions }).receipts
+    .find(({ event, itemId, evidenceRevision }) => event === 'CLAIMED'
+      && itemId === subject.readyItemId
+      && evidenceRevision === gate.nextAction.actionIdentity);
+  if (!activeClaim) fail('ReservationLost', 'the exact durable claim is not readable');
+  appendEngineeringPumpCorrelation({
+    directory,
+    witness: {
+      schema: ENGINEERING_PUMP_CORRELATION_SCHEMA,
+      actionIdentity: gate.nextAction.actionIdentity,
+      claimRevision: activeClaim.revision,
+      deliveryOperationIdentity: draftPlan.operationIdentity,
+      repository: activeClaim.repository,
+      itemKind: activeClaim.itemKind,
+      itemId: activeClaim.itemId,
+      itemNumber: activeClaim.itemNumber,
+      subjectRevision: subject.subjectRevision,
+      policyRevision: observed.policyRevision,
+    },
+    lockOptions,
+  });
   const delivery = await deliverFirstEvidenceDraftPr({
     directory, observation: subject.draftObservation, grant, authority, effects,
     now, owner, leaseMs, lockOptions,
@@ -349,46 +374,70 @@ function observedTelemetry(operation) {
       reason: null,
     },
     estimateVariance: unknown('NO_COMPARABLE_ESTIMATE_EVIDENCE'),
+    evidenceLinks: operation?.pullRequest?.url
+      ? { value: [operation.pullRequest.url], reason: null }
+      : unknown('NO_DELIVERY_EVIDENCE'),
   });
 }
 
 const DEFAULT_SOURCE_READERS = Object.freeze({
   readDrain: readPortfolioDrainLedger,
   readDraft: readFirstEvidenceLedger,
+  readCorrelation: readEngineeringPumpCorrelations,
 });
 
 function stablePumpSourceSnapshot({
   directory, lockOptions, sourceReaders = DEFAULT_SOURCE_READERS, maxAttempts = 4,
 }) {
-  if (!sourceReaders || typeof sourceReaders.readDrain !== 'function'
-      || typeof sourceReaders.readDraft !== 'function') {
-    fail('ProjectionAdapterInvalid', 'both exact pump ledger readers are required');
+  const readers = { ...DEFAULT_SOURCE_READERS, ...sourceReaders };
+  if (typeof readers.readDrain !== 'function' || typeof readers.readDraft !== 'function'
+      || typeof readers.readCorrelation !== 'function') {
+    fail('ProjectionAdapterInvalid', 'all exact pump source readers are required');
   }
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const leftDrain = sourceReaders.readDrain({ directory, lockOptions });
-    const leftDraft = sourceReaders.readDraft({ directory, lockOptions });
-    const rightDrain = sourceReaders.readDrain({ directory, lockOptions });
-    const rightDraft = sourceReaders.readDraft({ directory, lockOptions });
+    const leftDrain = readers.readDrain({ directory, lockOptions });
+    const leftDraft = readers.readDraft({ directory, lockOptions });
+    const leftCorrelation = readers.readCorrelation({ directory, lockOptions });
+    const rightDrain = readers.readDrain({ directory, lockOptions });
+    const rightDraft = readers.readDraft({ directory, lockOptions });
+    const rightCorrelation = readers.readCorrelation({ directory, lockOptions });
     if (leftDrain.revision === rightDrain.revision
-        && leftDraft.revision === rightDraft.revision) {
-      return deepFreeze({ drain: rightDrain, draft: rightDraft });
+        && leftDraft.revision === rightDraft.revision
+        && leftCorrelation.revision === rightCorrelation.revision) {
+      return deepFreeze({
+        drain: rightDrain, draft: rightDraft, correlation: rightCorrelation,
+      });
     }
   }
   fail('ProjectionSnapshotUnstable', 'pump source ledgers changed throughout the bounded read window');
 }
 
-function operationForClaim(claim, operations) {
+function operationForClaim(claim, receipts, operations, correlations) {
   if (claim === null) return null;
-  return operations.filter((operation) => operation.repository === claim.repository
-    && operation.task?.kind === claim.itemKind
-    && operation.task?.number === claim.itemNumber).at(-1) ?? null;
+  const witness = correlations.witnesses.find(({ actionIdentity, repository, itemKind, itemId,
+    itemNumber }) => actionIdentity === claim.evidenceRevision
+      && repository === claim.repository && itemKind === claim.itemKind
+      && itemId === claim.itemId && itemNumber === claim.itemNumber) ?? null;
+  if (witness === null) return null;
+  const originatingClaim = receipts.find(({ revision }) => revision === witness.claimRevision);
+  if (!originatingClaim || originatingClaim.event !== 'CLAIMED'
+      || originatingClaim.evidenceRevision !== witness.actionIdentity
+      || originatingClaim.itemId !== witness.itemId) return null;
+  const operation = operations.find(
+    ({ operationIdentity }) => operationIdentity === witness.deliveryOperationIdentity,
+  ) ?? null;
+  return claim.evidenceRevision === witness.actionIdentity ? operation : null;
 }
 
 export function projectEngineeringPumpChecklist({ directory, lockOptions, sourceReaders } = {}) {
-  const { drain, draft } = stablePumpSourceSnapshot({ directory, lockOptions, sourceReaders });
+  const { drain, draft, correlation } = stablePumpSourceSnapshot({
+    directory, lockOptions, sourceReaders,
+  });
   const delivery = projectFirstEvidenceLedgerSnapshot(draft);
   const claim = drain.receipts.at(-1) ?? null;
-  const operation = operationForClaim(claim, delivery.projection.operations);
+  const operation = operationForClaim(
+    claim, drain.receipts, delivery.projection.operations, correlation,
+  );
   const profile = executionProfile();
   const telemetry = observedTelemetry(operation);
   const currentGate = ['CREATED', 'REUSED'].includes(operation?.outcome) ? 'DRAFT_OPEN'
@@ -400,7 +449,8 @@ export function projectEngineeringPumpChecklist({ directory, lockOptions, source
     outcome: 'Open one evidence-bound Draft pull request for one ready issue.',
     why: 'Keep the engineering pump supplied with visible, reviewable work.',
     forWhom: 'Gaia operator and the next bounded delivery lane.',
-    owner: operation?.owner ?? 'UNASSIGNED',
+    owner: unknown('NO_OWNER_BINDING_EVIDENCE'),
+    lane: unknown('NO_LANE_BINDING_EVIDENCE'),
     reportsTo: 'GAIA_PUMP',
     scope: ['START_DRAFT tracer bullet'],
     exclusions: ['merge', 'ready-for-review', 'adaptive fanout', 'provider scheduling'],
@@ -410,7 +460,6 @@ export function projectEngineeringPumpChecklist({ directory, lockOptions, source
     where: [claim?.repository ?? operation?.repository ?? 'UNKNOWN'],
     withWhat: ['portfolio drain ledger', 'first-evidence delivery journal', 'GitHub effect port'],
     authorityBoundary: 'OPEN_DRAFT_PULL_REQUEST exact grant only',
-    evidenceLinks: operation?.pullRequest?.url ? [operation.pullRequest.url] : [],
     ifFailure: 'Stop without retry and surface the typed refusal or reconciliation gate.',
     executionProfile: profile,
   };
@@ -426,6 +475,7 @@ export function projectEngineeringPumpChecklist({ directory, lockOptions, source
     'ETA reason: NO_DURATION_MODEL_EVIDENCE',
     `Latest evidence: ${operation?.operationIdentity ?? claim?.evidenceRevision ?? 'UNKNOWN'}`,
     `Retries: ${telemetry.retries.value}`,
+    `Evidence links: ${telemetry.evidenceLinks.value?.join(', ') ?? 'UNKNOWN'}`,
     'Origin: GAIA PUMP',
     `updatedAt: ${updatedAt ?? 'UNKNOWN'}`,
   ].join('\n');
@@ -433,13 +483,19 @@ export function projectEngineeringPumpChecklist({ directory, lockOptions, source
     schema: ENGINEERING_PUMP_CHECKLIST_SCHEMA,
     origin: 'GAIA PUMP', currentGate, issueBody, statusComment,
     observedTelemetry: telemetry,
-    sourceRevisions: { portfolioDrain: drain.revision, draftDelivery: delivery.ledgerRevision },
+    sourceRevisions: {
+      portfolioDrain: drain.revision,
+      draftDelivery: delivery.ledgerRevision,
+      pumpCorrelation: correlation.revision,
+    },
   };
   return deepFreeze({ ...body, revision: sha256(body) });
 }
 
 export function projectEngineeringPumpTransitions({ directory, lockOptions, sourceReaders } = {}) {
-  const { drain, draft } = stablePumpSourceSnapshot({ directory, lockOptions, sourceReaders });
+  const { drain, draft, correlation } = stablePumpSourceSnapshot({
+    directory, lockOptions, sourceReaders,
+  });
   const profile = executionProfile();
   const operations = projectFirstEvidenceLedgerSnapshot(draft).projection.operations;
   const byIdentity = new Map(operations.map((operation) => [operation.operationIdentity, operation]));
@@ -462,7 +518,11 @@ export function projectEngineeringPumpTransitions({ directory, lockOptions, sour
   ];
   const body = {
     schema: ENGINEERING_PUMP_TRANSITION_SCHEMA,
-    sourceRevisions: { portfolioDrain: drain.revision, draftDelivery: draft.revision },
+    sourceRevisions: {
+      portfolioDrain: drain.revision,
+      draftDelivery: draft.revision,
+      pumpCorrelation: correlation.revision,
+    },
     rows,
     effect: 'NONE', authority: 'NONE',
   };

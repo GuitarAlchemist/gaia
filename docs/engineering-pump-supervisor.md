@@ -38,8 +38,10 @@ The logical resource is `(repository, readyItemId, subjectRevision)`. The operat
 content digest of that tuple plus the chosen action and policy revision.
 
 Actors are concurrent supervisor ticks, restarted supervisors, the single effect executor, GitHub,
-and projection readers. The two existing append-only journals are authoritative. DuckDB and the
-managed status-comment content are rebuildable projections; R0 does not publish that comment.
+and projection readers. The two existing append-only lifecycle journals are authoritative. A
+passive append-only pump-correlation witness binds their exact generations without defining a
+third lifecycle machine. DuckDB and the managed status-comment content are rebuildable
+projections; R0 does not publish that comment.
 
 The capacity/target linearization point is exclusive append of a portfolio-drain `CLAIMED` receipt
 against its expected ledger revision. The GitHub-effect linearization point remains durable creation
@@ -54,14 +56,14 @@ already contains an exact matching `INTENT` whose provider response may have bee
 unexpired matching `INTENT` owned by another actor remains live: observing its Draft does not permit
 a second actor to settle or reinterpret it.
 
-Checklist replay joins the latest drain claim to a delivery operation only through a durable
-correlation witness carried by the first-evidence transition. The witness must equal the claim's
-exact action identity in addition to matching repository, item kind, and item number. A delivery for
-another claim generation is not "latest status" for this one: absent an exact match,
+Checklist replay joins the latest drain claim to a delivery operation only through a passive,
+durable correlation witness written before delivery. The witness binds the exact claim receipt and
+action identity to the delivery operation identity, repository, item and source/policy revisions.
+A delivery for another claim generation is not "latest status" for this one: absent an exact match,
 delivery-derived fields remain honestly unknown and no old PR evidence is shown.
-The projection derives both the checklist and DuckDB rows from one stable pair of exact ledger
-snapshots. It retries when either head changes across the read window and typed-refuses when no
-stable pair can be measured; it never combines independently sampled heads.
+The projection derives both the checklist and DuckDB rows from one stable set of exact source
+snapshots. It retries when any head changes across the read window and typed-refuses when no stable
+set can be measured; it never combines independently sampled heads.
 
 The sealed nested portfolio revision is validated before capacity, provider, CI, or empty-work early
 gates. An early gate is a conclusion over verified evidence, never a shortcut around evidence

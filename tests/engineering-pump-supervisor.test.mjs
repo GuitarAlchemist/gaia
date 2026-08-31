@@ -13,6 +13,7 @@ import {
   runEngineeringPumpSupervisorTick,
   sealEngineeringPumpObservation,
 } from '../src/engineering-pump-supervisor.mjs';
+import { readEngineeringPumpCorrelations } from '../src/engineering-pump-correlation.mjs';
 import { synchronizeEngineeringPumpDuckDb } from '../src/duckdb-engineering-pump-supervisor.mjs';
 import { readFirstEvidenceLedger } from '../src/first-evidence-draft-pr-delivery.mjs';
 import {
@@ -513,9 +514,13 @@ test('R2 same item re-claimed under a new subject and policy cannot inherit the 
   });
   assert.doesNotMatch(restarted.statusComment, /pull\/45/u);
   const originalClaim = readPortfolioDrainLedger({ directory }).receipts[0];
-  assert.ok(readFirstEvidenceLedger({ directory }).transitions.every(
-    ({ correlationRevision }) => correlationRevision === originalClaim.evidenceRevision,
-  ));
+  const correlations = readEngineeringPumpCorrelations({ directory });
+  assert.equal(correlations.count, 1);
+  assert.equal(correlations.witnesses[0].actionIdentity, originalClaim.evidenceRevision);
+  assert.equal(
+    correlations.witnesses[0].deliveryOperationIdentity,
+    readFirstEvidenceLedger({ directory }).transitions[0].operationIdentity,
+  );
 });
 
 test('R1 a foreign live delivery owner cannot be settled by an observed Draft', async () => {
@@ -607,12 +612,14 @@ test('R1 checklist and DuckDB projections retry an append between source-ledger 
   );
 });
 
-test('R0 deterministic replay and DuckDB derive only from the two existing ledgers', async () => {
+test('R0 deterministic replay and DuckDB derive from exact stable source generations', async () => {
   const directory = scratch();
   await tick(directory);
   const first = projectEngineeringPumpTransitions({ directory });
   assert.deepEqual(projectEngineeringPumpTransitions({ directory }), first);
-  assert.deepEqual(Object.keys(first.sourceRevisions).sort(), ['draftDelivery', 'portfolioDrain']);
+  assert.deepEqual(Object.keys(first.sourceRevisions).sort(), [
+    'draftDelivery', 'portfolioDrain', 'pumpCorrelation',
+  ]);
   assert.ok(first.rows.every((row) => Object.hasOwn(row, 'executionProfile')
     && Object.hasOwn(row, 'observedTelemetry')));
   const calls = [];
@@ -637,7 +644,7 @@ test('R0 MECHANISM REVERT: existing machines own reservation, intent and reconci
   assert.match(source, /appendPortfolioDrainReceipt/u);
   assert.match(source, /operationForClaim/u);
   assert.match(source, /stablePumpSourceSnapshot/u);
-  assert.match(source, /claim\.evidenceRevision === operation\.correlationRevision/u);
+  assert.match(source, /claim\.evidenceRevision === witness\.actionIdentity/u);
   assert.equal(source.includes('operations.at(-1)'), false);
   for (const forbidden of [
     'engineering-pump.jsonl', 'ENGINEERING_PUMP_LEDGER', 'openDraftPullRequest({',
