@@ -57,6 +57,9 @@ the exact Draft but the first-evidence journal has no durable `INTENT`, the tick
 `BLOCKED / DELIVERY_INTENT_MISSING` result after repairing the witness. It neither adopts the Draft
 without proof nor retries an effect. Thus the orphan is observable and convergent without creating
 a second authority path.
+This passive recovery runs after complete nested evidence validation but before provider, CI, or
+writer admission gates. It consumes none of those capacities: saturation governs new work, not
+reconciliation of a durable outbox already accepted at the claim linearization point.
 
 A fresh `DRAFT_OPEN` observation is already satisfied work. It cannot reserve capacity and cannot
 announce `START_DRAFT`. It may reach the delivery adoption path only when the first-evidence journal
