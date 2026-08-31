@@ -82,9 +82,14 @@ export const PR_REVIEW_THREAD_LIFECYCLE = Object.freeze(
   PR_REVIEW_THREAD_TRANSITIONS.filter((verb) => verb !== 'REFUSED'),
 );
 
+/**
+ * The five refusals the reading can reach, plus `AUTHORITY_REFUSED`, which only the durable half
+ * can reach. It is declared here so that one closed vocabulary covers every refusal that can
+ * become durable: a grant that was declined must not be recorded as an unverified repair.
+ */
 export const PR_REVIEW_THREAD_REFUSALS = Object.freeze([
   'FINDING_STALE', 'APPLICABILITY_UNKNOWN', 'THREAD_DISPUTED', 'REPAIR_UNVERIFIED',
-  'PARTIALLY_ADDRESSED',
+  'PARTIALLY_ADDRESSED', 'AUTHORITY_REFUSED',
 ]);
 
 export const PR_REVIEW_THREAD_IDENTITY_FIELDS = Object.freeze([

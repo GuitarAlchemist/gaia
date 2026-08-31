@@ -686,8 +686,12 @@ test('R33: every published vocabulary is closed, frozen and complete', () => {
   assert.deepEqual([...PR_REVIEW_ACTIONABLE_SEVERITIES], ['P0', 'P1']);
   assert.deepEqual([...PR_REVIEW_THREAD_ACTIONS], ['NONE', 'CLAIM', 'COMMENT', 'RESOLVE', 'REFUSE']);
   assert.deepEqual([...PR_REVIEW_THREAD_REFUSALS].sort(), [
-    'APPLICABILITY_UNKNOWN', 'FINDING_STALE', 'PARTIALLY_ADDRESSED', 'REPAIR_UNVERIFIED',
-    'THREAD_DISPUTED',
+    // AUTHORITY_REFUSED is reachable only by the durable half, and is declared here so that one
+    // closed vocabulary covers every refusal that can become durable. Without it a declined grant
+    // would have to borrow REPAIR_UNVERIFIED and record the repair as unverified when it was
+    // verified and it was the grant that was refused.
+    'APPLICABILITY_UNKNOWN', 'AUTHORITY_REFUSED', 'FINDING_STALE', 'PARTIALLY_ADDRESSED',
+    'REPAIR_UNVERIFIED', 'THREAD_DISPUTED',
   ]);
   for (const severity of PR_REVIEW_ACTIONABLE_SEVERITIES) {
     assert.ok(PR_REVIEW_SEVERITIES.includes(severity));

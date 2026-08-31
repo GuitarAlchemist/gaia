@@ -127,7 +127,16 @@ the operator's evidence is on the pull request *before* the thread that would ha
 closed. A resolution that precedes its evidence deletes the reason it happened.
 
 The four refusals issue #43 names are each their own token and each their own gate:
-`FINDING_STALE`, `THREAD_DISPUTED`, `REPAIR_UNVERIFIED`, `PARTIALLY_ADDRESSED`.
+`FINDING_STALE`, `THREAD_DISPUTED`, `REPAIR_UNVERIFIED`, `PARTIALLY_ADDRESSED`. Two more exist
+because they are things that actually happen and would otherwise have to borrow a token that lies:
+`APPLICABILITY_UNKNOWN`, for a finding whose anchor was never measured, and `AUTHORITY_REFUSED`,
+for a declined grant — recording that as `REPAIR_UNVERIFIED` would say the repair was unverified
+when it was verified and it was the grant that was refused.
+
+A refused lane is terminal, and nothing further accrues to it: no evidence transition, no claim,
+no effect. A failed *request* is deliberately not terminal, because it may have arrived; it leaves
+the claim reconcilable and bounded by its lease. A refused *authority* is terminal, because no
+request was made and there is nothing to reconcile.
 
 ## Failure modes, and what each one does
 
@@ -144,6 +153,7 @@ The four refusals issue #43 names are each their own token and each their own ga
 | A human resolved the thread first | reconciliation records `RESOLVED` from what is there; no effect is performed |
 | Required contexts are unknown, or a required context is absent from the reported conclusions | `REPAIR_UNVERIFIED`; a missing check is not a passing check |
 | A transition arrives out of order | refused; the lifecycle is monotonic, and `VERIFIED` without `REPAIRED` is a corrupt claim |
+| A supervisor is killed between `RECEIVED` and `CLASSIFIED` | the missing prefix is completed on the next tick; a lane whose history is not a contiguous prefix can no longer be planned at all, so ingestion repairs itself rather than assuming it happened |
 
 ## Rejected simpler alternatives
 

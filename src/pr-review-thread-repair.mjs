@@ -69,7 +69,6 @@ import { isExactInstant } from './local-lane-observation.mjs';
 import {
   PR_REVIEW_SEVERITIES,
   PR_REVIEW_STATES,
-  PR_REVIEW_THREAD_ACTIONS,
   PR_REVIEW_THREAD_LIFECYCLE,
   PR_REVIEW_THREAD_REFUSALS,
   PR_REVIEW_THREAD_TRANSITIONS,
@@ -378,10 +377,7 @@ const laneOf = (transitions) => transitions.reduce((lane, transition) => ({
   transitions: [...lane.transitions, transition.transition],
   claimedAt: lane.claimedAt ?? (transition.transition === 'CLAIMED' ? transition.recordedAt : null),
   resolvedAt: transition.transition === 'RESOLVED' ? transition.recordedAt : lane.resolvedAt,
-  outcome: PR_REVIEW_THREAD_LIFECYCLE.includes(transition.transition)
-    || transition.transition === 'REFUSED'
-    ? transition.transition
-    : lane.outcome,
+  outcome: transition.transition,
 }), {
   transitions: [], claimedAt: null, resolvedAt: null, outcome: 'NONE',
 });
@@ -555,10 +551,7 @@ export async function runPrReviewThreadRepairPump({
     }
   };
 
-  const reading = (over = {}) => {
-    const plan = planPrReviewThreadRepair({ observation: observed, history: history() });
-    return { ...plan, ...over };
-  };
+  const reading = () => planPrReviewThreadRepair({ observation: observed, history: history() });
 
   const report = (plan, { state, outcome, effect = 'NONE', consumed = 'NONE', comment = null }) => result({
     schema: PR_REVIEW_REPAIR_SCHEMA,
@@ -579,18 +572,39 @@ export async function runPrReviewThreadRepairPump({
     authority: consumed,
   });
 
-  // First sight. Ingesting the thread is unconditional — a thread nobody classified as actionable
-  // is still evidence that a review happened, and the compare-and-swap on RECEIVED is what orders
-  // two supervisors that see one thread for the first time at the same moment.
-  if (mine().length === 0) {
-    const first = reading();
-    ordered({ transition: 'RECEIVED', reading: first });
-    ordered({ transition: 'CLASSIFIED', reading: first });
+  // Ingestion is unconditional, and is itself repaired rather than assumed. A thread nobody
+  // classified as actionable is still evidence that a review happened; and a supervisor killed
+  // between RECEIVED and CLASSIFIED leaves a lane whose history is no longer a contiguous prefix,
+  // so completing a missing prefix here is what stops one crash from wedging that lane forever.
+  // The compare-and-swap on the first of these orders two supervisors that see one thread for the
+  // first time at the same moment.
+  const ingestion = planPrReviewThreadRepair({ observation: observed, history: [] });
+  for (const verb of ['RECEIVED', 'CLASSIFIED']) {
+    if (!history().includes(verb)) ordered({ transition: verb, reading: ingestion });
   }
 
+  const settled = () => (appended.length === 0 ? 'NONE' : 'PROGRESSED');
   let plan = reading();
-  if (plan.action === 'NONE') {
-    return report(plan, { outcome: appended.length === 0 ? 'NONE' : 'PROGRESSED' });
+
+  /** Evidence this observation proves that the ledger does not yet carry. */
+  const pendingEvidence = () => {
+    const seen = history();
+    // Evidence accrues only to a live claimed lane. A lane that was refused, or whose thread is
+    // already resolved, is terminal, and appending to it would grow a record nobody may act on.
+    if (!seen.includes('CLAIMED') || seen.includes('REFUSED') || seen.includes('RESOLVED')) {
+      return [];
+    }
+    // Both are gated on the repair proof, because VERIFIED may never precede REPAIRED: a
+    // verification of a repair that was never proven verifies nothing.
+    if (!plan.repairProven) return [];
+    const pending = seen.includes('REPAIRED') ? [] : ['REPAIRED'];
+    return plan.verificationProven && !seen.includes('VERIFIED')
+      ? [...pending, 'VERIFIED']
+      : pending;
+  };
+
+  if (plan.action === 'NONE' && pendingEvidence().length === 0) {
+    return report(plan, { outcome: settled() });
   }
 
   // A live supervisor and one killed mid-repair leave the same record; the bounded lease is the
@@ -607,7 +621,7 @@ export async function runPrReviewThreadRepairPump({
   }
 
   if (plan.action === 'REFUSE') {
-    append({ transition: 'REFUSED', refusal: plan.refusal, reading: plan });
+    ordered({ transition: 'REFUSED', refusal: plan.refusal, reading: plan });
     return report(plan, { state: 'REFUSED', outcome: 'REFUSED' });
   }
 
@@ -617,16 +631,13 @@ export async function runPrReviewThreadRepairPump({
   }
 
   // The evidence transitions carry no effect: they record that the repair and its verification
-  // were proven, from an observation that proved them.
-  if (plan.repairProven && !history().includes('REPAIRED')) {
-    append({ transition: 'REPAIRED', reading: plan });
-  }
-  if (plan.verificationProven && !history().includes('VERIFIED')) {
-    append({ transition: 'VERIFIED', reading: plan });
-  }
+  // were proven, from an observation that proved them. They are recorded as soon as they are
+  // proven rather than at the moment of the comment, so an operator sees "repaired, awaiting its
+  // checks" instead of silence.
+  for (const verb of pendingEvidence()) append({ transition: verb, reading: plan });
   plan = reading();
   if (plan.action !== 'COMMENT' && plan.action !== 'RESOLVE') {
-    return report(plan, { outcome: appended.length === 0 ? 'NONE' : 'PROGRESSED' });
+    return report(plan, { outcome: settled() });
   }
 
   // A prior attempt reached, or may have reached, GitHub. Ask what is actually there before
@@ -653,7 +664,7 @@ export async function runPrReviewThreadRepairPump({
     if (plan.action !== 'RESOLVE') {
       // Somebody else closed this thread. Recording a resolution this pump did not perform would
       // be a durable claim about an effect that never happened.
-      return report(plan, { state: 'THREAD_RESOLVED', outcome: 'NONE' });
+      return report(plan, { state: 'THREAD_RESOLVED', outcome: settled() });
     }
     append({ transition: 'RESOLVED', reading: plan });
     return report(plan, { state: 'THREAD_RESOLVED', outcome: 'RESOLVED' });
@@ -674,8 +685,12 @@ export async function runPrReviewThreadRepairPump({
   ordered({ transition: 'CLAIMED', intent, lease: leaseExpiresAt, reading: plan });
   const intentRevision = lastRecord.revision;
 
-  const abandon = (errorCode, message, refusal) => {
-    append({ transition: 'REFUSED', refusal, reading: plan });
+  // Terminal, unlike a failed request: no request was made, so there is nothing that may have
+  // arrived and nothing to reconcile. The refusal names what actually happened rather than
+  // borrowing a token that would record the repair as unverified when it was verified and it was
+  // the grant that was refused.
+  const abandon = (errorCode, message) => {
+    append({ transition: 'REFUSED', refusal: 'AUTHORITY_REFUSED', reading: plan });
     fail(errorCode, message);
   };
 
@@ -694,10 +709,10 @@ export async function runPrReviewThreadRepairPump({
       },
     });
   } catch {
-    abandon('AuthorityRefused', 'authority refused without exposing diagnostics', 'REPAIR_UNVERIFIED');
+    abandon('AuthorityRefused', 'authority refused without exposing diagnostics');
   }
   if (!authorization || authorization.status !== 'AUTHORIZED') {
-    abandon('AuthorityRefused', 'authority did not authorize this exact effect', 'REPAIR_UNVERIFIED');
+    abandon('AuthorityRefused', 'authority did not authorize this exact effect');
   }
 
   const idempotencyKey = sha256({ threadIdentity, intent, grantId: authorization.grantId });
@@ -826,4 +841,4 @@ export function measurePrReviewThreadRepair({
   });
 }
 
-export { PR_REVIEW_THREAD_ACTIONS, repairIdentityMarker };
+export { repairIdentityMarker };

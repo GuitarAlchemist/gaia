@@ -416,7 +416,7 @@ test('S13: a thread a human resolved first is never claimed as this pump\'s reso
   const closed = fakeEffects({ read: () => ({ isResolved: true, comments: [] }) });
   const tick = await drive(directory, { observation: repaired(), effects: closed });
   assert.equal(tick.state, 'THREAD_RESOLVED');
-  assert.equal(tick.outcome, 'NONE');
+  assert.equal(tick.outcome, 'PROGRESSED', 'the evidence it did record is not nothing');
   assert.equal(closed.counts('postReviewThreadComment'), 0);
   assert.ok(
     !verbs(directory).includes('RESOLVED'),
@@ -1139,4 +1139,36 @@ test('S36: the identity marker is derived from the identity and appears in the p
   assert.equal(posted.threadIdentity, IDENTITY);
   assert.ok(posted.body.includes(marker), '"probably ours" is how one lane adopts another\'s work');
   assert.match(posted.idempotencyKey, /^[a-f0-9]{64}$/u);
+});
+
+/* ------------------------------------------------------------------------------------------- *
+ * S37 — the prefix a crash can leave half-written
+ * ------------------------------------------------------------------------------------------ */
+
+test('S37: a lane whose ingestion was interrupted is completed, not wedged forever', async () => {
+  const directory = scratch();
+  // Exactly what a supervisor killed between RECEIVED and CLASSIFIED leaves behind. A pump that
+  // treated "any record exists" as "ingestion happened" would claim from this history, producing
+  // RECEIVED -> CLAIMED, which is no longer a contiguous prefix of the lifecycle; every later tick
+  // on that lane would then fail to plan at all.
+  const seeded = await drive(directory, {});
+  const first = readPrReviewRepairLedger({ directory }).transitions[0];
+  const path = prReviewRepairLedgerPath(directory);
+  const head = readFileSync(path, 'utf8').trim().split('\n')[0];
+  writeFileSync(path, `${head}\n`, 'utf8');
+  assert.deepEqual(verbs(directory), ['RECEIVED'], 'a half-written ingestion');
+  assert.equal(first.transition, 'RECEIVED');
+  assert.equal(seeded.outcome, 'CLAIMED');
+
+  const effects = fakeEffects();
+  const resumed = await drive(directory, { effects });
+  assert.deepEqual(resumed.appended, ['CLASSIFIED', 'CLAIMED'], 'the missing prefix is completed');
+  assert.deepEqual(verbs(directory), ['RECEIVED', 'CLASSIFIED', 'CLAIMED']);
+
+  // And the lane still runs to completion from there, which is the property that matters.
+  await drive(directory, { observation: repaired(), effects });
+  const finished = await drive(directory, { observation: repaired(), effects });
+  assert.equal(finished.outcome, 'RESOLVED');
+  assert.equal(effects.counts('postReviewThreadComment'), 1);
+  assert.equal(effects.counts('resolveReviewThread'), 1);
 });
