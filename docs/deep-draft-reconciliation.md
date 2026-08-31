@@ -93,6 +93,21 @@ R0 ships two adapters behind the same store contract:
 Both run the same black-box contract suite. An adapter that cannot preserve the interface is
 refused rather than approximated. No adapter-specific exception may appear in a caller.
 
+The append-only adapter keeps `draft-reconciliation.jsonl` under an explicit data directory. Its
+lock, full replay, compare-and-set, one-line append, and `fsync` happen behind the store port. A
+torn, altered, non-contiguous, or future-schema record refuses the whole read; no partial replay or
+automatic lock breaking is allowed.
+
+The GitHub adapter embeds the complete operation identity as a closed HTML marker and accepts a
+Draft only when repository, base, head branch, head OID, open/Draft state, and marker all agree. A
+`422` create response is ambiguous rather than success: the adapter performs an exact lookup and
+returns the Draft only if that complete identity is visible. GitHub documents `201`, `403`, and
+generic validation-or-abuse `422` responses for Draft creation, but does not document duplicate
+head/base serialization as an idempotency contract. Therefore R0 treats the adapter as
+production-shaped, not as independent proof of provider serialization. Promotion requires either
+a live concurrency probe demonstrating that property or a GitHub-hosted serialized executor. If a
+probe can create two open Drafts for one head/base operation, this adapter is rejected unchanged.
+
 ## Mandatory deterministic fault matrix
 
 Tests use explicit barriers and step functions, never wall-clock sleeps or probabilistic stress.

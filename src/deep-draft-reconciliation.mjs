@@ -1,11 +1,26 @@
 import { createHash } from 'node:crypto';
+import {
+  appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync,
+} from 'node:fs';
+import { join, resolve } from 'node:path';
+
+import {
+  CorruptLogError, LOCK_RM_OPTIONS, LOCK_STALE_MS, LOCK_TIMEOUT_MS, LockTimeoutError,
+  parseEventLog,
+} from './event-log.mjs';
 
 export const DRAFT_RECONCILIATION_SCHEMA = 'gaia-draft-reconciliation-receipt/1';
 export const DRAFT_RECONCILIATION_STORE_SCHEMA = 'gaia-draft-reconciliation-store/1';
+export const DRAFT_RECONCILIATION_RECORD_SCHEMA = 'gaia-draft-reconciliation-record/1';
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const OID = /^[a-f0-9]{40}$/u;
 const EFFECT = 'CREATE_DRAFT';
+const STORE_FIELDS = Object.freeze([
+  'kind', 'operationIdentity', 'baseIdentity', 'workIdentity', 'reconciliationGeneration',
+  'sourceRevision', 'outcome', 'refusal', 'effect', 'pullRequest',
+]);
+const TERMINAL_OUTCOMES = Object.freeze(['CREATED', 'SATISFIED', 'REFUSED']);
 
 const canonicalJson = (value) => {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -40,6 +55,36 @@ const fail = (code, message) => { throw new DraftReconciliationError(code, messa
 
 const EMPTY_REVISION = sha256({ schema: DRAFT_RECONCILIATION_STORE_SCHEMA, records: [] });
 
+function requireStoreCandidate(candidate) {
+  const keys = candidate && typeof candidate === 'object' ? Object.keys(candidate) : [];
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
+      || keys.length !== STORE_FIELDS.length || keys.some((key) => !STORE_FIELDS.includes(key))
+      || !['INTENT', 'TERMINAL'].includes(candidate.kind)
+      || typeof candidate.operationIdentity !== 'string'
+      || !SHA256.test(candidate.operationIdentity)
+      || typeof candidate.baseIdentity !== 'string' || !SHA256.test(candidate.baseIdentity)
+      || typeof candidate.workIdentity !== 'string' || !SHA256.test(candidate.workIdentity)
+      || !Number.isSafeInteger(candidate.reconciliationGeneration)
+      || candidate.reconciliationGeneration < 1
+      || typeof candidate.sourceRevision !== 'string' || !SHA256.test(candidate.sourceRevision)) {
+    fail('StoreRecordInvalid', 'the reconciliation record is not canonical');
+  }
+  const intentValid = candidate.kind === 'INTENT'
+    && candidate.outcome === null && candidate.refusal === null
+    && candidate.effect === EFFECT && candidate.pullRequest === null;
+  const terminalValid = candidate.kind === 'TERMINAL'
+    && TERMINAL_OUTCOMES.includes(candidate.outcome)
+    && (candidate.refusal === null || typeof candidate.refusal === 'string')
+    && ['NONE', EFFECT].includes(candidate.effect)
+    && (candidate.pullRequest === null || exactDraft(
+      candidate.pullRequest, candidate.operationIdentity,
+    ));
+  if (!intentValid && !terminalValid) {
+    fail('StoreRecordInvalid', 'the reconciliation transition fields are incoherent');
+  }
+  return freeze(clone(candidate));
+}
+
 export function createMemoryDraftReconciliationStore() {
   let revision = EMPTY_REVISION;
   const records = [];
@@ -60,17 +105,243 @@ export function createMemoryDraftReconciliationStore() {
       if (expectedRevision !== revision) {
         fail('CasMismatch', 'the reconciliation store changed after it was observed');
       }
-      if (!candidate || typeof candidate !== 'object'
-          || !['INTENT', 'TERMINAL'].includes(candidate.kind)
-          || typeof candidate.operationIdentity !== 'string'
-          || !SHA256.test(candidate.operationIdentity)) {
-        fail('StoreRecordInvalid', 'the reconciliation record is not canonical');
-      }
-      const body = freeze(clone(candidate));
+      const body = requireStoreCandidate(candidate);
       const nextRevision = sha256({ previousRevision: revision, record: body });
       records.push(freeze({ ...body, stateRevision: nextRevision }));
       revision = nextRevision;
       return this.read();
+    },
+  });
+}
+
+function requireDirectory(directory) {
+  if (typeof directory !== 'string' || directory.trim() !== directory || directory.length === 0) {
+    fail('StorePathInvalid', 'directory must be explicit');
+  }
+  return resolve(directory);
+}
+
+export function draftReconciliationLogPath(directory) {
+  return join(requireDirectory(directory), 'draft-reconciliation.jsonl');
+}
+
+export function draftReconciliationLockPath(directory) {
+  return join(requireDirectory(directory), 'draft-reconciliation.lock');
+}
+
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function withStoreLock(directory, operation, {
+  timeoutMs = LOCK_TIMEOUT_MS, staleMs = LOCK_STALE_MS,
+} = {}) {
+  const root = requireDirectory(directory);
+  const lock = draftReconciliationLockPath(root);
+  mkdirSync(root, { recursive: true });
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch (error) {
+      if (!['EEXIST', 'EPERM', 'EACCES'].includes(error.code)) throw error;
+      if (Date.now() >= deadline) {
+        throw new LockTimeoutError(
+          `could not acquire ${lock} within ${timeoutMs}ms; refusing to access the Draft `
+          + `reconciliation store without its lock (fail closed; stale threshold ${staleMs}ms)`,
+        );
+      }
+      sleepSync(15);
+    }
+  }
+  try {
+    return operation();
+  } finally {
+    rmSync(lock, LOCK_RM_OPTIONS);
+  }
+}
+
+function verifyDurableRecord(record, ordinal, previousRevision) {
+  const fields = ['type', 'schema', 'ordinal', 'previousRevision', 'body', 'stateRevision'];
+  const keys = record && typeof record === 'object' ? Object.keys(record) : [];
+  if (!record || record.type !== 'gaia.draft-reconciliation.record'
+      || record.schema !== DRAFT_RECONCILIATION_RECORD_SCHEMA
+      || keys.length !== fields.length || keys.some((key) => !fields.includes(key))
+      || record.ordinal !== ordinal || record.previousRevision !== previousRevision) {
+    throw new CorruptLogError('Draft reconciliation store contains a non-contiguous record');
+  }
+  const body = requireStoreCandidate(record.body);
+  const stateRevision = sha256({ previousRevision, record: body });
+  if (record.stateRevision !== stateRevision) {
+    throw new CorruptLogError('Draft reconciliation record revision does not match its content');
+  }
+  return freeze({ ...body, stateRevision });
+}
+
+function readDurableRecordsUnlocked(directory) {
+  const path = draftReconciliationLogPath(directory);
+  if (!existsSync(path)) return [];
+  const envelopes = parseEventLog(readFileSync(path, 'utf8'), { source: path });
+  const records = [];
+  let previousRevision = EMPTY_REVISION;
+  for (const [ordinal, envelope] of envelopes.entries()) {
+    const record = verifyDurableRecord(envelope, ordinal, previousRevision);
+    records.push(record);
+    previousRevision = record.stateRevision;
+  }
+  return records;
+}
+
+function storeSnapshot(records) {
+  return freeze({
+    schema: DRAFT_RECONCILIATION_STORE_SCHEMA,
+    revision: records.at(-1)?.stateRevision ?? EMPTY_REVISION,
+    records: clone(records),
+  });
+}
+
+function appendDurableRecord(directory, envelope) {
+  const path = draftReconciliationLogPath(directory);
+  appendFileSync(path, `${canonicalJson(envelope)}\n`, 'utf8');
+  const descriptor = openSync(path, 'r+');
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+export function createAppendOnlyDraftReconciliationStore({ directory, lockOptions } = {}) {
+  const root = requireDirectory(directory);
+  return freeze({
+    async read() {
+      if (!existsSync(root)) return storeSnapshot([]);
+      return withStoreLock(root, () => storeSnapshot(readDurableRecordsUnlocked(root)), lockOptions);
+    },
+
+    async compareAndSetAppend(expectedRevision, candidate) {
+      if (typeof expectedRevision !== 'string' || !SHA256.test(expectedRevision)) {
+        fail('StoreRequestInvalid', 'expectedRevision must be a SHA-256');
+      }
+      const body = requireStoreCandidate(candidate);
+      return withStoreLock(root, () => {
+        const records = readDurableRecordsUnlocked(root);
+        const before = storeSnapshot(records);
+        if (before.revision !== expectedRevision) {
+          fail('CasMismatch', 'the reconciliation store changed after it was observed');
+        }
+        const stateRevision = sha256({ previousRevision: before.revision, record: body });
+        const envelope = freeze({
+          type: 'gaia.draft-reconciliation.record',
+          schema: DRAFT_RECONCILIATION_RECORD_SCHEMA,
+          ordinal: records.length,
+          previousRevision: before.revision,
+          body,
+          stateRevision,
+        });
+        appendDurableRecord(root, envelope);
+        return storeSnapshot([...records, freeze({ ...body, stateRevision })]);
+      }, lockOptions);
+    },
+  });
+}
+
+function githubOperationMarker(operationIdentity) {
+  return `<!-- gaia-draft-operation:${operationIdentity} -->`;
+}
+
+function githubResultBody(result) {
+  return result && typeof result === 'object' && 'data' in result ? result.data : result;
+}
+
+function exactGitHubDraft(candidate, operationIdentity, observation) {
+  const marker = githubOperationMarker(operationIdentity);
+  if (!candidate || typeof candidate !== 'object'
+      || !Number.isSafeInteger(candidate.number) || candidate.number < 1
+      || candidate.draft !== true || candidate.state !== 'open'
+      || candidate.head?.ref !== observation.headBranch
+      || candidate.head?.sha !== observation.evidenceHeadOid
+      || candidate.base?.ref !== observation.baseBranch
+      || typeof candidate.body !== 'string'
+      || !candidate.body.split(/\r?\n/u).includes(marker)) return null;
+  return freeze({
+    number: candidate.number,
+    url: typeof candidate.html_url === 'string' ? candidate.html_url : null,
+    isDraft: true,
+    state: 'OPEN',
+    operationIdentity,
+  });
+}
+
+/**
+ * Production-shaped GitHub adapter. The injected request function is the only transport seam.
+ * A 422 is ambiguous, never proof of duplicate serialization: it is reconciled by exact identity
+ * instead of being retried. Provider serialization remains a promotion gate documented by R0.
+ */
+export function createGitHubDraftProvider({ request } = {}) {
+  if (typeof request !== 'function') {
+    fail('AdapterInvalid', 'the GitHub adapter requires one request function');
+  }
+
+  const lookupExact = async ({ operationIdentity, observation }) => {
+    if (!SHA256.test(operationIdentity) || requireObservation(observation)) {
+      fail('ProviderRequestInvalid', 'GitHub lookup requires canonical operation evidence');
+    }
+    const repositoryPath = `/repos/${encodeURIComponent(observation.organization)}`
+      + `/${encodeURIComponent(observation.repository)}/pulls`;
+    const response = githubResultBody(await request({
+      method: 'GET',
+      path: repositoryPath,
+      query: {
+        state: 'open', base: observation.baseBranch,
+        head: `${observation.organization}:${observation.headBranch}`,
+      },
+    }));
+    if (!Array.isArray(response)) {
+      fail('ProviderResultInvalid', 'GitHub pull lookup did not return a list');
+    }
+    const exact = response
+      .map((candidate) => exactGitHubDraft(candidate, operationIdentity, observation))
+      .filter(Boolean);
+    if (exact.length > 1) {
+      fail('ProviderEvidenceAmbiguous', 'GitHub returned more than one exact Draft');
+    }
+    return exact[0] ?? null;
+  };
+
+  return freeze({
+    lookupExact,
+
+    async createDraft({ operationIdentity, observation }) {
+      if (!SHA256.test(operationIdentity) || requireObservation(observation)) {
+        fail('ProviderRequestInvalid', 'GitHub create requires canonical operation evidence');
+      }
+      const repositoryPath = `/repos/${encodeURIComponent(observation.organization)}`
+        + `/${encodeURIComponent(observation.repository)}/pulls`;
+      const marker = githubOperationMarker(operationIdentity);
+      try {
+        const response = githubResultBody(await request({
+          method: 'POST',
+          path: repositoryPath,
+          body: {
+            title: `Draft: ${observation.workItem}`,
+            head: observation.headBranch,
+            base: observation.baseBranch,
+            draft: true,
+            body: `${marker}\n\nManaged by Gaia reconciliation for ${observation.workItem}.`,
+          },
+        }));
+        const exact = exactGitHubDraft(response, operationIdentity, observation);
+        if (!exact) fail('ProviderResultInvalid', 'GitHub created a non-exact Draft');
+        return exact;
+      } catch (error) {
+        if (error?.status !== 422) throw error;
+        const reconciled = await lookupExact({ operationIdentity, observation });
+        if (reconciled) return reconciled;
+        fail('AmbiguousProviderResponse',
+          'GitHub refused Draft creation but no exact operation is observable');
+      }
     },
   });
 }
@@ -178,8 +449,16 @@ function receiptFromTerminal(record) {
 
 function exactDraft(candidate, operation) {
   return candidate && candidate.operationIdentity === operation
+    && Number.isSafeInteger(candidate.number) && candidate.number > 0
     && candidate.isDraft === true && candidate.state === 'OPEN'
-    ? freeze(clone(candidate)) : null;
+    && (candidate.url === undefined || candidate.url === null || typeof candidate.url === 'string')
+    ? freeze({
+      number: candidate.number,
+      url: candidate.url ?? null,
+      isDraft: true,
+      state: 'OPEN',
+      operationIdentity: operation,
+    }) : null;
 }
 
 function activeIntent(records, operation) {
