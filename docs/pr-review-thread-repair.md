@@ -331,3 +331,51 @@ checklist upserts, cancellation, corrupt/future evidence, and completion. Mechan
 stable identity, intent-before-effect and reconciliation one at a time and must each produce a
 duplicate or unsafe resolution. The optional DuckDB dependency and its explicit absence behavior
 are documented; the canonical locked logs remain replay authority.
+
+## R3 measured-head, authority, and receipt closure
+
+R3 keeps the same thread identity and seven-stage machine, but closes four evidence domains that
+R2 still allowed a caller to narrate. The logical resource is one review thread at one reviewed
+head. A lane operation is identified by `sha256("lane", threadIdentity)` and a checklist operation
+by `sha256("checklist", threadIdentity, bodyDigest)`. The authoritative state is the repair ledger
+plus the closed operation intent/receipt pair. Atomic exclusive intent creation remains the named
+linearization point. A receipt is admissible only when its operation identity, idempotency key,
+intent digest, expected source revision and observation window all match that intent.
+
+After a lane completes, the GitHub Adapter first re-reads the pull request and pins its exact new
+head. The compare, current anchor content, check runs, branch-protection/ruleset requirements and
+returned observation all bind that one head. A head that moves during these reads refuses the
+window. Required checks that are absent, queued, cancelled, foreign-head, or not started can never
+construct `VERIFIED`.
+
+Coverage is not copied from the lane request. The factory receipt carries its independently
+measured change set. Only requested comment ids whose review-thread anchor path is present in that
+exact measured change set become addressed ids in the durable receipt. A restarted process reads
+that closed receipt and cannot broaden coverage from its new request or local memory.
+
+Dispute status is produced from each complete, revision-bound provider thread window. An exact
+`gaia-dispute: OPEN` line makes the thread disputed; an exact `gaia-dispute: CLEAR` or no dispute
+marker in an otherwise complete window makes it clear. Conflicting or malformed `gaia-dispute:`
+lines, incomplete pagination, corrupt data, or a foreign revision produce `UNKNOWN`. The producer
+runs independently for every thread; there is no global boolean and no hard-coded clear result.
+
+Every external effect acquires a grant for its own exact intent: repair-lane claim, claim-checklist
+upsert, evidence comment, and exact-thread resolution. The runtime reads a closed grant registry
+and selects by exact intent revision; the authority Adapter verifies and consumes each signed grant
+once. No static grant is shared between effects, and grant reuse is a typed refusal.
+
+The CLI applies the shared filesystem-identity guard before it reads or writes: `--gate-out` may
+not alias or hardlink the grant registry, public key, authority ledger, DuckDB database, state
+directory, or evidence root. The gate output is reserved only after that check.
+
+The lane outbox writes its complete intent before starting the factory. After a lost response or
+process crash, a fresh process reconstructs the same intent and asks the factory receipt store for
+the stable operation identity before any effect. A matching closed receipt is adopted. A missing,
+corrupt, stale, future, or mismatched receipt is a typed refusal; no blind retry is authorized.
+
+R3 RED proof forces: a head move after lane completion; addressed-id broadening after restart; a
+corrupt and foreign receipt; gate-output aliases and hardlinks; single-use effect grants and reuse;
+multiple independent dispute states; absent required checks; and a real child-process crash after
+factory success but before the caller receives the receipt. Mechanism-revert controls remove stable
+identity, intent-before-effect, and reconciliation independently and must expose a duplicate effect
+or unsafe adoption.
