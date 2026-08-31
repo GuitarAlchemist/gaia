@@ -19,6 +19,7 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const REVIEW_STATES = new Set(['PENDING', 'COMMENTED', 'APPROVED', 'CHANGES_REQUESTED', 'DISMISSED']);
 const REPAIR_MARKER = /(?:^|\n)gaia-repair-thread: ([a-f0-9]{64})(?:\n|$)/u;
+const DISPUTE_MARKER = /(?:^|\n)gaia-dispute-evidence: (\{[^\n]+\})(?:\n|$)/gu;
 
 export const PR_REVIEW_CHECKLIST_MARKER_PREFIX = 'gaia-claim-checklist: ';
 
@@ -34,6 +35,14 @@ const REVIEW_THREADS_QUERY = `query GaiaReviewThreads($owner:String!,$name:Strin
       }
     }
   }
+}`;
+
+const DISPUTE_WINDOW_QUERY = `query GaiaReviewThreadDisputes($owner:String!,$name:String!,$number:Int!,$cursor:String){
+  repository(owner:$owner,name:$name){pullRequest(number:$number){
+    comments(first:100,after:$cursor){
+      totalCount pageInfo{hasNextPage endCursor} nodes{id body updatedAt}
+    }
+  }}
 }`;
 
 const RESOLVE_MUTATION = `mutation GaiaResolveReviewThread($threadId:ID!){
@@ -181,13 +190,61 @@ function markerOf(body) {
   return REPAIR_MARKER.exec(String(body ?? ''))?.[1] ?? null;
 }
 
+function disputeRevision({ repo, number, currentHeadOid, thread }) {
+  return sha256({
+    repository: repo, pullRequest: number, currentHeadOid,
+    reviewThreadId: thread.id, isResolved: thread.isResolved, isOutdated: thread.isOutdated,
+    comments: thread.comments.nodes.map(({ id, body, review }) => ({
+      id, body, reviewId: review?.id, reviewState: review?.state,
+      reviewedHeadOid: review?.commit?.oid,
+    })),
+  });
+}
+
+function parseDisputeWindow(comments, threads) {
+  const known = new Map(threads.map((thread) => [thread.id, {
+    sourceRevision: thread.sourceRevision, statuses: [], corrupt: false,
+  }]));
+  let globallyCorrupt = false;
+  for (const comment of comments) {
+    const body = typeof comment?.body === 'string' ? comment.body : '';
+    for (const match of body.matchAll(DISPUTE_MARKER)) {
+      let artifact;
+      try { artifact = JSON.parse(match[1]); } catch { artifact = null; }
+      const target = artifact && known.get(artifact.reviewThreadId);
+      if (!artifact) { globallyCorrupt = true; continue; }
+      if (!target) continue;
+      const keys = artifact && typeof artifact === 'object' ? Object.keys(artifact).sort() : [];
+      if (!artifact
+          || JSON.stringify(keys) !== JSON.stringify([
+            'reviewThreadId', 'schema', 'sourceRevision', 'status',
+          ])
+          || artifact.schema !== 'gaia-pr-review-thread-dispute-provider/1'
+          || artifact.sourceRevision !== target.sourceRevision
+          || !['NONE', 'OPEN'].includes(artifact.status)) {
+        target.corrupt = true;
+      } else {
+        target.statuses.push(artifact.status);
+      }
+    }
+  }
+  return new Map([...known].map(([id, evidence]) => {
+    if (globallyCorrupt) return [id, 'UNKNOWN'];
+    const distinct = [...new Set(evidence.statuses)];
+    if (evidence.corrupt || distinct.length > 1) return [id, 'UNKNOWN'];
+    return [id, distinct[0] === 'OPEN']; // a complete window with no marker proves no open dispute
+  }));
+}
+
 /** Create the only production GitHub port this feature uses. */
 export function createGitGhPrReviewThreadEffects({
   run = defaultRun,
-  readDisputeEvidence = async () => 'UNKNOWN',
+  readDisputeEvidence = null,
 } = {}) {
   if (typeof run !== 'function') fail('run must be a function');
-  if (typeof readDisputeEvidence !== 'function') fail('readDisputeEvidence must be a function');
+  if (readDisputeEvidence !== null && typeof readDisputeEvidence !== 'function') {
+    fail('readDisputeEvidence must be a function or null');
+  }
   const invoke = (args, options) => run(args, options);
 
   const collectReviewThreads = async ({
@@ -228,20 +285,47 @@ export function createGitGhPrReviewThreadEffects({
             observations: Object.freeze([]),
           });
         }
+        const disputeThreads = nodes.map((thread) => ({
+          id: thread.id,
+          sourceRevision: disputeRevision({
+            repo, number, currentHeadOid: pullRequest.headRefOid, thread,
+          }),
+        }));
+        const disputeComments = [];
+        let disputeCursor = null;
+        let disputeComplete = false;
+        for (let disputePage = 0; disputePage < 100; disputePage += 1) {
+          const disputeResponse = await invoke(graphqlArgs(DISPUTE_WINDOW_QUERY, {
+            owner, name, number, cursor: disputeCursor,
+          }), { signal });
+          const comments = disputeResponse?.data?.repository?.pullRequest?.comments;
+          if (!comments || !Array.isArray(comments.nodes)
+              || typeof comments.pageInfo?.hasNextPage !== 'boolean') break;
+          disputeComments.push(...comments.nodes);
+          if (!comments.pageInfo.hasNextPage) {
+            disputeComplete = comments.totalCount === disputeComments.length;
+            break;
+          }
+          if (typeof comments.pageInfo.endCursor !== 'string'
+              || comments.pageInfo.endCursor.length === 0) break;
+          disputeCursor = comments.pageInfo.endCursor;
+        }
+        const providerDisputes = disputeComplete
+          ? parseDisputeWindow(disputeComments, disputeThreads)
+          : new Map(disputeThreads.map(({ id }) => [id, 'UNKNOWN']));
         const observations = [];
         for (const thread of nodes) {
-          const disputeSourceRevision = sha256({
-            repository: repo, pullRequest: number, currentHeadOid: pullRequest.headRefOid,
-            reviewThreadId: thread.id, isResolved: thread.isResolved, isOutdated: thread.isOutdated,
-            comments: thread.comments.nodes.map(({ id, body, review }) => ({
-              id, body, reviewId: review?.id, reviewState: review?.state,
-              reviewedHeadOid: review?.commit?.oid,
-            })),
+          const disputeSourceRevision = disputeRevision({
+            repo, number, currentHeadOid: pullRequest.headRefOid, thread,
           });
-          const disputed = await readDisputeEvidence({
-            repository: repo, pullRequest: number, reviewThreadId: thread.id, observedAt,
-            sourceRevision: disputeSourceRevision,
-          });
+          let disputed = providerDisputes.get(thread.id) ?? 'UNKNOWN';
+          if (readDisputeEvidence !== null) {
+            const external = await readDisputeEvidence({
+              repository: repo, pullRequest: number, reviewThreadId: thread.id, observedAt,
+              sourceRevision: disputeSourceRevision,
+            });
+            if ([true, false].includes(external)) disputed = external;
+          }
           if (![true, false, 'UNKNOWN'].includes(disputed)) fail('dispute evidence is not closed');
           observations.push(normalizeThread({
             repository: repo, pullRequest, thread, disputed, observedAt, run: boundedRun,
@@ -270,26 +354,57 @@ export function createGitGhPrReviewThreadEffects({
     async readRepairEvidence({ observation, laneReceipt, requiredContexts = [], signal }) {
       const repo = repository(observation.repository);
       const reviewed = observation.review.reviewedHeadOid;
-      const current = observation.currentHeadOid;
       if (!laneReceipt || laneReceipt.status !== 'completed') return observation;
+      const freshPullRequest = await invoke([
+        'api', `repos/${repo}/pulls/${observation.pullRequest.number}`,
+      ], { signal });
+      const current = freshPullRequest?.head?.sha;
+      const baseBranch = freshPullRequest?.base?.ref;
+      if (typeof current !== 'string' || !/^[a-f0-9]{40}$/u.test(current)
+          || typeof baseBranch !== 'string' || baseBranch.length === 0) {
+        fail('GitHub did not return an exact fresh pull-request head and base branch');
+      }
       const compare = await invoke([
         'api', `repos/${repo}/compare/${reviewed}...${current}`,
       ], { signal });
       const readAnchor = async (oid) => invoke([
         'api', `repos/${repo}/contents/${observation.reviewThread.path}`, '-f', `ref=${oid}`,
       ], { signal });
-      const [atReview, atCurrent, checksResponse] = await Promise.all([
+      const [atReview, atCurrent, checksResponse, protection, rulesets] = await Promise.all([
         readAnchor(reviewed), readAnchor(current),
         invoke(['api', `repos/${repo}/commits/${current}/check-runs`], { signal }),
+        invoke(['api', `repos/${repo}/branches/${encodeURIComponent(baseBranch)}/protection`], { signal })
+          .catch(() => null),
+        invoke(['api', `repos/${repo}/rulesets?includes_parents=true`], { signal }).catch(() => null),
       ]);
       const digest = (content) => {
         if (content?.encoding !== 'base64' || typeof content.content !== 'string') return 'UNKNOWN';
         return createHash('sha256').update(Buffer.from(content.content.replaceAll('\n', ''), 'base64')).digest('hex');
       };
       const checkRuns = Array.isArray(checksResponse?.check_runs) ? checksResponse.check_runs : [];
-      const contexts = requiredContexts.length > 0
-        ? [...requiredContexts] : checkRuns.map(({ name }) => name).filter((name) => typeof name === 'string');
+      const protectedContexts = protection?.required_status_checks?.contexts;
+      const rulesetDetails = Array.isArray(rulesets) ? await Promise.all(rulesets
+        .filter(({ enforcement }) => enforcement === undefined || enforcement === 'active')
+        .map(({ id, rules }) => Array.isArray(rules) ? { rules } : invoke([
+          'api', `repos/${repo}/rulesets/${id}`,
+        ], { signal }).catch(() => null))) : [];
+      const rulesetContexts = rulesetDetails.flatMap((detail) => (detail?.rules ?? []))
+        .filter(({ type }) => type === 'required_status_checks')
+        .flatMap(({ parameters }) => parameters?.required_status_checks ?? [])
+        .map(({ context }) => context).filter((context) => typeof context === 'string');
+      const measuredContexts = [
+        ...(Array.isArray(protectedContexts) ? protectedContexts : []), ...rulesetContexts,
+      ];
+      const contexts = [...new Set(requiredContexts.length > 0
+        ? requiredContexts : measuredContexts)].sort();
+      const confirmedPullRequest = await invoke([
+        'api', `repos/${repo}/pulls/${observation.pullRequest.number}`,
+      ], { signal });
+      if (confirmedPullRequest?.head?.sha !== current) {
+        fail('GitHub pull-request head moved during repair evidence measurement');
+      }
       const conclusion = (value) => {
+        if (value === null || value === undefined) return 'UNKNOWN';
         const token = String(value ?? 'UNKNOWN').toUpperCase();
         if (['SUCCESS', 'FAILURE', 'CANCELLED', 'TIMED_OUT', 'SKIPPED', 'NEUTRAL'].includes(token)) return token;
         return token === 'IN_PROGRESS' || token === 'QUEUED' || token === 'PENDING'

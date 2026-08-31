@@ -69,8 +69,9 @@ test('R1 collector builds a COMMENTED P1 observation from actual GraphQL review-
     run: { runId: 'review-44', laneGeneration: 1 },
   });
 
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2, 'review threads and the complete dispute registry are separate reads');
   assert.deepEqual(calls[0].slice(0, 2), ['api', 'graphql']);
+  assert.deepEqual(calls[1].slice(0, 2), ['api', 'graphql']);
   assert.equal(observations.complete, true);
   assert.equal(observations.observations.length, 1);
   const [observation] = observations.observations;

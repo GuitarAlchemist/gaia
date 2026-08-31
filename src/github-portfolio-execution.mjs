@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
-  existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync,
+  closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync,
+  writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 
@@ -27,6 +29,86 @@ function canonicalText(value, field) {
 }
 
 const OWNER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u;
+const SHA256 = /^[a-f0-9]{64}$/u;
+const RECEIPT_KEYS = [
+  'addressedCommentIds', 'expectedRevision', 'factory', 'idempotencyKey', 'intentDigest',
+  'operationIdentity', 'schema',
+].sort();
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(
+      (key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`,
+    ).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+const digest = (value) => createHash('sha256').update(canonicalJson(value)).digest('hex');
+
+function receiptBinding(intent, idempotencyKey) {
+  const evidence = intent?.reviewThreadEvidence ?? null;
+  return {
+    operationIdentity: digest({
+      kind: 'RUN_FACTORY_AGENT', threadIdentity: evidence?.threadIdentity ?? null,
+      idempotencyKey,
+    }),
+    idempotencyKey,
+    intentDigest: digest(intent),
+    expectedRevision: evidence?.sourceRevision ?? null,
+  };
+}
+
+function measuredAddressedCommentIds(intent, factory) {
+  const evidence = intent?.reviewThreadEvidence;
+  const changed = factory?.changeSet?.files;
+  if (!evidence || !Array.isArray(evidence.addressedCommentIds)
+      || !Array.isArray(changed)
+      || !changed.some(({ path }) => path === evidence.anchorPath)) return [];
+  return [...new Set(evidence.addressedCommentIds)].sort();
+}
+
+function readBoundReceipt(path, { intent, idempotencyKey }) {
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(path, 'utf8')); } catch {
+    throw new PortfolioExecutionError('CorruptExecutionReceipt', 'factory receipt is not JSON');
+  }
+  const keys = receipt && typeof receipt === 'object' && !Array.isArray(receipt)
+    ? Object.keys(receipt).sort() : [];
+  if (JSON.stringify(keys) !== JSON.stringify(RECEIPT_KEYS)
+      || receipt.schema !== 'gaia-portfolio-execution-receipt/2'
+      || receipt.factory?.schema !== 'gaia-agent-factory-receipt/1'
+      || !SHA256.test(receipt.operationIdentity)
+      || receipt.idempotencyKey !== idempotencyKey
+      || !SHA256.test(receipt.intentDigest)
+      || (receipt.expectedRevision !== null && !SHA256.test(receipt.expectedRevision))
+      || !Array.isArray(receipt.addressedCommentIds)
+      || receipt.addressedCommentIds.some((id) => typeof id !== 'string')) {
+    throw new PortfolioExecutionError('CorruptExecutionReceipt', 'factory receipt is not canonical');
+  }
+  if (intent !== undefined) {
+    const expected = receiptBinding(intent, idempotencyKey);
+    if (receipt.operationIdentity !== expected.operationIdentity
+        || receipt.intentDigest !== expected.intentDigest
+        || receipt.expectedRevision !== expected.expectedRevision) {
+      throw new PortfolioExecutionError(
+        'ExecutionReceiptMismatch', 'factory receipt does not bind the expected operation revision',
+      );
+    }
+  }
+  return receipt;
+}
+
+function writeDurableExclusive(path, value) {
+  const descriptor = openSync(path, 'wx', 0o600);
+  try {
+    writeFileSync(descriptor, `${JSON.stringify(value)}\n`, 'utf8');
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
 
 // The only two shapes a github.com remote takes: a URL with a scheme, and the scp-like
 // form. Both may carry credentials, a port, and a `.git` suffix; neither is trusted for
@@ -129,7 +211,7 @@ export function createAgentFactoryExecutionAdapter({
   }
 
   return Object.freeze({
-    async findReceipt({ idempotencyKey }) {
+    async findReceipt({ idempotencyKey, intent }) {
       if (typeof idempotencyKey !== 'string' || !/^[a-f0-9]{64}$/u.test(idempotencyKey)) {
         throw new PortfolioExecutionError(
           'InvalidIdempotencyKey', 'idempotencyKey must be a lowercase SHA-256',
@@ -137,11 +219,7 @@ export function createAgentFactoryExecutionAdapter({
       }
       const path = join(physicalEvidenceRoot, idempotencyKey, 'receipt.json');
       if (!existsSync(path)) return null;
-      const receipt = JSON.parse(readFileSync(path, 'utf8'));
-      if (receipt?.schema !== 'gaia-portfolio-execution-receipt/1'
-          || receipt.factory?.schema !== 'gaia-agent-factory-receipt/1') {
-        throw new PortfolioExecutionError('CorruptExecutionReceipt', 'factory receipt is not canonical');
-      }
+      const receipt = readBoundReceipt(path, { intent, idempotencyKey });
       return { ...receipt.factory, addressedCommentIds: receipt.addressedCommentIds };
     },
     async execute({ intent, idempotencyKey }) {
@@ -161,13 +239,7 @@ export function createAgentFactoryExecutionAdapter({
       }
       const existingReceiptPath = join(physicalEvidenceRoot, idempotencyKey, 'receipt.json');
       if (existsSync(existingReceiptPath)) {
-        const existing = JSON.parse(readFileSync(existingReceiptPath, 'utf8'));
-        if (existing?.schema !== 'gaia-portfolio-execution-receipt/1'
-            || existing.factory?.schema !== 'gaia-agent-factory-receipt/1') {
-          throw new PortfolioExecutionError(
-            'CorruptExecutionReceipt', 'factory receipt is not canonical',
-          );
-        }
+        const existing = readBoundReceipt(existingReceiptPath, { intent, idempotencyKey });
         return existing.factory;
       }
       const receipt = await executeFactory({
@@ -182,14 +254,12 @@ export function createAgentFactoryExecutionAdapter({
       // final receipt here lets a new process reconcile an acknowledged execution after the
       // caller loses the response, without issuing the effect again.
       mkdirSync(join(physicalEvidenceRoot, idempotencyKey), { recursive: true });
-      writeFileSync(
-        join(physicalEvidenceRoot, idempotencyKey, 'receipt.json'),
-        `${JSON.stringify({
-          schema: 'gaia-portfolio-execution-receipt/1',
-          factory: receipt,
-          addressedCommentIds: intent.reviewThreadEvidence?.addressedCommentIds ?? [],
-        })}\n`, { flag: 'wx', mode: 0o600 },
-      );
+      writeDurableExclusive(join(physicalEvidenceRoot, idempotencyKey, 'receipt.json'), {
+        schema: 'gaia-portfolio-execution-receipt/2',
+        ...receiptBinding(intent, idempotencyKey),
+        factory: receipt,
+        addressedCommentIds: measuredAddressedCommentIds(intent, receipt),
+      });
       return receipt;
     },
   });

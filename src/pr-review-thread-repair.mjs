@@ -465,7 +465,7 @@ const result = (body) => deepFreeze({ ...body, revision: sha256(body) });
  * against one ledger is safe; running it again after a crash is safe.
  */
 export async function runPrReviewThreadRepairPump({
-  directory, observation, grant, authority, effects, now = () => new Date(),
+  directory, observation, grant, acquireGrant, authority, effects, now = () => new Date(),
   owner = randomBytes(16).toString('hex'), leaseMs = PR_REVIEW_REPAIR_LEASE_MS, lockOptions,
 }) {
   const root = requireDirectory(directory);
@@ -696,18 +696,22 @@ export async function runPrReviewThreadRepairPump({
   };
 
   let authorization;
+  const authorizationIntent = {
+    intentRevision,
+    action: intent === 'COMMENT' ? 'POST_REVIEW_THREAD_COMMENT' : 'RESOLVE_REVIEW_THREAD',
+    repository: observed.repository,
+    itemKind: 'PULL_REQUEST',
+    itemId: `pull-request-${observed.pullRequest.number}`,
+    itemNumber: observed.pullRequest.number,
+    snapshotRevision: observed.sourceRevision,
+  };
   try {
+    const exactGrant = typeof acquireGrant === 'function'
+      ? await acquireGrant(authorizationIntent)
+      : grant;
     authorization = await authority.consume({
-      grant,
-      intent: {
-        intentRevision,
-        action: intent === 'COMMENT' ? 'POST_REVIEW_THREAD_COMMENT' : 'RESOLVE_REVIEW_THREAD',
-        repository: observed.repository,
-        itemKind: 'PULL_REQUEST',
-        itemId: `pull-request-${observed.pullRequest.number}`,
-        itemNumber: observed.pullRequest.number,
-        snapshotRevision: observed.sourceRevision,
-      },
+      grant: exactGrant,
+      intent: authorizationIntent,
     });
   } catch {
     abandon('AuthorityRefused', 'authority refused without exposing diagnostics');

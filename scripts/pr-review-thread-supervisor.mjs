@@ -12,6 +12,7 @@ import {
   createBoundedRepairLaneEffects,
   runPrReviewThreadSupervisorTick,
 } from '../src/pr-review-thread-supervisor.mjs';
+import { assertDistinctFiles } from '../src/path-identity.mjs';
 
 class UsageError extends Error {}
 
@@ -34,6 +35,24 @@ function flags(argv) {
 }
 
 const readJson = (path) => JSON.parse(readFileSync(resolve(path), 'utf8'));
+
+export function createGrantRegistryAcquirer(registry) {
+  const grants = Array.isArray(registry) ? registry : [registry];
+  return async (intent) => {
+    const matches = grants.filter((grant) => grant
+      && grant.intentRevision === intent.intentRevision
+      && grant.action === intent.action
+      && grant.repository === intent.repository
+      && grant.itemKind === intent.itemKind
+      && grant.itemId === intent.itemId
+      && grant.itemNumber === intent.itemNumber
+      && grant.snapshotRevision === intent.snapshotRevision);
+    if (matches.length !== 1) {
+      throw new UsageError('grant registry must contain exactly one grant for the exact effect intent');
+    }
+    return matches[0];
+  };
+}
 
 export function createDisputeEvidenceReader(path) {
   if (!path) return async () => 'UNKNOWN';
@@ -68,6 +87,16 @@ export async function runPrReviewThreadSupervisorCli(argv, {
     throw new UsageError('--pull-request must be a positive integer');
   }
   const directory = resolve(args['state-dir']);
+  assertDistinctFiles({
+    outputs: [resolve(args['gate-out'])],
+    inputs: [
+      resolve(args.grant), resolve(args['public-key']), resolve(args.database),
+      resolve(args['state-dir']), resolve(args['authority-ledger']), resolve(args['evidence-root']),
+      args['dispute-evidence'] ? resolve(args['dispute-evidence']) : null,
+    ],
+    refuse: (message) => { throw new UsageError(`gate output path identity refused: ${message}`); },
+  });
+  const grantRegistry = readJson(args.grant);
   const execution = createExecution({
     expectedRepository: args.repository,
     worktree: resolve(args.worktree),
@@ -86,7 +115,7 @@ export async function runPrReviewThreadSupervisorCli(argv, {
       ledgerDir: resolve(args['authority-ledger']),
       now,
     }),
-    grant: readJson(args.grant),
+    acquireGrant: createGrantRegistryAcquirer(grantRegistry),
     now,
     synchronizeTelemetry: () => synchronize({
       directory,

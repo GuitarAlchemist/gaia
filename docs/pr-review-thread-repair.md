@@ -353,11 +353,13 @@ measured change set. Only requested comment ids whose review-thread anchor path 
 exact measured change set become addressed ids in the durable receipt. A restarted process reads
 that closed receipt and cannot broaden coverage from its new request or local memory.
 
-Dispute status is produced from each complete, revision-bound provider thread window. An exact
-`gaia-dispute: OPEN` line makes the thread disputed; an exact `gaia-dispute: CLEAR` or no dispute
-marker in an otherwise complete window makes it clear. Conflicting or malformed `gaia-dispute:`
-lines, incomplete pagination, corrupt data, or a foreign revision produce `UNKNOWN`. The producer
-runs independently for every thread; there is no global boolean and no hard-coded clear result.
+Dispute status is produced from each complete, revision-bound provider comment window. The closed
+line format is `gaia-dispute-evidence: {"schema":"gaia-pr-review-thread-dispute-provider/1",`
+`"reviewThreadId":"...","sourceRevision":"...","status":"OPEN|NONE"}`. `OPEN` makes the
+exact thread disputed; `NONE`, or no marker in an otherwise complete provider window, makes it
+clear. Conflicting or malformed markers, incomplete pagination, corrupt data, or a foreign
+revision produce `UNKNOWN`. The producer runs independently for every thread; there is no global
+boolean and no hard-coded clear result.
 
 Every external effect acquires a grant for its own exact intent: repair-lane claim, claim-checklist
 upsert, evidence comment, and exact-thread resolution. The runtime reads a closed grant registry
