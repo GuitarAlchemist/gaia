@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import {
-  appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync,
+  appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync,
 } from 'node:fs';
+import { mkdir as mkdirAsync, rm as rmAsync } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import {
@@ -72,13 +73,18 @@ function requireStoreCandidate(candidate) {
   const intentValid = candidate.kind === 'INTENT'
     && candidate.outcome === null && candidate.refusal === null
     && candidate.effect === EFFECT && candidate.pullRequest === null;
+  const hasExactDraft = candidate.pullRequest !== null && exactDraft(
+    candidate.pullRequest, candidate.operationIdentity,
+  );
+  const createdValid = candidate.outcome === 'CREATED' && candidate.refusal === null
+    && candidate.effect === EFFECT && hasExactDraft;
+  const satisfiedValid = candidate.outcome === 'SATISFIED' && candidate.refusal === null
+    && candidate.effect === 'NONE' && hasExactDraft;
+  const refusedValid = candidate.outcome === 'REFUSED' && typeof candidate.refusal === 'string'
+    && candidate.effect === 'NONE' && candidate.pullRequest === null;
   const terminalValid = candidate.kind === 'TERMINAL'
     && TERMINAL_OUTCOMES.includes(candidate.outcome)
-    && (candidate.refusal === null || typeof candidate.refusal === 'string')
-    && ['NONE', EFFECT].includes(candidate.effect)
-    && (candidate.pullRequest === null || exactDraft(
-      candidate.pullRequest, candidate.operationIdentity,
-    ));
+    && (createdValid || satisfiedValid || refusedValid);
   if (!intentValid && !terminalValid) {
     fail('StoreRecordInvalid', 'the reconciliation transition fields are incoherent');
   }
@@ -88,28 +94,70 @@ function requireStoreCandidate(candidate) {
 export function createMemoryDraftReconciliationStore() {
   let revision = EMPTY_REVISION;
   const records = [];
+  let tail = Promise.resolve();
+
+  const withMutex = async (operation) => {
+    const prior = tail;
+    let release;
+    tail = new Promise((resolve) => { release = resolve; });
+    await prior;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  };
+
+  const snapshot = () => freeze({
+    schema: DRAFT_RECONCILIATION_STORE_SCHEMA,
+    revision,
+    records: clone(records),
+  });
+
+  const append = (candidate) => {
+    const body = requireStoreCandidate(candidate);
+    const nextRevision = sha256({ previousRevision: revision, record: body });
+    records.push(freeze({ ...body, stateRevision: nextRevision }));
+    revision = nextRevision;
+    return snapshot();
+  };
 
   return freeze({
     async read() {
-      return freeze({
-        schema: DRAFT_RECONCILIATION_STORE_SCHEMA,
-        revision,
-        records: clone(records),
-      });
+      return withMutex(snapshot);
     },
 
     async compareAndSetAppend(expectedRevision, candidate) {
       if (typeof expectedRevision !== 'string' || !SHA256.test(expectedRevision)) {
         fail('StoreRequestInvalid', 'expectedRevision must be a SHA-256');
       }
-      if (expectedRevision !== revision) {
-        fail('CasMismatch', 'the reconciliation store changed after it was observed');
+      return withMutex(() => {
+        if (expectedRevision !== revision) {
+          fail('CasMismatch', 'the reconciliation store changed after it was observed');
+        }
+        return append(candidate);
+      });
+    },
+
+    async runExclusive(expectedRevision, operation) {
+      if (typeof expectedRevision !== 'string' || !SHA256.test(expectedRevision)
+          || typeof operation !== 'function') {
+        fail('StoreRequestInvalid', 'runExclusive requires a revision and operation');
       }
-      const body = requireStoreCandidate(candidate);
-      const nextRevision = sha256({ previousRevision: revision, record: body });
-      records.push(freeze({ ...body, stateRevision: nextRevision }));
-      revision = nextRevision;
-      return this.read();
+      return withMutex(async () => {
+        if (expectedRevision !== revision) {
+          fail('CasMismatch', 'the reconciliation store changed after it was observed');
+        }
+        let appended = false;
+        return operation(freeze({
+          snapshot: snapshot(),
+          append(candidate) {
+            if (appended) fail('StoreRequestInvalid', 'an exclusive transaction appends once');
+            appended = true;
+            return append(candidate);
+          },
+        }));
+      });
     },
   });
 }
@@ -129,11 +177,9 @@ export function draftReconciliationLockPath(directory) {
   return join(requireDirectory(directory), 'draft-reconciliation.lock');
 }
 
-function sleepSync(milliseconds) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
-}
+const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 
-function withStoreLock(directory, operation, {
+async function withStoreLock(directory, operation, {
   timeoutMs = LOCK_TIMEOUT_MS, staleMs = LOCK_STALE_MS,
 } = {}) {
   const root = requireDirectory(directory);
@@ -142,7 +188,7 @@ function withStoreLock(directory, operation, {
   const deadline = Date.now() + timeoutMs;
   while (true) {
     try {
-      mkdirSync(lock);
+      await mkdirAsync(lock);
       break;
     } catch (error) {
       if (!['EEXIST', 'EPERM', 'EACCES'].includes(error.code)) throw error;
@@ -152,13 +198,13 @@ function withStoreLock(directory, operation, {
           + `reconciliation store without its lock (fail closed; stale threshold ${staleMs}ms)`,
         );
       }
-      sleepSync(15);
+      await delay(15);
     }
   }
   try {
-    return operation();
+    return await operation();
   } finally {
-    rmSync(lock, LOCK_RM_OPTIONS);
+    await rmAsync(lock, LOCK_RM_OPTIONS);
   }
 }
 
@@ -214,6 +260,23 @@ function appendDurableRecord(directory, envelope) {
 
 export function createAppendOnlyDraftReconciliationStore({ directory, lockOptions } = {}) {
   const root = requireDirectory(directory);
+  const appendUnderLock = (records, candidate) => {
+    const body = requireStoreCandidate(candidate);
+    const before = storeSnapshot(records);
+    const stateRevision = sha256({ previousRevision: before.revision, record: body });
+    const envelope = freeze({
+      type: 'gaia.draft-reconciliation.record',
+      schema: DRAFT_RECONCILIATION_RECORD_SCHEMA,
+      ordinal: records.length,
+      previousRevision: before.revision,
+      body,
+      stateRevision,
+    });
+    appendDurableRecord(root, envelope);
+    records.push(freeze({ ...body, stateRevision }));
+    return storeSnapshot(records);
+  };
+
   return freeze({
     async read() {
       if (!existsSync(root)) return storeSnapshot([]);
@@ -231,17 +294,30 @@ export function createAppendOnlyDraftReconciliationStore({ directory, lockOption
         if (before.revision !== expectedRevision) {
           fail('CasMismatch', 'the reconciliation store changed after it was observed');
         }
-        const stateRevision = sha256({ previousRevision: before.revision, record: body });
-        const envelope = freeze({
-          type: 'gaia.draft-reconciliation.record',
-          schema: DRAFT_RECONCILIATION_RECORD_SCHEMA,
-          ordinal: records.length,
-          previousRevision: before.revision,
-          body,
-          stateRevision,
-        });
-        appendDurableRecord(root, envelope);
-        return storeSnapshot([...records, freeze({ ...body, stateRevision })]);
+        return appendUnderLock(records, body);
+      }, lockOptions);
+    },
+
+    async runExclusive(expectedRevision, operation) {
+      if (typeof expectedRevision !== 'string' || !SHA256.test(expectedRevision)
+          || typeof operation !== 'function') {
+        fail('StoreRequestInvalid', 'runExclusive requires a revision and operation');
+      }
+      return withStoreLock(root, async () => {
+        const records = readDurableRecordsUnlocked(root);
+        const before = storeSnapshot(records);
+        if (before.revision !== expectedRevision) {
+          fail('CasMismatch', 'the reconciliation store changed after it was observed');
+        }
+        let appended = false;
+        return operation(freeze({
+          snapshot: before,
+          append(candidate) {
+            if (appended) fail('StoreRequestInvalid', 'an exclusive transaction appends once');
+            appended = true;
+            return appendUnderLock(records, candidate);
+          },
+        }));
       }, lockOptions);
     },
   });
@@ -507,6 +583,7 @@ function requirePorts(ports) {
   if (!ports || typeof ports !== 'object'
       || typeof ports.store?.read !== 'function'
       || typeof ports.store?.compareAndSetAppend !== 'function'
+      || typeof ports.store?.runExclusive !== 'function'
       || typeof ports.provider?.lookupExact !== 'function'
       || typeof ports.provider?.createDraft !== 'function') {
     fail('AdapterInvalid', 'store and provider ports must implement the closed interface');
@@ -538,6 +615,15 @@ export async function reconcileDraft(observation, expectedRevision, ports) {
   }
 
   const priorForWork = latestIntentForWork(snapshot.records, work);
+  const priorTerminalForWork = snapshot.records.findLast(
+    (record) => record.kind === 'TERMINAL' && record.workIdentity === work,
+  );
+  if (priorTerminalForWork && priorTerminalForWork.operationIdentity !== operation) {
+    return receipt({
+      outcome: 'REFUSED', refusal: 'CrossGenerationIntent', operation,
+      sourceRevision: observation.sourceRevision, stateRevision: snapshot.revision,
+    });
+  }
   if (priorForWork && priorForWork.baseIdentity !== base) {
     return receipt({
       outcome: 'REFUSED', refusal: 'CrossGenerationIntent', operation,
@@ -589,42 +675,70 @@ export async function reconcileDraft(observation, expectedRevision, ports) {
   }, 'StaleRevision');
   if (withIntent?.schema === DRAFT_RECONCILIATION_SCHEMA) return withIntent;
 
-  const fenced = await store.read();
-  const latestForWork = latestIntentForWork(fenced.records, work);
-  if (!latestForWork || latestForWork.operationIdentity !== operation) {
-    return receipt({
-      outcome: 'REFUSED', refusal: 'StaleOwner', operation,
-      sourceRevision: observation.sourceRevision, stateRevision: fenced.revision,
-    });
-  }
-
-  let created;
+  let result;
   try {
-    created = exactDraft(await provider.createDraft({
-      operationIdentity: operation, observation,
-    }), operation);
-    if (!created) fail('ProviderResultInvalid', 'provider returned a non-exact Draft');
+    result = await store.runExclusive(withIntent.revision, async (transaction) => {
+      const latestForWork = latestIntentForWork(transaction.snapshot.records, work);
+      if (!latestForWork || latestForWork.operationIdentity !== operation) {
+        return receipt({
+          outcome: 'REFUSED', refusal: 'StaleOwner', operation,
+          sourceRevision: observation.sourceRevision,
+          stateRevision: transaction.snapshot.revision,
+        });
+      }
+
+      let created;
+      try {
+        created = exactDraft(await provider.createDraft({
+          operationIdentity: operation, observation,
+        }), operation);
+        if (!created) fail('ProviderResultInvalid', 'provider returned a non-exact Draft');
+      } catch (error) {
+        if (error?.code !== 'AmbiguousProviderResponse') throw error;
+        const reconciled = exactDraft(
+          await provider.lookupExact({ operationIdentity: operation, observation }), operation,
+        );
+        if (!reconciled) {
+          return receipt({
+            outcome: 'NEEDS_RECONCILIATION', operation,
+            sourceRevision: observation.sourceRevision,
+            stateRevision: transaction.snapshot.revision,
+          });
+        }
+        created = reconciled;
+      }
+
+      const appended = transaction.append({
+        kind: 'TERMINAL', operationIdentity: operation, baseIdentity: base, workIdentity: work,
+        reconciliationGeneration: observation.reconciliationGeneration,
+        sourceRevision: observation.sourceRevision, outcome: 'CREATED', refusal: null,
+        effect: EFFECT, pullRequest: created,
+      });
+      return receiptFromTerminal(appended.records.at(-1));
+    });
   } catch (error) {
-    if (error?.code !== 'AmbiguousProviderResponse') throw error;
-    const reconciled = exactDraft(
-      await provider.lookupExact({ operationIdentity: operation, observation }), operation,
-    );
-    if (!reconciled) {
+    if (error?.code === 'CasMismatch') {
+      const current = await store.read();
+      const completed = current.records.findLast(
+        (record) => record.kind === 'TERMINAL' && record.operationIdentity === operation,
+      );
+      if (completed) return receiptFromTerminal(completed);
       return receipt({
-        outcome: 'NEEDS_RECONCILIATION', operation,
-        sourceRevision: observation.sourceRevision, stateRevision: fenced.revision,
+        outcome: 'REFUSED', refusal: 'StaleOwner', operation,
+        sourceRevision: observation.sourceRevision, stateRevision: current.revision,
       });
     }
-    created = reconciled;
+    throw error;
   }
-
-  const result = await commitTerminal({
-    store, expectedRevision: fenced.revision, observation, operation, base, work,
-    outcome: 'CREATED', effect: EFFECT, pullRequest: created,
-  });
-  if (result.outcome !== 'REFUSED') telemetry?.append?.({
-    type: 'gaia.draft-reconciliation', operationIdentity: operation,
-    outcome: result.outcome, stateRevision: result.stateRevision,
-  });
+  if (result.outcome !== 'REFUSED' && typeof telemetry?.append === 'function') {
+    try {
+      await telemetry.append({
+        type: 'gaia.draft-reconciliation', operationIdentity: operation,
+        outcome: result.outcome, stateRevision: result.stateRevision,
+      });
+    } catch {
+      // Telemetry is observational. Durable reconciliation has already completed.
+    }
+  }
   return result;
 }

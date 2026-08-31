@@ -98,15 +98,24 @@ lock, full replay, compare-and-set, one-line append, and `fsync` happen behind t
 torn, altered, non-contiguous, or future-schema record refuses the whole read; no partial replay or
 automatic lock breaking is allowed.
 
+The same store lock also owns `runExclusive`. After the durable INTENT, the module revalidates the
+winning operation and keeps that lock through the provider effect and terminal append. A competing
+generation or cancellation therefore orders either before the critical section or after its
+terminal record; it cannot land between the final fence and the effect. This is deliberately an
+async lock acquisition, so a waiting call never blocks the event loop that must complete the
+current provider request. The in-memory and append-only adapters run the same black-box lifecycle
+contract, including replay, lost-response reconciliation, cancellation, and zero duplicate effect.
+
 The GitHub adapter embeds the complete operation identity as a closed HTML marker and accepts a
 Draft only when repository, base, head branch, head OID, open/Draft state, and marker all agree. A
 `422` create response is ambiguous rather than success: the adapter performs an exact lookup and
 returns the Draft only if that complete identity is visible. GitHub documents `201`, `403`, and
 generic validation-or-abuse `422` responses for Draft creation, but does not document duplicate
 head/base serialization as an idempotency contract. Therefore R0 treats the adapter as
-production-shaped, not as independent proof of provider serialization. Promotion requires either
-a live concurrency probe demonstrating that property or a GitHub-hosted serialized executor. If a
-probe can create two open Drafts for one head/base operation, this adapter is rejected unchanged.
+production-shaped, not as independent proof of provider serialization. The append-only adapter's
+exclusive transaction is the local pump's serialized executor; a future multi-host executor still
+requires either a live concurrency probe or GitHub-hosted serialization. If a probe can create two
+open Drafts for one head/base operation, uncoordinated multi-host use is rejected unchanged.
 
 ## Mandatory deterministic fault matrix
 

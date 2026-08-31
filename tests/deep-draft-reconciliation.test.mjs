@@ -78,7 +78,7 @@ async function call(mod, obs, store, remote, expectedRevision = null, extra = {}
   });
 }
 
-test('R0-01 old-generation intent is refused by a new policy/head generation', async () => {
+test('MECHANISM REVERT R0-01 stable identity refuses an old-generation intent', async () => {
   const mod = await load();
   const store = mod.createMemoryDraftReconciliationStore();
   const remote = provider([], { loseResponse: true, persistBeforeLoss: false });
@@ -94,7 +94,7 @@ test('R0-01 old-generation intent is refused by a new policy/head generation', a
   assert.equal(remote.calls.create, 1);
 });
 
-test('R0-02 a resumed stale owner performs no effect after a newer generation wins', async () => {
+test('MECHANISM REVERT R0-02 fencing stops a resumed stale owner before effect', async () => {
   const mod = await load();
   const inner = mod.createMemoryDraftReconciliationStore();
   let entered;
@@ -103,6 +103,7 @@ test('R0-02 a resumed stale owner performs no effect after a newer generation wi
   const gate = new Promise((resolve) => { release = resolve; });
   const stalled = {
     read: (...args) => inner.read(...args),
+    runExclusive: (...args) => inner.runExclusive(...args),
     async compareAndSetAppend(expected, record) {
       const result = await inner.compareAndSetAppend(expected, record);
       if (record.kind === 'INTENT') { entered(); await gate; }
@@ -123,7 +124,7 @@ test('R0-02 a resumed stale owner performs no effect after a newer generation wi
   assert.equal(remote.calls.create, 1);
 });
 
-test('R0-03 a lost provider response reconciles without a blind retry', async () => {
+test('MECHANISM REVERT R0-03 reconciliation closes a lost provider response', async () => {
   const mod = await load();
   const store = mod.createMemoryDraftReconciliationStore();
   const remote = provider([], { loseResponse: true });
@@ -162,7 +163,7 @@ test('R0-06 exact adoption bypasses provider, CI, and lane capacity', async () =
   assert.equal(remote.calls.create, 0);
 });
 
-test('R0-07 two actors reading one revision produce one CAS winner and one effect', async () => {
+test('MECHANISM REVERT R0-07 CAS gives two readers one winner and one effect', async () => {
   const mod = await load();
   const store = mod.createMemoryDraftReconciliationStore();
   const remote = provider();
@@ -216,7 +217,7 @@ test('R0-10 cancellation racing completion is ordered by one durable revision', 
   assert.equal(remote.calls.create, 0);
 });
 
-test('R0-11 projection, checklist, action, and source share the committed revision', async () => {
+test('MECHANISM REVERT R0-11 projection and action bind one committed revision', async () => {
   const mod = await load();
   const store = mod.createMemoryDraftReconciliationStore();
   const result = await call(mod, observation(), store, provider());
@@ -282,15 +283,16 @@ test('the append-only adapter fails closed on a torn or altered record', async (
 
 test('MECHANISM REVERT: durable intent is observable before the provider effect starts', async () => {
   const mod = await load();
-  const store = mod.createMemoryDraftReconciliationStore();
-  const remote = provider();
-  const create = remote.createDraft.bind(remote);
-  remote.createDraft = async (request) => {
-    const snapshot = await store.read();
-    assert.equal(snapshot.records.at(-1)?.kind, 'INTENT');
-    assert.equal(snapshot.records.at(-1)?.operationIdentity, request.operationIdentity);
-    return create(request);
+  const inner = mod.createMemoryDraftReconciliationStore();
+  const store = {
+    read: (...args) => inner.read(...args),
+    compareAndSetAppend: (...args) => inner.compareAndSetAppend(...args),
+    runExclusive: (expected, operation) => inner.runExclusive(expected, (transaction) => {
+      assert.equal(transaction.snapshot.records.at(-1)?.kind, 'INTENT');
+      return operation(transaction);
+    }),
   };
+  const remote = provider();
   assert.equal((await call(mod, observation(), store, remote)).outcome, 'CREATED');
 });
 
@@ -303,7 +305,7 @@ test('MECHANISM REVERT: fixed input replays to byte-identical committed receipts
   assert.equal(await run(), await run());
 });
 
-test('the GitHub adapter serializes duplicate creates through exact provider reconciliation', async () => {
+test('the GitHub adapter reconciles an ambiguous duplicate-create 422 by exact identity', async () => {
   const mod = await load();
   const pulls = [];
   let posts = 0;
@@ -350,4 +352,118 @@ test('the GitHub adapter refuses a same-branch Draft from another operation gene
   assert.equal(await adapter.lookupExact({
     operationIdentity: 'd'.repeat(64), observation: observation(),
   }), null);
+});
+
+test('memory and append-only adapters pass the same black-box lifecycle contract', async (t) => {
+  const mod = await load();
+  const root = await mkdtemp(join(tmpdir(), 'gaia-deep-shared-contract-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const factories = [
+    {
+      name: 'memory',
+      create() {
+        const store = mod.createMemoryDraftReconciliationStore();
+        return { store, restart: () => store };
+      },
+    },
+    {
+      name: 'append-only',
+      create(scenario) {
+        const directory = join(root, scenario);
+        return {
+          store: mod.createAppendOnlyDraftReconciliationStore({ directory }),
+          restart: () => mod.createAppendOnlyDraftReconciliationStore({ directory }),
+        };
+      },
+    },
+  ];
+  for (const factory of factories) {
+    const ordinary = factory.create(`${factory.name}-ordinary`);
+    const remote = provider();
+    const created = await call(mod, observation(), ordinary.store, remote);
+    const replayed = await call(mod, observation(), ordinary.restart(), remote);
+    assert.equal(created.outcome, 'CREATED', factory.name);
+    assert.deepEqual(replayed, created, factory.name);
+    assert.equal(remote.calls.create, 1, factory.name);
+
+    const lost = factory.create(`${factory.name}-lost`);
+    const uncertain = provider([], { loseResponse: true });
+    assert.equal((await call(mod, observation(), lost.store, uncertain)).outcome,
+      'CREATED', factory.name);
+    assert.equal(uncertain.calls.create, 1, factory.name);
+
+    const cancelled = factory.create(`${factory.name}-cancelled`);
+    const untouched = provider();
+    const refused = await call(mod, observation({ cancelled: true }), cancelled.store, untouched);
+    assert.deepEqual({ outcome: refused.outcome, refusal: refused.refusal },
+      { outcome: 'REFUSED', refusal: 'Cancelled' }, factory.name);
+    assert.equal(untouched.calls.create, 0, factory.name);
+  }
+});
+
+test('R1 post-fence race serializes the provider effect before a newer owner can win', async () => {
+  const mod = await load();
+  const store = mod.createMemoryDraftReconciliationStore();
+  const remote = provider();
+  let entered;
+  const atEffect = new Promise((resolve) => { entered = resolve; });
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const create = remote.createDraft.bind(remote);
+  remote.createDraft = async (request) => {
+    if (remote.calls.create === 0) { entered(); await gate; }
+    return create(request);
+  };
+  const ownerA = call(mod, observation(), store, remote);
+  await atEffect;
+  const ownerB = call(mod, observation({ reconciliationGeneration: 2 }), store, remote);
+  await Promise.resolve();
+  assert.equal(remote.calls.create, 0);
+  release();
+  const results = await Promise.all([ownerA, ownerB]);
+  assert.equal(remote.calls.create, 1);
+  assert.equal(results.filter(({ outcome }) => outcome === 'CREATED').length, 1);
+});
+
+test('R1 cancellation racing an in-flight effect cannot publish a false cancellation', async () => {
+  const mod = await load();
+  const store = mod.createMemoryDraftReconciliationStore();
+  const remote = provider();
+  let entered;
+  const atEffect = new Promise((resolve) => { entered = resolve; });
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const create = remote.createDraft.bind(remote);
+  remote.createDraft = async (request) => { entered(); await gate; return create(request); };
+  const creator = call(mod, observation(), store, remote);
+  await atEffect;
+  const cancellation = call(mod, observation({ cancelled: true }), store, remote);
+  release();
+  const [created, cancelled] = await Promise.all([creator, cancellation]);
+  assert.equal(remote.calls.create, 1);
+  assert.equal(created.outcome, 'CREATED');
+  assert.equal(cancelled.outcome, 'CREATED');
+  assert.deepEqual((await store.read()).records.map(({ outcome }) => outcome), [null, 'CREATED']);
+});
+
+test('R1 telemetry failure is observational and cannot change a durable result', async () => {
+  const mod = await load();
+  const store = mod.createMemoryDraftReconciliationStore();
+  const result = await call(mod, observation(), store, provider(), null, {
+    telemetry: { append() { throw new Error('sink down'); } },
+  });
+  assert.equal(result.outcome, 'CREATED');
+  assert.equal((await store.read()).records.at(-1).outcome, 'CREATED');
+});
+
+test('R1 the store refuses an incoherent CREATED terminal record', async () => {
+  const mod = await load();
+  const store = mod.createMemoryDraftReconciliationStore();
+  const revision = (await store.read()).revision;
+  await assert.rejects(store.compareAndSetAppend(revision, {
+    kind: 'TERMINAL', operationIdentity: 'd'.repeat(64),
+    baseIdentity: SHA256_A, workIdentity: SHA256_B,
+    reconciliationGeneration: 1, sourceRevision: SHA256_B,
+    outcome: 'CREATED', refusal: null, effect: 'NONE', pullRequest: null,
+  }), (error) => error?.code === 'StoreRecordInvalid');
 });
