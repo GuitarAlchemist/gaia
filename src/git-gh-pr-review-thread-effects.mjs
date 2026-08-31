@@ -208,7 +208,11 @@ function parseDisputeWindow(comments, threads) {
   let globallyCorrupt = false;
   for (const comment of comments) {
     const body = typeof comment?.body === 'string' ? comment.body : '';
-    for (const match of body.matchAll(DISPUTE_MARKER)) {
+    const markerLines = body.split(/\r?\n/u)
+      .filter((line) => line.startsWith('gaia-dispute-evidence: '));
+    const matches = [...body.matchAll(DISPUTE_MARKER)];
+    if (markerLines.length !== matches.length) globallyCorrupt = true;
+    for (const match of matches) {
       let artifact;
       try { artifact = JSON.parse(match[1]); } catch { artifact = null; }
       const target = artifact && known.get(artifact.reviewThreadId);

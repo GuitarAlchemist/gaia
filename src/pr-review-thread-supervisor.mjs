@@ -140,14 +140,22 @@ function reserve(path, intent) {
 function settle(path, intent, result) {
   if (!result || typeof result !== 'object') fail('ProviderResultInvalid', 'effect returned no receipt');
   const target = receiptPath(path);
-  if (!existsSync(target)) writeFileSync(target, `${JSON.stringify({
-    schema: 'gaia-pr-review-thread-operation-receipt/2',
-    operationIdentity: intent.operationIdentity,
-    idempotencyKey: intent.idempotencyKey,
-    intentDigest: sha256(intent),
-    expectedRevision: intent.expectedRevision,
-    result,
-  })}\n`, { flag: 'wx' });
+  if (!existsSync(target)) {
+    const descriptor = openSync(target, 'wx', 0o600);
+    try {
+      writeFileSync(descriptor, `${JSON.stringify({
+        schema: 'gaia-pr-review-thread-operation-receipt/2',
+        operationIdentity: intent.operationIdentity,
+        idempotencyKey: intent.idempotencyKey,
+        intentDigest: sha256(intent),
+        expectedRevision: intent.expectedRevision,
+        result,
+      })}\n`, 'utf8');
+      fsyncSync(descriptor);
+    } finally {
+      closeSync(descriptor);
+    }
+  }
   return readReceipt(path, intent);
 }
 

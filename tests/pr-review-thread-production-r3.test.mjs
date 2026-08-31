@@ -122,6 +122,22 @@ test('R3 per-thread provider dispute evidence derives OPEN, UNKNOWN, and NONE in
     [true, 'UNKNOWN', false]);
 });
 
+test('R3 a malformed dispute marker poisons the complete provider window to UNKNOWN', async () => {
+  const graph = reviewGraph({ threads: 2 });
+  const adapter = createGitGhPrReviewThreadEffects({
+    run: async (args) => String(args.find((entry) => entry.startsWith('query=')))
+      .includes('GaiaReviewThreadDisputes')
+      ? disputeGraph({ comments: [{ id: 'IC_bad', body: 'gaia-dispute-evidence: not-json' }] })
+      : graph,
+  });
+  const collection = await adapter.collectReviewThreads({
+    repository: 'GuitarAlchemist/gaia', pullRequest: 44, observedAt: OBSERVED,
+    run: { runId: 'review-r3', laneGeneration: 1 },
+  });
+  assert.deepEqual(collection.observations.map(({ reviewThread }) => reviewThread.disputed),
+    ['UNKNOWN', 'UNKNOWN']);
+});
+
 test('R3 repair evidence re-reads the current head and blocks a missing required check', async () => {
   const freshHead = 'b'.repeat(40);
   const calls = [];
