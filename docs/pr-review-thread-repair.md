@@ -248,3 +248,51 @@ as they are — they were each gated on verified evidence at the time they happe
 - **Falsifier:** a `COMMENTED` P1 thread that does not block merge; two lanes, two comments or two
   resolutions for one thread under any interleaving; a resolution of a stale, disputed, unverified
   or partially addressed thread; a review body reaching a durable record.
+
+## R1 production vertical slice
+
+R0 proved the closed reading and the repair ledger, but it deliberately stopped at injected
+observations and injected effects. R1 makes that contract production-reachable without changing
+its identity, lifecycle, authority boundary, or six bus verbs.
+
+The public seams are:
+
+1. `createGitGhPrReviewThreadEffects`, a bounded `gh api graphql` Adapter. Its collector reads the
+   pull request head, base branch, review threads, enclosing review state and reviewed commit, and
+   inline comments. Its effect side can read one exact thread, create or update one PR checklist,
+   reply to one exact review thread, and resolve that exact thread. No mutation can merge, approve,
+   dismiss, push, promote a Draft, close a pull request, or edit repository configuration.
+2. `runPrReviewThreadSupervisorTick`, the reconciliation caller. Every tick re-reads GitHub and
+   derives the same `(repository, pull request, thread, reviewed head)` identity. A missed webhook,
+   duplicate delivery, restart, or reordered delivery therefore converges through the existing
+   ledger CAS instead of minting another claim.
+3. `synchronizePrReviewThreadDuckDb`, an optional analytical sink using the same pinned
+   `@duckdb/node-api` client seam as Gaia raw telemetry. The append-only repair ledger remains the
+   authority. DuckDB is rebuilt transactionally from its deterministic projection and records all
+   seven lifecycle transitions; failure to load or update DuckDB is explicit telemetry failure,
+   never permission to continue a merge.
+4. `derivePrReviewThreadMergeGate`, the production merge/control-room input. Any unresolved,
+   undisputed P0/P1 reading makes `blocksMerge=true`; absence, corrupt input, stale source identity,
+   or an incomplete collector window fails closed rather than reporting merge readiness.
+
+`CLAIMED` remains the linearization point. After that durable append, R1 performs two separately
+reconcilable effects with stable operation keys: `lane:<threadIdentity>` and
+`checklist:<threadIdentity>`. The lane Adapter must first find an existing receipt by that key and
+may start work only when none exists. The checklist Adapter finds its marker and edits the one
+matching PR comment; zero matches creates it and more than one match refuses. A provider timeout is
+followed by a read, never a blind retry. Duplicate collectors and concurrent supervisors can thus
+produce at most one lane and one checklist.
+
+The checklist is published when the claim opens, with origin, current step, evidence-based ETA and
+the seven short checkbox rows. It is updated idempotently after each durable transition. The final
+review-thread reply remains after `VERIFIED`, and only the exact verified thread can be resolved.
+
+The lane effect uses the existing bounded factory execution port and supplies only the closed
+finding identity, repository, pull request, anchor path and actionable comment ids. Review prose is
+not forwarded. `blocksMerge` is consumed by the supervisor result and the control-room merge gate;
+it is not merely a field published for a future caller.
+
+Required RED proof adds forced interleavings for duplicate collector deliveries, two concurrent
+lane starts, two checklist upserts, a lost checklist response, a lost resolution response, and
+DuckDB replay. Mechanism-revert controls must fail if stable identity, CAS, intent-before-effect,
+provider reconciliation, or the merge-gate consumer is removed.
