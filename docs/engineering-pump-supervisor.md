@@ -50,6 +50,14 @@ performs no effect. After an ambiguous response, the existing delivery seam reco
 operation marker before deciding whether an effect remains outstanding. A retry never establishes
 uniqueness.
 
+`CLAIMED` is also the durable pump outbox for the correlation step. A crash after that append and
+before the passive correlation append is not healthy idle: a later tick reconstructs the one exact
+correlation witness from the sealed claim, subject and policy generation. If GitHub already shows
+the exact Draft but the first-evidence journal has no durable `INTENT`, the tick reports a typed
+`BLOCKED / DELIVERY_INTENT_MISSING` result after repairing the witness. It neither adopts the Draft
+without proof nor retries an effect. Thus the orphan is observable and convergent without creating
+a second authority path.
+
 A fresh `DRAFT_OPEN` observation is already satisfied work. It cannot reserve capacity and cannot
 announce `START_DRAFT`. It may reach the delivery adoption path only when the first-evidence journal
 already contains an exact matching `INTENT` whose provider response may have been lost. An
@@ -64,6 +72,9 @@ delivery-derived fields remain honestly unknown and no old PR evidence is shown.
 The projection derives both the checklist and DuckDB rows from one stable set of exact source
 snapshots. It retries when any head changes across the read window and typed-refuses when no stable
 set can be measured; it never combines independently sampled heads.
+The DuckDB metadata row stores all three revisions (`portfolioDrain`, `draftDelivery`, and
+`pumpCorrelation`) in the same transaction as the derived rows. A consumer can therefore prove
+which exact correlation generation produced the materialized view after restart.
 
 The sealed nested portfolio revision is validated before capacity, provider, CI, or empty-work early
 gates. An early gate is a conclusion over verified evidence, never a shortcut around evidence
