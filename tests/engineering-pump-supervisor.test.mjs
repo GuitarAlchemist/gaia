@@ -374,7 +374,9 @@ test('R1 early capacity gates still validate the sealed nested portfolio revisio
 });
 
 test('R0 EXPECTED_NONE is healthy idle', async () => {
-  const result = await tick(scratch(), { observation: observation({ items: [] }) });
+  const result = await tick(scratch(), { observation: observation({
+    items: [], capacity: { writerSlots: 0, providerSlots: 0, ciSlots: 0 },
+  }) });
   assert.equal(result.gate.state, 'EXPECTED_NONE');
   assert.equal(result.gate.nextAction.kind, 'NONE');
   assert.equal(result.delivery, null);
@@ -385,18 +387,25 @@ test('R0 checklist is bounded, self-sufficient, and has one managed status comme
   await tick(directory);
   const projected = projectEngineeringPumpChecklist({ directory });
   assert.deepEqual(Object.keys(projected.issueBody), [
-    'outcome', 'why', 'forWhom', 'owner', 'reportsTo', 'scope', 'exclusions', 'plan',
+    'outcome', 'why', 'forWhom', 'owner', 'lane', 'reportsTo', 'scope', 'exclusions', 'plan',
     'deliverables', 'doneWhen', 'where', 'withWhat', 'authorityBoundary', 'evidenceLinks',
     'ifFailure', 'executionProfile',
-  ]);
+  ].filter((field) => field !== 'evidenceLinks'));
   assert.deepEqual(Object.keys(projected.issueBody.executionProfile), [
     'complexity', 'uncertainty', 'estimatedTokens', 'parallelismCeiling',
     'missingCapabilities', 'constraints', 'externalServices', 'risk',
   ]);
   assert.deepEqual(Object.keys(projected.observedTelemetry), [
     'actualTokens', 'agentWallTimeMs', 'ciWallTimeMs', 'retries', 'queueDelayMs',
-    'blockers', 'estimateVariance',
+    'blockers', 'estimateVariance', 'evidenceLinks',
   ]);
+  assert.deepEqual(projected.issueBody.owner, { value: null, reason: 'NO_OWNER_BINDING_EVIDENCE' });
+  assert.deepEqual(projected.issueBody.lane, { value: null, reason: 'NO_LANE_BINDING_EVIDENCE' });
+  assert.equal(projected.issueBody.reportsTo, 'GAIA_PUMP');
+  assert.equal(Object.hasOwn(projected.issueBody, 'evidenceLinks'), false);
+  assert.deepEqual(projected.observedTelemetry.evidenceLinks, {
+    value: ['https://github.com/GuitarAlchemist/gaia/pull/45'], reason: null,
+  });
   for (const unknown of [
     projected.issueBody.executionProfile.estimatedTokens,
     projected.observedTelemetry.actualTokens,
@@ -408,6 +417,7 @@ test('R0 checklist is bounded, self-sufficient, and has one managed status comme
   assert.match(projected.statusComment, /Origin: GAIA PUMP/u);
   assert.equal((projected.statusComment.match(/^Next:/gmu) ?? []).length, 1);
   assert.match(projected.statusComment, /ETA: UNKNOWN \(low confidence\)/u);
+  assert.match(projected.statusComment, /Evidence links: https:\/\/github.com\/GuitarAlchemist\/gaia\/pull\/45/u);
   assert.match(projected.statusComment, /- \[x\] Observe/u);
   assert.ok(projected.statusComment.length <= 1200);
   assert.ok(Object.keys(projected.issueBody).length <= 16);
@@ -448,10 +458,64 @@ test('R1 skewed journals never combine the latest claim with another item delive
   const restarted = projectEngineeringPumpChecklist({ directory });
   assert.deepEqual(restarted, first);
   assert.equal(first.currentGate, 'START_DRAFT');
-  assert.equal(first.issueBody.owner, 'UNASSIGNED');
-  assert.deepEqual(first.issueBody.evidenceLinks, []);
+  assert.deepEqual(first.issueBody.owner, { value: null, reason: 'NO_OWNER_BINDING_EVIDENCE' });
+  assert.deepEqual(first.observedTelemetry.evidenceLinks, {
+    value: null, reason: 'NO_DELIVERY_EVIDENCE',
+  });
   assert.deepEqual(first.issueBody.where, ['OtherOwner/other-repo']);
   assert.doesNotMatch(first.statusComment, /pull\/45/u);
+});
+
+test('R2 same item re-claimed under a new subject and policy cannot inherit the old Draft', async () => {
+  const directory = scratch();
+  await tick(directory);
+  const nextItem = item(40, { itemId: 'issue-40-r2' });
+  const currentPortfolio = portfolio([item(40), nextItem]);
+  let ledger = readPortfolioDrainLedger({ directory });
+  let previous = ledger.receipts.at(-1);
+  for (const event of ['STARTED', 'CANDIDATE_REJECTED']) {
+    const receipt = buildPortfolioDrainReceipt({
+      portfolioRevision: currentPortfolio.revision,
+      item: currentPortfolio.workItems[0], previous, event,
+      evidenceRevision: previous.evidenceRevision,
+    });
+    ledger = appendPortfolioDrainReceipt({
+      directory, portfolio: currentPortfolio, receipt,
+      expectedLedgerRevision: ledger.revision,
+    });
+    previous = receipt;
+  }
+  const nextActionIdentity = sha256({
+    schema: 'gaia-engineering-pump-action/1',
+    repository: 'guitaralchemist/gaia',
+    readyItemId: 'issue-40-r2',
+    subjectRevision: 'd'.repeat(64),
+    policyRevision: 'e'.repeat(64),
+    action: 'START_DRAFT',
+  });
+  const nextClaim = buildPortfolioDrainReceipt({
+    portfolioRevision: currentPortfolio.revision,
+    item: nextItem, previous: null, event: 'CLAIMED',
+    evidenceRevision: nextActionIdentity,
+  });
+  appendPortfolioDrainReceipt({
+    directory, portfolio: currentPortfolio, receipt: nextClaim,
+    expectedLedgerRevision: ledger.revision,
+  });
+
+  const restarted = projectEngineeringPumpChecklist({ directory });
+  assert.equal(restarted.currentGate, 'START_DRAFT');
+  assert.deepEqual(restarted.issueBody.owner, {
+    value: null, reason: 'NO_OWNER_BINDING_EVIDENCE',
+  });
+  assert.deepEqual(restarted.observedTelemetry.evidenceLinks, {
+    value: null, reason: 'NO_DELIVERY_EVIDENCE',
+  });
+  assert.doesNotMatch(restarted.statusComment, /pull\/45/u);
+  const originalClaim = readPortfolioDrainLedger({ directory }).receipts[0];
+  assert.ok(readFirstEvidenceLedger({ directory }).transitions.every(
+    ({ correlationRevision }) => correlationRevision === originalClaim.evidenceRevision,
+  ));
 });
 
 test('R1 a foreign live delivery owner cannot be settled by an observed Draft', async () => {
@@ -573,6 +637,7 @@ test('R0 MECHANISM REVERT: existing machines own reservation, intent and reconci
   assert.match(source, /appendPortfolioDrainReceipt/u);
   assert.match(source, /operationForClaim/u);
   assert.match(source, /stablePumpSourceSnapshot/u);
+  assert.match(source, /claim\.evidenceRevision === operation\.correlationRevision/u);
   assert.equal(source.includes('operations.at(-1)'), false);
   for (const forbidden of [
     'engineering-pump.jsonl', 'ENGINEERING_PUMP_LEDGER', 'openDraftPullRequest({',
