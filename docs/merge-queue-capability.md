@@ -135,6 +135,18 @@ Three pieces and one file between them:
   return value therefore cannot distinguish `403` from `404` from `200 []`, and that distinction is
   the entire decision this module makes. Discarding the status is correct for the portfolio survey
   and disqualifying here.
+
+  The probe issues **two kinds of read** against the rulesets API, because one is not enough.
+  `GET /repos/{owner}/{repo}/rulesets` is an index: it returns each ruleset's `id`, `name`,
+  `target`, `source`, `source_type` and `enforcement`, and it returns **no `rules` array and no
+  `conditions` object at all**. Deciding the capability from that response finds no `merge_queue`
+  rule in *every* repository, including one whose merge queue is active and governs the default
+  branch, and rule 5 then seals `ABSENT` for a configuration nobody read. So for every listed
+  ruleset whose `source_type` is `Repository`, the probe reads
+  `GET /repos/{owner}/{repo}/rulesets/{ruleset_id}` — the only endpoint that carries the rules and
+  the ref conditions — in listing order, before anything is parsed. The reads are bounded by the
+  same 64-ruleset bound the artifact carries and are applied before the first detail read, and a
+  ruleset governed elsewhere costs no request because it is discarded either way.
 - `scripts/factory-dashboard.mjs` — `--merge-queue-capability <path>`. The publisher reads the
   sealed artifact and hands it to `buildControlRoomSnapshot` as one more explicit input, exactly as
   it already hands over `dependencies`, `localLanes` and `engineeringFlow`. Without the flag the
@@ -261,6 +273,20 @@ Eight notes on why these rules are what they are:
   assertion that the listing was exhausted, and an incomplete listing is `UNKNOWN` — the same
   discipline `searchIsComplete` already applies to the portfolio survey at
   `src/github-read-adapter.mjs:78`.
+- **A detail read that fell short can never decide `ABSENT`.** One read per listed repository
+  ruleset is one more way the observation can be partial, and every one of them fails closed. A
+  transport failure, a `403`, a `404` or a `500` on any detail read degrades `rulesetsRead` to the
+  most severe outcome observed across the listing and its details, so rules 1-3 decide it exactly
+  as they decide a failed listing: `FORBIDDEN` is `PERMISSION_DENIED`, and `RATE_LIMITED`, `FAILED`
+  and `NOT_FOUND` are `UNKNOWN`. `rulesets` is then exactly `[]` and `rulesetDigest` exactly `null`,
+  because a read that did not succeed carries no rulesets. A detail that answered `200` with a body
+  this version cannot read — one that is not an object, one naming another `ruleset_id`, one whose
+  `source_type` has moved off this repository, one carrying no `rules` array, or one carrying no
+  pair of `conditions.ref_name` arrays — is recorded as `unreadable_ruleset_detail` in
+  `unknownRuleTypes` and decided `UNKNOWN` by rule 3, for the same reason
+  `unmodelled_governing_ruleset` is: a ruleset that exists and whose record could not be read is
+  not a ruleset that does not exist. A listed `id` that is not a positive integer is treated the
+  same way and is never interpolated into a request path.
 - **`adminPermission` does not decide the state.** It is evidence about *writing*; the capability
   question is about *reading* what exists. It gates remediation, not classification. A read-only
   identity that successfully lists zero rulesets has honestly established `ABSENT`.
@@ -880,9 +906,13 @@ In `tests/merge-queue-capability.test.mjs`:
 | M23 | A write after which no active ruleset carries the desired rule — including one that landed nothing, and one that came back `evaluate`-only — seals `AMBIGUOUS`, and the executor's verdict equals the reconciler's over the same read. |
 | M24 | An organization, enterprise or `source_type`-less ruleset carrying an active merge queue records `unmodelled_governing_ruleset` and decides `UNKNOWN`; the planner refuses it; and this document decides the case. |
 | M25 | The sealed intent is verified at the executor's mouth, refused after a correct reseal, reaches no write when refused, and the payload carries the desired-rule constant. |
+| M26 | The rulesets listing carries no rules, so the probe reads `GET /repos/{owner}/{repo}/rulesets/{ruleset_id}` once per listed repository ruleset, in listing order and within the 64-ruleset bound; a configured queue decides `AVAILABLE`, a genuinely rule-free ruleset still decides `ABSENT`, and every failed, partial, malformed, ambiguous or incomplete detail read decides `PERMISSION_DENIED` or `UNKNOWN` and never `ABSENT`. |
 | MRM1 | Mechanism revert: assuming `APPLIED` after a non-throwing write is what seals completion for a merge queue that does not exist. |
 | MRM2 | Mechanism revert: discarding a governing ruleset silently is what asserts absence about a repository whose merge queue works. |
 | MRM3 | Mechanism revert: dropping the intent verification and writing `intent.additions` is what lets a forged `deletion` rule reach the provider. |
+| MRM4 | Mechanism revert: deciding from the listing instead of the detail reads is what reads an active merge queue as `ABSENT`. |
+| MRM5 | Mechanism revert: ignoring a detail read's outcome is what turns "I was not allowed to read it" into "it is not there". |
+| MRM6 | Mechanism revert: discarding an unreadable detail silently is what calls the silence an absence. |
 
 In `tests/control-room-merge-queue-capability.test.mjs`:
 

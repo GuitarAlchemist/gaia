@@ -935,8 +935,12 @@ function requireCapabilityBinding(obstruction, snapshot, capability) {
   // them: with something waiting to merge, a capability that names an obstruction must produce
   // that obstruction, or one of the two that legitimately outrank it.
   const named = MERGE_QUEUE_CAPABILITY_OBSTRUCTION[capability.state] ?? null;
+  // Over the capability's own repository, exactly as the classifier selects. Asking this across
+  // the portfolio made a correct, repository-bound obstruction about another repository look like
+  // a contradiction, and refused a snapshot in which nothing disagreed.
   const waiting = snapshot.items.some(
-    ({ drainState }) => MERGE_DEPENDENT_DRAIN_STATES.includes(drainState),
+    ({ drainState, repository }) => MERGE_DEPENDENT_DRAIN_STATES.includes(drainState)
+      && repository === capability.repository,
   );
   if (named !== null && waiting && obstruction.state !== named
       && !OBSTRUCTIONS_OUTRANKING_CAPABILITY.includes(obstruction.state)) {

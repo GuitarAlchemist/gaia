@@ -568,7 +568,16 @@ export function classifyPortfolioDrainObstruction({
   const cycleItems = live.filter(({ itemId }) => cyclic.has(itemId));
   const eligible = live.filter(({ drainState }) => ELIGIBLE_STATES.has(drainState));
   const capability = requireCapability(mergeQueueCapability);
-  const awaitingMerge = live.filter(({ drainState }) => MERGE_DEPENDENT_STATES.has(drainState));
+  // Bound to the observed repository, not to the portfolio. A `gaia-merge-queue-capability/1`
+  // reading names exactly one repository and one default branch; a drain spans many. Selecting
+  // every merge-dependent item against one repository's reading fabricates a finding about
+  // repositories nobody observed, and replaces the real obstruction those items had with it. An
+  // item whose repository is not the observed one — including one carrying no repository at all —
+  // stays unclassified by this reading until its own evidence is supplied.
+  const awaitingMerge = capability === null ? [] : live.filter(
+    ({ drainState, repository }) => MERGE_DEPENDENT_STATES.has(drainState)
+      && repository === capability.repository,
+  );
   const capabilityState = capability === null || awaitingMerge.length === 0
     ? null : MERGE_QUEUE_CAPABILITY_OBSTRUCTION[capability.state] ?? null;
   const stalled = eligible.length > 0 && projection.counts.available > 0 && !moving

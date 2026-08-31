@@ -507,16 +507,23 @@ export async function probeMergeQueueCapability({
   const protection = await readOutcome(
     read, `repos/${repository}/branches/${defaultBranch}/protection`,
   );
-  const parsed = rulesets.outcome === 'OK'
-    ? parseRulesets(rulesets.answer.body, defaultBranch)
+  // The listing is an index, not the configuration. Each listed ruleset's own record is read
+  // before anything is parsed, because the rules and the ref conditions exist only there.
+  const detailed = rulesets.outcome === 'OK'
+    ? await readRulesetDetails(read, repository, rulesets.answer.body)
+    : { outcome: rulesets.outcome, entries: [], unreadable: false };
+  const parsed = detailed.outcome === 'OK'
+    ? parseRulesets(detailed.entries, defaultBranch, detailed.unreadable)
     : { rulesets: [], unknownRuleTypes: [] };
 
   const observation = {
-    rulesetsRead: rulesets.outcome,
-    rulesetsComplete: rulesets.outcome === 'OK' ? rulesets.answer.complete === true : false,
+    rulesetsRead: detailed.outcome,
+    // A listing that was exhausted but whose details were not read is not a complete observation
+    // of the configuration, and `ABSENT` is the one answer completeness is load-bearing for.
+    rulesetsComplete: detailed.outcome === 'OK' ? rulesets.answer.complete === true : false,
     protectionRead: protection.outcome,
     rulesets: parsed.rulesets,
-    rulesetDigest: rulesets.outcome === 'OK' ? mergeQueueRulesetDigest(parsed.rulesets) : null,
+    rulesetDigest: detailed.outcome === 'OK' ? mergeQueueRulesetDigest(parsed.rulesets) : null,
     adminPermission: 'UNKNOWN',
     unknownRuleTypes: parsed.unknownRuleTypes,
   };
@@ -548,9 +555,107 @@ async function readOutcome(read, path) {
   return { outcome: 'FAILED', answer };
 }
 
-function parseRulesets(body, defaultBranch) {
+/**
+ * Read every listed repository ruleset's own record, because the listing does not carry the rules.
+ *
+ * `GET /repos/{owner}/{repo}/rulesets` returns each ruleset's `id`, `name`, `target`, `source`,
+ * `source_type` and `enforcement`. It returns no `rules` array and no `conditions` object at all.
+ * Parsing that response for a `merge_queue` rule therefore finds none in *every* repository —
+ * including one whose merge queue is active and governs the default branch — and rule 5 then seals
+ * `ABSENT` for a configuration nobody looked at. That is the same false absence this module exists
+ * to refuse, arriving through the shape of the response rather than through its status.
+ *
+ * `GET /repos/{owner}/{repo}/rulesets/{ruleset_id}` is the only endpoint that carries them, so one
+ * detail read is issued per listed repository ruleset, in listing order. Every way that read can
+ * fall short is failed closed and can never reach `ABSENT`: a transport failure, a 403, a 404 or a
+ * 500 degrades `rulesetsRead` and is decided by rules 1-3, and a body that is not this ruleset,
+ * carries no `rules` array or carries no resolvable ref condition is recorded as
+ * `unreadable_ruleset_detail` and decided by rule 3.
+ */
+async function readRulesetDetails(read, repository, body) {
+  const listed = Array.isArray(body) ? body : [];
+  // Bounded before the first detail read. A listing longer than the artifact can carry is refused
+  // at the seal either way, and spending one request per entry that cannot be sealed is not
+  // boundedness — it is the same unbounded fan-out wearing a limit that arrives too late.
+  if (listed.length > MAX_RULESETS) return { outcome: 'OK', entries: listed, unreadable: false };
+  const entries = [];
+  let outcome = 'OK';
+  let unreadable = false;
+  for (const entry of listed) {
+    // A ruleset this repository does not own never enters `rulesets` and already forces UNKNOWN
+    // through `unmodelled_governing_ruleset`, so reading a detail Gaia has already decided it
+    // cannot reconcile against buys no evidence and costs a request.
+    if (entry?.source_type !== 'Repository') {
+      entries.push(entry);
+      continue;
+    }
+    const rulesetId = listedRulesetId(entry);
+    if (rulesetId === null) {
+      unreadable = true;
+      continue;
+    }
+    const detail = await readOutcome(read, `repos/${repository}/rulesets/${rulesetId}`);
+    if (detail.outcome !== 'OK') {
+      outcome = worseReadOutcome(outcome, detail.outcome);
+      continue;
+    }
+    const complete = completeRulesetDetail(detail.answer.body, rulesetId);
+    if (complete === null) {
+      unreadable = true;
+      continue;
+    }
+    entries.push(complete);
+  }
+  return { outcome, entries, unreadable };
+}
+
+/**
+ * The one identity a detail read may be addressed by.
+ *
+ * A listed `id` that is not a positive integer is not something this probe will interpolate into a
+ * request path — that is how a provider response starts choosing which URL Gaia calls — and it is
+ * also not an identity the artifact could seal. It is an unreadable detail, never an absence.
+ */
+function listedRulesetId(entry) {
+  const id = entry?.id;
+  if (typeof id === 'number' && Number.isSafeInteger(id) && id > 0) return String(id);
+  if (typeof id === 'string' && /^[1-9][0-9]{0,18}$/u.test(id)) return id;
+  return null;
+}
+
+/**
+ * The detail body, or `null` when it cannot decide anything about this ruleset.
+ *
+ * A body that names another ruleset is ambiguous, a body carrying no `rules` array cannot show the
+ * absence of a `merge_queue` rule, and a body carrying no pair of ref-name arrays cannot resolve
+ * what the ruleset governs. Each is an incomplete read of a ruleset that exists, which is an
+ * evidence gap; treating any of them as "no merge queue here" is the defect in miniature.
+ */
+function completeRulesetDetail(body, rulesetId) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  if (listedRulesetId(body) !== rulesetId || body.source_type !== 'Repository') return null;
+  const refName = body.conditions?.ref_name;
+  if (!Array.isArray(body.rules) || !refName || typeof refName !== 'object'
+      || !Array.isArray(refName.include) || !Array.isArray(refName.exclude)) {
+    return null;
+  }
+  return body;
+}
+
+/** Least to most severe, so many reads collapse into one outcome without an order of arrival. */
+const READ_OUTCOME_SEVERITY = Object.freeze([
+  'OK', 'NOT_FOUND', 'RATE_LIMITED', 'FAILED', 'FORBIDDEN',
+]);
+
+const worseReadOutcome = (left, right) => (
+  READ_OUTCOME_SEVERITY.indexOf(right) > READ_OUTCOME_SEVERITY.indexOf(left) ? right : left
+);
+
+function parseRulesets(body, defaultBranch, unreadableDetail = false) {
   const rulesets = [];
   const unknown = new Set();
+  // A ruleset that exists and whose record could not be read is not a ruleset that does not exist.
+  if (unreadableDetail) unknown.add('unreadable_ruleset_detail');
   for (const entry of Array.isArray(body) ? body : []) {
     // An organization, enterprise or otherwise non-repository ruleset governs this branch but
     // cannot be read or written through this repository's endpoints, so it is not evidence this
