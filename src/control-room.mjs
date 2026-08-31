@@ -43,10 +43,18 @@ import {
   requireLocalLaneObservation,
 } from './local-lane-observation.mjs';
 import {
+  MERGE_DEPENDENT_DRAIN_STATES,
+  MERGE_QUEUE_CAPABILITY_OBSTRUCTION,
+  OBSTRUCTIONS_OUTRANKING_CAPABILITY,
   PORTFOLIO_DRAIN_OBSTRUCTION_SCHEMA,
   PORTFOLIO_DRAIN_OBSTRUCTION_STATES,
   classifyPortfolioDrainObstruction,
 } from './portfolio-drain-obstruction.mjs';
+import {
+  MERGE_QUEUE_CAPABILITY_SCHEMA, MERGE_QUEUE_CAPABILITY_SOURCE,
+  MERGE_QUEUE_CAPABILITY_STATES, deriveMergeQueueCapabilityBlock,
+  mergeQueueCapabilityRevision, requireMergeQueueCapabilityArtifact,
+} from './merge-queue-capability.mjs';
 
 export const CONTROL_ROOM_SCHEMA = 'gaia-control-room/1';
 
@@ -489,7 +497,9 @@ export function requireControlRoomSnapshot(value) {
     throw new ControlRoomError('InvalidSnapshot', 'the control-room snapshot knowledge coverage is invalid');
   }
   requireEvidenceBasis(value.sourceChangedAtBasis, value.sourceChangedAt, value.observedAt);
-  requireObstruction(value.obstruction, value);
+  // Re-derived before the obstruction, because the obstruction is now checked against it.
+  const capability = requireMergeQueueCapabilityBlock(value);
+  requireObstruction(value.obstruction, value, capability);
   requireTelemetryVocabulary(value);
   const localLanes = requireLocalLanes(value);
   requireEngineeringFlow(value);
@@ -514,6 +524,66 @@ export function requireControlRoomSnapshot(value) {
  * because that spelling canonicalises into the digest and would move every previously published
  * snapshot revision for evidence that did not change.
  */
+/**
+ * Re-derive the published capability reading from the observation it carries.
+ *
+ * The state is the field an operator reads as "there is nothing wrong with the merge path", so it
+ * is the highest-value one to forge in a resealed snapshot: flipping ABSENT to AVAILABLE restores
+ * the exact silence that produced the incident. It is therefore never trusted as published, only
+ * re-decided from the carried observation and the snapshot's own instant.
+ *
+ * Absent means the key is omitted. A present `null` is refused rather than read as absence.
+ */
+function requireMergeQueueCapabilityBlock(value) {
+  if (!Object.hasOwn(value, 'mergeQueueCapability')) return null;
+  const refuse = (message) => {
+    throw new ControlRoomError('InvalidSnapshot', message);
+  };
+  const block = value.mergeQueueCapability;
+  if (block === null) {
+    refuse('an absent merge queue capability omits the field entirely, and never publishes null');
+  }
+  if (!block || typeof block !== 'object' || Array.isArray(block)
+      || block.source !== MERGE_QUEUE_CAPABILITY_SOURCE || block.binding !== 'NONE'
+      || !block.observation || typeof block.observation !== 'object') {
+    refuse('the snapshot merge queue capability block is not a Gaia capability reading');
+  }
+  const rebuilt = {
+    schema: MERGE_QUEUE_CAPABILITY_SCHEMA,
+    effect: 'NONE',
+    authority: 'NONE',
+    observedAt: block.observedAt,
+    repositoryId: block.repositoryId,
+    repository: block.repository,
+    defaultBranch: block.defaultBranch,
+    observation: block.observation,
+    revision: mergeQueueCapabilityRevision({
+      observedAt: block.observedAt,
+      repositoryId: block.repositoryId,
+      repository: block.repository,
+      defaultBranch: block.defaultBranch,
+      observation: block.observation,
+    }),
+  };
+  let artifact;
+  try {
+    artifact = requireMergeQueueCapabilityArtifact(rebuilt);
+  } catch (error) {
+    refuse(
+      'the snapshot merge queue capability block does not carry a verifiable artifact:'
+      + ` ${error?.message ?? 'unreadable'}`,
+    );
+  }
+  if (block.artifactRevision !== artifact.revision) {
+    refuse('the capability block names an artifact revision its own observation does not derive');
+  }
+  const expected = deriveMergeQueueCapabilityBlock({ artifact, observedAt: value.observedAt });
+  if (canonicalJson(expected) !== canonicalJson(block)) {
+    refuse('the capability block is not what its own observation and instants derive');
+  }
+  return expected;
+}
+
 function requireEngineeringFlow(value) {
   if (!Object.hasOwn(value, 'engineeringFlow')) return null;
   const refuse = (message) => {
@@ -781,7 +851,7 @@ function requireDerivedCounts(value, localLanes) {
  * `buildControlRoomSnapshot` assigns the window start and `sourceChangedAt` from the same
  * variable, so this can refuse no snapshot the builder itself produced.
  */
-function requireObstruction(obstruction, snapshot) {
+function requireObstruction(obstruction, snapshot, capability) {
   if (!obstruction || typeof obstruction !== 'object' || Array.isArray(obstruction)
       || obstruction.schema !== PORTFOLIO_DRAIN_OBSTRUCTION_SCHEMA
       || obstruction.effect !== 'NONE' || obstruction.authority !== 'NONE'
@@ -818,7 +888,67 @@ function requireObstruction(obstruction, snapshot) {
       'the control-room snapshot obstruction is not bound to this snapshot evidence and window',
     );
   }
+  requireCapabilityBinding(obstruction, snapshot, capability);
   return obstruction;
+}
+
+/**
+ * The verified capability and the obstruction shown beside it must be one reading.
+ *
+ * `requireMergeQueueCapabilityBlock` already refuses a forged state, and that is the highest-value
+ * forgery. This refuses the next one: keep the honestly derived `ABSENT` block verbatim, splice in
+ * the obstruction, headline and ETA from the same drain classified *without* the capability, and
+ * reseal. Every existing check passed, and the result was the incident's second half restored
+ * through the verified seam — a published `ABSENT` capability beside a page telling the operator to
+ * go ask a human for a merge-authority grant nobody could give.
+ *
+ * The obstruction has never been re-derivable from a snapshot alone, so this is a consistency
+ * check rather than a re-derivation, and no verifier can compel a publisher to consult the
+ * capability at all — omitting the block entirely still yields a valid pre-feature snapshot. What
+ * it can do is refuse a snapshot that published both and made them disagree, and the three
+ * comparisons it needs are all already in hand.
+ */
+function requireCapabilityBinding(obstruction, snapshot, capability) {
+  const refuse = (message) => {
+    throw new ControlRoomError('InvalidSnapshot', message);
+  };
+  if (capability === null) {
+    if (Object.hasOwn(obstruction, 'capability')) {
+      refuse('the obstruction names a capability reading this snapshot does not publish');
+    }
+    return;
+  }
+  if (!Object.hasOwn(obstruction, 'capability')) {
+    refuse('the obstruction was classified without the capability this snapshot publishes');
+  }
+  const expected = {
+    state: capability.state,
+    evidenceRevision: capability.artifactRevision,
+    observationAgeMs: capability.observationAgeMs,
+    repository: capability.repository,
+    defaultBranch: capability.defaultBranch,
+  };
+  if (canonicalJson(obstruction.capability) !== canonicalJson(expected)) {
+    refuse('the obstruction carries a capability reading the published block does not derive');
+  }
+  // Compatibility, decided against the classifier's own exported tables rather than a copy of
+  // them: with something waiting to merge, a capability that names an obstruction must produce
+  // that obstruction, or one of the two that legitimately outrank it.
+  const named = MERGE_QUEUE_CAPABILITY_OBSTRUCTION[capability.state] ?? null;
+  // Over the capability's own repository, exactly as the classifier selects. Asking this across
+  // the portfolio made a correct, repository-bound obstruction about another repository look like
+  // a contradiction, and refused a snapshot in which nothing disagreed.
+  const waiting = snapshot.items.some(
+    ({ drainState, repository }) => MERGE_DEPENDENT_DRAIN_STATES.includes(drainState)
+      && repository === capability.repository,
+  );
+  if (named !== null && waiting && obstruction.state !== named
+      && !OBSTRUCTIONS_OUTRANKING_CAPABILITY.includes(obstruction.state)) {
+    refuse(
+      `the obstruction ${obstruction.state} cannot stand beside a ${capability.state} merge queue`
+      + ' capability with work waiting to merge',
+    );
+  }
 }
 
 /**
@@ -981,7 +1111,26 @@ function blockerAction(blocker) {
   };
 }
 
-function nextActionFor(items, decisions, blockers, localLanes) {
+/**
+ * The one next move, ranked.
+ *
+ * A capability obstruction comes first, for the same reason it sits above the live-lane short
+ * circuit in the classifier: a live worker cannot resolve a mechanism that does not exist, and
+ * "Wait for the worker result, then run the independent review." — rendered at `healthy` severity
+ * in the page's most prominent field — is exactly the instruction the incident gave for as long as
+ * it went unfixed. The sentence is the obstruction's own rather than a second copy of it, so the
+ * hero and the obstruction panel cannot name two different next moves from one truth.
+ */
+function nextActionFor(items, decisions, blockers, localLanes, capabilityObstruction) {
+  if (capabilityObstruction !== null) {
+    return {
+      kind: capabilityObstruction.recovery.kind,
+      // No item: an absent merge queue is a fact about the repository's configuration, and naming
+      // one of the several items waiting on it would say the others are not.
+      itemId: null,
+      label: capabilityObstruction.recovery.label,
+    };
+  }
   const stale = items.find(({ activity }) => activity.state === 'STALE');
   if (stale) {
     return {
@@ -1028,6 +1177,7 @@ export function buildControlRoomSnapshot({
   dependencies = null, localLanes = null,
   engineeringFlow = null, priorEngineeringFlow = null,
   ciFlow = null, priorCiFlow = null,
+  mergeQueueCapability = null,
 }) {
   const projection = requireProjection(drainProjection);
   const at = requireTimestamp(observedAt);
@@ -1057,6 +1207,13 @@ export function buildControlRoomSnapshot({
   // beside. It is an input to nothing below. A passing pipeline is not a unit of delivery, and the
   // moment a CI conclusion could move a count on this page, six green runs would read as progress.
   const ciFlowBlock = projectCiFlow(ciFlow, at, priorCiFlow);
+  // Decided here, against this snapshot's instant, because this is the consumer that owns the
+  // clock. A capability decided at production time and cached is exactly how an AVAILABLE reading
+  // outlives the configuration it described.
+  const capabilityBlock = mergeQueueCapability === null ? null
+    : deriveMergeQueueCapabilityBlock({
+      artifact: requireMergeQueueCapabilityArtifact(mergeQueueCapability), observedAt: at,
+    });
   const localLiveCount = localLaneBlock === null ? 0 : localLaneBlock.liveCount;
   const activeCount = items.filter(({ activity }) => activity.state === 'ACTIVE').length;
   const staleCount = items.filter(({ activity }) => activity.state === 'STALE').length;
@@ -1090,7 +1247,19 @@ export function buildControlRoomSnapshot({
     windowStartedAt: changedAt,
     liveness: items.map(({ itemId, activity }) => ({ itemId, state: activity.state })),
     dependencies,
+    mergeQueueCapability: capabilityBlock === null ? null : {
+      state: capabilityBlock.state,
+      evidenceRevision: capabilityBlock.artifactRevision,
+      observationAgeMs: capabilityBlock.observationAgeMs,
+      repository: capabilityBlock.repository,
+      defaultBranch: capabilityBlock.defaultBranch,
+    },
   });
+  // A capability obstruction is not a lane fact and must not be reported only in the one headline
+  // state nobody was looking at. In the incident the headline read ACTIVE — a worker was alive —
+  // and the sentence naming the missing queue would never have been shown.
+  const capabilityObstructed = obstruction.state === 'CAPABILITY_ABSENT'
+    || obstruction.state === 'CAPABILITY_UNVERIFIED';
 
   const body = {
     schema: CONTROL_ROOM_SCHEMA,
@@ -1116,19 +1285,23 @@ export function buildControlRoomSnapshot({
       : state === 'ACTIVE' ? {
         state: 'ACTIVE',
         label: 'Active',
-        // Two sentences at most, and each names its own source. With no local lanes this is
-        // byte-identical to what it always was.
+        // Two sentences at most, and each names its own source. With no local lanes and no
+        // capability gap this is byte-identical to what it always was.
         detail: [
           activeCount > 0
             ? `${activeCount} Gaia ${activeCount === 1 ? 'run is' : 'runs are'} moving.` : null,
           localLiveCount > 0
             ? `${localLiveCount} local wmux ${localLiveCount === 1 ? 'lane is' : 'lanes are'}`
               + ' running; process liveness only, with no tracked portfolio binding.' : null,
+          capabilityObstructed ? obstruction.label : null,
         ].filter(Boolean).join(' '),
       } : {
         state: 'STALE',
         label: 'Needs attention',
-        detail: `${staleCount} recorded ${staleCount === 1 ? 'run has' : 'runs have'} no fresh heartbeat.`,
+        detail: [
+          `${staleCount} recorded ${staleCount === 1 ? 'run has' : 'runs have'} no fresh heartbeat.`,
+          capabilityObstructed ? obstruction.label : null,
+        ].filter(Boolean).join(' '),
       },
     activeCount,
     staleCount,
@@ -1140,19 +1313,27 @@ export function buildControlRoomSnapshot({
     showSpinner: items.some(({ activity }) => activity.showPulse)
       || (localLaneBlock !== null && localLaneBlock.showPulse),
     pace: measured.pace,
-    eta: forecast ?? (activeCount === 0
-      ? {
-        state: 'UNKNOWN',
-        label: 'Unknown',
-        reason: staleCount > 0
-          ? 'The heartbeat is stale; no reliable ETA exists.'
-          : 'There is no active run to estimate.',
-      }
-      : {
-        state: 'UNKNOWN',
-        label: 'Unknown',
-        reason: 'Insufficient comparable history.',
-      }),
+    // An estimate of when something finishes is a claim that it is progressing, which is exactly
+    // the reading an absent capability must never produce. The reason must be the true one:
+    // discarding a computed forecast and then publishing "Insufficient comparable history."
+    // named a data gap that did not exist, and rendered it as "-3 more comparable completed
+    // portfolio-factory-run samples (8 of 5 recorded)" — a next move that is both impossible and
+    // irrelevant to the actual blocker.
+    eta: capabilityObstructed
+      ? { state: 'UNKNOWN', label: 'Unknown', reason: CAPABILITY_ETA_REASON }
+      : forecast ?? (activeCount === 0
+        ? {
+          state: 'UNKNOWN',
+          label: 'Unknown',
+          reason: staleCount > 0
+            ? 'The heartbeat is stale; no reliable ETA exists.'
+            : 'There is no active run to estimate.',
+        }
+        : {
+          state: 'UNKNOWN',
+          label: 'Unknown',
+          reason: 'Insufficient comparable history.',
+        }),
     portfolioCompletion: {
       percentage: null,
       reason: 'The portfolio is an open queue; it has no truthful global completion percentage.',
@@ -1175,7 +1356,10 @@ export function buildControlRoomSnapshot({
       freshnessWindowMs: HEARTBEAT_FRESH_MS,
       projectionRevision: spine === null ? null : spine.revision,
     },
-    nextAction: nextActionFor(items, projection.decisions, blockers, localLaneBlock),
+    nextAction: nextActionFor(
+      items, projection.decisions, blockers, localLaneBlock,
+      capabilityObstructed ? obstruction : null,
+    ),
     items,
     // Omitted entirely when there is no observation, never published as `null`. A present key
     // holding `null` canonicalises into the digest, and the snapshot revision is rendered into the
@@ -1188,6 +1372,9 @@ export function buildControlRoomSnapshot({
     // would move every previously published snapshot revision for evidence that did not change.
     ...(engineeringFlowBlock === null ? {} : { engineeringFlow: engineeringFlowBlock }),
     ...(ciFlowBlock === null ? {} : { ciFlow: ciFlowBlock }),
+    // Omitted entirely when there is no artifact, and never published as null, for the same
+    // digest-stability reason the flow block gives.
+    ...(capabilityBlock === null ? {} : { mergeQueueCapability: capabilityBlock }),
   };
   return deepFreeze({
     ...body,
@@ -1343,12 +1530,32 @@ const RENDER_COPY = Object.freeze({
     bulletKind: { ACTION: 'Doing', RESULT: 'Produced', CHECKPOINT: 'Next', BLOCKER: 'Blocked' },
     obstruction: 'Why the drain is not moving', recovery: 'Bounded recovery',
     affected: 'Affected items', declaredEdges: 'Declared dependency evidence',
+    capability: 'Merge queue capability', capabilityTarget: 'Repository and default branch',
+    capabilityRead: 'Configuration read at',
+    capabilityWithin: (window) => `Read within its ${window} freshness window.`,
+    capabilityExpired: (window) => `Older than its ${window} freshness window; re-observe before`
+      + ' relying on it.',
+    capabilityState: {
+      AVAILABLE: 'Merge queue available', ABSENT: 'Merge queue missing',
+      MISCONFIGURED: 'Merge queue misconfigured', PERMISSION_DENIED: 'Configuration unreadable',
+      STALE: 'Reading expired', UNKNOWN: 'Capability not established',
+    },
+    capabilitySentence: {
+      AVAILABLE: 'One active ruleset carries a merge queue rule for the default branch.',
+      ABSENT: 'The configuration was read and carries no merge queue rule for the default branch.',
+      MISCONFIGURED: 'A merge queue rule exists but does not govern the default branch on its own.',
+      PERMISSION_DENIED: 'The reading identity may not list this repository’s configuration.',
+      STALE: 'This reading is older than its freshness window and is no longer a fact about now.',
+      UNKNOWN: 'The configuration could not be established from what was read.',
+    },
     obstructionState: {
       NONE: 'No obstruction detected', NO_ELIGIBLE_WORK: 'Empty drain',
       EVIDENCE_STARVATION: 'Missing evidence', LANE_STALE: 'Stale lane',
       DEPENDENCY_DEADLOCK: 'Declared dependency cycle', REVIEW_STARVATION: 'Missing review',
       AUTHORITY_STARVATION: 'Missing authority', RECONCILE_REQUIRED: 'Reconcile required',
       THROUGHPUT_STALL: 'Throughput stalled',
+      CAPABILITY_ABSENT: 'Merge queue missing',
+      CAPABILITY_UNVERIFIED: 'Merge queue unverified',
     },
   }),
   fr: Object.freeze({
@@ -1497,12 +1704,40 @@ const RENDER_COPY = Object.freeze({
     bulletKind: { ACTION: 'En cours', RESULT: 'Produit', CHECKPOINT: 'Ensuite', BLOCKER: 'Bloqué' },
     obstruction: 'Pourquoi le drain n’avance pas', recovery: 'Reprise bornée',
     affected: 'Éléments concernés', declaredEdges: 'Preuve de dépendances déclarée',
+    capability: 'Capacité de file d’attente de merge',
+    capabilityTarget: 'Dépôt et branche par défaut',
+    capabilityRead: 'Configuration lue le',
+    capabilityWithin: (window) => `Lue dans sa fenêtre de fraîcheur de ${window}.`,
+    capabilityExpired: (window) => `Plus ancienne que sa fenêtre de fraîcheur de ${window} ;`
+      + ' relire avant de s’y fier.',
+    capabilityState: {
+      AVAILABLE: 'File d’attente de merge disponible',
+      ABSENT: 'File d’attente de merge absente',
+      MISCONFIGURED: 'File d’attente de merge mal configurée',
+      PERMISSION_DENIED: 'Configuration illisible',
+      STALE: 'Lecture périmée', UNKNOWN: 'Capacité non établie',
+    },
+    capabilitySentence: {
+      AVAILABLE: 'Un ruleset actif porte une règle de file d’attente de merge pour la branche par'
+        + ' défaut.',
+      ABSENT: 'La configuration a été lue et ne porte aucune règle de file d’attente de merge pour'
+        + ' la branche par défaut.',
+      MISCONFIGURED: 'Une règle de file d’attente de merge existe mais ne gouverne pas seule la'
+        + ' branche par défaut.',
+      PERMISSION_DENIED: 'L’identité de lecture n’est pas autorisée à lister la configuration de ce'
+        + ' dépôt.',
+      STALE: 'Cette lecture est plus ancienne que sa fenêtre de fraîcheur et n’est plus un fait'
+        + ' sur maintenant.',
+      UNKNOWN: 'La configuration n’a pas pu être établie à partir de ce qui a été lu.',
+    },
     obstructionState: {
       NONE: 'Aucun blocage détecté', NO_ELIGIBLE_WORK: 'Drain vide',
       EVIDENCE_STARVATION: 'Preuves manquantes', LANE_STALE: 'Lane périmée',
       DEPENDENCY_DEADLOCK: 'Cycle de dépendances déclaré', REVIEW_STARVATION: 'Review manquante',
       AUTHORITY_STARVATION: 'Autorité manquante', RECONCILE_REQUIRED: 'Réconciliation requise',
       THROUGHPUT_STALL: 'Débit à l’arrêt',
+      CAPABILITY_ABSENT: 'File d’attente de merge absente',
+      CAPABILITY_UNVERIFIED: 'File d’attente de merge non vérifiée',
     },
   }),
 });
@@ -1646,6 +1881,11 @@ function localizedHeadline(snapshot, language) {
 }
 
 function localizedNextAction(snapshot, language) {
+  // A next action taken from the obstruction is translated by the obstruction's own phrasebook, so
+  // the hero and the panel cannot say two different things in French either.
+  if (isCapabilityNextAction(snapshot)) {
+    return localizedRecoveryLabel(snapshot.obstruction, language);
+  }
   if (language === 'en') return snapshot.nextAction.label;
   const blockerCount = snapshot.blockers.find(
     ({ state }) => `TRIAGE_${state}` === snapshot.nextAction.kind,
@@ -1662,6 +1902,16 @@ function localizedNextAction(snapshot, language) {
   return labels[snapshot.nextAction.kind]
     ?? `${blockerCount} éléments nécessitent la résolution du blocage indiqué.`;
 }
+
+/** Whether the hero's next action is the capability obstruction's own recovery, and not a copy. */
+function isCapabilityNextAction(snapshot) {
+  return CAPABILITY_OBSTRUCTION_STATES.has(snapshot.obstruction.state)
+    && snapshot.obstruction.recovery !== null
+    && snapshot.nextAction.kind === snapshot.obstruction.recovery.kind;
+}
+
+/** The obstruction states that are statements about the merge queue capability, and only those. */
+const CAPABILITY_OBSTRUCTION_STATES = new Set(Object.values(MERGE_QUEUE_CAPABILITY_OBSTRUCTION));
 
 function localizedGate(item, language) {
   if (language === 'en') return item.progress.currentGate;
@@ -1703,6 +1953,16 @@ function localizedPace(snapshot, language) {
  * "Insufficient comparable history." is true and unactionable; "3 more comparable completed
  * portfolio-factory-run samples" is the same fact with the operator's next move inside it.
  */
+/**
+ * Why an ETA is withheld under a capability obstruction, in the words of the actual cause.
+ *
+ * Its own reason rather than a reused one: the two are different kinds of uncertainty, and this
+ * repository's rule is that ignorance, conflict, risk and freshness are not compressed into one
+ * scalar or one sentence.
+ */
+const CAPABILITY_ETA_REASON
+  = 'A merge queue capability obstruction stands; no completion estimate applies.';
+
 const ETA_MISSING_EVIDENCE = Object.freeze({
   en: Object.freeze({
     'Insufficient comparable history.': (snapshot) => (
@@ -1715,6 +1975,7 @@ const ETA_MISSING_EVIDENCE = Object.freeze({
     ),
     'The heartbeat is stale; no reliable ETA exists.': () => 'a fresh heartbeat for the recorded run.',
     'There is no active run to estimate.': () => 'an active run to estimate.',
+    [CAPABILITY_ETA_REASON]: () => 'a verified merge queue capability for the default branch.',
   }),
   fr: Object.freeze({
     'Insufficient comparable history.': (snapshot) => (
@@ -1727,6 +1988,8 @@ const ETA_MISSING_EVIDENCE = Object.freeze({
     ),
     'The heartbeat is stale; no reliable ETA exists.': () => 'un heartbeat frais pour l’exécution enregistrée.',
     'There is no active run to estimate.': () => 'une exécution active à estimer.',
+    [CAPABILITY_ETA_REASON]: () => 'une capacité de file d’attente de merge vérifiée pour la'
+      + ' branche par défaut.',
   }),
 });
 
@@ -1764,6 +2027,12 @@ function localizedObstructionLabel(obstruction, language) {
     RECONCILE_REQUIRED: `${count} élément${many} dont la preuve enregistrée contredit l’observation.`,
     THROUGHPUT_STALL: `${count} élément${many} éligible${many} et de la capacité libre immobiles`
       + ` depuis ${formatDuration(obstruction.observationWindow.durationMs)}.`,
+    CAPABILITY_ABSENT: obstruction.capability?.state === 'MISCONFIGURED'
+      ? `${count} élément${many} en attente d’une file d’attente de merge qui existe mais ne`
+        + ' régit pas la branche par défaut.'
+      : `${count} élément${many} en attente d’une file d’attente de merge que ce dépôt n’a pas.`,
+    CAPABILITY_UNVERIFIED: `${count} élément${many} en attente d’une file d’attente de merge que`
+      + ` Gaia n’a pas pu vérifier (${CAPABILITY_REASON_FR[obstruction.capability?.state]}).`,
   }[obstruction.state];
 }
 
@@ -1778,8 +2047,25 @@ function localizedRecoveryLabel(obstruction, language) {
     REQUEST_EXPLICIT_AUTHORITY: 'Demander à un humain l’autorisation explicite attendue.',
     RECONCILE_DRAIN_EVIDENCE: 'Ré-observer les éléments nommés et réconcilier la chaîne de reçus.',
     CLAIM_QUEUED_WORK: 'Autoriser une exécution bornée de la factory pour le travail éligible.',
+    CREATE_MERGE_QUEUE_RULE: 'Créer un ruleset actif portant une règle de file d’attente de merge'
+      + ' pour la branche par défaut, puis ré-observer.',
+    CORRECT_MERGE_QUEUE_RULE: 'Corriger le ruleset pour qu’exactement un ruleset actif porte une'
+      + ' règle de file d’attente de merge pour la branche par défaut, puis ré-observer.',
+    GRANT_CAPABILITY_READ: 'Accorder à l’identité de lecture le droit de lister les rulesets de ce'
+      + ' dépôt, puis ré-observer.',
+    REPROBE_CAPABILITY: 'Ré-observer la capacité de file d’attente de merge : cette lecture a'
+      + ' dépassé sa fenêtre de fraîcheur.',
+    REPORT_UNREADABLE_CAPABILITY: 'Signaler la configuration de file d’attente de merge illisible'
+      + ' et ré-observer : attendre ne la rendra pas lisible.',
   }[obstruction.recovery.kind] ?? obstruction.recovery.label;
 }
+
+/** Why a capability could not be established, in French, as closed tokens rather than prose. */
+const CAPABILITY_REASON_FR = Object.freeze({
+  PERMISSION_DENIED: 'permission refusée',
+  STALE: 'preuve périmée',
+  UNKNOWN: 'lecture incomplète',
+});
 
 const OBSTRUCTION_SEVERITY = Object.freeze({
   NONE: 'healthy',
@@ -1791,6 +2077,10 @@ const OBSTRUCTION_SEVERITY = Object.freeze({
   REVIEW_STARVATION: 'blocked',
   AUTHORITY_STARVATION: 'blocked',
   DEPENDENCY_DEADLOCK: 'blocked',
+  // Blocked, not warning. Neither resolves by waiting, which is the only thing a warning would
+  // invite an operator to do.
+  CAPABILITY_ABSENT: 'blocked',
+  CAPABILITY_UNVERIFIED: 'blocked',
 });
 
 /**
@@ -1832,6 +2122,71 @@ function renderObstruction(snapshot, copy, language) {
     ${declaredEdges}
     <p class="evidence-line"><code>${escapeHtml(obstruction.revision)}</code> · effect=NONE · authority=NONE</p>
   </section>`;
+}
+
+/**
+ * The published capability reading, rendered as its own fact.
+ *
+ * It used to reach the page only through the obstruction, so any higher-precedence obstruction
+ * deleted it completely: an occupied lane with no liveness evidence — which is exactly what the
+ * dashboard produces with no `--progress` and no `--telemetry` — defaults to `STALE`, wins the
+ * precedence, and the absent merge queue disappeared from the document altogether while remaining
+ * sealed into the snapshot JSON. `LANE_STALE` is a statement about lane heartbeat evidence; it is
+ * not a statement about whether a ruleset listing was complete thirty seconds ago, and it does not
+ * get to erase a fact decided from separate evidence carrying its own instant and its own
+ * freshness verdict. Both truths are displayed, in their own panels, and neither is invented.
+ *
+ * Nothing here estimates, queues or waits: a state, its two identities, when it was read and how
+ * old that reading is.
+ */
+function renderMergeQueueCapability(snapshot, copy, language) {
+  const block = snapshot.mergeQueueCapability;
+  if (block === undefined) return '';
+  const age = formatDuration(block.observationAgeMs);
+  const freshness = block.observationAgeMs > block.freshnessWindowMs
+    ? copy.capabilityExpired(formatDuration(block.freshnessWindowMs))
+    : copy.capabilityWithin(formatDuration(block.freshnessWindowMs));
+  return `<section class="section-panel" data-severity="${CAPABILITY_SEVERITY[block.state]}">
+    <h2>${copy.capability}</h2>
+    <div class="facts">
+      <div class="fact"><span class="semantic-symbol" aria-hidden="true">■</span>${escapeHtml(copy.capabilityState[block.state])} <code>${escapeHtml(block.state)}</code><strong>${escapeHtml(copy.capabilitySentence[block.state])}</strong></div>
+      <div class="fact">${copy.capabilityTarget}<strong>${escapeHtml(block.repository)} · ${escapeHtml(block.defaultBranch)}</strong></div>
+      <div class="fact">${copy.capabilityRead}<strong><time>${escapeHtml(block.observedAt)}</time> · ${escapeHtml(age)}</strong></div>
+    </div>
+    <p class="evidence-line">${escapeHtml(freshness)}</p>
+    <p class="evidence-line"><code>${escapeHtml(block.artifactRevision)}</code> · effect=NONE · authority=NONE · binding=${escapeHtml(block.binding)}</p>
+  </section>`;
+}
+
+/**
+ * One severity per capability state, total over the closed vocabulary.
+ *
+ * `AVAILABLE` is the only healthy reading. `ABSENT` and `MISCONFIGURED` are blocked because the
+ * merge cannot happen at all; the three Gaia could not establish are warnings, because what is
+ * wrong is the reading rather than the mechanism, and claiming otherwise would be the same
+ * absence-of-evidence error in the opposite direction.
+ */
+const CAPABILITY_SEVERITY = Object.freeze({
+  AVAILABLE: 'healthy',
+  ABSENT: 'blocked',
+  MISCONFIGURED: 'blocked',
+  PERMISSION_DENIED: 'warning',
+  STALE: 'warning',
+  UNKNOWN: 'warning',
+});
+
+// Both capability tables are bare lookups indexed by a closed vocabulary that lives in another
+// module, so a state missing from either renders the literal string `undefined` on the page or a
+// CSS class named `undefined`. Checked at module load rather than trusted, because that vocabulary
+// can grow without this module noticing.
+for (const state of MERGE_QUEUE_CAPABILITY_STATES) {
+  if (!Object.hasOwn(CAPABILITY_SEVERITY, state)
+      || !Object.hasOwn(RENDER_COPY.en.capabilityState, state)
+      || !Object.hasOwn(RENDER_COPY.en.capabilitySentence, state)
+      || !Object.hasOwn(RENDER_COPY.fr.capabilityState, state)
+      || !Object.hasOwn(RENDER_COPY.fr.capabilitySentence, state)) {
+    throw new Error(`the merge queue capability state ${state} has no rendering`);
+  }
 }
 
 function activityText(bullet, language) {
@@ -2401,9 +2756,18 @@ export function renderControlRoomHtml(candidate, {
       .flow-family-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }` : '';
   const flowCss1440 = snapshot.engineeringFlow ? `
       .flow-family-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }` : '';
+  // Emitted only when the section is, exactly as the lane and flow blocks are, so a document
+  // published without the artifact carries no residue of this feature at all.
+  const capabilityCss = snapshot.mergeQueueCapability ? `
+    .merge-queue-capability-note { color: var(--muted); font-size: 12px; }` : '';
   const headline = headlinePresentation(snapshot.headline.state);
-  const nextSeverity = snapshot.nextAction.kind === 'NONE' ? 'neutral'
-    : snapshot.nextAction.kind === 'OBSERVE_ACTIVE_RUN' ? 'healthy' : 'warning';
+  // Taken from the obstruction it came from rather than from a second severity table. An
+  // obstruction the drain cannot pass is not a warning and is certainly not healthy, and the hero
+  // panel is the field an operator reads first.
+  const capabilityNext = isCapabilityNextAction(snapshot);
+  const nextSeverity = capabilityNext ? OBSTRUCTION_SEVERITY[snapshot.obstruction.state]
+    : snapshot.nextAction.kind === 'NONE' ? 'neutral'
+      : snapshot.nextAction.kind === 'OBSERVE_ACTIVE_RUN' ? 'healthy' : 'warning';
   const backlogCopy = {
     ...copy,
     backlogScope: (total) => (language === 'fr'
@@ -2527,7 +2891,7 @@ export function renderControlRoomHtml(candidate, {
       .fog-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
       .local-lane-list { grid-template-columns: repeat(4, minmax(0, 1fr)); }${flowCss1440}${ciCss1440}
     }
-    ${pulseCss}
+    ${pulseCss}${capabilityCss}
   </style>
 </head>
 <body data-snapshot-at="${escapeHtml(snapshot.observedAt)}">
@@ -2556,6 +2920,7 @@ export function renderControlRoomHtml(candidate, {
     <div class="metric" data-severity="neutral"><span><span class="semantic-symbol" aria-hidden="true">○</span>${copy.slots}</span><strong>${snapshot.capacity.available}/${snapshot.capacity.occupied + snapshot.capacity.available}</strong></div>
   </section>
   ${renderObstruction(snapshot, copy, language)}
+  ${renderMergeQueueCapability(snapshot, copy, language)}
   ${renderLocalLanes(snapshot, copy)}
   ${renderEngineeringFlow(snapshot, copy)}
   ${renderCiFlow(snapshot, copy)}
