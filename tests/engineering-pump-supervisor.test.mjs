@@ -357,6 +357,22 @@ test('R0 provider and CI saturation are explicit effect-free gates', async () =>
   }
 });
 
+test('R1 early capacity gates still validate the sealed nested portfolio revision', async () => {
+  const validPortfolio = portfolio([item(40)]);
+  const corruptPortfolio = { ...validPortfolio, policyRevision: 'policy-corrupt' };
+  const observed = observation({
+    capacity: { writerSlots: 0, providerSlots: 1, ciSlots: 1 },
+    portfolio: corruptPortfolio,
+  });
+  const directory = scratch();
+  await assert.rejects(
+    tick(directory, { observation: observed }),
+    (error) => error.code === 'PortfolioMismatch',
+  );
+  assert.equal(readPortfolioDrainLedger({ directory }).count, 0);
+  assert.equal(readFirstEvidenceLedger({ directory }).count, 0);
+});
+
 test('R0 EXPECTED_NONE is healthy idle', async () => {
   const result = await tick(scratch(), { observation: observation({ items: [] }) });
   assert.equal(result.gate.state, 'EXPECTED_NONE');
@@ -438,6 +454,95 @@ test('R1 skewed journals never combine the latest claim with another item delive
   assert.doesNotMatch(first.statusComment, /pull\/45/u);
 });
 
+test('R1 a foreign live delivery owner cannot be settled by an observed Draft', async () => {
+  const directory = scratch();
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let reached;
+  const authorityReached = new Promise((resolve) => { reached = resolve; });
+  const slowAuthority = authority();
+  slowAuthority.consume = async (request) => {
+    slowAuthority.calls.push(request);
+    reached();
+    await blocked;
+    return { status: 'AUTHORIZED', grantId: 'grant-r0' };
+  };
+  const first = tick(directory, { authority: slowAuthority, owner: OWNER_A });
+  await authorityReached;
+  const operationIdentity = readFirstEvidenceLedger({ directory }).transitions[0].operationIdentity;
+  const observed = observation({ subjects: [{
+    readyItemId: 'issue-40', subjectRevision: SUBJECT,
+    draftObservation: draftObservation(40, SUBJECT, { drafts: [draft(operationIdentity)] }),
+  }] });
+
+  const contender = await tick(directory, { observation: observed, owner: OWNER_B })
+    .then((value) => ({ value, error: null }), (error) => ({ value: null, error }));
+  release();
+  const incumbent = await first.then(
+    (value) => ({ value, error: null }), (error) => ({ value: null, error }),
+  );
+  assert.equal(contender.error?.code, 'DeliveryInFlight');
+  assert.equal(incumbent.error, null);
+  assert.equal(incumbent.value.delivery.outcome, 'CREATED');
+  assert.deepEqual(
+    readFirstEvidenceLedger({ directory }).transitions.map(({ transition }) => transition),
+    ['INTENT', 'CREATED'],
+  );
+});
+
+test('R1 checklist and DuckDB projections retry an append between source-ledger reads', async () => {
+  const directory = scratch();
+  await tick(directory);
+  const currentPortfolio = portfolio([item(40)]);
+
+  const readersWithAppend = (event) => {
+    let drainReads = 0;
+    return {
+      sourceReaders: {
+        readDrain(options) {
+          const before = readPortfolioDrainLedger(options);
+          drainReads += 1;
+          if (drainReads === 1) {
+            const previous = before.receipts.at(-1);
+            const receipt = buildPortfolioDrainReceipt({
+              portfolioRevision: currentPortfolio.revision,
+              item: currentPortfolio.workItems[0], previous, event,
+              evidenceRevision: '8'.repeat(64),
+            });
+            appendPortfolioDrainReceipt({
+              ...options, portfolio: currentPortfolio, receipt,
+              expectedLedgerRevision: before.revision,
+            });
+          }
+          return before;
+        },
+        readDraft: readFirstEvidenceLedger,
+      },
+      reads: () => drainReads,
+    };
+  };
+
+  const transitionRead = readersWithAppend('STARTED');
+  const projected = projectEngineeringPumpTransitions({
+    directory, sourceReaders: transitionRead.sourceReaders,
+  });
+  assert.ok(transitionRead.reads() >= 4);
+  assert.equal(
+    projected.sourceRevisions.portfolioDrain,
+    readPortfolioDrainLedger({ directory }).revision,
+  );
+
+  const checklistRead = readersWithAppend('CANDIDATE_REJECTED');
+  const checklist = projectEngineeringPumpChecklist({
+    directory, sourceReaders: checklistRead.sourceReaders,
+  });
+  assert.ok(checklistRead.reads() >= 4);
+  assert.equal(
+    checklist.sourceRevisions.portfolioDrain,
+    readPortfolioDrainLedger({ directory }).revision,
+  );
+});
+
 test('R0 deterministic replay and DuckDB derive only from the two existing ledgers', async () => {
   const directory = scratch();
   await tick(directory);
@@ -467,6 +572,7 @@ test('R0 MECHANISM REVERT: existing machines own reservation, intent and reconci
   assert.match(source, /deliverFirstEvidenceDraftPr/u);
   assert.match(source, /appendPortfolioDrainReceipt/u);
   assert.match(source, /operationForClaim/u);
+  assert.match(source, /stablePumpSourceSnapshot/u);
   assert.equal(source.includes('operations.at(-1)'), false);
   for (const forbidden of [
     'engineering-pump.jsonl', 'ENGINEERING_PUMP_LEDGER', 'openDraftPullRequest({',
