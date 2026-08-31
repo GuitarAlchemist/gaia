@@ -126,6 +126,9 @@ function resumeIntent(path, candidate) {
   const existing = readIntent(path);
   if (existing === null) return null;
   const rebound = { ...candidate, observedAt: existing.observedAt, expiresAt: existing.expiresAt };
+  if (candidate.kind === 'LANE_START' && candidate.request && existing.request) {
+    rebound.request = { ...candidate.request, observedAt: existing.request.observedAt };
+  }
   if (JSON.stringify(existing) !== JSON.stringify(rebound)) {
     fail('OperationIntentCorrupt', 'operation intent does not bind its exact stable identity');
   }

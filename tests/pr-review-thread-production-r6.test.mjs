@@ -40,10 +40,11 @@ const disputes = { data: { repository: { pullRequest: { comments: {
 
 test('R6 real recollection resumes late lane and checklist grants across advancing observedAt', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'gaia-r6-observer-clock-'));
+  let providerGraph = graph;
   const provider = createGitGhPrReviewThreadEffects({
     readDisputeEvidence: async () => false,
     run: async (args) => String(args.find((value) => value.startsWith('query=')) ?? '')
-      .includes('GaiaReviewThreadDisputes') ? disputes : graph,
+      .includes('GaiaReviewThreadDisputes') ? disputes : providerGraph,
   });
   const revisions = []; const instants = [];
   let checklist = null; let lane = null;
@@ -103,5 +104,11 @@ test('R6 real recollection resumes late lane and checklist grants across advanci
   assert.equal(new Set(revisions).size, 1, 'identical GitHub facts retain one source revision');
   assert.equal(new Set(instants).size, 4, 'only the observer instant advances');
   assert.equal(effects.lanes, 1);
+  assert.equal(effects.checklists, 1);
+
+  providerGraph = structuredClone(graph);
+  providerGraph.data.repository.pullRequest.reviewThreads.nodes[0].path = 'src/other.mjs';
+  await assert.rejects(tick(), { code: 'OperationIntentCorrupt' });
+  assert.equal(effects.lanes, 1, 'a substantive request change performs no second effect');
   assert.equal(effects.checklists, 1);
 });
