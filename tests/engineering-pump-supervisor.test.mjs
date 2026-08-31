@@ -15,8 +15,15 @@ import {
 } from '../src/engineering-pump-supervisor.mjs';
 import { synchronizeEngineeringPumpDuckDb } from '../src/duckdb-engineering-pump-supervisor.mjs';
 import { readFirstEvidenceLedger } from '../src/first-evidence-draft-pr-delivery.mjs';
-import { FIRST_EVIDENCE_OBSERVATION_SCHEMA } from '../src/first-evidence-draft-pr.mjs';
-import { readPortfolioDrainLedger } from '../src/portfolio-drain-ledger.mjs';
+import {
+  FIRST_EVIDENCE_OBSERVATION_SCHEMA,
+  firstEvidenceOperationIdentity,
+} from '../src/first-evidence-draft-pr.mjs';
+import {
+  appendPortfolioDrainReceipt,
+  readPortfolioDrainLedger,
+} from '../src/portfolio-drain-ledger.mjs';
+import { buildPortfolioDrainReceipt } from '../src/portfolio-drain.mjs';
 
 const AT = '2026-08-31T18:00:00.000Z';
 const LATER = '2026-08-31T18:03:00.000Z';
@@ -265,6 +272,27 @@ test('R0 next observation that already sees the lost-response Draft records REUS
   assert.equal(readFirstEvidenceLedger({ directory }).transitions.at(-1).transition, 'REUSED');
 });
 
+test('R1 a fresh DRAFT_OPEN observation has no claim, action, or delivery INTENT', async () => {
+  const directory = scratch();
+  const operationIdentity = firstEvidenceOperationIdentity({
+    repository: 'GuitarAlchemist/gaia', task: { kind: 'ISSUE', number: 40 },
+    baseBranch: 'main', headBranch: 'codex/shared-pump-branch', headBranchGeneration: 1,
+    evidenceHeadOid: '0000000000000000000000000000000000000040',
+  });
+  const observed = observation({ subjects: [{
+    readyItemId: 'issue-40', subjectRevision: SUBJECT,
+    draftObservation: draftObservation(40, SUBJECT, { drafts: [draft(operationIdentity)] }),
+  }] });
+  const port = effects();
+  const result = await tick(directory, { observation: observed, effects: port });
+  assert.equal(result.gate.state, 'EXPECTED_NONE');
+  assert.equal(result.gate.nextAction.kind, 'NONE');
+  assert.equal(result.delivery, null);
+  assert.equal(port.calls.length, 0);
+  assert.equal(readPortfolioDrainLedger({ directory }).count, 0);
+  assert.equal(readFirstEvidenceLedger({ directory }).count, 0);
+});
+
 test('R0 restart after grant consumption fails closed without a duplicate effect', async () => {
   const directory = scratch();
   let consumed = 0;
@@ -371,6 +399,45 @@ test('R0 checklist is bounded, self-sufficient, and has one managed status comme
   assert.equal(projected.revision, projectEngineeringPumpChecklist({ directory }).revision);
 });
 
+test('R1 skewed journals never combine the latest claim with another item delivery', async () => {
+  const directory = scratch();
+  await tick(directory);
+  const mixedPortfolio = portfolio([
+    item(40),
+    item(41, { repository: 'OtherOwner/other-repo' }),
+  ]);
+  let ledger = readPortfolioDrainLedger({ directory });
+  let previous = ledger.receipts.at(-1);
+  for (const event of ['STARTED', 'CANDIDATE_REJECTED']) {
+    const receipt = buildPortfolioDrainReceipt({
+      portfolioRevision: mixedPortfolio.revision,
+      item: mixedPortfolio.workItems[0], previous, event, evidenceRevision: 'f'.repeat(64),
+    });
+    ledger = appendPortfolioDrainReceipt({
+      directory, portfolio: mixedPortfolio, receipt, expectedLedgerRevision: ledger.revision,
+    });
+    previous = receipt;
+  }
+  const claimB = buildPortfolioDrainReceipt({
+    portfolioRevision: mixedPortfolio.revision,
+    item: mixedPortfolio.workItems[1], previous: null, event: 'CLAIMED',
+    evidenceRevision: '9'.repeat(64),
+  });
+  appendPortfolioDrainReceipt({
+    directory, portfolio: mixedPortfolio, receipt: claimB,
+    expectedLedgerRevision: ledger.revision,
+  });
+
+  const first = projectEngineeringPumpChecklist({ directory });
+  const restarted = projectEngineeringPumpChecklist({ directory });
+  assert.deepEqual(restarted, first);
+  assert.equal(first.currentGate, 'START_DRAFT');
+  assert.equal(first.issueBody.owner, 'UNASSIGNED');
+  assert.deepEqual(first.issueBody.evidenceLinks, []);
+  assert.deepEqual(first.issueBody.where, ['OtherOwner/other-repo']);
+  assert.doesNotMatch(first.statusComment, /pull\/45/u);
+});
+
 test('R0 deterministic replay and DuckDB derive only from the two existing ledgers', async () => {
   const directory = scratch();
   await tick(directory);
@@ -399,6 +466,8 @@ test('R0 MECHANISM REVERT: existing machines own reservation, intent and reconci
   const source = readFileSync(new URL('../src/engineering-pump-supervisor.mjs', import.meta.url), 'utf8');
   assert.match(source, /deliverFirstEvidenceDraftPr/u);
   assert.match(source, /appendPortfolioDrainReceipt/u);
+  assert.match(source, /operationForClaim/u);
+  assert.equal(source.includes('operations.at(-1)'), false);
   for (const forbidden of [
     'engineering-pump.jsonl', 'ENGINEERING_PUMP_LEDGER', 'openDraftPullRequest({',
   ]) assert.equal(source.includes(forbidden), false, forbidden);
