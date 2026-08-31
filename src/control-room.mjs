@@ -20,6 +20,14 @@ import {
   requireEngineeringFlowArtifact,
   summarizeEngineeringFlow,
 } from './engineering-flow.mjs';
+import {
+  CI_FLOW_SCHEMA,
+  CI_FLOW_SOURCE,
+  ciFlowRevision,
+  deriveCiFlowBlock,
+  requireCiFlowArtifact,
+  summarizeCiFlow,
+} from './ci-flow.mjs';
 import { DEFAULT_MAX_LIVE_LANES } from './lanes.mjs';
 import {
   LOCAL_LANE_LABEL_STATES,
@@ -495,6 +503,7 @@ export function requireControlRoomSnapshot(value) {
   requireTelemetryVocabulary(value);
   const localLanes = requireLocalLanes(value);
   requireEngineeringFlow(value);
+  requireCiFlow(value);
   requireDerivedCounts(value, localLanes);
   return value;
 }
@@ -621,6 +630,71 @@ function requireEngineeringFlow(value) {
   const expected = deriveEngineeringFlowBlock({ artifact, observedAt: value.observedAt });
   if (canonicalJson(expected) !== canonicalJson(block)) {
     refuse('the snapshot engineering flow block is not what its own events and instants derive');
+  }
+  return expected;
+}
+
+/**
+ * Re-derive the CI flow block instead of believing it.
+ *
+ * The block carries its observations verbatim precisely so this is possible: every gate, phase,
+ * percentile, retry count and reason is recomputed from those observations and those instants, and
+ * a block that is not what its own evidence derives is refused rather than displayed.
+ *
+ * The two forgeries worth catching are the obvious one — moving a median — and the quiet one:
+ * resealing an unmeasured phase as a measured zero, so that "the provider never reported a runner
+ * instant" reads as "runners are instant". Both are caught by the same comparison.
+ *
+ * Absent means the key is omitted. A present `null` is refused rather than read as absence,
+ * because that spelling canonicalises into the digest and would move every previously published
+ * snapshot revision for evidence that did not change.
+ */
+function requireCiFlow(value) {
+  if (!Object.hasOwn(value, 'ciFlow')) return null;
+  const refuse = (message) => {
+    throw new ControlRoomError('InvalidCiFlow', message);
+  };
+  const block = value.ciFlow;
+  if (block === null) {
+    refuse('an absent CI flow artifact omits the field entirely, and never publishes null');
+  }
+  if (!block || typeof block !== 'object' || Array.isArray(block)
+      || block.source !== CI_FLOW_SOURCE || block.binding !== 'NONE'
+      || block.readiness !== 'NOT_CLAIMED' || !Array.isArray(block.observations)) {
+    refuse('the snapshot CI flow block is not a Gaia CI flow projection');
+  }
+  // Rebuilt from the block's own evidence and sealed with the schema's own recipe, rather than
+  // pattern-matched: sixty-four hex characters of the wrong evidence is still the wrong evidence.
+  const rebuilt = {
+    schema: CI_FLOW_SCHEMA,
+    effect: 'NONE',
+    authority: 'NONE',
+    observedAt: block.observedAt,
+    windowStartedAt: block.windowStartedAt,
+    sequence: block.sequence,
+    observations: block.observations,
+    revision: ciFlowRevision({
+      observedAt: block.observedAt,
+      windowStartedAt: block.windowStartedAt,
+      sequence: block.sequence,
+      observations: block.observations,
+    }),
+  };
+  let artifact;
+  try {
+    artifact = requireCiFlowArtifact(rebuilt);
+  } catch (error) {
+    refuse(
+      'the snapshot CI flow block does not carry a verifiable artifact:'
+      + ` ${error?.message ?? 'unreadable'}`,
+    );
+  }
+  if (block.artifactRevision !== artifact.revision) {
+    refuse('the snapshot CI flow block names an artifact revision its own observations do not derive');
+  }
+  const expected = deriveCiFlowBlock({ artifact, observedAt: value.observedAt });
+  if (canonicalJson(expected) !== canonicalJson(block)) {
+    refuse('the snapshot CI flow block is not what its own observations and instants derive');
   }
   return expected;
 }
@@ -989,6 +1063,25 @@ function projectEngineeringFlow(candidate, observedAt, priorObservation) {
 }
 
 /**
+ * Project the CI flow artifact, or nothing at all.
+ *
+ * The refusal is deliberately not softened into a warning block. Evidence about how long CI takes
+ * is acted on, and evidence that fails its own coherence check is not weaker evidence — it is a
+ * producer or a clock that is wrong, and displaying it would put a number where a defect is.
+ */
+function projectCiFlow(candidate, observedAt, priorObservation) {
+  if (candidate === null || candidate === undefined) return null;
+  try {
+    return summarizeCiFlow({ artifact: candidate, observedAt, priorObservation });
+  } catch (error) {
+    throw new ControlRoomError(
+      error?.code === 'IncoherentCiFlow' ? 'IncoherentEvidence' : 'InvalidCiFlow',
+      error?.message ?? 'the CI flow artifact could not be read',
+    );
+  }
+}
+
+/**
  * The headline state, in one place, because the verify seam re-derives it.
  *
  * A fresh local lane is a live process on this machine. It is not a moving portfolio run, and the
@@ -1079,6 +1172,7 @@ export function buildControlRoomSnapshot({
   progressObservations = [], completedRuns = [], telemetryProjection = null,
   dependencies = null, localLanes = null,
   engineeringFlow = null, priorEngineeringFlow = null,
+  ciFlow = null, priorCiFlow = null,
   mergeQueueCapability = null,
 }) {
   const projection = requireProjection(drainProjection);
@@ -1105,6 +1199,10 @@ export function buildControlRoomSnapshot({
   // decision and no next action; it is derived here only so that it is sealed into the same
   // revision as the evidence it sits beside.
   const engineeringFlowBlock = projectEngineeringFlow(engineeringFlow, at, priorEngineeringFlow);
+  // Derived here for one reason only: to be sealed into the same revision as the evidence it sits
+  // beside. It is an input to nothing below. A passing pipeline is not a unit of delivery, and the
+  // moment a CI conclusion could move a count on this page, six green runs would read as progress.
+  const ciFlowBlock = projectCiFlow(ciFlow, at, priorCiFlow);
   // Decided here, against this snapshot's instant, because this is the consumer that owns the
   // clock. A capability decided at production time and cached is exactly how an AVAILABLE reading
   // outlives the configuration it described.
@@ -1269,6 +1367,7 @@ export function buildControlRoomSnapshot({
     // consequence as the lane block above: a present `null` canonicalises into the digest and
     // would move every previously published snapshot revision for evidence that did not change.
     ...(engineeringFlowBlock === null ? {} : { engineeringFlow: engineeringFlowBlock }),
+    ...(ciFlowBlock === null ? {} : { ciFlow: ciFlowBlock }),
     // Omitted entirely when there is no artifact, and never published as null, for the same
     // digest-stability reason the flow block gives.
     ...(capabilityBlock === null ? {} : { mergeQueueCapability: capabilityBlock }),
@@ -1374,6 +1473,53 @@ const RENDER_COPY = Object.freeze({
         + ' can be measured.',
       NOT_ENOUGH_COMPARABLE_DURATIONS: 'Unknown: fewer than 5 comparable closing durations.',
       INCOMPLETE_COMPARABLE_DURATIONS: 'Unknown: a closing event carries no comparable start.',
+    },
+    ciFlow: 'CI flow and cost',
+    ciCaveat: 'Closed runs only, and only what the provider actually reported. A green pipeline'
+      + ' proves the configured checks passed on the commit they ran against; it proves nothing'
+      + ' about whether a feature works, so readiness here is NOT_CLAIMED. Nothing on this card'
+      + ' animates and nothing here edits a workflow.',
+    ciAge: 'reading age',
+    ciSequence: 'sequence',
+    ciState: { FRESH: 'Fresh reading', STALE: 'Stale reading' },
+    ciStaleNote: (age, window) => `This reading was taken ${age} ago, past its ${window} window.`
+      + ' The current gate is withheld because it is a claim about now; the percentiles below are'
+      + ' a claim about a closed past and still stand.',
+    ciGate: 'Current gate',
+    ciSlowestCheck: 'Slowest check',
+    // Named apart from the slowest check on purpose. A five-minute job running fully in parallel
+    // can be the slowest check and lie on no critical path at all.
+    ciCriticalPath: 'Critical path',
+    ciPercentiles: 'Comparable run duration',
+    ciQueueLatency: 'Queue latency',
+    ciRunnerStartup: 'Runner startup',
+    ciSetup: 'Setup',
+    ciExecution: 'Execution',
+    ciRetries: 'Retries',
+    ciCancellations: 'Cancellations',
+    ciConsumedRunner: 'Consumed runner time',
+    ciUnknown: 'Unknown',
+    ciReadiness: 'Feature readiness: NOT_CLAIMED',
+    ciBinding: { PROVEN: 'pull request proven', PR_NOT_PROVEN: 'no pull request proven' },
+    ciPercentileMeasured: (p50, p95, sample) => `p50 ${p50}, p95 ${p95} over ${sample} comparable runs`,
+    ciPathMeasured: (duration, hops) => `${duration} across ${hops} checks`,
+    ciConsumedMeasured: (minutes, sample) => `${minutes} runner minutes over ${sample} runs`,
+    ciReason: {
+      NOT_EXPOSED: 'Unknown: the provider does not report this here.',
+      INSUFFICIENT_HISTORY: 'Unknown: fewer than 5 comparable closed runs.',
+      STALE: 'Unknown: this reading is too old to describe the current gate.',
+      CORRUPT: 'Unknown: the carried evidence contradicts itself.',
+      NOT_APPLICABLE: 'Not applicable: this conclusion means the quantity does not exist.',
+      ATTEMPT_QUEUE_BASIS_NOT_EXPOSED: 'Unknown: this re-run carries only the original run'
+        + ' creation instant, which would measure a human, not a queue.',
+      ATTEMPT_HISTORY_NOT_COLLECTED: 'Unknown: earlier attempts of this run were not collected.',
+      NO_PROVEN_DEPENDENCY_GRAPH: 'Unknown: no dependency graph was supplied, and the slowest'
+        + ' check is not the critical path.',
+      BILLING_NOT_EXPOSED: 'Unknown: the provider reported no billable time, and wall clock is'
+        + ' not cost.',
+      OBSERVATION_INCOMPLETE: 'Unknown: the producer marked this a partial read.',
+      NO_OBSERVATIONS: 'Unknown: no closed run has been observed.',
+      NO_DETECTABLE_EFFECT: 'Unknown: the change is inside the regression guard.',
     },
     state: { ACTIVE: 'Active', STALE: 'Needs attention', PAUSED: 'Paused' },
     evidenceState: { FRESH: 'Fresh', PARTIAL: 'Partial', STALE: 'Stale', UNKNOWN: 'Unknown' },
@@ -1500,6 +1646,54 @@ const RENDER_COPY = Object.freeze({
       NOT_ENOUGH_COMPARABLE_DURATIONS: 'Inconnu : moins de 5 durées de clôture comparables.',
       INCOMPLETE_COMPARABLE_DURATIONS: 'Inconnu : un événement de clôture n’a pas de début'
         + ' comparable.',
+    },
+    ciFlow: 'Flux et coût de l\u2019intégration continue',
+    ciCaveat: 'Uniquement des exécutions closes, et uniquement ce que le fournisseur a réellement'
+      + ' rapporté. Un pipeline vert prouve que les vérifications configurées ont réussi sur le'
+      + ' commit exécuté ; il ne prouve rien sur le fonctionnement d\u2019une fonctionnalité, donc'
+      + ' l\u2019état de préparation ici est NOT_CLAIMED. Rien ne s\u2019anime et rien ne modifie'
+      + ' un workflow.',
+    ciAge: 'âge de la lecture',
+    ciSequence: 'séquence',
+    ciState: { FRESH: 'Lecture fraîche', STALE: 'Lecture périmée' },
+    ciStaleNote: (age, window) => `Cette lecture date de ${age}, au-delà de sa fenêtre de ${window}.`
+      + ' La porte actuelle est retenue car elle affirme le présent ; les centiles ci-dessous'
+      + ' portent sur un passé clos et restent valides.',
+    ciGate: 'Porte actuelle',
+    ciSlowestCheck: 'Vérification la plus lente',
+    ciCriticalPath: 'Chemin critique',
+    ciPercentiles: 'Durée comparable des exécutions',
+    ciQueueLatency: 'Latence de file',
+    ciRunnerStartup: 'Démarrage de l\u2019exécuteur',
+    ciSetup: 'Préparation',
+    ciExecution: 'Exécution',
+    ciRetries: 'Reprises',
+    ciCancellations: 'Annulations',
+    ciConsumedRunner: 'Temps d\u2019exécuteur consommé',
+    ciUnknown: 'Inconnu',
+    ciReadiness: 'Préparation fonctionnelle : NOT_CLAIMED (non revendiquée)',
+    ciBinding: {
+      PROVEN: 'pull request prouvée', PR_NOT_PROVEN: 'aucune pull request prouvée',
+    },
+    ciPercentileMeasured: (p50, p95, sample) => `p50 ${p50}, p95 ${p95} sur ${sample} exécutions comparables`,
+    ciPathMeasured: (duration, hops) => `${duration} sur ${hops} vérifications`,
+    ciConsumedMeasured: (minutes, sample) => `${minutes} minutes d\u2019exécuteur sur ${sample} exécutions`,
+    ciReason: {
+      NOT_EXPOSED: 'Inconnu : le fournisseur ne rapporte pas cette valeur ici.',
+      INSUFFICIENT_HISTORY: 'Inconnu : moins de 5 exécutions closes comparables.',
+      STALE: 'Inconnu : cette lecture est trop ancienne pour décrire la porte actuelle.',
+      CORRUPT: 'Inconnu : les preuves transportées se contredisent.',
+      NOT_APPLICABLE: 'Sans objet : cette conclusion signifie que la quantité n\u2019existe pas.',
+      ATTEMPT_QUEUE_BASIS_NOT_EXPOSED: 'Inconnu : cette reprise ne porte que l\u2019instant de'
+        + ' création initiale, ce qui mesurerait un humain et non une file.',
+      ATTEMPT_HISTORY_NOT_COLLECTED: 'Inconnu : les tentatives antérieures n\u2019ont pas été collectées.',
+      NO_PROVEN_DEPENDENCY_GRAPH: 'Inconnu : aucun graphe de dépendances fourni, et la'
+        + ' vérification la plus lente n\u2019est pas le chemin critique.',
+      BILLING_NOT_EXPOSED: 'Inconnu : le fournisseur n\u2019a rapporté aucun temps facturable, et'
+        + ' le temps écoulé n\u2019est pas un coût.',
+      OBSERVATION_INCOMPLETE: 'Inconnu : le producteur a marqué cette lecture partielle.',
+      NO_OBSERVATIONS: 'Inconnu : aucune exécution close observée.',
+      NO_DETECTABLE_EFFECT: 'Inconnu : l\u2019écart reste dans la garde de régression.',
     },
     state: { ACTIVE: 'En cours', STALE: 'À vérifier', PAUSED: 'En pause' },
     evidenceState: { FRESH: 'Fraîche', PARTIAL: 'Partielle', STALE: 'Périmée', UNKNOWN: 'Inconnue' },
@@ -2194,6 +2388,94 @@ function renderEngineeringFlow(snapshot, copy) {
   </section>`;
 }
 
+/**
+ * The CI section.
+ *
+ * Every cell states its reading in words as well as in a symbol and a data attribute, because
+ * colour is never the meaning here. An unmeasured cell prints its NAMED reason where a number
+ * would go — never a zero, and never a blank that a reader would fill in with one.
+ *
+ * The slowest check and the critical path are rendered as two separate cells, adjacent and
+ * differently labelled, so that the easy number cannot be read as the important one.
+ */
+function renderCiFlow(snapshot, copy) {
+  const block = snapshot.ciFlow;
+  if (!block) return '';
+  const age = formatDuration(block.observationAgeMs);
+  const heading = block.state === 'FRESH'
+    ? { severity: 'healthy', symbol: '\u25cf' }
+    : { severity: 'warning', symbol: '\u25b2' };
+  const shownState = (state) => (state === 'MEASURED'
+    ? { severity: 'neutral', symbol: '\u25cf' }
+    : { severity: 'warning', symbol: '\u25cb' });
+  const symbolFor = (state) => '<span class="semantic-symbol" aria-hidden="true">'
+    + `${shownState(state).symbol}</span>`;
+  const reasonAttribute = (reasonCode) => (
+    reasonCode === null ? '' : ` data-reason="${escapeHtml(reasonCode)}"`
+  );
+  const renderCell = (name, label, cell, measured) => (
+    `<li class="ci-cell" data-cell="${escapeHtml(name)}" data-state="${escapeHtml(cell.state)}"`
+    + `${reasonAttribute(cell.reasonCode)} data-severity="${shownState(cell.state).severity}">`
+    + `<span class="ci-cell-label">${label}</span>`
+    + `<strong class="ci-cell-value">${symbolFor(cell.state)}${escapeHtml(
+      cell.state === 'MEASURED' ? measured(cell) : copy.ciUnknown,
+    )}</strong>`
+    + `<span class="ci-cell-reading">${escapeHtml(cell.state === 'MEASURED'
+      ? measured(cell) : copy.ciReason[cell.reasonCode])}</span></li>`
+  );
+  // Ordered so that the two quantities most easily confused sit next to each other, and so that
+  // the comparable distribution — the number an operator carries away — reads last.
+  const cells = [
+    ['queueLatency', copy.ciQueueLatency, block.phases.queueLatencyMs,
+      (cell) => formatDuration(cell.value)],
+    ['runnerStartup', copy.ciRunnerStartup, block.phases.runnerStartupMs,
+      (cell) => formatDuration(cell.value)],
+    ['setup', copy.ciSetup, block.phases.setupMs, (cell) => formatDuration(cell.value)],
+    ['execution', copy.ciExecution, block.phases.executionMs,
+      (cell) => formatDuration(cell.value)],
+    ['slowestCheck', copy.ciSlowestCheck, block.slowestCheck,
+      (cell) => `${cell.name} \u00b7 ${formatDuration(cell.durationMs)}`],
+    ['criticalPath', copy.ciCriticalPath, block.criticalPath,
+      (cell) => copy.ciPathMeasured(formatDuration(cell.durationMs), cell.checkIds.length)],
+    ['retries', copy.ciRetries, block.retries, (cell) => String(cell.value)],
+    ['cancellations', copy.ciCancellations, block.cancellations, (cell) => String(cell.value)],
+    ['consumedRunner', copy.ciConsumedRunner, block.consumedRunner,
+      (cell) => copy.ciConsumedMeasured(cell.minutes, cell.sampleSize)],
+    ['percentiles', copy.ciPercentiles, block.percentiles,
+      (cell) => copy.ciPercentileMeasured(
+        formatDuration(cell.p50Ms), formatDuration(cell.p95Ms), cell.sampleSize,
+      )],
+  ].map(([name, label, cell, measured]) => renderCell(name, label, cell, measured)).join('');
+
+  const gate = block.gate.state === 'MEASURED'
+    ? `<strong class="ci-gate-value">${symbolFor(block.gate.state)}${
+      escapeHtml(block.gate.conclusion)}</strong><span class="ci-gate-detail">${
+      escapeHtml(`${block.gate.repository} \u00b7 ${block.gate.workflow} \u00b7 ${
+        block.gate.runId}#${block.gate.attempt} \u00b7 ${
+        copy.ciBinding[block.gate.pullRequestBinding]}`)}</span>`
+    : `<strong class="ci-gate-value">${symbolFor(block.gate.state)}${
+      escapeHtml(copy.ciUnknown)}</strong><span class="ci-gate-detail">${
+      escapeHtml(copy.ciReason[block.gate.reasonCode])}</span>`;
+
+  return `<section class="section-panel ci-flow" data-source="${escapeHtml(block.source)}"
+    data-state="${escapeHtml(block.state)}" data-severity="${heading.severity}"
+    aria-label="${escapeHtml(copy.ciFlow)}">
+    <div class="section-heading"><h2>${copy.ciFlow}</h2>
+      <span class="as-of"><code>${escapeHtml(block.source)}</code> \u00b7 <span class="semantic-symbol" aria-hidden="true">${heading.symbol}</span>${copy.ciState[block.state]}
+        \u00b7 <time>${escapeHtml(block.observedAt)}</time> \u00b7 ${copy.ciAge} ${escapeHtml(age)}</span></div>
+    <p class="evidence-line">${copy.ciCaveat}</p>
+    ${block.state === 'STALE'
+    ? `<p class="evidence-line ci-stale"><span class="semantic-symbol" aria-hidden="true">\u25b2</span>${
+      escapeHtml(copy.ciStaleNote(age, formatDuration(block.freshnessWindowMs)))}</p>` : ''}
+    <div class="ci-gate" data-cell="gate" data-state="${escapeHtml(block.gate.state)}"${
+  reasonAttribute(block.gate.reasonCode)}><span class="ci-cell-label">${copy.ciGate}</span>${gate}</div>
+    <ol class="ci-cell-list">${cells}</ol>
+    <p class="evidence-line ci-readiness">${copy.ciReadiness}</p>
+    <p class="evidence-line"><code>${escapeHtml(block.artifactRevision)}</code> \u00b7 ${
+  copy.ciSequence} ${block.sequence} \u00b7 binding=${escapeHtml(block.binding)} \u00b7 effect=NONE \u00b7 authority=NONE</p>
+  </section>`;
+}
+
 const fact = (label, value, extra = '', attributes = '') => (
   `<div class="fact"${attributes}><span class="fact-label">${label}</span>`
   + `<strong>${value}</strong>${extra}</div>`
@@ -2446,8 +2728,26 @@ export function renderControlRoomHtml(candidate, {
     .flow-sub-label { color: var(--muted); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
     .flow-sub-value { line-height: 1.4; }
     .flow-stale { color: var(--amber); }` : '';
+  const ciCss = snapshot.ciFlow ? `
+    .ci-flow .section-heading { align-items: baseline; }
+    .ci-gate { background: var(--panel-2); border: 1px solid var(--line); display: grid; gap: 4px; margin: 14px 0 0; padding: 14px; }
+    .ci-gate-value { font-size: 24px; line-height: 1.2; }
+    .ci-gate-detail { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .ci-cell-list { display: grid; gap: 8px; list-style: none; margin: 12px 0 0; padding: 0; }
+    .ci-cell { border-left: 3px solid var(--semantic, var(--line)); display: grid; gap: 4px; padding: 8px 0 8px 10px; }
+    .ci-cell-label { color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+    .ci-cell-value { font-size: 18px; line-height: 1.2; }
+    .ci-cell-reading { color: var(--muted); font-size: 12px; }
+    .ci-readiness { color: #c8d2df; }
+    .ci-stale { color: var(--amber); }` : '';
   const flowCss768 = snapshot.engineeringFlow ? `
       .flow-window-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }` : '';
+  const ciCss768 = snapshot.ciFlow ? `
+      .ci-cell-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }` : '';
+  const ciCss1024 = snapshot.ciFlow ? `
+      .ci-cell-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }` : '';
+  const ciCss1440 = snapshot.ciFlow ? `
+      .ci-cell-list { grid-template-columns: repeat(5, minmax(0, 1fr)); }` : '';
   const flowCss1024 = snapshot.engineeringFlow ? `
       .flow-family-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }` : '';
   const flowCss1440 = snapshot.engineeringFlow ? `
@@ -2558,7 +2858,7 @@ export function renderControlRoomHtml(candidate, {
     .backlog-total { margin: 12px 0 4px; }
     .evidence { align-items: start; display: grid; gap: 14px; }
     .wide-scroll { overflow-x: auto; }
-    code { color: #bdd2f2; overflow-wrap: anywhere; } .empty { color: var(--muted); }${flowCss}
+    code { color: #bdd2f2; overflow-wrap: anywhere; } .empty { color: var(--muted); }${flowCss}${ciCss}
     @media (min-width: 768px) {
       main { max-width: 880px; padding: 22px; }
       header { align-items: end; display: flex; justify-content: space-between; }
@@ -2569,14 +2869,14 @@ export function renderControlRoomHtml(candidate, {
       .evidence { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .fog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .fog-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .local-lane-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }${flowCss768}
+      .local-lane-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }${flowCss768}${ciCss768}
     }
     @media (min-width: 1024px) {
       main { max-width: 1240px; padding: 26px 32px; }
       .hero { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
       .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
       .work-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .local-lane-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }${flowCss1024}
+      .local-lane-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }${flowCss1024}${ciCss1024}
     }
     @media (min-width: 1440px) {
       main { max-width: 1600px; padding: 30px 44px; }
@@ -2585,7 +2885,7 @@ export function renderControlRoomHtml(candidate, {
       .work-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .lower-grid { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
       .fog-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-      .local-lane-list { grid-template-columns: repeat(4, minmax(0, 1fr)); }${flowCss1440}
+      .local-lane-list { grid-template-columns: repeat(4, minmax(0, 1fr)); }${flowCss1440}${ciCss1440}
     }
     ${pulseCss}${capabilityCss}
   </style>
@@ -2619,6 +2919,7 @@ export function renderControlRoomHtml(candidate, {
   ${renderMergeQueueCapability(snapshot, copy, language)}
   ${renderLocalLanes(snapshot, copy)}
   ${renderEngineeringFlow(snapshot, copy)}
+  ${renderCiFlow(snapshot, copy)}
   <section class="section-panel">
     <div class="section-heading"><h2>${copy.progress}</h2><span class="as-of">${snapshot.totalItems} ${copy.items}</span></div>
     <h3>${copy.topWork}</h3>

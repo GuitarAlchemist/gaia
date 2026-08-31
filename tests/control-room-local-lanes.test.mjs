@@ -942,9 +942,23 @@ test('T20: the observation digest recipe has exactly one implementation', () => 
     /gaia-local-lane-observation\/1/u.test(control), false,
     'the control room does not respell the observation schema it hashes over',
   );
+  // This gate used to count `createHash` calls and require exactly one. That count stopped being
+  // the question when the module gained the artifact-completion recipes, and a count is the wrong
+  // mechanism anyway: two recipes are safe when they address different things and dangerous when
+  // they address the same thing. So the rule is now the property the count was standing in for —
+  // every recipe is domain-separated by its OWN schema constant, and exactly one of them names
+  // the observation.
+  const recipes = schema.split("createHash('sha256')").slice(1)
+    .map((tail) => /schema:\s*([A-Za-z_]+)/u.exec(tail)?.[1] ?? null);
+
+  assert.deepEqual(recipes, [
+    'LOCAL_LANE_OBSERVATION_SCHEMA',
+    'LANE_ARTIFACT_BINDING_RECORD_SCHEMA',
+    'LANE_ARTIFACT_BINDINGS_SCHEMA',
+    'LANE_COMPLETION_EVIDENCE_SCHEMA',
+  ], 'every digest recipe carries its own domain separator, so none can collide with another');
   assert.equal(
-    (schema.match(/createHash\('sha256'\)/gu) ?? []).length, 1,
-    'the schema module hashes an observation in exactly one place',
+    new Set(recipes).size, recipes.length, 'and no two recipes share a domain',
   );
   assert.match(control, /localLaneObservationRevision/u, 'the control room imports that one recipe');
 });
@@ -1077,4 +1091,65 @@ test('T21: the exact-instant rule has exactly one implementation', () => {
     /toISOString\(\)\s*===/u.test(control), false,
     'the control room does not respell the round-trip rule it imports',
   );
+});
+
+// ---------------------------------------------------------------------------
+// ARTIFACT COMPLETION SIGNALS R0 — the control room is downstream of it, and
+// deliberately unchanged by it. docs/artifact-completion-signals.md.
+// ---------------------------------------------------------------------------
+
+test('T22: an observation carrying task states still projects to exactly the process axis', () => {
+  const lanes = [lane(1), lane(2, { lifecycle: 'EXITED' })];
+  const taskState = (n, overrides = {}) => ({
+    workspaceId: `ws-${n}`,
+    paneId: `pane-${n}`,
+    surfaceId: `surf-${n}`,
+    agentId: `agent-${n}`,
+    processLifecycle: 'RUNNING',
+    taskState: 'UNBOUND',
+    evidenceReason: 'NO_BINDING',
+    bindingRevision: null,
+    generation: 0,
+    artifactDigest: null,
+    completionObservedAt: null,
+    completionEvidenceRevision: null,
+    ...overrides,
+  });
+  const withStates = {
+    ...observation(lanes),
+    taskStates: [taskState(1), taskState(2, { processLifecycle: 'EXITED' })],
+  };
+
+  const plain = renderControlRoomHtml(requireControlRoomSnapshot(snapshotWith(observation(lanes))));
+  const enriched = renderControlRoomHtml(requireControlRoomSnapshot(snapshotWith(withStates)));
+
+  assert.equal(
+    enriched, plain,
+    'the page is a function of the process axis alone, so R0 changes no rendered byte',
+  );
+  const snapshot = snapshotWith(withStates);
+  assert.equal(
+    JSON.stringify(snapshot).includes('taskState'), false,
+    'and no task state, digest or binding reaches the snapshot the browser is handed',
+  );
+  assert.equal(snapshot.localLanes.binding, 'NONE');
+  assert.equal(
+    snapshot.localLanes.observationRevision,
+    localLaneObservationRevision({ observedAt: AT, lanes: withStates.lanes }),
+    'the lane revision still re-derives, which is why the recipe was not widened',
+  );
+});
+
+test('T23: the browser reads no local file, and no artifact path or marker reaches the page', () => {
+  const html = renderControlRoomHtml(requireControlRoomSnapshot(
+    snapshotWith(observation([lane(1)])),
+  ));
+  const control = readFileSync(join(ROOT, 'src', 'control-room.mjs'), 'utf8');
+
+  for (const reader of ['readFileSync', 'node:fs', 'fetch(', 'XMLHttpRequest', 'FileReader']) {
+    assert.equal(control.includes(reader), false, `the control room must not ${reader}`);
+  }
+  for (const leak of ['artifactPath', 'allowedRoot', 'completionMarker', 'COMPLETED_EVIDENCE']) {
+    assert.equal(html.includes(leak), false, `${leak} must never reach the page`);
+  }
 });

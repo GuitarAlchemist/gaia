@@ -966,3 +966,48 @@ call sites had drifted, which is the failure this repair is shaped to make impos
   single owning schema module the way the lane block has `src/local-lane-observation.mjs`. It is
   recorded here rather than repaired, because this lane is authorized for one reproduced blocker,
   and closing a second one quietly is how a bounded repair stops being reviewable.
+
+# R0 — the lane block reports process liveness, and only process liveness
+
+## The reading that was ambiguous
+
+`localLanes` publishes one axis: what wmux observed about a process. That was always its scope,
+and the caveat under the section says so. What it could not say is the case an operator actually
+hits — a provider writes its exact terminal artifact marker and stops, and the wrapper that
+launched it keeps reporting `running`. The page then shows a live lane for finished work, and
+nothing on it distinguishes "still working" from "done, wrapper lingering".
+
+That is not repaired by changing this section. It is repaired by publishing a **second axis**
+upstream of it. `docs/artifact-completion-signals.md` is the normative contract; what matters to
+this document is what did **not** change.
+
+## What the control room does with the second axis: nothing, deliberately
+
+A `gaia-local-lane-observation/1` document may now carry a `taskStates` array beside its `lanes`.
+The control room does not read it. `projectLocalLanes` verifies the observation with the shared
+verifier and then derives the block from the seven lane fields it always derived it from, so:
+
+- **every rendered byte is unchanged** by the presence or absence of `taskStates`, and a gate
+  compares the two renderings directly;
+- **`observationRevision` still re-derives**, because the observation digest recipe was not
+  widened to cover the new field. Widening it would have made the page refuse every observation
+  the new sensor produces, which is why the second axis is content-addressed per completion
+  instead of folded into the lane digest;
+- **no artifact path, allowed root, completion marker or task state reaches the snapshot or the
+  page.** The browser reads no local file, and this slice does not give it one to read.
+
+`binding: 'NONE'` still means what it said. A verified completion marker is not a portfolio
+binding, an approval, a success, a percentage, a pace or an ETA, and the lane block gains none of
+them.
+
+## Why the axis was added upstream rather than here
+
+The control room is a rendered artifact with no authority and no clock of its own. A completion
+signal has to be derived where the artifact bytes are — at the server-side sensor, from an
+explicit operator-authored binding, with a monotonic transition that survives across ticks. Doing
+any part of that in the page would mean a browser resolving a local path, and doing it in an
+analytics store would mean a transition read from a copy rather than re-derived from the evidence.
+Both are ruled out by name in the upstream contract.
+
+R0 emits the state. It closes no pane and ends no provider; a reaper is a later slice, and it will
+be written against a transition rather than against a guess.
