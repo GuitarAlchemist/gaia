@@ -492,3 +492,24 @@ R7 RED proof mutates durable expiry, future observation, and nested request time
 uses the real bounded factory adapter across a response-loss restart. The clock mutations must
 typed-refuse before any effect, while the restart must reconcile one receipt for the sealed original
 request and perform exactly one factory execution.
+
+## R8 checklist receipt binding on resumption
+
+The checklist operation resource is `(thread identity, rendered body digest)`. Its stable operation
+identity and the fsynced `CHECKLIST_UPSERT` intent are the reservation linearization point. When the
+provider created the checklist but its response was lost, a later observer may advance its clock
+while the checklist body and every substantive GitHub fact remain identical. Reconciliation must
+settle the provider observation against the resumed durable `operationIntent`, never the fresh
+current-tick candidate intent.
+
+This binding is load-bearing because the local receipt digest includes the operation intent. Using
+the fresh candidate would write a receipt whose digest includes the later observer clock; the next
+restart would then reject its own receipt as corrupt. R8 changes no identity, effect, authority, or
+retry policy. The provider marker still supplies idempotency, and an ambiguous or mismatched body
+still refuses or follows the existing exact update path.
+
+R8 RED proof uses the public supervisor tick: the first tick creates one checklist and loses the
+response; a later tick with an advanced injected observation adopts that exact provider checklist;
+a third fresh tick must read the durable receipt without a duplicate effect or receipt corruption.
+The mechanism-revert control substitutes the fresh candidate at the settle seam and must reproduce
+the corrupt next-reconciliation failure.
