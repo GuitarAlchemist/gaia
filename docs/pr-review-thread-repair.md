@@ -449,3 +449,23 @@ after nested pagination, a reply id that sorts before the root review id, and se
 for lane start and checklist creation across later ticks. The expected outcomes are respectively a
 typed refusal/no collection, stable root review classification, and exactly one lane plus one
 checklist under the original operation identities.
+
+## R6 observer-clock normalization on durable resumption
+
+`observation.observedAt` names when an observer measured otherwise identical GitHub facts. It is
+not part of the lane-start request's semantic identity: repository, pull request, thread, reviewed
+head, anchor path, actionable comment ids, and source revision already bind those facts. A later
+collector tick can therefore advance only this observer clock while preserving the same source
+revision and operation identity.
+
+When a lane-start intent already exists, resumption compares every substantive request field
+exactly but normalizes the candidate's nested `request.observedAt` to the timestamp already sealed
+in the durable intent. The operation-level `observedAt` and `expiresAt` are likewise restored from
+that original intent. No GitHub head, source revision, requested comment, anchor, operation id,
+idempotency key, body digest, or authority field is excluded. Any stale, future, corrupt, foreign,
+or substantively mismatched evidence still typed-refuses.
+
+The forced R6 public-seam test performs real GitHub collection on successive injected instants,
+with byte-identical provider facts and an unchanged source revision. Lane and checklist authority
+arrive on later ticks; the original durable intents must resume to exactly one lane and one
+checklist rather than fail because the observer clock advanced.
