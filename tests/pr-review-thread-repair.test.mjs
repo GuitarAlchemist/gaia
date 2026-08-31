@@ -233,7 +233,10 @@ test('S2: a non-actionable thread is received and classified, and never claimed'
   });
   assert.deepEqual(tick.appended, ['RECEIVED', 'CLASSIFIED']);
   assert.equal(tick.state, 'NOT_ACTIONABLE');
-  assert.equal(tick.outcome, 'NONE');
+  // PROGRESSED, not NONE: two records landed. An outcome that said nothing happened while the
+  // ledger grew would contradict `appended` in the same reading.
+  assert.equal(tick.outcome, 'PROGRESSED');
+  assert.equal(tick.blocksMerge, false);
   assert.equal(effects.counts('readReviewThread'), 0, 'a non-actionable thread asks GitHub nothing');
 });
 

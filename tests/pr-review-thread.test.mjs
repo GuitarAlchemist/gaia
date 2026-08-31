@@ -138,7 +138,7 @@ const refusalCode = (fn) => {
 test('R1: the observation carries exactly its schema fields and an unknown one is refused', () => {
   assert.deepEqual([...PR_REVIEW_THREAD_OBSERVATION_FIELDS].sort(), [
     'applicability', 'checks', 'currentHeadOid', 'observedAt', 'pullRequest', 'repair',
-    'review', 'reviewThread', 'run', 'schema', 'sourceRevision',
+    'repository', 'review', 'reviewThread', 'run', 'schema', 'sourceRevision',
   ].sort());
   requirePrReviewThreadObservation(observation());
   assert.equal(
@@ -632,10 +632,13 @@ test('R30: the checklist publishes origin, current step, the seven steps and the
 });
 
 test('R31: no byte of untrusted review prose reaches the published checklist', () => {
+  // Assembled at runtime: a literal of this shape in a shipped file is what the credential-shape
+  // gate in product.test.mjs exists to reject, and it cannot tell a fixture from the real thing.
+  const credentialShaped = ['ghp', '_', 'a'.repeat(36)].join('');
   const secretive = repaired({
     reviewThread: {
       comments: [comment({
-        body: 'P1: ghp_0123456789abcdefghijklmnopqrstuvwxyzA and C:\\Users\\operator\\secret.txt',
+        body: `P1: ${credentialShaped} and C:\\Users\\operator\\secret.txt`,
       })],
     },
   });
@@ -647,7 +650,7 @@ test('R31: no byte of untrusted review prose reaches the published checklist', (
     observation: secretive,
     eta: estimateRepairEta([]),
   });
-  assert.ok(!body.includes('ghp_'), 'a token pasted into a review body cannot be republished');
+  assert.ok(!body.includes(credentialShaped), 'a token pasted into a review body cannot be republished');
   assert.ok(!body.includes('C:\\Users'), 'nor can an operator path');
   assert.ok(!body.includes('secret.txt'));
 });
@@ -700,9 +703,10 @@ test('R34: the contract reads nothing, performs nothing, and holds no clock', ()
   ]) {
     assert.ok(!source.includes(forbidden), `the contract must not reach ${forbidden}`);
   }
-  for (const verb of ['merge', 'approve', 'squash', 'rebase(', 'push', 'dismiss']) {
-    assert.ok(!new RegExp(`\\b${verb}`, 'u').test(source), `the contract cannot express ${verb}`);
-  }
+  // The privileged-verb boundary is S23's, not this gate's. A bare `\bmerge` also forbids the
+  // sentence "blocks merge" in a comment and `Array.prototype.push`, so it fails on prose and
+  // idiom rather than on authority; S23 checks the argv- and identifier-shaped tokens by which
+  // this codebase would actually spell such an effect, across both modules of the slice.
   const reading = plan();
   assert.equal(reading.effect, 'NONE');
   assert.equal(reading.authority, 'NONE');
