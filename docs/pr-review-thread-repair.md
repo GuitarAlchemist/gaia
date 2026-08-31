@@ -381,3 +381,43 @@ multiple independent dispute states; absent required checks; and a real child-pr
 factory success but before the caller receives the receipt. Mechanism-revert controls remove stable
 identity, intent-before-effect, and reconciliation independently and must expose a duplicate effect
 or unsafe adoption.
+
+## R4 continuous reconciliation and late authority
+
+R4 keeps the same thread identity, seven-stage machine, six bus verbs, and authority actions. It
+closes the remaining places where a one-shot process or an early snapshot could become correctness
+state.
+
+Each external operation first commits its immutable intent/outbox. Its stable operation identity
+and intent digest are the linearization key. Only then does the runtime persist a closed
+`grant-request` for that exact intent revision and re-read the grant registry. An absent exact grant
+is `WAITING_AUTHORITY`: durable, retryable on a later tick, and effect-free. A malformed, foreign,
+expired, mismatched, or already-consumed grant remains a typed refusal. COMMENT and RESOLVE have
+different intent revisions and consume different single-use grants; no grant is loaded before its
+effect intent exists.
+
+The factory executor, not its caller, durably records provider success under the stable operation
+identity before returning. A fresh process with empty memory reconciles that authoritative receipt
+before any retry. The forced crash boundary is after provider success and its durable receipt but
+before the wrapper can return or write local state; restart must adopt exactly once. If the provider
+receipt is absent or does not bind the exact intent, Gaia refuses instead of retrying blindly.
+
+Review-thread comment pagination is per thread. The collector follows every nested cursor until
+`hasNextPage` is false, binds every page to the same pull-request head and thread identity, and
+deduplicates comments by node id before sorting them deterministically. Duplicate, delayed, and
+reordered pages therefore replay to the same observation. A missing cursor, foreign thread/head,
+conflicting duplicate, provider error, or exhausted bound makes the collection incomplete and
+blocks the gate.
+
+The production entry can run as a bounded watch. One injected scheduler serializes ticks (never
+overlaps them), and every tick invokes the same one-shot CLI composition. The gate file is written
+atomically and is consumed by the existing portfolio/control-room startup integration when the
+feature is configured. Scheduling provides liveness only: authority, uniqueness, reconciliation,
+and merge safety remain entirely in durable state. Tests inject each wake-up; no wall clock is a
+correctness mechanism.
+
+R4 RED proof names four public seams: real CLI multi-tick late grants for COMMENT and RESOLVE; a
+child-process kill after factory receipt durability but before wrapper receipt; automatic daemon
+ticks with gate consumption; and a thread with more than one hundred nested comments across
+duplicate/reordered pages. Each must fail when intent-before-grant, provider receipt reconciliation,
+serialized scheduling, or cursor continuation is reverted.
