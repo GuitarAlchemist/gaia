@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { lstatSync, realpathSync } from 'node:fs';
+import {
+  existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import {
@@ -127,6 +129,21 @@ export function createAgentFactoryExecutionAdapter({
   }
 
   return Object.freeze({
+    async findReceipt({ idempotencyKey }) {
+      if (typeof idempotencyKey !== 'string' || !/^[a-f0-9]{64}$/u.test(idempotencyKey)) {
+        throw new PortfolioExecutionError(
+          'InvalidIdempotencyKey', 'idempotencyKey must be a lowercase SHA-256',
+        );
+      }
+      const path = join(physicalEvidenceRoot, idempotencyKey, 'receipt.json');
+      if (!existsSync(path)) return null;
+      const receipt = JSON.parse(readFileSync(path, 'utf8'));
+      if (receipt?.schema !== 'gaia-portfolio-execution-receipt/1'
+          || receipt.factory?.schema !== 'gaia-agent-factory-receipt/1') {
+        throw new PortfolioExecutionError('CorruptExecutionReceipt', 'factory receipt is not canonical');
+      }
+      return { ...receipt.factory, addressedCommentIds: receipt.addressedCommentIds };
+    },
     async execute({ intent, idempotencyKey }) {
       if (!intent || intent.action !== 'RUN_FACTORY_AGENT') {
         throw new PortfolioExecutionError('InvalidIntent', 'only RUN_FACTORY_AGENT is supported');
@@ -142,7 +159,18 @@ export function createAgentFactoryExecutionAdapter({
           'InvalidIdempotencyKey', 'idempotencyKey must be a lowercase SHA-256',
         );
       }
-      return executeFactory({
+      const existingReceiptPath = join(physicalEvidenceRoot, idempotencyKey, 'receipt.json');
+      if (existsSync(existingReceiptPath)) {
+        const existing = JSON.parse(readFileSync(existingReceiptPath, 'utf8'));
+        if (existing?.schema !== 'gaia-portfolio-execution-receipt/1'
+            || existing.factory?.schema !== 'gaia-agent-factory-receipt/1') {
+          throw new PortfolioExecutionError(
+            'CorruptExecutionReceipt', 'factory receipt is not canonical',
+          );
+        }
+        return existing.factory;
+      }
+      const receipt = await executeFactory({
         worktree: candidateWorktree,
         evidenceDir: join(physicalEvidenceRoot, idempotencyKey),
         task,
@@ -150,6 +178,19 @@ export function createAgentFactoryExecutionAdapter({
         runReviewer,
         runRepair,
       });
+      // The evidence directory is reserved by the factory before any agent effect. Persisting the
+      // final receipt here lets a new process reconcile an acknowledged execution after the
+      // caller loses the response, without issuing the effect again.
+      mkdirSync(join(physicalEvidenceRoot, idempotencyKey), { recursive: true });
+      writeFileSync(
+        join(physicalEvidenceRoot, idempotencyKey, 'receipt.json'),
+        `${JSON.stringify({
+          schema: 'gaia-portfolio-execution-receipt/1',
+          factory: receipt,
+          addressedCommentIds: intent.reviewThreadEvidence?.addressedCommentIds ?? [],
+        })}\n`, { flag: 'wx', mode: 0o600 },
+      );
+      return receipt;
     },
   });
 }

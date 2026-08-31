@@ -204,12 +204,11 @@ Every accepted and refused transition is appended to one append-only JSONL ledge
 directory-scoped lock protocol the telemetry log and the drain ledger already run, and is replayed
 into a deterministic flat projection: one row per transition, sorted by identity then ordinal.
 
-That projection is the DuckDB path. DuckDB itself is **not** added as a dependency and this slice
-has no analytical-store call site at all, which is a stronger property than a degradation path
-around one: the projection is newline-delimited JSON that DuckDB reads directly, and its
-unavailability cannot stop the pump because the pump never speaks to it. Persisting the seven
-transitions inside the existing telemetry machine would have required widening that machine's
-rules; that is the widening this slice declines.
+That projection is the DuckDB path. `@duckdb/node-api` is a pinned **optional** dependency. The
+bounded runtime calls the optional client through `synchronizePrReviewThreadDuckDb`; if the client
+is absent or the transaction fails, the tick fails explicitly and the merge gate cannot become
+ready. The append-only repair ledger and canonical factory telemetry log remain replay authority;
+DuckDB is a derived, transactionally rebuilt analytical copy.
 
 ## Required evidence
 
@@ -244,7 +243,8 @@ as they are — they were each gated on verified evidence at the time they happe
   authorized, both idempotency-keyed, both reconcilable.
 - **Authority delta:** none. The existing grant adapter is used unchanged; no scope is widened.
 - **Bus delta:** none. Six verbs, unchanged.
-- **Dependency delta:** none.
+- **Dependency delta:** pinned optional `@duckdb/node-api` only; the authoritative ledgers do not
+  depend on DuckDB availability.
 - **Falsifier:** a `COMMENTED` P1 thread that does not block merge; two lanes, two comments or two
   resolutions for one thread under any interleaving; a resolution of a stale, disputed, unverified
   or partially addressed thread; a review body reaching a durable record.

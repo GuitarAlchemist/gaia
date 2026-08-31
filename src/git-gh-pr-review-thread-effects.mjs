@@ -28,7 +28,7 @@ const REVIEW_THREADS_QUERY = `query GaiaReviewThreads($owner:String!,$name:Strin
       id number baseRefName headRefOid
       reviewThreads(first:100,after:$cursor){
         pageInfo{hasNextPage endCursor}
-        nodes{id path line isResolved isOutdated comments(first:100){nodes{
+        nodes{id path line isResolved isOutdated comments(first:100){totalCount pageInfo{hasNextPage endCursor} nodes{
           id body review{id state submittedAt commit{oid}}
         }}}
       }
@@ -116,7 +116,7 @@ function requireRun(value) {
   return { runId: value.runId, laneGeneration: value.laneGeneration };
 }
 
-function normalizeThread({ repository: repo, pullRequest, thread, observedAt, run }) {
+function normalizeThread({ repository: repo, pullRequest, thread, disputed, observedAt, run }) {
   if (!thread || !Array.isArray(thread.comments?.nodes) || thread.comments.nodes.length === 0) {
     fail('GitHub review thread omitted its comments');
   }
@@ -141,7 +141,7 @@ function normalizeThread({ repository: repo, pullRequest, thread, observedAt, ru
     review: { id: review.id, state: review.state, submittedAt: review.submittedAt, reviewedHeadOid },
     reviewThread: {
       id: thread.id, path: thread.path, line: thread.line, isResolved: thread.isResolved,
-      isOutdated: thread.isOutdated, disputed: false, comments,
+      isOutdated: thread.isOutdated, disputed, comments,
     },
   };
   return {
@@ -157,7 +157,7 @@ function normalizeThread({ repository: repo, pullRequest, thread, observedAt, ru
       id: nodeId(thread.id, 'reviewThread.id'), path: thread.path,
       line: positiveInteger(thread.line, 'reviewThread.line'),
       isResolved: thread.isResolved === true, isOutdated: thread.isOutdated === true,
-      disputed: false, comments,
+      disputed, comments,
     },
     currentHeadOid,
     applicability: { anchorDigestAtReview: 'UNKNOWN', anchorDigestAtCurrentHead: 'UNKNOWN' },
@@ -182,8 +182,12 @@ function markerOf(body) {
 }
 
 /** Create the only production GitHub port this feature uses. */
-export function createGitGhPrReviewThreadEffects({ run = defaultRun } = {}) {
+export function createGitGhPrReviewThreadEffects({
+  run = defaultRun,
+  readDisputeEvidence = async () => 'UNKNOWN',
+} = {}) {
   if (typeof run !== 'function') fail('run must be a function');
+  if (typeof readDisputeEvidence !== 'function') fail('readDisputeEvidence must be a function');
   const invoke = (args, options) => run(args, options);
 
   const collectReviewThreads = async ({
@@ -209,9 +213,40 @@ export function createGitGhPrReviewThreadEffects({ run = defaultRun } = {}) {
       nodes.push(...current.reviewThreads.nodes);
       const { hasNextPage, endCursor } = current.reviewThreads.pageInfo;
       if (!hasNextPage) {
-        const observations = nodes.map((thread) => normalizeThread({
-          repository: repo, pullRequest, thread, observedAt, run: boundedRun,
-        }));
+        const commentsComplete = nodes.every((thread) => (
+          thread.comments?.pageInfo?.hasNextPage === false
+          && thread.comments?.totalCount === thread.comments?.nodes?.length
+        ));
+        if (!commentsComplete) {
+          return Object.freeze({
+            schema: 'gaia-pr-review-thread-collection/1', repository: repo,
+            pullRequest: number, observedAt, complete: false,
+            sourceRevision: sha256(nodes.map(({ id, comments }) => ({
+              id, totalCount: comments?.totalCount ?? 'UNKNOWN',
+              visibleCount: comments?.nodes?.length ?? 0,
+            }))),
+            observations: Object.freeze([]),
+          });
+        }
+        const observations = [];
+        for (const thread of nodes) {
+          const disputeSourceRevision = sha256({
+            repository: repo, pullRequest: number, currentHeadOid: pullRequest.headRefOid,
+            reviewThreadId: thread.id, isResolved: thread.isResolved, isOutdated: thread.isOutdated,
+            comments: thread.comments.nodes.map(({ id, body, review }) => ({
+              id, body, reviewId: review?.id, reviewState: review?.state,
+              reviewedHeadOid: review?.commit?.oid,
+            })),
+          });
+          const disputed = await readDisputeEvidence({
+            repository: repo, pullRequest: number, reviewThreadId: thread.id, observedAt,
+            sourceRevision: disputeSourceRevision,
+          });
+          if (![true, false, 'UNKNOWN'].includes(disputed)) fail('dispute evidence is not closed');
+          observations.push(normalizeThread({
+            repository: repo, pullRequest, thread, disputed, observedAt, run: boundedRun,
+          }));
+        }
         return Object.freeze({
           schema: 'gaia-pr-review-thread-collection/1', repository: repo,
           pullRequest: number, observedAt, complete: true,
@@ -231,6 +266,60 @@ export function createGitGhPrReviewThreadEffects({ run = defaultRun } = {}) {
 
   return Object.freeze({
     collectReviewThreads,
+
+    async readRepairEvidence({ observation, laneReceipt, requiredContexts = [], signal }) {
+      const repo = repository(observation.repository);
+      const reviewed = observation.review.reviewedHeadOid;
+      const current = observation.currentHeadOid;
+      if (!laneReceipt || laneReceipt.status !== 'completed') return observation;
+      const compare = await invoke([
+        'api', `repos/${repo}/compare/${reviewed}...${current}`,
+      ], { signal });
+      const readAnchor = async (oid) => invoke([
+        'api', `repos/${repo}/contents/${observation.reviewThread.path}`, '-f', `ref=${oid}`,
+      ], { signal });
+      const [atReview, atCurrent, checksResponse] = await Promise.all([
+        readAnchor(reviewed), readAnchor(current),
+        invoke(['api', `repos/${repo}/commits/${current}/check-runs`], { signal }),
+      ]);
+      const digest = (content) => {
+        if (content?.encoding !== 'base64' || typeof content.content !== 'string') return 'UNKNOWN';
+        return createHash('sha256').update(Buffer.from(content.content.replaceAll('\n', ''), 'base64')).digest('hex');
+      };
+      const checkRuns = Array.isArray(checksResponse?.check_runs) ? checksResponse.check_runs : [];
+      const contexts = requiredContexts.length > 0
+        ? [...requiredContexts] : checkRuns.map(({ name }) => name).filter((name) => typeof name === 'string');
+      const conclusion = (value) => {
+        const token = String(value ?? 'UNKNOWN').toUpperCase();
+        if (['SUCCESS', 'FAILURE', 'CANCELLED', 'TIMED_OUT', 'SKIPPED', 'NEUTRAL'].includes(token)) return token;
+        return token === 'IN_PROGRESS' || token === 'QUEUED' || token === 'PENDING'
+          ? 'UNKNOWN' : 'FAILURE';
+      };
+      return {
+        ...observation,
+        applicability: {
+          anchorDigestAtReview: digest(atReview),
+          anchorDigestAtCurrentHead: digest(atCurrent),
+        },
+        repair: {
+          headOid: current,
+          descendsFromReviewedHead: ['ahead', 'identical'].includes(compare?.status),
+          touchesAnchorPath: Array.isArray(compare?.files)
+            && compare.files.some(({ filename }) => filename === observation.reviewThread.path),
+          commitsAheadOfReviewedHead: Number.isSafeInteger(compare?.ahead_by) ? compare.ahead_by : 0,
+          addressedCommentIds: laneReceipt.addressedCommentIds ?? [],
+        },
+        checks: contexts.length === 0 ? null : {
+          headOid: current,
+          requiredContexts: contexts,
+          conclusions: contexts.map((context) => ({
+            context,
+            conclusion: conclusion(checkRuns.find(({ name }) => name === context)?.conclusion
+              ?? checkRuns.find(({ name }) => name === context)?.status),
+          })),
+        },
+      };
+    },
 
     async readReviewThread({ repository: repo, pullRequest, reviewThreadId }) {
       const collection = await collectReviewThreads({
@@ -275,7 +364,9 @@ export function createGitGhPrReviewThreadEffects({ run = defaultRun } = {}) {
       if (!Array.isArray(rows)) fail('GitHub issue comments response is not an array');
       const matches = rows.filter(({ body }) => String(body ?? '').includes(marker));
       if (matches.length > 1) fail('more than one checklist carries this claim marker');
-      return matches.length === 0 ? null : { id: matches[0].id, url: matches[0].html_url };
+      return matches.length === 0 ? null : {
+        id: matches[0].id, url: matches[0].html_url, body: matches[0].body,
+      };
     },
 
     async createChecklist({ repository: repo, pullRequest, marker, body }) {

@@ -88,7 +88,7 @@ export const PR_REVIEW_THREAD_LIFECYCLE = Object.freeze(
  * become durable: a grant that was declined must not be recorded as an unverified repair.
  */
 export const PR_REVIEW_THREAD_REFUSALS = Object.freeze([
-  'FINDING_STALE', 'APPLICABILITY_UNKNOWN', 'THREAD_DISPUTED', 'REPAIR_UNVERIFIED',
+  'FINDING_STALE', 'APPLICABILITY_UNKNOWN', 'THREAD_DISPUTED', 'THREAD_DISPUTE_UNKNOWN', 'REPAIR_UNVERIFIED',
   'PARTIALLY_ADDRESSED', 'AUTHORITY_REFUSED',
 ]);
 
@@ -367,7 +367,8 @@ function requireThread(value) {
     line: positiveInteger(value.line, 'line', 'reviewThread', code),
     isResolved: boolean(value.isResolved, 'isResolved', 'reviewThread', code),
     isOutdated: boolean(value.isOutdated, 'isOutdated', 'reviewThread', code),
-    disputed: boolean(value.disputed, 'disputed', 'reviewThread', code),
+    disputed: value.disputed === 'UNKNOWN'
+      ? 'UNKNOWN' : boolean(value.disputed, 'disputed', 'reviewThread', code),
     comments: value.comments.map((entry, index) => requireComment(entry, index)),
   };
 }
@@ -535,7 +536,7 @@ export function planPrReviewThreadRepair({ observation, history = [] }) {
   // Not a function of `reviewState`. That is the whole feature.
   const blocksMerge = actionable
     && !observed.reviewThread.isResolved
-    && !observed.reviewThread.disputed;
+    && observed.reviewThread.disputed !== true;
 
   const { repair, checks } = observed;
   const addressed = new Set(repair?.addressedCommentIds ?? []);
@@ -587,6 +588,9 @@ export function planPrReviewThreadRepair({ observation, history = [] }) {
     return reading('THREAD_RESOLVED', 'NONE');
   }
   if (!actionable) return reading('NOT_ACTIONABLE', 'NONE');
+  if (observed.reviewThread.disputed === 'UNKNOWN') {
+    return reading('REFUSED', 'REFUSE', 'THREAD_DISPUTE_UNKNOWN');
+  }
   if (observed.reviewThread.disputed) return reading('REFUSED', 'REFUSE', 'THREAD_DISPUTED');
   // One gate, two tokens. `STALE` and `UNKNOWN` both refuse; only `APPLIES` may proceed.
   if (applicable.verdict !== 'APPLIES') {

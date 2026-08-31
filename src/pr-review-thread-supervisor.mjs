@@ -8,7 +8,7 @@
 
 import { createHash } from 'node:crypto';
 import {
-  existsSync, mkdirSync, readFileSync, writeFileSync,
+  closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 
@@ -90,23 +90,34 @@ function operationRoot(directory) {
 }
 
 function operationPath(directory, kind, threadIdentity) {
-  return join(operationRoot(directory), `${kind}-${threadIdentity}`);
+  return join(operationRoot(directory), sha256({ kind, threadIdentity }));
 }
 
-function receiptPath(path) { return join(path, 'receipt.json'); }
+function intentPath(path) { return `${path}.intent.json`; }
+function receiptPath(path) { return `${path}.receipt.json`; }
 
 function readReceipt(path) {
   if (!existsSync(receiptPath(path))) return null;
   return JSON.parse(readFileSync(receiptPath(path), 'utf8'));
 }
 
-function reserve(path) {
+function readIntent(path) {
+  if (!existsSync(intentPath(path))) return null;
+  return JSON.parse(readFileSync(intentPath(path), 'utf8'));
+}
+
+function reserve(path, intent) {
+  let descriptor;
   try {
-    mkdirSync(path);
+    descriptor = openSync(intentPath(path), 'wx', 0o600);
+    writeFileSync(descriptor, `${JSON.stringify(intent)}\n`, 'utf8');
+    fsyncSync(descriptor);
     return true;
   } catch (error) {
     if (error?.code === 'EEXIST') return false;
     throw error;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 
@@ -117,60 +128,94 @@ function settle(path, receipt) {
   return readReceipt(path);
 }
 
-async function ensureLane({ directory, lanes, observation, threadIdentity }) {
+async function ensureLane({ directory, lanes, observation, threadIdentity, observedAt }) {
   const idempotencyKey = sha256({ kind: 'lane', threadIdentity });
   const path = operationPath(directory, 'lane', threadIdentity);
+  const request = {
+    threadIdentity,
+    idempotencyKey,
+    repository: observation.repository,
+    pullRequest: observation.pullRequest.number,
+    reviewThreadId: observation.reviewThread.id,
+    reviewedHeadOid: observation.review.reviewedHeadOid,
+    anchorPath: observation.reviewThread.path,
+    actionableCommentIds: planPrReviewThreadRepair({ observation, history: [] }).actionableCommentIds,
+  };
+  const intent = {
+    schema: 'gaia-pr-review-thread-operation-intent/1',
+    operationIdentity: sha256({ kind: 'lane', threadIdentity }), kind: 'LANE_START',
+    threadIdentity, idempotencyKey, request,
+    observedAt,
+    expiresAt: new Date(Date.parse(observedAt) + 120_000).toISOString(),
+  };
   const durable = readReceipt(path);
   if (durable) return durable;
   const found = await lanes.findRepairLane({ threadIdentity, idempotencyKey });
   if (found) {
-    if (!existsSync(path)) reserve(path);
+    if (!readIntent(path)) reserve(path, intent);
     return settle(path, found);
   }
-  if (!reserve(path)) {
+  if (!reserve(path, intent)) {
     const reconciled = await lanes.findRepairLane({ threadIdentity, idempotencyKey });
     if (reconciled) return settle(path, reconciled);
+    const existing = readIntent(path);
+    if (!existing || existing.schema !== intent.schema
+        || existing.operationIdentity !== intent.operationIdentity) {
+      fail('OperationIntentCorrupt', 'lane operation intent is absent or corrupt');
+    }
+    if (Date.parse(observedAt) >= Date.parse(existing.expiresAt)) {
+      fail('LaneStartUncertain', 'lane start remains ambiguous after its bounded lease');
+    }
     // A concurrent owner may still be inside the provider call. The durable intent is already
     // the linearization point, so this observer performs no effect and reports pending rather
     // than either failing the whole tick or issuing a second start.
     return Object.freeze({ state: 'PENDING', idempotencyKey });
   }
   try {
-    return settle(path, await lanes.startRepairLane({
-      threadIdentity,
-      idempotencyKey,
-      repository: observation.repository,
-      pullRequest: observation.pullRequest.number,
-      reviewThreadId: observation.reviewThread.id,
-      reviewedHeadOid: observation.review.reviewedHeadOid,
-      anchorPath: observation.reviewThread.path,
-      actionableCommentIds: planPrReviewThreadRepair({ observation, history: [] }).actionableCommentIds,
-    }));
+    return settle(path, await lanes.startRepairLane(request));
   } catch {
     // The request may have arrived. Preserve the durable intent; the next tick reconciles first.
     fail('LaneStartFailed', 'lane start failed after durable intent; reconciliation is required');
   }
 }
 
-async function ensureChecklist({ directory, github, observation, threadIdentity, body }) {
+async function ensureChecklist({ directory, github, observation, threadIdentity, body, observedAt }) {
   const marker = `${PR_REVIEW_CHECKLIST_MARKER_PREFIX}${threadIdentity}`;
-  const path = operationPath(directory, 'checklist', threadIdentity);
+  const bodyDigest = sha256({ body });
+  const path = operationPath(directory, `checklist-${bodyDigest}`, threadIdentity);
+  const intent = {
+    schema: 'gaia-pr-review-thread-operation-intent/1',
+    operationIdentity: sha256({ kind: `checklist-${bodyDigest}`, threadIdentity }),
+    kind: 'CHECKLIST_UPSERT', threadIdentity, marker, bodyDigest, observedAt,
+    expiresAt: new Date(Date.parse(observedAt) + 120_000).toISOString(),
+  };
+  const durable = readReceipt(path);
+  if (durable) return durable;
   const found = await github.findChecklist({
     repository: observation.repository, pullRequest: observation.pullRequest.number, marker,
   });
+  if (!reserve(path, intent)) {
+    const reconciled = await github.findChecklist({
+      repository: observation.repository, pullRequest: observation.pullRequest.number, marker,
+    });
+    if (reconciled?.body === body) return settle(path, reconciled);
+    const existing = readIntent(path);
+    if (!existing || existing.schema !== intent.schema
+        || existing.operationIdentity !== intent.operationIdentity) {
+      fail('OperationIntentCorrupt', 'checklist operation intent is absent or corrupt');
+    }
+    if (Date.parse(observedAt) >= Date.parse(existing.expiresAt)) {
+      fail('ChecklistUncertain', 'checklist upsert remains ambiguous after its bounded lease');
+    }
+    return Object.freeze({ state: 'PENDING', marker });
+  }
   if (found) {
-    if (!existsSync(path)) reserve(path);
+    if (found.body === body) return settle(path, found);
     const updated = await github.updateChecklist({
       repository: observation.repository, pullRequest: observation.pullRequest.number,
       commentId: found.id, marker, body,
     });
     return settle(path, updated ?? found);
-  }
-  if (!reserve(path)) {
-    // Another supervisor owns the durable intent. It may still be inside the provider call; this
-    // tick performs no effect and the next reconciliation will either adopt the marker or report
-    // the still-uncertain intent. Waiting or blindly retrying here would create the race.
-    return Object.freeze({ state: 'PENDING', marker });
   }
   try {
     return settle(path, await github.createChecklist({
@@ -187,9 +232,18 @@ async function ensureChecklist({ directory, github, observation, threadIdentity,
  */
 export function createBoundedRepairLaneEffects({ execution }) {
   if (!execution || typeof execution.execute !== 'function') fail('InvalidAdapter', 'execution port required');
-  const receipts = new Map();
+  const normalize = (idempotencyKey, result) => result === null ? null : Object.freeze({
+    id: result.threadIdentity ?? idempotencyKey,
+    idempotencyKey,
+    status: result.status,
+    changeSetIdentity: result.changeSet?.identity ?? result.changeSetIdentity ?? null,
+    addressedCommentIds: result.addressedCommentIds ?? [],
+  });
   return Object.freeze({
-    async findRepairLane({ idempotencyKey }) { return receipts.get(idempotencyKey) ?? null; },
+    async findRepairLane({ idempotencyKey }) {
+      if (typeof execution.findReceipt !== 'function') return null;
+      return normalize(idempotencyKey, await execution.findReceipt({ idempotencyKey }));
+    },
     async startRepairLane(request) {
       const task = [
         `Repair review thread ${request.reviewThreadId} on ${request.repository}#${request.pullRequest}.`,
@@ -198,15 +252,23 @@ export function createBoundedRepairLaneEffects({ execution }) {
         `Address exactly comment ids: ${request.actionableCommentIds.join(',')}.`,
       ].join(' ');
       const result = await execution.execute({
-        intent: { action: 'RUN_FACTORY_AGENT', repository: request.repository, task },
+        intent: {
+          action: 'RUN_FACTORY_AGENT', repository: request.repository, task,
+          reviewThreadEvidence: {
+            threadIdentity: request.threadIdentity,
+            reviewThreadId: request.reviewThreadId,
+            anchorPath: request.anchorPath,
+            addressedCommentIds: request.actionableCommentIds,
+          },
+        },
         idempotencyKey: request.idempotencyKey,
       });
-      const receipt = Object.freeze({
-        id: request.threadIdentity, idempotencyKey: request.idempotencyKey,
-        status: result.status, changeSetIdentity: result.changeSet?.identity ?? null,
+      return Object.freeze({
+        ...normalize(request.idempotencyKey, result), id: request.threadIdentity,
+        addressedCommentIds: result.status === 'completed'
+          && result.changeSet?.files?.some(({ path }) => path === request.anchorPath)
+          ? request.actionableCommentIds : [],
       });
-      receipts.set(request.idempotencyKey, receipt);
-      return receipt;
     },
   });
 }
@@ -219,6 +281,7 @@ export async function runPrReviewThreadSupervisorTick({
   if (!github || typeof github.collectReviewThreads !== 'function'
       || typeof github.findChecklist !== 'function' || typeof github.createChecklist !== 'function'
       || typeof github.updateChecklist !== 'function'
+      || typeof github.readRepairEvidence !== 'function'
       || !lanes || typeof lanes.findRepairLane !== 'function'
       || typeof lanes.startRepairLane !== 'function'
       || typeof synchronizeTelemetry !== 'function') {
@@ -232,10 +295,11 @@ export async function runPrReviewThreadSupervisorTick({
   const results = [];
   for (const observation of collection.observations) {
     const threadIdentity = identityOf(observation);
+    const owner = sha256({ kind: 'review-thread-supervisor', threadIdentity }).slice(0, 32);
     let result = null;
     try {
       result = await runPrReviewThreadRepairPump({
-        directory, observation, grant, authority, effects: github, now,
+        directory, observation, grant, authority, effects: github, now, owner,
       });
     } catch (error) {
       if (!(error instanceof PrReviewRepairError)
@@ -243,14 +307,29 @@ export async function runPrReviewThreadSupervisorTick({
     }
     const history = historyOf(directory, threadIdentity);
     if (history.includes('CLAIMED') && !history.includes('REFUSED') && !history.includes('RESOLVED')) {
-      const lane = await ensureLane({ directory, lanes, observation, threadIdentity });
-      const plan = planPrReviewThreadRepair({ observation, history });
+      const lane = await ensureLane({ directory, lanes, observation, threadIdentity, observedAt });
+      let currentObservation = observation;
+      if (lane.state !== 'PENDING') {
+        currentObservation = await github.readRepairEvidence({ observation, laneReceipt: lane });
+        try {
+          result = await runPrReviewThreadRepairPump({
+            directory, observation: currentObservation, grant, authority, effects: github, now, owner,
+          });
+        } catch (error) {
+          if (!(error instanceof PrReviewRepairError)
+              || !['RepairRaceLost', 'RepairInFlight'].includes(error.code)) throw error;
+        }
+      }
+      const finalHistory = historyOf(directory, threadIdentity);
+      const plan = planPrReviewThreadRepair({ observation: currentObservation, history: finalHistory });
       const peers = projectPrReviewRepairLedger({ directory }).projection.lanes
         .filter((candidate) => candidate.threadIdentity !== threadIdentity);
       const checklist = renderRepairChecklist({
-        reading: plan, observation, eta: estimateRepairEta(peers), history,
+        reading: plan, observation: currentObservation, eta: estimateRepairEta(peers), history: finalHistory,
       }) + `\n\n${PR_REVIEW_CHECKLIST_MARKER_PREFIX}${threadIdentity}`;
-      await ensureChecklist({ directory, github, observation, threadIdentity, body: checklist });
+      await ensureChecklist({
+        directory, github, observation, threadIdentity, body: checklist, observedAt,
+      });
       results.push({ threadIdentity, result, lane });
     } else {
       results.push({ threadIdentity, result, lane: null });

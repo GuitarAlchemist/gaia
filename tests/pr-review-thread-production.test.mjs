@@ -4,7 +4,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -41,6 +41,8 @@ const graph = ({ resolved = false } = {}) => ({
             id: 'PRRT_thread_44', path: 'src/pump.mjs', line: 41,
             isResolved: resolved, isOutdated: false,
             comments: {
+              totalCount: 1,
+              pageInfo: { hasNextPage: false, endCursor: null },
               nodes: [{
                 id: 'PRRC_comment_44', body: 'P1: missed COMMENTED review thread.',
                 review: {
@@ -100,7 +102,9 @@ function supervisorGithub() {
   return {
     get creates() { return creates; },
     async collectReviewThreads() {
-      const adapter = createGitGhPrReviewThreadEffects({ run: async () => graph() });
+      const adapter = createGitGhPrReviewThreadEffects({
+        run: async () => graph(), readDisputeEvidence: async () => false,
+      });
       return adapter.collectReviewThreads({
         repository: 'GuitarAlchemist/gaia', pullRequest: 44, observedAt: AT,
         run: { runId: 'review-44', laneGeneration: 1 },
@@ -113,11 +117,19 @@ function supervisorGithub() {
     async createChecklist(request) {
       if (checklists.has(request.marker)) return checklists.get(request.marker);
       creates += 1;
-      const receipt = { id: 'IC_checklist_44', url: 'https://github.com/x/y/issues/44#issuecomment-1' };
+      const receipt = {
+        id: 'IC_checklist_44', url: 'https://github.com/x/y/issues/44#issuecomment-1',
+        body: request.body,
+      };
       checklists.set(request.marker, receipt);
       return receipt;
     },
-    async updateChecklist(request) { return checklists.get(request.marker); },
+    async updateChecklist(request) {
+      const updated = { ...checklists.get(request.marker), body: request.body };
+      checklists.set(request.marker, updated);
+      return updated;
+    },
+    async readRepairEvidence({ observation }) { return observation; },
   };
 }
 
@@ -175,8 +187,148 @@ test('R1 concurrent ticks never duplicate a lane start while the first provider 
   assert.equal(starts, 1, 'the durable intent is the unique lane-start linearization point');
 });
 
+test('R2 concurrent checklist upserts linearize on one durable intent before one provider effect', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'gaia-pr-review-checklist-race-'));
+  const base = supervisorGithub();
+  const comments = new Map();
+  let creates = 0;
+  let release;
+  let entered;
+  const started = new Promise((resolve) => { entered = resolve; });
+  const hold = new Promise((resolve) => { release = resolve; });
+  const github = {
+    ...base,
+    async findChecklist({ marker }) { return comments.get(marker) ?? null; },
+    async createChecklist(request) {
+      creates += 1;
+      assert.ok(
+        readdirSync(join(directory, 'pr-review-thread-operations'))
+          .some((name) => name.endsWith('.intent.json')),
+        'the durable intent exists before the provider effect begins',
+      );
+      const receipt = { id: 'IC_race', url: 'https://github.test/comment/1', body: request.body };
+      comments.set(request.marker, receipt);
+      entered();
+      await hold;
+      return receipt;
+    },
+    async updateChecklist() { throw new Error('an identical body must be adopted, not patched'); },
+  };
+  const lanes = concurrentLanePort();
+  const tick = () => runPrReviewThreadSupervisorTick({
+    directory, repository: 'GuitarAlchemist/gaia', pullRequest: 44,
+    github, lanes, authority: { consume: async () => ({ status: 'AUTHORIZED' }) },
+    grant: null, now: () => new Date(AT), synchronizeTelemetry: async () => ({ rowCount: 3 }),
+  });
+
+  const winner = tick();
+  await started;
+  const loser = await tick();
+  assert.equal(loser.results[0].lane.id.startsWith('lane-'), true);
+  assert.equal(creates, 1);
+  release();
+  await winner;
+  assert.equal(creates, 1, 'two actors at one revision produce one checklist effect');
+});
+
+test('R2 a lost checklist response is reconciled from the marker after restart', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'gaia-pr-review-checklist-lost-'));
+  const base = supervisorGithub();
+  const comments = new Map();
+  let creates = 0;
+  let loseResponse = true;
+  const github = {
+    ...base,
+    async findChecklist({ marker }) { return comments.get(marker) ?? null; },
+    async createChecklist(request) {
+      creates += 1;
+      const receipt = { id: 'IC_lost', url: 'https://github.test/comment/lost', body: request.body };
+      comments.set(request.marker, receipt);
+      if (loseResponse) throw new Error('provider response lost after success');
+      return receipt;
+    },
+    async updateChecklist() { throw new Error('reconciliation must not retry another effect'); },
+  };
+  const lanes = concurrentLanePort();
+  const tick = () => runPrReviewThreadSupervisorTick({
+    directory, repository: 'GuitarAlchemist/gaia', pullRequest: 44,
+    github, lanes, authority: { consume: async () => ({ status: 'AUTHORIZED' }) },
+    grant: null, now: () => new Date(AT), synchronizeTelemetry: async () => ({ rowCount: 3 }),
+  });
+
+  await assert.rejects(tick(), { code: 'ChecklistFailed' });
+  loseResponse = false;
+  await tick();
+  assert.equal(creates, 1, 'a fresh supervisor adopts the provider marker without recreating');
+});
+
+test('R2 production reconciliation reaches verified exact-thread resolution from measured evidence', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'gaia-pr-review-production-resolve-'));
+  const base = supervisorGithub();
+  const replies = [];
+  let resolved = false;
+  const github = {
+    ...base,
+    async readRepairEvidence({ observation, laneReceipt }) {
+      return {
+        ...observation,
+        applicability: {
+          anchorDigestAtReview: '1'.repeat(64), anchorDigestAtCurrentHead: '1'.repeat(64),
+        },
+        repair: {
+          headOid: OID, descendsFromReviewedHead: true, touchesAnchorPath: true,
+          commitsAheadOfReviewedHead: 1,
+          addressedCommentIds: laneReceipt.addressedCommentIds,
+        },
+        checks: {
+          headOid: OID, requiredContexts: ['test'],
+          conclusions: [{ context: 'test', conclusion: 'SUCCESS' }],
+        },
+      };
+    },
+    async readReviewThread() { return { isResolved: resolved, comments: replies }; },
+    async postReviewThreadComment({ threadIdentity }) {
+      const receipt = {
+        id: 'PRRC_reply', url: 'https://github.com/x/y/pull/44#discussion_r1', marker: threadIdentity,
+      };
+      replies.push(receipt);
+      return receipt;
+    },
+    async resolveReviewThread({ reviewThreadId }) {
+      assert.equal(reviewThreadId, 'PRRT_thread_44');
+      resolved = true;
+      return { isResolved: true };
+    },
+  };
+  const lanes = {
+    async findRepairLane() { return null; },
+    async startRepairLane(request) {
+      return {
+        id: 'lane-verified', idempotencyKey: request.idempotencyKey,
+        addressedCommentIds: ['PRRC_comment_44'],
+      };
+    },
+  };
+  for (let tick = 0; tick < 4 && !resolved; tick += 1) {
+    await runPrReviewThreadSupervisorTick({
+      directory, repository: 'GuitarAlchemist/gaia', pullRequest: 44,
+      github, lanes, authority: { consume: async () => ({ status: 'AUTHORIZED' }) },
+      grant: null, now: () => new Date(AT), synchronizeTelemetry: async () => ({ rowCount: 7 }),
+    });
+  }
+  assert.equal(resolved, true);
+  assert.deepEqual(
+    ['RECEIVED', 'CLASSIFIED', 'CLAIMED', 'REPAIRED', 'VERIFIED', 'COMMENTED', 'RESOLVED']
+      .filter((verb) => readPrReviewRepairLedger({ directory }).transitions
+        .some(({ transition }) => transition === verb)),
+    ['RECEIVED', 'CLASSIFIED', 'CLAIMED', 'REPAIRED', 'VERIFIED', 'COMMENTED', 'RESOLVED'],
+  );
+});
+
 test('R1 merge gate consumes unresolved P1 and refuses an incomplete collector window', async () => {
-  const adapter = createGitGhPrReviewThreadEffects({ run: async () => graph() });
+  const adapter = createGitGhPrReviewThreadEffects({
+    run: async () => graph(), readDisputeEvidence: async () => false,
+  });
   const complete = await adapter.collectReviewThreads({
     repository: 'GuitarAlchemist/gaia', pullRequest: 44, observedAt: AT,
     run: { runId: 'review-44', laneGeneration: 1 },

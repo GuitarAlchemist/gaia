@@ -208,8 +208,6 @@ test('a Windows short path and its long form bind the same canonical roots', {
   await build(shortRoot).execute({ intent, idempotencyKey: 'c'.repeat(64) });
   await build(evidenceRoot).execute({ intent, idempotencyKey: 'c'.repeat(64) });
 
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0].evidenceDir, calls[1].evidenceDir);
+  assert.equal(calls.length, 1);
   assert.equal(calls[0].evidenceDir, join(realpathSync.native(evidenceRoot), 'c'.repeat(64)));
-  assert.equal(calls[0].worktree, calls[1].worktree);
 });

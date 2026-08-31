@@ -691,7 +691,7 @@ test('R33: every published vocabulary is closed, frozen and complete', () => {
     // would have to borrow REPAIR_UNVERIFIED and record the repair as unverified when it was
     // verified and it was the grant that was refused.
     'APPLICABILITY_UNKNOWN', 'AUTHORITY_REFUSED', 'FINDING_STALE', 'PARTIALLY_ADDRESSED',
-    'REPAIR_UNVERIFIED', 'THREAD_DISPUTED',
+    'REPAIR_UNVERIFIED', 'THREAD_DISPUTED', 'THREAD_DISPUTE_UNKNOWN',
   ]);
   for (const severity of PR_REVIEW_ACTIONABLE_SEVERITIES) {
     assert.ok(PR_REVIEW_SEVERITIES.includes(severity));
