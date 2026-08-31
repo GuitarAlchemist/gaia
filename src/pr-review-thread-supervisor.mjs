@@ -322,7 +322,7 @@ async function ensureChecklist({
     found = reconciled ?? found;
   }
   if (found) {
-    if (found.body === body) return settle(path, intent, found);
+    if (found.body === body) return settle(path, operationIntent, found);
     try {
       await authorize({
         authority, acquireGrant,
