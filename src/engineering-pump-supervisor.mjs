@@ -252,7 +252,9 @@ function ensureCorrelation({ directory, observed, subject, draftPlan, actionIden
   return claim;
 }
 
-function recoverClaimOutbox({ directory, observed, lockOptions }) {
+async function recoverClaimOutbox({
+  directory, observed, grant, authority, effects, now, owner, leaseMs, lockOptions,
+}) {
   const drainTick = tickPortfolioDrain({
     directory, portfolio: observed.portfolio, capacity: 1, lockOptions,
   });
@@ -275,12 +277,20 @@ function recoverClaimOutbox({ directory, observed, lockOptions }) {
     (entry) => entry.operationIdentity === draftPlan.operationIdentity
       && entry.transition === 'INTENT',
   );
-  if (priorIntent) return null;
-
   ensureCorrelation({
     directory, observed, subject, draftPlan,
     actionIdentity: desiredActionIdentity, lockOptions,
   });
+  if (priorIntent) {
+    const delivery = await deliverFirstEvidenceDraftPr({
+      directory, observation: subject.draftObservation, grant, authority, effects,
+      now, owner, leaseMs, lockOptions,
+    });
+    return deepFreeze({
+      gate: readyGate(observed, subject), delivery,
+      checklist: projectEngineeringPumpChecklist({ directory, lockOptions }),
+    });
+  }
   return deepFreeze({
     gate: noAction('BLOCKED', 'DELIVERY_INTENT_MISSING'), delivery: null,
     checklist: projectEngineeringPumpChecklist({ directory, lockOptions }),
@@ -299,7 +309,9 @@ export async function runEngineeringPumpSupervisorTick({
     return deepFreeze({ gate: noAction('EXPECTED_NONE', 'NO_READY_WORK'), delivery: null,
       checklist: projectEngineeringPumpChecklist({ directory }) });
   }
-  const recovered = recoverClaimOutbox({ directory, observed, lockOptions });
+  const recovered = await recoverClaimOutbox({
+    directory, observed, grant, authority, effects, now, owner, leaseMs, lockOptions,
+  });
   if (recovered !== null) return recovered;
   if (observed.capacity.providerSlots === 0) {
     return deepFreeze({ gate: noAction('PROVIDER_SATURATED', 'NO_PROVIDER_SLOT'), delivery: null,
