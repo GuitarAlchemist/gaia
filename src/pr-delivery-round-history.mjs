@@ -600,10 +600,27 @@ function validateEvidenceRecord(value) {
         || !SHA256.test(value.receiptRevision)) fail(code);
       return Object.freeze(ownedClone(value, code));
     }
+    if (value?.kind === 'CLAIM') {
+      keys(value, [
+        'schema', 'kind', 'workKey', 'operationId', 'idempotencyKey', 'intentRevision',
+        'claimId', 'claimReceiptRevision', 'observedAt', 'leaseExpiresAt',
+        'predecessorClaimRevision',
+      ], code);
+      if (value.schema !== 'GaiaManagedRoundEvidenceV0' || !SHA256.test(value.workKey)
+        || !SHA256.test(value.operationId) || value.idempotencyKey !== value.operationId
+        || !SHA256.test(value.intentRevision) || !SHA256.test(value.claimId)
+        || !SHA256.test(value.claimReceiptRevision)
+        || !ISO_INSTANT.test(value.observedAt) || !ISO_INSTANT.test(value.leaseExpiresAt)
+        || (value.predecessorClaimRevision !== 'NONE'
+          && !SHA256.test(value.predecessorClaimRevision))) fail(code);
+      const duration = Date.parse(value.leaseExpiresAt) - Date.parse(value.observedAt);
+      if (!Number.isSafeInteger(duration) || duration <= 0 || duration > 10 * 60 * 1000) fail(code);
+      return Object.freeze(ownedClone(value, code));
+    }
     if (value?.kind === 'APPLIED') {
       keys(value, [
         'schema', 'kind', 'workKey', 'operationId', 'idempotencyKey', 'intentRevision',
-        'providerReceipt', 'result',
+        'claimRevision', 'providerReceipt', 'result',
       ], code);
       keys(value.providerReceipt, [
         'schema', 'operationId', 'number', 'headRevision', 'bodyRevision',
@@ -615,6 +632,7 @@ function validateEvidenceRecord(value) {
       if (value.schema !== 'GaiaManagedRoundEvidenceV0' || !SHA256.test(value.workKey)
         || !SHA256.test(value.operationId) || value.idempotencyKey !== value.operationId
         || !SHA256.test(value.intentRevision)
+        || (value.claimRevision !== 'NONE' && !SHA256.test(value.claimRevision))
         || value.providerReceipt.schema !== 'GaiaGitHubRoundEffectReceiptV0'
         || value.providerReceipt.operationId !== value.operationId
         || value.result.kind !== 'APPLIED' || value.result.operationId !== value.operationId
@@ -643,12 +661,27 @@ function validateEvidenceSnapshot(value) {
     const prior = operations.get(record.operationId) ?? [];
     if (record.kind === 'INTENT') {
       if (prior.some((candidate) => candidate.kind === 'APPLIED')) fail('EvidenceProtocolViolation');
-      const lastAttempt = prior.at(-1)?.attempt ?? 0;
+      const lastAttempt = prior.findLast((candidate) => candidate.kind === 'INTENT')?.attempt ?? 0;
       if (record.attempt <= lastAttempt) fail('EvidenceProtocolViolation');
+    } else if (record.kind === 'CLAIM') {
+      const intent = prior.findLast((candidate) => candidate.kind === 'INTENT');
+      const previousClaim = prior.findLast((candidate) => candidate.kind === 'CLAIM');
+      if (!intent || record.intentRevision !== recordRevision(intent)
+        || prior.some((candidate) => candidate.kind === 'APPLIED')
+        || record.predecessorClaimRevision !== (previousClaim
+          ? recordRevision(previousClaim) : 'NONE')
+        || (previousClaim
+          && Date.parse(record.observedAt) < Date.parse(previousClaim.leaseExpiresAt))) {
+        fail('EvidenceProtocolViolation');
+      }
     } else {
       const intent = prior.findLast((candidate) => candidate.kind === 'INTENT');
+      const claim = prior.findLast((candidate) => candidate.kind === 'CLAIM');
       if (!intent || record.intentRevision !== recordRevision(intent)
-        || prior.some((candidate) => candidate.kind === 'APPLIED')) fail('EvidenceProtocolViolation');
+        || prior.some((candidate) => candidate.kind === 'APPLIED')
+        || (intent.transition === 'CREATE_R0' && !claim)
+        || record.claimRevision !== (intent.transition === 'CREATE_R0'
+          ? recordRevision(claim) : 'NONE')) fail('EvidenceProtocolViolation');
     }
     prior.push(record);
     operations.set(record.operationId, prior);
@@ -675,6 +708,12 @@ function intentFor(snapshot, operationId) {
   ) ?? null;
 }
 
+function claimFor(snapshot, operationId) {
+  return snapshot.records.findLast(
+    (record) => record.kind === 'CLAIM' && record.operationId === operationId,
+  ) ?? null;
+}
+
 async function readEvidence(port, workKey) {
   return validateEvidenceSnapshot(await port.read(workKey));
 }
@@ -684,6 +723,10 @@ async function persistIntent(port, intent) {
     const before = await readEvidence(port, intent.workKey);
     const terminal = terminalFor(before, intent.operationId);
     if (terminal) return { terminal };
+    const existingIntent = intentFor(before, intent.operationId);
+    if (existingIntent && canonical(existingIntent) === canonical(intent)) {
+      return { intent: existingIntent, intentRevision: recordRevision(existingIntent) };
+    }
     const latest = before.records.at(-1);
     if (latest?.kind === 'INTENT' && latest.operationId !== intent.operationId) {
       return { refusal: refusal('EvidenceLineageConflict') };
@@ -731,7 +774,7 @@ function providerReceipt(operationId, observed) {
   });
 }
 
-function appliedRecord(intent, intentRevision, attempts, observed) {
+function appliedRecord(intent, intentRevision, claimRevision, attempts, observed) {
   const result = Object.freeze({
     kind: 'APPLIED', operationId: intent.operationId, idempotencyKey: intent.idempotencyKey,
     attempts, observed: Object.freeze(ownedClone(observed)),
@@ -739,7 +782,8 @@ function appliedRecord(intent, intentRevision, attempts, observed) {
   return Object.freeze({
     schema: 'GaiaManagedRoundEvidenceV0', kind: 'APPLIED', workKey: intent.workKey,
     operationId: intent.operationId, idempotencyKey: intent.idempotencyKey,
-    intentRevision, providerReceipt: providerReceipt(intent.operationId, observed), result,
+    intentRevision, claimRevision,
+    providerReceipt: providerReceipt(intent.operationId, observed), result,
   });
 }
 
@@ -785,6 +829,75 @@ function makeIntent({ workKey, operationId, transition, attempt, expectedHeadRev
     idempotencyKey: operationId, transition, attempt, expectedHeadRevision,
     expectedBodyRevision, proposedBodyRevision, effectOwner, receiptRevision,
   });
+}
+
+function effectClaim(value) {
+  const code = 'InvalidEffectClaim';
+  try {
+    keys(value, [
+      'schema', 'revision', 'claimId', 'observedAt', 'leaseExpiresAt',
+    ], code);
+  } catch (error) {
+    if (error instanceof DeliveryRoundError) fail(code);
+    throw error;
+  }
+  if (value.schema !== 'GaiaManagedRoundEffectClaimV0' || !SHA256.test(value.revision)
+    || !SHA256.test(value.claimId) || !ISO_INSTANT.test(value.observedAt)
+    || !ISO_INSTANT.test(value.leaseExpiresAt)) fail(code);
+  const duration = Date.parse(value.leaseExpiresAt) - Date.parse(value.observedAt);
+  if (!Number.isSafeInteger(duration) || duration <= 0 || duration > 10 * 60 * 1000) fail(code);
+  return Object.freeze(ownedClone(value, code));
+}
+
+function makeClaim(intent, intentRevision, receipt, predecessorClaimRevision) {
+  return Object.freeze({
+    schema: 'GaiaManagedRoundEvidenceV0', kind: 'CLAIM', workKey: intent.workKey,
+    operationId: intent.operationId, idempotencyKey: intent.idempotencyKey, intentRevision,
+    claimId: receipt.claimId, claimReceiptRevision: receipt.revision,
+    observedAt: receipt.observedAt, leaseExpiresAt: receipt.leaseExpiresAt,
+    predecessorClaimRevision,
+  });
+}
+
+async function persistClaim(port, intent, intentRevision, receipt) {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const before = await readEvidence(port, intent.workKey);
+    const terminal = terminalFor(before, intent.operationId);
+    if (terminal) return { terminal };
+    const durableIntent = intentFor(before, intent.operationId);
+    if (!durableIntent || recordRevision(durableIntent) !== intentRevision) {
+      return { refusal: refusal('EvidenceIntentConflict') };
+    }
+    const prior = claimFor(before, intent.operationId);
+    if (prior && Date.parse(receipt.observedAt) < Date.parse(prior.leaseExpiresAt)) {
+      return { refusal: refusal('EffectClaimHeld') };
+    }
+    const claim = makeClaim(
+      intent, intentRevision, receipt, prior ? recordRevision(prior) : 'NONE',
+    );
+    let acknowledgement;
+    try {
+      acknowledgement = await port.compareAndAppend(intent.workKey, before.version, claim);
+    } catch {
+      acknowledgement = { kind: 'AMBIGUOUS' };
+    }
+    if (!['APPENDED', 'STALE', 'AMBIGUOUS'].includes(acknowledgement?.kind)) {
+      fail('EvidenceProtocolViolation');
+    }
+    const after = await readEvidence(port, intent.workKey);
+    const stored = claimFor(after, intent.operationId);
+    if (stored && canonical(stored) === canonical(claim)
+      && acknowledgement.kind !== 'STALE') {
+      return { claim: stored, claimRevision: recordRevision(stored) };
+    }
+    if (terminalFor(after, intent.operationId)) {
+      return { terminal: terminalFor(after, intent.operationId) };
+    }
+    if (claimFor(after, intent.operationId)) return { refusal: refusal('EffectClaimHeld') };
+  }
+  return { refusal: Object.freeze({
+    kind: 'BLOCKED', code: 'POSTCONDITION_UNPROVEN', attempts: MAX_ATTEMPTS,
+  }) };
 }
 
 export function createMemoryManagedRoundEvidencePort() {
@@ -919,19 +1032,21 @@ async function reconcileExisting(port, operationId, observed) {
     observed.observation.body,
   )) return null;
   const record = appliedRecord(
-    intent, recordRevision(intent), intent.attempt, observed.observation,
+    intent, recordRevision(intent), 'NONE', intent.attempt, observed.observation,
   );
   return persistApplied(port, record);
 }
 
 export async function executeManagedDraftCreation(input) {
   keys(input, [
-    'workKey', 'headRevision', 'baseBody', 'receipt', 'effectActor', 'adapter', 'evidencePort',
+    'workKey', 'headRevision', 'baseBody', 'receipt', 'effectActor', 'effectClaim',
+    'adapter', 'evidencePort',
   ], 'InvalidInput');
   if (typeof input.baseBody !== 'string' || typeof input.effectActor !== 'string') fail('InvalidInput');
   const workKey = sha256(input.workKey, 'InvalidInput');
   const adapter = adapterPort(input.adapter, true);
   const durable = evidencePort(input.evidencePort);
+  const claimReceipt = effectClaim(input.effectClaim);
   const initial = createInitialManagedRound({
     workKey, headRevision: input.headRevision, receipt: input.receipt,
   });
@@ -953,7 +1068,14 @@ export async function executeManagedDraftCreation(input) {
   if (persisted.terminal) return Object.freeze(ownedClone(persisted.terminal.result));
   if (persisted.refusal) return persisted.refusal;
   let observed = await adapter.observeByOperation(initial.roundKey);
+  let appliedClaimRevision;
   if (!exactPostcondition(observed, input.headRevision, proposedBodyRevision, proposedBody)) {
+    const claimed = await persistClaim(
+      durable, intent, persisted.intentRevision, claimReceipt,
+    );
+    if (claimed.terminal) return Object.freeze(ownedClone(claimed.terminal.result));
+    if (claimed.refusal) return claimed.refusal;
+    appliedClaimRevision = claimed.claimRevision;
     const effect = Object.freeze({
       operationId: initial.roundKey, idempotencyKey: initial.roundKey, workKey,
       expectedHeadRevision: input.headRevision, expectedBodyRevision: revision(input.baseBody),
@@ -971,6 +1093,12 @@ export async function executeManagedDraftCreation(input) {
       }
       if (exactPostcondition(observed, input.headRevision, proposedBodyRevision, proposedBody)) break;
     }
+  } else {
+    const priorClaim = claimFor(await readEvidence(durable, workKey), initial.roundKey);
+    if (!priorClaim) return Object.freeze({
+      kind: 'BLOCKED', code: 'POSTCONDITION_UNPROVEN', attempts: MAX_ATTEMPTS, observed,
+    });
+    appliedClaimRevision = recordRevision(priorClaim);
   }
   if (!exactPostcondition(observed, input.headRevision, proposedBodyRevision, proposedBody)) {
     return Object.freeze({
@@ -978,7 +1106,7 @@ export async function executeManagedDraftCreation(input) {
     });
   }
   return persistApplied(durable, appliedRecord(
-    intent, persisted.intentRevision, 1, observed,
+    intent, persisted.intentRevision, appliedClaimRevision, 1, observed,
   ));
 }
 
@@ -1033,7 +1161,7 @@ export async function executeManagedRoundUpdate(input) {
       observed, plan.expected.headRevision, plan.proposedBodyRevision, plan.proposedBody,
     )) {
       return persistApplied(durable, appliedRecord(
-        intent, persisted.intentRevision, attempt, observed,
+        intent, persisted.intentRevision, 'NONE', attempt, observed,
       ));
     }
     mismatch = Object.freeze({

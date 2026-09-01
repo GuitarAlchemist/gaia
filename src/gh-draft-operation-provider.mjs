@@ -312,7 +312,8 @@ export function createGhDraftOperationProvider({
       const result = await executeManagedDraftCreation({
         workKey: managed.workKey, headRevision: request.headRevision,
         baseBody: renderBody(display, request.operationMarker), receipt: managed.receipt,
-        effectActor: managed.effectActor, adapter, evidencePort: managed.evidencePort,
+        effectActor: managed.effectActor, effectClaim: managed.effectClaim,
+        adapter, evidencePort: managed.evidencePort,
       });
       if (result.kind !== 'APPLIED' || last === null) fail('ManagedRoundEffectRefused');
       return last.draft;

@@ -142,6 +142,15 @@ function observation(body, overrides = {}) {
   };
 }
 
+function effectClaim(claimId = '9'.repeat(64), overrides = {}) {
+  return {
+    schema: 'GaiaManagedRoundEffectClaimV0', revision: '8'.repeat(64), claimId,
+    observedAt: '2026-09-01T22:40:00.000Z',
+    leaseExpiresAt: '2026-09-01T22:45:00.000Z',
+    ...overrides,
+  };
+}
+
 function githubApiFixture(initial = []) {
   const drafts = new Map(initial.map((item) => [item.number, structuredClone(item)]));
   const operations = new Map();
@@ -657,6 +666,7 @@ test('every managed Draft is created with canonical R0 through both public adapt
         baseBody: 'human-authored prefix\r\nwith exact bytes',
         receipt: openReceipt(),
         effectActor: EFFECT,
+        effectClaim: effectClaim(),
         adapter,
         evidencePort,
       });
@@ -667,7 +677,9 @@ test('every managed Draft is created with canonical R0 through both public adapt
       assert.equal((result.observed.body.match(/<!-- gaia-rounds:begin:/gu) ?? []).length, 1);
       assert.equal((result.observed.body.match(/#### R0/gu) ?? []).length, 1);
       const evidenceSnapshot = await evidencePort.read(WORK_KEY);
-      assert.deepEqual(evidenceSnapshot.records.map((record) => record.kind), ['INTENT', 'APPLIED']);
+      assert.deepEqual(
+        evidenceSnapshot.records.map((record) => record.kind), ['INTENT', 'CLAIM', 'APPLIED'],
+      );
       if (fixture) {
         assert.equal(fixture.calls.filter((call) => call.method === 'createDraft').length, 1);
         assert.ok(fixture.calls.some((call) => call.method === 'observeByOperation'));
@@ -759,20 +771,21 @@ test('GitHub evidence persists INTENT and read-back-proven APPLIED before byte-i
   };
   const input = {
     workKey: WORK_KEY, headRevision: HEAD, baseBody: 'human', receipt: openReceipt(),
-    effectActor: EFFECT, adapter, evidencePort,
+    effectActor: EFFECT, effectClaim: effectClaim(), adapter, evidencePort,
   };
 
   const first = await executeManagedDraftCreation(input);
   assert.equal(first.kind, 'APPLIED');
-  assert.deepEqual(records.map((record) => record.body.kind), ['INTENT', 'APPLIED']);
+  assert.deepEqual(records.map((record) => record.body.kind), ['INTENT', 'CLAIM', 'APPLIED']);
   assert.ok(calls.filter((call) => call.method === 'read').length >= 4,
     'each durable append is reconciled through read-after-write');
   assert.ok(trace.indexOf('evidence:INTENT') < trace.indexOf('provider:createDraft'));
+  assert.ok(trace.indexOf('evidence:CLAIM') < trace.indexOf('provider:createDraft'));
   assert.ok(trace.indexOf('provider:createDraft') < trace.indexOf('evidence:APPLIED'));
   const intentAppend = trace.indexOf('evidence:INTENT');
   assert.equal(trace[intentAppend + 1], 'evidence:read',
     'durable intent is read back before the provider effect');
-  assert.deepEqual(records[1].body.providerReceipt, {
+  assert.deepEqual(records[2].body.providerReceipt, {
     schema: 'GaiaGitHubRoundEffectReceiptV0',
     operationId: first.operationId,
     number: first.observed.number,
@@ -848,7 +861,10 @@ test('two same-operation creators linearize on one durable claim before provider
   };
 
   const [left, right] = await Promise.all([
-    executeManagedDraftCreation(input), executeManagedDraftCreation(input),
+    executeManagedDraftCreation({ ...input, effectClaim: effectClaim('a'.repeat(64)) }),
+    executeManagedDraftCreation({ ...input, effectClaim: effectClaim('b'.repeat(64), {
+      revision: '7'.repeat(64),
+    }) }),
   ]);
 
   assert.equal(creates, 1);
@@ -856,4 +872,61 @@ test('two same-operation creators linearize on one durable claim before provider
   assert.equal([left, right].filter(
     (result) => result.kind === 'REFUSED' && result.code === 'EffectClaimHeld',
   ).length, 1);
+});
+
+test('a crashed create claim is held until its exact lease boundary, then replaced once', async () => {
+  const {
+    executeManagedDraftCreation, createMemoryManagedRoundEvidencePort,
+  } = await api();
+  let current = null;
+  let creates = 0;
+  const adapter = {
+    async observe() { return current === null ? null : structuredClone(current); },
+    async observeByOperation() { return current === null ? null : structuredClone(current); },
+    async createDraft(effect) {
+      creates += 1;
+      if (creates === 1) return { kind: 'AMBIGUOUS' };
+      current = observation(effect.proposedBody);
+      return { kind: 'ACKNOWLEDGED', number: 69 };
+    },
+    async compareAndSet() { return { kind: 'STALE' }; },
+  };
+  const evidencePort = createMemoryManagedRoundEvidencePort();
+  const input = {
+    workKey: WORK_KEY, headRevision: HEAD, baseBody: 'human', receipt: openReceipt(),
+    effectActor: EFFECT, adapter, evidencePort,
+  };
+
+  const crashed = await executeManagedDraftCreation({
+    ...input, effectClaim: effectClaim('c'.repeat(64)),
+  });
+  assert.deepEqual({ kind: crashed.kind, code: crashed.code }, {
+    kind: 'BLOCKED', code: 'POSTCONDITION_UNPROVEN',
+  });
+
+  const early = await executeManagedDraftCreation({
+    ...input,
+    effectClaim: effectClaim('d'.repeat(64), {
+      revision: '6'.repeat(64), observedAt: '2026-09-01T22:44:59.999Z',
+      leaseExpiresAt: '2026-09-01T22:49:59.999Z',
+    }),
+  });
+  assert.deepEqual({ kind: early.kind, code: early.code }, {
+    kind: 'REFUSED', code: 'EffectClaimHeld',
+  });
+  assert.equal(creates, 1);
+
+  const recovered = await executeManagedDraftCreation({
+    ...input,
+    effectClaim: effectClaim('e'.repeat(64), {
+      revision: '7'.repeat(64), observedAt: '2026-09-01T22:45:00.000Z',
+      leaseExpiresAt: '2026-09-01T22:50:00.000Z',
+    }),
+  });
+  assert.equal(recovered.kind, 'APPLIED');
+  assert.equal(creates, 2);
+  const snapshot = await evidencePort.read(WORK_KEY);
+  assert.deepEqual(snapshot.records.map((record) => record.kind), [
+    'INTENT', 'CLAIM', 'CLAIM', 'APPLIED',
+  ]);
 });
