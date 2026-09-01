@@ -77,7 +77,7 @@ function fakeGitData({ failOnceOnKind = null, protectionSequence = [] } = {}) {
         assert.equal(matches.length, 1, 'operation identity is unique across work refs');
         return { state: 'PRESENT', records: structuredClone(matches[0]) };
       },
-      async compareAndAppend(ref, expectedHeadOid, body) {
+      async compareAndAppend(ref, expectedHeadOid, body, transportMetadata) {
         if (body.kind === failOnceOnKind) {
           failOnceOnKind = null;
           throw new Error('simulated process loss');
@@ -88,6 +88,9 @@ function fakeGitData({ failOnceOnKind = null, protectionSequence = [] } = {}) {
         const oid = nextOid.toString(16).padStart(40, '0');
         nextOid += 1;
         const record = { oid, body: structuredClone(body), committedRevision: revision(body) };
+        if (transportMetadata !== undefined) {
+          record.transportMetadata = structuredClone(transportMetadata);
+        }
         refs.set(ref, [...records, record]);
         return { kind: 'APPENDED', ...structuredClone(record) };
       },
@@ -238,7 +241,7 @@ test('R3 successor epochs fence CLAIMED and INTENT before issuing commands', asy
       }),
     );
     assert.equal(created.outcome, 'CREATED');
-    assert.equal(successorReservations, boundary.durableState === 'CLAIMED' ? 1 : 0);
+    assert.equal(successorReservations, 1);
     const epochReceipts = git.records(workRef)
       .filter(({ body }) => ['CLAIMED', 'INTENT', 'EFFECT_STARTED'].includes(body.kind))
       .map(({ body }) => ({ kind: body.kind, executorEpoch: body.executorEpoch }));
@@ -254,6 +257,7 @@ test('R3 successor epochs fence CLAIMED and INTENT before issuing commands', asy
       : [
         { kind: 'CLAIMED', executorEpoch: firstEpoch },
         { kind: 'INTENT', executorEpoch: firstEpoch },
+        { kind: 'CLAIMED', executorEpoch: successorEpoch },
         { kind: 'INTENT', executorEpoch: successorEpoch },
         { kind: 'EFFECT_STARTED', executorEpoch: successorEpoch },
       ]);
@@ -273,6 +277,12 @@ test('R3 work registration refuses an identical root body stored under a differe
   const store = createGitDataDraftOperationStore({ gitData: git.port, config });
   const accepted = await enqueueDraft(selector, 'NONE', ports(store, observedEnvelope()));
   const workRef = `refs/heads/gaia-ledger/draft-operations-v0/${accepted.workKey}`;
+  const confirmed = git.records(REGISTRY_REF).at(-1);
+  assert.deepEqual(Object.keys(confirmed.body).sort(), [
+    'bootstrapCommittedRevision', 'kind', 'priorCommittedRevision', 'schema', 'workKey',
+  ]);
+  assert.deepEqual(confirmed.transportMetadata, { workRootOid: git.records(workRef)[0].oid });
+  assert.equal(confirmed.committedRevision, revision(confirmed.body));
 
   git.replaceRecordOid(workRef, 0, OID_B);
 
