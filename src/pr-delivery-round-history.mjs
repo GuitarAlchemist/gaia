@@ -576,7 +576,8 @@ function adapterPort(value, create = false) {
 
 function evidencePort(value) {
   if (value === null || typeof value !== 'object'
-    || typeof value.read !== 'function' || typeof value.compareAndAppend !== 'function') {
+    || typeof value.read !== 'function' || typeof value.compareAndAppend !== 'function'
+    || typeof value.leaseState !== 'function') {
     fail('InvalidEvidencePort');
   }
   return value;
@@ -670,8 +671,7 @@ function validateEvidenceSnapshot(value) {
         || prior.some((candidate) => candidate.kind === 'APPLIED')
         || record.predecessorClaimRevision !== (previousClaim
           ? recordRevision(previousClaim) : 'NONE')
-        || (previousClaim
-          && Date.parse(record.observedAt) < Date.parse(previousClaim.leaseExpiresAt))) {
+        ) {
         fail('EvidenceProtocolViolation');
       }
     } else {
@@ -859,7 +859,7 @@ function makeClaim(intent, intentRevision, receipt, predecessorClaimRevision) {
   });
 }
 
-async function persistClaim(port, intent, intentRevision, receipt) {
+async function persistClaim(port, adapter, intent, intentRevision, receipt) {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     const before = await readEvidence(port, intent.workKey);
     const terminal = terminalFor(before, intent.operationId);
@@ -869,8 +869,19 @@ async function persistClaim(port, intent, intentRevision, receipt) {
       return { refusal: refusal('EvidenceIntentConflict') };
     }
     const prior = claimFor(before, intent.operationId);
-    if (prior && Date.parse(receipt.observedAt) < Date.parse(prior.leaseExpiresAt)) {
-      return { refusal: refusal('EffectClaimHeld') };
+    if (prior) {
+      const leaseState = await port.leaseState(intent.workKey, ownedClone(prior));
+      if (!['ACTIVE', 'EXPIRED', 'UNKNOWN'].includes(leaseState)) {
+        fail('EvidenceProtocolViolation');
+      }
+      if (leaseState === 'ACTIVE') return { refusal: refusal('EffectClaimHeld') };
+      if (leaseState === 'UNKNOWN') return { refusal: refusal('LeaseExpiryUnproven') };
+      const absence = typeof adapter.proveCreateAbsent === 'function'
+        ? await adapter.proveCreateAbsent(intent.operationId) : 'UNKNOWN';
+      if (!['PROVEN_ABSENT', 'UNKNOWN'].includes(absence)) fail('AdapterProtocolViolation');
+      if (absence !== 'PROVEN_ABSENT') return { refusal: Object.freeze({
+        kind: 'BLOCKED', code: 'CREATE_OUTCOME_AMBIGUOUS', attempts: MAX_ATTEMPTS,
+      }) };
     }
     const claim = makeClaim(
       intent, intentRevision, receipt, prior ? recordRevision(prior) : 'NONE',
@@ -900,11 +911,21 @@ async function persistClaim(port, intent, intentRevision, receipt) {
   }) };
 }
 
-export function createMemoryManagedRoundEvidencePort() {
+export function createMemoryManagedRoundEvidencePort({ authoritativeNow } = {}) {
+  if (authoritativeNow !== undefined && typeof authoritativeNow !== 'function') {
+    fail('InvalidEvidencePort');
+  }
   const ledgers = new Map();
   const calls = [];
   return Object.freeze({
     calls,
+    async leaseState(workKey, claim) {
+      calls.push({ method: 'leaseState', workKey, claim: ownedClone(claim) });
+      if (authoritativeNow === undefined) return 'UNKNOWN';
+      const now = authoritativeNow();
+      if (typeof now !== 'string' || !ISO_INSTANT.test(now)) fail('EvidenceProtocolViolation');
+      return Date.parse(now) < Date.parse(claim.leaseExpiresAt) ? 'ACTIVE' : 'EXPIRED';
+    },
     async read(workKey) {
       calls.push({ method: 'read', workKey });
       const records = ledgers.get(workKey) ?? [];
@@ -933,6 +954,7 @@ export function createGitHubManagedRoundEvidencePort({ gitData } = {}) {
   }
   const ref = (workKey) => `refs/heads/gaia-ledger/managed-rounds-v0/${sha256(workKey, 'InvalidWorkKey')}`;
   return Object.freeze({
+    async leaseState() { return 'UNKNOWN'; },
     async read(workKey) {
       const observed = await gitData.read(ref(workKey));
       if (observed?.state === 'UNSEEN') return { state: 'UNSEEN' };
@@ -974,6 +996,10 @@ export function createMemoryManagedRoundAdapter({ observations = [] } = {}) {
       const number = operations.get(operationId);
       return number === undefined ? null : ownedClone(drafts.get(number));
     },
+    async proveCreateAbsent(operationId) {
+      calls.push({ method: 'proveCreateAbsent', operationId });
+      return operations.has(operationId) ? 'UNKNOWN' : 'PROVEN_ABSENT';
+    },
     async createDraft(effect) {
       calls.push({ method: 'createDraft', effect: ownedClone(effect) });
       const existing = operations.get(effect.operationId);
@@ -1013,6 +1039,8 @@ export function createGitHubManagedRoundAdapter({ api } = {}) {
     createDraft: (effect) => api.createDraft(effect),
     observe: (number) => api.observe(number),
     observeByOperation: (operationId) => api.observeByOperation(operationId),
+    proveCreateAbsent: (operationId) => (typeof api.proveCreateAbsent === 'function'
+      ? api.proveCreateAbsent(operationId) : 'UNKNOWN'),
     compareAndSet: (effect) => api.compareAndSetBody(effect),
   });
 }
@@ -1071,7 +1099,7 @@ export async function executeManagedDraftCreation(input) {
   let appliedClaimRevision;
   if (!exactPostcondition(observed, input.headRevision, proposedBodyRevision, proposedBody)) {
     const claimed = await persistClaim(
-      durable, intent, persisted.intentRevision, claimReceipt,
+      durable, adapter, intent, persisted.intentRevision, claimReceipt,
     );
     if (claimed.terminal) return Object.freeze(ownedClone(claimed.terminal.result));
     if (claimed.refusal) return claimed.refusal;

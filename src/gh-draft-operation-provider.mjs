@@ -245,7 +245,8 @@ export function createGhDraftOperationProvider({
       'workKey', 'receipt', 'effectActor', 'effectClaim', 'evidencePort',
     ], 'ManagedRoundRequired');
     if (typeof managedRound.evidencePort?.read !== 'function'
-      || typeof managedRound.evidencePort?.compareAndAppend !== 'function') {
+      || typeof managedRound.evidencePort?.compareAndAppend !== 'function'
+      || typeof managedRound.evidencePort?.leaseState !== 'function') {
       fail('ManagedRoundRequired');
     }
     return managedRound;
@@ -269,6 +270,9 @@ export function createGhDraftOperationProvider({
         async observeByOperation() {
           if (last === null) last = await lookupCandidate(request);
           return last === null ? null : observation(last);
+        },
+        async proveCreateAbsent() {
+          return 'UNKNOWN';
         },
         async observe(number) {
           if (last?.draft.number === number) return observation(last);
@@ -317,6 +321,73 @@ export function createGhDraftOperationProvider({
       });
       if (result.kind !== 'APPLIED' || last === null) fail('ManagedRoundEffectRefused');
       return last.draft;
+    },
+  });
+}
+
+function parseIncludedResponse(value) {
+  const text = String(value ?? '');
+  const boundary = Math.max(text.lastIndexOf('\r\n\r\n'), text.lastIndexOf('\n\n'));
+  if (boundary < 0) fail('ProviderProtocolViolation');
+  const header = text.slice(0, boundary);
+  const body = text.slice(boundary + (text.startsWith('\r\n', boundary) ? 4 : 2));
+  const etag = /^etag:\s*(\S+)\s*$/imu.exec(header)?.[1];
+  if (typeof etag !== 'string' || etag.length === 0) fail('ProviderProtocolViolation');
+  return { etag, body: parseJson(body) };
+}
+
+export function createGhManagedRoundApi({ expectedRepository, run = defaultRun } = {}) {
+  const expected = repository(expectedRepository, 'InvalidConfiguration');
+  if (typeof run !== 'function') fail('InvalidAdapter');
+  const repositoryName = `${expected.owner}/${expected.name}`;
+  const etags = new Map();
+  const invoke = async (args, staleOnFailure = false) => {
+    try {
+      return await run('gh', args, {
+        encoding: 'utf8', maxBuffer: 1024 * 1024, windowsHide: true,
+      });
+    } catch {
+      if (staleOnFailure) return null;
+      fail('ProviderUnavailable');
+    }
+  };
+  const observe = async (number) => {
+    if (!Number.isSafeInteger(number) || number <= 0) fail('InvalidInput');
+    const response = await invoke(['api', '-i', `repos/${repositoryName}/pulls/${number}`]);
+    const included = parseIncludedResponse(response?.stdout);
+    const value = included.body;
+    if (value?.number !== number || value?.state !== 'open' || value?.draft !== true
+      || !GIT_OID.test(value?.head?.sha) || typeof value?.body !== 'string') {
+      fail('ProviderProtocolViolation');
+    }
+    const observed = Object.freeze({
+      number, headRevision: value.head.sha, body: value.body,
+      bodyRevision: bodyRevision(value.body),
+    });
+    etags.set(number, { etag: included.etag, headRevision: observed.headRevision,
+      bodyRevision: observed.bodyRevision });
+    return observed;
+  };
+  return Object.freeze({
+    async createDraft() { fail('UnsupportedCreate'); },
+    async observeByOperation() { return null; },
+    async proveCreateAbsent() { return 'UNKNOWN'; },
+    observe,
+    async compareAndSetBody(effect) {
+      const cached = etags.get(effect?.number);
+      if (!cached || cached.headRevision !== effect.expectedHeadRevision
+        || cached.bodyRevision !== effect.expectedBodyRevision) return { kind: 'STALE' };
+      const response = await invoke([
+        'api', '-i', '-X', 'PATCH', `repos/${repositoryName}/pulls/${effect.number}`,
+        '-H', `If-Match: ${cached.etag}`, '-f', `body=${effect.proposedBody}`,
+      ], true);
+      if (response === null) return { kind: 'STALE' };
+      const included = parseIncludedResponse(response.stdout);
+      if (included.body?.head?.sha !== effect.expectedHeadRevision
+        || included.body?.body !== effect.proposedBody) return { kind: 'AMBIGUOUS' };
+      etags.set(effect.number, { etag: included.etag,
+        headRevision: effect.expectedHeadRevision, bodyRevision: effect.proposedBodyRevision });
+      return { kind: 'ACKNOWLEDGED' };
     },
   });
 }

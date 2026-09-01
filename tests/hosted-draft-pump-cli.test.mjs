@@ -22,6 +22,7 @@ const MANAGED_ADVANCE = Object.freeze({
   receipt: { schema: 'GaiaRoundReceiptV0', kind: 'ADVANCE' },
   effectActor: 'github:app:gaia-draft-pump',
 });
+const MANAGED_JSON = JSON.stringify({ create: MANAGED_CREATE, advance: null });
 
 function sink() {
   let value = '';
@@ -102,6 +103,7 @@ test('reconcile binds one durable operation, Actions work key, and concise Draft
       '--check', 'Bind the exact generation',
       '--check', 'Publish provider evidence',
       '--eta-minutes', '60:120',
+      '--managed-round', MANAGED_JSON,
     ],
     env: {
       GITHUB_REPOSITORY: 'GuitarAlchemist/gaia',
