@@ -150,3 +150,17 @@ test('R1 concrete gh observations feed the same collector seam', async () => {
   assert.equal(envelope.generation.headRevision, 'b'.repeat(40));
   assert.equal(responses.length, 0);
 });
+
+test('R1 provider failures are typed and redact gh diagnostics', async () => {
+  const { createGhDraftCollectorApi, HostedDraftCollectorError } = await api();
+  const github = createGhDraftCollectorApi({
+    async run() { throw new Error('secret path and provider payload'); },
+  });
+
+  await assert.rejects(
+    github.resolveRepository({ owner: 'GuitarAlchemist', name: 'gaia' }),
+    (error) => error instanceof HostedDraftCollectorError
+      && error.code === 'GitHubObservationUnavailable'
+      && !error.message.includes('secret'),
+  );
+});
