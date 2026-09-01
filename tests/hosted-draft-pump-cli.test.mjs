@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   HostedDraftPumpCliError,
+  createHostedDraftPumpRuntime,
   main,
 } from '../scripts/hosted-draft-pump.mjs';
 
@@ -208,4 +209,79 @@ test('invalid arguments and provider failures return only closed redacted errors
   });
 
   assert.equal(new HostedDraftPumpCliError('InvalidArguments').message, 'InvalidArguments');
+});
+
+test('the production runtime composition wires existing collector, Git Data, provider, admission, and core seams', async () => {
+  const calls = [];
+  const telemetry = { events: [], async append(event) { this.events.push(event); } };
+  const environment = {
+    GITHUB_REPOSITORY: 'GuitarAlchemist/gaia',
+    GITHUB_RUN_ID: '9001',
+    GITHUB_RUN_ATTEMPT: '2',
+  };
+  const configuration = {
+    command: 'reconcile',
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActorId: 1234,
+    ledgerRootOid: ROOT_OID,
+    ledgerRootRevision: ROOT_REVISION,
+    environment,
+    operationId: OPERATION_ID,
+    workKey: WORK_KEY,
+    expectedRevision: REVISION,
+    repositoryNodeId: 'R_kgDOGaia',
+    verifiedConcurrencyGroup: `gaia-draft-${WORK_KEY}`,
+    presentation: {
+      title: 'feat: deliver issue 60',
+      issueUrl: 'https://github.com/GuitarAlchemist/gaia/issues/60',
+      owner: 'Gaia hosted Draft pump',
+      gate: 'R4_PROVIDER',
+      checklist: ['Bind the exact generation'],
+      eta: { minimumMinutes: 60, maximumMinutes: 120 },
+    },
+  };
+  const gitData = { name: 'git-data' };
+  const store = { name: 'store' };
+  const collectorApi = { name: 'collector-api' };
+  const collector = { collect() {} };
+  const provider = { lookupExact() {}, createDraft() {} };
+  const admission = { executorEpoch: { runId: 9001, runAttempt: 2 }, reserveEffect() {} };
+  const dependencies = {
+    createGhGitDataApi(options) { calls.push(['git-data', options]); return gitData; },
+    createGitDataDraftOperationStore(options) { calls.push(['store', options]); return store; },
+    createGhDraftCollectorApi() { calls.push(['collector-api']); return collectorApi; },
+    createHostedDraftCollector(options) { calls.push(['collector', options]); return collector; },
+    createGhDraftOperationProvider(options) { calls.push(['provider', options]); return provider; },
+    createGitHubActionsDraftAdmission(options) { calls.push(['admission', options]); return admission; },
+    createDraftOperationPorts(options) { calls.push(['ports', options]); return options; },
+    async enqueueDraft(selector, expected, ports) {
+      calls.push(['enqueue-core', selector, expected, ports]);
+      return { kind: 'Enqueued', operationId: OPERATION_ID };
+    },
+    async reconcileDraft(operationId, expected, ports) {
+      calls.push(['reconcile-core', operationId, expected, ports]);
+      return { kind: 'Terminal', operationId };
+    },
+    async listUnsettledDrafts(ports) {
+      calls.push(['list-core', ports]);
+      return [];
+    },
+    async readWorkflowAdmission() { return {}; },
+  };
+
+  const runtime = createHostedDraftPumpRuntime(configuration, telemetry, dependencies);
+  await runtime.enqueue({ repository: configuration.repository,
+    workItem: { kind: 'ISSUE', number: 60 } });
+  await runtime.reconcile({ operationId: OPERATION_ID,
+    workKey: WORK_KEY, expectedRevision: REVISION });
+  await runtime.listUnsettled();
+
+  assert.deepEqual(calls.filter(([kind]) => kind.endsWith('-core')).map(([kind]) => kind), [
+    'enqueue-core', 'reconcile-core', 'list-core',
+  ]);
+  assert.equal(calls.find(([kind]) => kind === 'store')[1].gitData, gitData);
+  assert.equal(calls.find(([kind]) => kind === 'provider')[1].expectedRepository.nodeId,
+    'R_kgDOGaia');
+  assert.equal(calls.find(([kind]) => kind === 'admission')[1].expectedWorkKey, WORK_KEY);
+  assert.equal(calls.find(([kind]) => kind === 'reconcile-core')[3].executorEpoch.runId, 9001);
 });
