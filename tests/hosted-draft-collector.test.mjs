@@ -86,23 +86,19 @@ test('R1 real enqueue seam accepts the sealed selector and reaches hosted observ
       },
     },
   });
-  const COMMITTED = '1'.repeat(64);
+  const { createMemoryDraftOperationStore, enqueueDraft } = await import(
+    '../src/draft-operation-envelope.mjs'
+  );
   const ports = {
     collector,
-    store: {
-      async inspectByWork() { return null; },
-      async bootstrapAndEnqueue() {
-        return { stale: false, committedRevision: COMMITTED };
-      },
-    },
+    store: createMemoryDraftOperationStore(),
     telemetry: { async append() {} },
   };
-  const { enqueueDraft } = await import('../src/draft-operation-envelope.mjs');
 
   const result = await enqueueDraft(SELECTOR, 'NONE', ports);
 
   assert.equal(result.kind, 'Enqueued');
-  assert.equal(result.committedRevision, COMMITTED);
+  assert.match(result.committedRevision, /^[a-f0-9]{64}$/u);
   assert.equal(repositoryReads, 1, 'the real collector was reached through the sealed selector');
 });
 

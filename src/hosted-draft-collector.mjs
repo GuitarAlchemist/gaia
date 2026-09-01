@@ -40,9 +40,10 @@ function deepFreeze(value) {
   return value;
 }
 
-function ownDataObject(value, fields, code) {
+function ownDataObject(value, fields, code, allowNullPrototype = false) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)
-      || Object.getPrototypeOf(value) !== Object.prototype) fail(code, code);
+      || (Object.getPrototypeOf(value) !== Object.prototype
+        && !(allowNullPrototype && Object.getPrototypeOf(value) === null))) fail(code, code);
   const keys = Reflect.ownKeys(value);
   const descriptors = Object.getOwnPropertyDescriptors(value);
   if (keys.some((key) => typeof key !== 'string')
@@ -90,9 +91,9 @@ function githubSegment(value, code) {
 
 function requireSelector(value) {
   const code = 'InvalidSelector';
-  ownDataObject(value, ['repository', 'workItem'], code);
-  ownDataObject(value.repository, ['owner', 'name'], code);
-  ownDataObject(value.workItem, ['kind', 'number'], code);
+  ownDataObject(value, ['repository', 'workItem'], code, true);
+  ownDataObject(value.repository, ['owner', 'name'], code, true);
+  ownDataObject(value.workItem, ['kind', 'number'], code, true);
   if (value.workItem.kind !== 'ISSUE') fail(code, code);
   return {
     repository: { owner: text(value.repository.owner, code), name: text(value.repository.name, code) },
