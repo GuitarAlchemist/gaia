@@ -189,8 +189,14 @@ The registry records each work branch's reservation and adapter-neutral bootstra
 a missing work ref that is
 already registered is corruption, never a new bootstrap. A required GitHub ruleset forbids deletion
 and non-fast-forward updates for `gaia-ledger/**` and restricts updates to the Gaia pump GitHub App.
-The adapter verifies that ruleset before every write and fails closed when it is absent or changed;
-the pump has no authority to create, loosen, or bypass it.
+Provisioning verifies through an administrator credential that the App is the ruleset's sole
+`always` bypass actor. The runtime App deliberately has no Administration-write permission. GitHub
+therefore redacts `bypass_actors` from its ruleset response; the adapter instead requires GitHub's
+server-derived `current_user_can_bypass: 'always'` plus the exact active target, include/exclude,
+deletion, non-fast-forward, and update restrictions before every write. It fails closed when any
+runtime-visible protection or the App's own bypass changes. An administrator adding another bypass
+actor is not observable to this least-privilege token and remains a provisioning/audit residual,
+not authority granted to the pump. The pump cannot create or loosen the ruleset.
 
 Each ref head is a hidden `ledgerHeadOid`, the exact 40-lowercase-hex Git object id used only for
 Git CAS. It is not a source or content revision. Each commit has exactly one parent (except a
