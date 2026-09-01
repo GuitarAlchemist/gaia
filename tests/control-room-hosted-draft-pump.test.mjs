@@ -265,17 +265,18 @@ test('a transition dated after the reading instant is refused, never clamped to 
   );
 });
 
-test('a producer that went backwards in time, sequence or committed revision is refused', async () => {
+test('a producer that went backwards in time or in sequence is refused', async () => {
   const mod = await api();
   const artifact = await seal();
-  const prior = { observedAt: AT, sequence: 41, committedRevision: COMMITTED_REVISION };
+  const prior = { observedAt: AT, sequence: 41, workKey: WORK_KEY,
+    committedRevision: COMMITTED_REVISION };
 
+  // Two separate negative controls: the only two fields that carry monotonic evidence. Each is
+  // pushed backwards on its own, with everything else left forward, so neither refusal can be
+  // credited to the other field.
   for (const [name, older] of [
     ['observedAt', { ...prior, observedAt: '2026-09-01T15:00:00.000Z' }],
     ['sequence', { ...prior, sequence: 99 }],
-    // The ledger is CAS-append-only, so a lower committed revision for a work key already
-    // reported higher is a producer reading a stale ref.
-    ['committedRevision', { ...prior, committedRevision: 'f'.repeat(64), workKey: WORK_KEY }],
   ]) {
     assert.throws(
       () => mod.requireHostedDraftPumpObservation(artifact, { priorObservation: older }),
@@ -283,6 +284,42 @@ test('a producer that went backwards in time, sequence or committed revision is 
       `a backwards ${name} must be refused`,
     );
   }
+});
+
+test('a forward observation is accepted however its opaque committed revision sorts', async () => {
+  const mod = await api();
+
+  // `committedRevision` is a SHA-256 content address. It is derived from the bytes of a ledger
+  // record, never from when that record was written, so two of them have no temporal relation and
+  // sorting them is a coin flip. Here the evidence that actually carries order — `observedAt` and
+  // `sequence` — both move forward on one work key, while the digest happens to sort lower than
+  // the one previously published. That is an ordinary forward append and must be accepted;
+  // refusing it manufactures `IncoherentHostedDraftPump` against real intake progress, and a
+  // refused observation ages into `STALE`, which is issue #70's defect restored.
+  const artifact = await seal({
+    sequence: 101,
+    transition: transition({ committedRevision: 'a'.repeat(64) }),
+  });
+  const prior = {
+    observedAt: WINDOW_START,
+    sequence: 100,
+    workKey: WORK_KEY,
+    committedRevision: 'e'.repeat(64),
+  };
+
+  assert.equal(prior.committedRevision > artifact.transition.committedRevision, true,
+    'the fixture must put the later committed revision lexicographically lower');
+
+  const verified = mod.requireHostedDraftPumpObservation(artifact, { priorObservation: prior });
+  assert.equal(verified.sequence, 101);
+  assert.equal(verified.transition.committedRevision, 'a'.repeat(64));
+
+  // The same reading through the summarizing seam, so the acceptance is proven where the Control
+  // Room actually consumes it and not only at the verifier.
+  const block = mod.summarizeHostedDraftPump({ artifact, observedAt: AT, priorObservation: prior });
+  assert.equal(block.state, 'ADVANCED');
+  assert.equal(block.committedRevision, 'a'.repeat(64));
+  assert.equal(block.workKey, WORK_KEY);
 });
 
 test('malformed, unknown-token and corrupt evidence is refused by typed code and by name', async () => {
