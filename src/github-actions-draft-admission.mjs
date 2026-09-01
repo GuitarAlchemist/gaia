@@ -48,6 +48,15 @@ function ownData(value, key) {
   return { ok: true, value: descriptor.value };
 }
 
+function environmentData(value, key) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false };
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor || !Object.hasOwn(descriptor, 'value')) return { ok: false };
+  return { ok: true, value: descriptor.value };
+}
+
 function exactDataKeys(value, expected) {
   if (!record(value)) return false;
   const keys = Reflect.ownKeys(value);
@@ -110,13 +119,14 @@ export function createGitHubActionsDraftAdmission({
 }) {
   const repository = configuredRepository(expectedRepository);
   const workKey = configuredWorkKey(expectedWorkKey);
-  if (!record(environment)
-    || ownData(environment, 'GITHUB_REPOSITORY').value !== repository
+  if (environmentData(environment, 'GITHUB_REPOSITORY').value !== repository
     || typeof readWorkflowAdmission !== 'function') {
     invalidConfiguration();
   }
-  const runId = positiveInteger(ownData(environment, 'GITHUB_RUN_ID').value);
-  const runAttempt = positiveInteger(ownData(environment, 'GITHUB_RUN_ATTEMPT').value);
+  const runId = positiveInteger(environmentData(environment, 'GITHUB_RUN_ID').value);
+  const runAttempt = positiveInteger(
+    environmentData(environment, 'GITHUB_RUN_ATTEMPT').value,
+  );
   const executorEpoch = Object.freeze({ runId, runAttempt });
   const concurrencyGroup = `gaia-draft-${workKey}`;
 
