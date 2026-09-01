@@ -277,6 +277,9 @@ function requireCoherence(body) {
  * and an operator can read the value a refusal was measured against. A producer republishing an
  * older reading as current is indistinguishable from a fresh one, and here that is worse than for
  * a pipeline: a stale replay of an old ADVANCED would say intake is moving while the pump is dead.
+ *
+ * The monotonic evidence is exactly `observedAt` and `sequence`. Nothing else on this observation
+ * is ordered, and a content address never can be.
  */
 function requireMonotonic(body, priorObservation) {
   if (priorObservation === null || priorObservation === undefined) return body;
@@ -288,15 +291,14 @@ function requireMonotonic(body, priorObservation) {
   if (Number.isSafeInteger(prior.sequence) && prior.sequence > body.sequence) {
     incoherent('the hosted pump observation sequence went backwards');
   }
-  // The ledger is compare-and-swap append-only, so a work key already reported at a higher
-  // committed revision cannot legitimately be re-reported at a lower one: that is a producer
-  // reading a stale ref, and a stale loser performs no effect.
-  if (typeof prior.workKey === 'string' && prior.workKey === body.transition.workKey
-    && typeof prior.committedRevision === 'string'
-    && typeof body.transition.committedRevision === 'string'
-    && body.transition.committedRevision < prior.committedRevision) {
-    incoherent('the hosted pump committed revision went backwards for one work key');
-  }
+  // `committedRevision` is deliberately not compared here. It is a SHA-256 content address,
+  // derived from a record's bytes and never from when the record was written, so two committed
+  // revisions carry no temporal relation and ordering them lexicographically is a coin flip: it
+  // refuses ordinary forward appends whose digest happens to sort low, and admits stale replays
+  // whose digest happens to sort high. Compare-and-swap append-only linearizes the ledger's
+  // records, walked by following prior pointers, not by sorting digests — and this observation
+  // does not carry that chain. The digest is validated for shape by `requireTransition` and may be
+  // compared for equality or binding, never for relative order.
   return body;
 }
 

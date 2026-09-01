@@ -229,10 +229,12 @@ legitimate outcome already recorded in the receipt artifact, which keeps `error`
 
 ## Deliberately not built
 
-No change to `src/hosted-draft-pump-observation.mjs`, `src/control-room.mjs`,
+No change to `src/control-room.mjs`,
 `src/draft-operation-envelope.mjs`, `src/gh-git-data-adapter.mjs`,
 `src/gh-draft-operation-provider.mjs`, `src/github-actions-draft-admission.mjs`,
-`.github/workflows/hosted-draft-pump-effect.yml`, or `.github/gaia/pump-policy.json`. No new bus
+`.github/workflows/hosted-draft-pump-effect.yml`, or `.github/gaia/pump-policy.json`. The single
+change to `src/hosted-draft-pump-observation.mjs` is the removal of the invalid lexicographic
+`committedRevision` comparison described above; no other behaviour of that module moves. No new bus
 verb, no new secret, no new repository variable, no new permission, no dispatch capability, no paid
 API and no dependency. Review findings A1 (beyond the one reachable consequence closed above), A2,
 A3 and A4 stay advisory and untouched. The Node 20 `mcp-client` EPIPE test is outside this diff and
