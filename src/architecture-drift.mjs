@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
 
 const INVENTORY_SCHEMA = 'gaia-architecture-inventory/1';
 const ADAPTER_SCHEMA = 'gaia-architecture-inventory-adapter/1';
 const REPORT_SCHEMA = 'gaia-architecture-drift-report/1';
+const VERIFICATION_SCHEMA = 'gaia-architecture-verification/1';
 
 const REQUIRED_SECTIONS = Object.freeze([
   'Purpose, scope, and non-goals',
@@ -23,12 +25,16 @@ const REQUIRED_SECTIONS = Object.freeze([
 ]);
 
 const INVENTORY_FIELDS = Object.freeze([
-  'architectureImpact', 'changedPaths', 'files', 'knownRevisions', 'revision', 'schema',
+  'architectureImpact', 'architectureRevisions', 'changedPaths', 'files', 'revision', 'schema',
 ]);
 const IMPACT_FIELDS = Object.freeze(['evidence', 'kind']);
+const ARCHITECTURE_REVISION_FIELDS = Object.freeze(['commit', 'contentRevision']);
+const VERIFICATION_FIELDS = Object.freeze(['commit', 'contentRevision', 'date', 'schema']);
 const IMPACT_KINDS = new Set(['UPDATED', 'NO_IMPACT', 'UNDECLARED']);
 const EXCLUDED_DIRECTORIES = new Set(['.git', 'node_modules']);
 const INTERFACE_LEAK = /github|duckdb|jsonl|config|storage|provider|payload|transport|retry|(?:^|[^a-z])path/i;
+const COMMIT = /^[0-9a-f]{40}$/;
+const CONTENT_REVISION = /^sha256:[0-9a-f]{64}$/;
 
 export class ArchitectureDriftRefusal extends Error {
   constructor(code) {
@@ -55,6 +61,10 @@ function ordinal(a, b) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+function contentRevision(content) {
+  return `sha256:${createHash('sha256').update(content, 'utf8').digest('hex')}`;
+}
+
 function normalizePath(path) {
   if (typeof path !== 'string' || path.length === 0 || path.includes('\\') || path.startsWith('/')) {
     refuse('INVENTORY_PATH_INVALID');
@@ -67,12 +77,26 @@ function normalizePath(path) {
 function normalizeInventory(input) {
   assertFields(input, INVENTORY_FIELDS);
   if (input.schema !== INVENTORY_SCHEMA) refuse('INVENTORY_SCHEMA_UNSUPPORTED');
-  if (typeof input.revision !== 'string' || !/^[0-9a-f]{40}$/.test(input.revision)) {
+  if (typeof input.revision !== 'string' || !COMMIT.test(input.revision)) {
     refuse('INVENTORY_REVISION_INVALID');
   }
-  if (!Array.isArray(input.knownRevisions)
-    || input.knownRevisions.some((revision) => typeof revision !== 'string' || !/^[0-9a-f]{40}$/.test(revision))) {
-    refuse('INVENTORY_REVISION_INVALID');
+  if (!Array.isArray(input.architectureRevisions)) {
+    refuse('INVENTORY_ARCHITECTURE_REVISIONS_INVALID');
+  }
+  const architectureRevisions = input.architectureRevisions.map((entry) => {
+    try {
+      assertFields(entry, ARCHITECTURE_REVISION_FIELDS, 'INVENTORY_ARCHITECTURE_REVISIONS_INVALID');
+    } catch {
+      refuse('INVENTORY_ARCHITECTURE_REVISIONS_INVALID');
+    }
+    if (typeof entry.commit !== 'string' || !COMMIT.test(entry.commit)
+      || typeof entry.contentRevision !== 'string' || !CONTENT_REVISION.test(entry.contentRevision)) {
+      refuse('INVENTORY_ARCHITECTURE_REVISIONS_INVALID');
+    }
+    return Object.freeze({ ...entry });
+  }).sort((a, b) => ordinal(a.commit, b.commit));
+  if (new Set(architectureRevisions.map((entry) => entry.commit)).size !== architectureRevisions.length) {
+    refuse('INVENTORY_ARCHITECTURE_REVISIONS_INVALID');
   }
   if (!Array.isArray(input.changedPaths)) refuse('INVENTORY_CHANGES_INVALID');
   assertFields(input.architectureImpact, IMPACT_FIELDS, 'INVENTORY_IMPACT_INVALID');
@@ -92,11 +116,10 @@ function normalizeInventory(input) {
     files[path] = input.files[path];
   }
   const changedPaths = [...new Set(input.changedPaths.map(normalizePath))].sort(ordinal);
-  const knownRevisions = [...new Set(input.knownRevisions)].sort(ordinal);
   return Object.freeze({
     schema: INVENTORY_SCHEMA,
     revision: input.revision,
-    knownRevisions: Object.freeze(knownRevisions),
+    architectureRevisions: Object.freeze(architectureRevisions),
     files: Object.freeze(files),
     changedPaths: Object.freeze(changedPaths),
     architectureImpact: Object.freeze({ ...input.architectureImpact }),
@@ -134,12 +157,12 @@ function readTree(root) {
 
 export function createFilesystemArchitectureInventory(options) {
   if (options === null || typeof options !== 'object' || Array.isArray(options)) refuse('ADAPTER_OPTIONS_INVALID');
-  const fields = ['architectureImpact', 'changedPaths', 'knownRevisions', 'revision', 'root'];
+  const fields = ['architectureImpact', 'architectureRevisions', 'changedPaths', 'revision', 'root'];
   if (JSON.stringify(Object.keys(options).sort()) !== JSON.stringify(fields.sort())) refuse('ADAPTER_OPTIONS_INVALID');
   return adapter(() => ({
     schema: INVENTORY_SCHEMA,
     revision: options.revision,
-    knownRevisions: options.knownRevisions,
+    architectureRevisions: options.architectureRevisions,
     files: readTree(options.root),
     changedPaths: options.changedPaths,
     architectureImpact: options.architectureImpact,
@@ -148,6 +171,28 @@ export function createFilesystemArchitectureInventory(options) {
 
 function violation(code, subject) {
   return Object.freeze({ code, subject });
+}
+
+function verificationRecord(files) {
+  let packageJson;
+  try {
+    packageJson = JSON.parse(files['package.json']);
+  } catch {
+    refuse('VERIFICATION_RECORD_INVALID');
+  }
+  const record = packageJson?.gaiaArchitectureVerification;
+  try {
+    assertFields(record, VERIFICATION_FIELDS, 'VERIFICATION_RECORD_INVALID');
+  } catch {
+    refuse('VERIFICATION_RECORD_INVALID');
+  }
+  if (record.schema !== VERIFICATION_SCHEMA
+    || typeof record.commit !== 'string' || !COMMIT.test(record.commit)
+    || typeof record.contentRevision !== 'string' || !CONTENT_REVISION.test(record.contentRevision)
+    || typeof record.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(record.date)) {
+    refuse('VERIFICATION_RECORD_INVALID');
+  }
+  return Object.freeze({ ...record });
 }
 
 function internalLinkTargets(markdown) {
@@ -200,8 +245,11 @@ export function checkArchitectureDrift(inventoryAdapter) {
   }
   const markdown = inventory.files['ARCHITECTURE.md'];
   if (typeof markdown !== 'string') refuse('ARCHITECTURE_DOCUMENT_MISSING');
+  const verification = verificationRecord(inventory.files);
+  const actualContentRevision = contentRevision(markdown);
 
   const violations = [];
+  const advisories = [];
   for (const heading of REQUIRED_SECTIONS) {
     const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     if (!new RegExp(`^## ${escaped}$`, 'm').test(markdown)) {
@@ -213,15 +261,18 @@ export function checkArchitectureDrift(inventoryAdapter) {
     if (!(target in inventory.files)) violations.push(violation('BROKEN_INTERNAL_LINK', target));
   }
 
-  const verificationMatches = [...markdown.matchAll(/Last verified at commit `([0-9a-f]{40})` on \d{4}-\d{2}-\d{2}\./g)];
-  const verifiedCommit = verificationMatches.length === 1 ? verificationMatches[0][1] : null;
-  if (verifiedCommit === null || !inventory.knownRevisions.includes(verifiedCommit)) {
-    violations.push(violation('STALE_VERIFIED_COMMIT', verifiedCommit ?? 'MISSING'));
+  if (actualContentRevision !== verification.contentRevision) {
+    violations.push(violation('ARCHITECTURE_CONTENT_REVISION_MISMATCH', actualContentRevision));
+  }
+  const witnessContentRevision = inventory.architectureRevisions
+    .find((entry) => entry.commit === verification.commit)?.contentRevision ?? null;
+  if (witnessContentRevision !== verification.contentRevision) {
+    violations.push(violation('STALE_VERIFIED_COMMIT', verification.commit));
   }
 
   for (const row of interfaceRows(markdown)) {
     if (row.length >= 2 && INTERFACE_LEAK.test(row[1])) {
-      violations.push(violation('MODULE_INTERFACE_LEAK', row[0] || 'UNNAMED'));
+      advisories.push(violation('MODULE_INTERFACE_TOKEN_ADVISORY', row[0] || 'UNNAMED'));
     }
   }
 
@@ -235,10 +286,15 @@ export function checkArchitectureDrift(inventoryAdapter) {
 
   const unique = new Map(violations.map((item) => [`${item.code}\0${item.subject}`, item]));
   const ordered = [...unique.values()].sort((a, b) => ordinal(a.code, b.code) || ordinal(a.subject, b.subject));
+  const uniqueAdvisories = new Map(advisories.map((item) => [`${item.code}\0${item.subject}`, item]));
+  const orderedAdvisories = [...uniqueAdvisories.values()]
+    .sort((a, b) => ordinal(a.code, b.code) || ordinal(a.subject, b.subject));
   return Object.freeze({
     schema: REPORT_SCHEMA,
     verdict: ordered.length === 0 ? 'PASS' : 'FAIL',
-    verifiedCommit,
+    verifiedCommit: verification.commit,
+    architectureContentRevision: actualContentRevision,
+    advisories: Object.freeze(orderedAdvisories),
     violations: Object.freeze(ordered),
   });
 }

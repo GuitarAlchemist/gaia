@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
@@ -32,6 +33,30 @@ function git(root, args) {
   return run.stdout.trim();
 }
 
+function architectureRevisions(root) {
+  let record;
+  try {
+    record = JSON.parse(readFileSync(`${root}/package.json`, 'utf8')).gaiaArchitectureVerification;
+  } catch {
+    throw new ArchitectureDriftRefusal('VERIFICATION_RECORD_INVALID');
+  }
+  if (record === null || typeof record !== 'object'
+    || typeof record.commit !== 'string' || !/^[0-9a-f]{40}$/.test(record.commit)) {
+    throw new ArchitectureDriftRefusal('VERIFICATION_RECORD_INVALID');
+  }
+  const run = spawnSync('git', [
+    '-c', `safe.directory=${root.replaceAll('\\', '/')}`,
+    'show', `${record.commit}:ARCHITECTURE.md`,
+  ], { cwd: root, windowsHide: true });
+  if (run.status !== 0 || !Buffer.isBuffer(run.stdout)) {
+    throw new ArchitectureDriftRefusal('REPOSITORY_READ_FAILED');
+  }
+  return [{
+    commit: record.commit,
+    contentRevision: `sha256:${createHash('sha256').update(run.stdout).digest('hex')}`,
+  }];
+}
+
 function impactFromEvent() {
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath) return { kind: 'UNDECLARED', evidence: null };
@@ -53,7 +78,6 @@ function main() {
   const args = parseArgs(process.argv.slice(2));
   const root = pluginRoot();
   const revision = git(root, ['rev-parse', 'HEAD']);
-  const knownRevisions = git(root, ['rev-list', '--all']).split(/\r?\n/).filter(Boolean);
   const configuredBase = args.base ?? process.env.GAIA_ARCHITECTURE_BASE?.trim();
   const base = configuredBase || `${revision}^`;
   const changed = git(root, ['diff', '--name-only', `${base}...${revision}`]);
@@ -61,7 +85,7 @@ function main() {
   const report = checkArchitectureDrift(createFilesystemArchitectureInventory({
     root,
     revision,
-    knownRevisions,
+    architectureRevisions: architectureRevisions(root),
     changedPaths,
     architectureImpact: impactFromEvent(),
   }));
