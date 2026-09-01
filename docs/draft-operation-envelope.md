@@ -227,7 +227,9 @@ non-force update. The registry has the same private two-revision protocol and ad
 `reserveWork(workKey)` and
 `confirmWork(workKey, bootstrapCommittedRevision)`. `reserveWork(workKey, 'NONE')` is legal only
 when the registry has never registered that key; it creates the canonical `WORK_ROOT` body
-`{ schema: 'GaiaDraftWorkRootV0', kind: 'WORK_ROOT', workKey }`. Its canonical registry receipt
+`{ schema: 'GaiaDraftWorkRootV0', priorCommittedRevision: 'NONE', kind: 'WORK_ROOT', workKey }`.
+`NONE` is legal only in that root field; every later body requires an exact 64-hex predecessor.
+Its canonical registry receipt
 body records only the adapter-neutral 64-hex bootstrap content revision. The hosted adapter
 privately maps that revision
 to the work ref's bootstrap OID and validates both; neither OID enters registry content. A crash
