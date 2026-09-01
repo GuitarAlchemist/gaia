@@ -498,6 +498,23 @@ test('forced CAS mutation preserves human edits and stale losers perform no effe
   });
   assert.equal(result.observed.body, winnerBody);
   assert.equal(fixture.calls.filter((call) => call.method === 'compareAndSet').length, 2);
+
+  const managedMutation = scriptedAdapter(observation(initial.managedSection), [
+    (_effect, current, set) => {
+      set(observation(current.body.replace('Result: `IN_PROGRESS`', 'Result: `HUMAN_EDIT`')));
+      return { kind: 'STALE' };
+    },
+  ]);
+  const conflict = await executeManagedRoundUpdate({
+    workKey: WORK_KEY, number: 69,
+    receipt: advanceReceipt(initial.roundKey), effectActor: EFFECT,
+    adapter: managedMutation.adapter,
+  });
+  assert.deepEqual({ kind: conflict.kind, code: conflict.code }, {
+    kind: 'REFUSED', code: 'ManagedSectionConflict',
+  });
+  assert.equal(managedMutation.calls.filter((call) => call.method === 'compareAndSet').length, 1,
+    'a managed-section mutation is never merged or retried');
 });
 
 test('five unproved postconditions end in typed POSTCONDITION_UNPROVEN', async () => {
