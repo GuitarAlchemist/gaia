@@ -325,6 +325,8 @@ export function createInitialManagedRound(input) {
   const round = initialRound(workKey, receipt);
   return Object.freeze({
     kind: 'INITIAL', lineageKey: lineage, roundKey: round.roundKey,
+    receiptRevision: receipt.revision,
+    effectOwner: receipt.responsibility.effectOwner,
     managedSection: renderSection(workKey, [round]),
   });
 }
@@ -542,6 +544,7 @@ export function planManagedRoundUpdate(input) {
     idempotencyKey: advanceKey,
     advanceKey,
     roundKey: round.roundKey,
+    receiptRevision: receipt.revision,
     effectOwner: receipt.responsibility.effectOwner,
     expected: Object.freeze({
       number: observed.number, headRevision: observed.headRevision,
@@ -552,53 +555,486 @@ export function planManagedRoundUpdate(input) {
   });
 }
 
-function adapterPort(value) {
+function ownedClone(value, code = 'AdapterProtocolViolation') {
+  try {
+    const cloned = JSON.parse(canonical(value));
+    if (cloned === null || typeof cloned !== 'object' || Array.isArray(cloned)) fail(code);
+    return cloned;
+  } catch (error) {
+    if (error instanceof DeliveryRoundError) throw error;
+    fail(code);
+  }
+}
+
+function adapterPort(value, create = false) {
   if (value === null || typeof value !== 'object'
-    || typeof value.observe !== 'function' || typeof value.compareAndSet !== 'function') {
-    fail('InvalidAdapter');
+    || typeof value.observe !== 'function' || typeof value.compareAndSet !== 'function'
+    || (create && (typeof value.createDraft !== 'function'
+      || typeof value.observeByOperation !== 'function'))) fail('InvalidAdapter');
+  return value;
+}
+
+function evidencePort(value) {
+  if (value === null || typeof value !== 'object'
+    || typeof value.read !== 'function' || typeof value.compareAndAppend !== 'function') {
+    fail('InvalidEvidencePort');
   }
   return value;
 }
 
+function validateEvidenceRecord(value) {
+  const code = 'EvidenceProtocolViolation';
+  try {
+    if (value?.kind === 'INTENT') {
+      keys(value, [
+        'schema', 'kind', 'workKey', 'operationId', 'idempotencyKey', 'transition', 'attempt',
+        'expectedHeadRevision', 'expectedBodyRevision', 'proposedBodyRevision', 'effectOwner',
+        'receiptRevision',
+      ], code);
+      if (value.schema !== 'GaiaManagedRoundEvidenceV0' || !SHA256.test(value.workKey)
+        || !SHA256.test(value.operationId) || value.idempotencyKey !== value.operationId
+        || !['CREATE_R0', 'ADVANCE_R1'].includes(value.transition)
+        || !Number.isSafeInteger(value.attempt) || value.attempt < 1 || value.attempt > MAX_ATTEMPTS
+        || !GIT_OID.test(value.expectedHeadRevision) || !SHA256.test(value.expectedBodyRevision)
+        || !SHA256.test(value.proposedBodyRevision) || !GITHUB_EFFECT_OWNER.test(value.effectOwner)
+        || !SHA256.test(value.receiptRevision)) fail(code);
+      return Object.freeze(ownedClone(value, code));
+    }
+    if (value?.kind === 'APPLIED') {
+      keys(value, [
+        'schema', 'kind', 'workKey', 'operationId', 'idempotencyKey', 'intentRevision',
+        'providerReceipt', 'result',
+      ], code);
+      keys(value.providerReceipt, [
+        'schema', 'operationId', 'number', 'headRevision', 'bodyRevision',
+      ], code);
+      keys(value.result, [
+        'kind', 'operationId', 'idempotencyKey', 'attempts', 'observed',
+      ], code);
+      const observed = validateObservation(value.result.observed);
+      if (value.schema !== 'GaiaManagedRoundEvidenceV0' || !SHA256.test(value.workKey)
+        || !SHA256.test(value.operationId) || value.idempotencyKey !== value.operationId
+        || !SHA256.test(value.intentRevision)
+        || value.providerReceipt.schema !== 'GaiaGitHubRoundEffectReceiptV0'
+        || value.providerReceipt.operationId !== value.operationId
+        || value.result.kind !== 'APPLIED' || value.result.operationId !== value.operationId
+        || value.result.idempotencyKey !== value.operationId
+        || !Number.isSafeInteger(value.result.attempts) || value.result.attempts < 1
+        || value.result.attempts > MAX_ATTEMPTS || observed.error
+        || value.providerReceipt.number !== observed.number
+        || value.providerReceipt.headRevision !== observed.headRevision
+        || value.providerReceipt.bodyRevision !== observed.bodyRevision) fail(code);
+      return Object.freeze(ownedClone(value, code));
+    }
+  } catch (error) {
+    if (error instanceof DeliveryRoundError) fail(code);
+    throw error;
+  }
+  fail(code);
+}
+
+function validateEvidenceSnapshot(value) {
+  if (value?.state === 'UNSEEN') return Object.freeze({ state: 'UNSEEN', version: 'NONE', records: [] });
+  if (value?.state !== 'PRESENT' || typeof value.version !== 'string'
+    || !Array.isArray(value.records) || value.records.length === 0) fail('EvidenceProtocolViolation');
+  const records = value.records.map(validateEvidenceRecord);
+  const operations = new Map();
+  for (const record of records) {
+    const prior = operations.get(record.operationId) ?? [];
+    if (record.kind === 'INTENT') {
+      if (prior.some((candidate) => candidate.kind === 'APPLIED')) fail('EvidenceProtocolViolation');
+      const lastAttempt = prior.at(-1)?.attempt ?? 0;
+      if (record.attempt <= lastAttempt) fail('EvidenceProtocolViolation');
+    } else {
+      const intent = prior.findLast((candidate) => candidate.kind === 'INTENT');
+      if (!intent || record.intentRevision !== recordRevision(intent)
+        || prior.some((candidate) => candidate.kind === 'APPLIED')) fail('EvidenceProtocolViolation');
+    }
+    prior.push(record);
+    operations.set(record.operationId, prior);
+  }
+  return Object.freeze({
+    state: 'PRESENT', version: value.version,
+    records: Object.freeze(records),
+  });
+}
+
+function recordRevision(record) {
+  return revision(record);
+}
+
+function terminalFor(snapshot, operationId) {
+  return snapshot.records.findLast(
+    (record) => record.kind === 'APPLIED' && record.operationId === operationId,
+  ) ?? null;
+}
+
+function intentFor(snapshot, operationId) {
+  return snapshot.records.findLast(
+    (record) => record.kind === 'INTENT' && record.operationId === operationId,
+  ) ?? null;
+}
+
+async function readEvidence(port, workKey) {
+  return validateEvidenceSnapshot(await port.read(workKey));
+}
+
+async function persistIntent(port, intent) {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const before = await readEvidence(port, intent.workKey);
+    const terminal = terminalFor(before, intent.operationId);
+    if (terminal) return { terminal };
+    const latest = before.records.at(-1);
+    if (latest?.kind === 'INTENT' && latest.operationId !== intent.operationId) {
+      return { refusal: refusal('EvidenceLineageConflict') };
+    }
+    if (latest?.kind === 'INTENT' && latest.operationId === intent.operationId
+      && canonical(latest) === canonical(intent)) {
+      return { intent: latest, intentRevision: recordRevision(latest) };
+    }
+    if (latest?.kind === 'INTENT' && latest.operationId === intent.operationId
+      && (!Number.isSafeInteger(latest.attempt) || latest.attempt >= intent.attempt)) {
+      return { refusal: refusal('EvidenceIntentConflict') };
+    }
+    let acknowledgement;
+    try {
+      acknowledgement = await port.compareAndAppend(intent.workKey, before.version, intent);
+    } catch {
+      acknowledgement = { kind: 'AMBIGUOUS' };
+    }
+    if (!['APPENDED', 'STALE', 'AMBIGUOUS'].includes(acknowledgement?.kind)) {
+      fail('EvidenceProtocolViolation');
+    }
+    const after = await readEvidence(port, intent.workKey);
+    const stored = after.records.findLast(
+      (record) => record.kind === 'INTENT'
+        && record.operationId === intent.operationId
+        && canonical(record) === canonical(intent),
+    );
+    if (stored) return { intent: stored, intentRevision: recordRevision(stored) };
+    const competing = after.records.at(-1);
+    if (competing?.kind === 'INTENT' && competing.operationId !== intent.operationId) {
+      return { refusal: refusal('EvidenceLineageConflict') };
+    }
+  }
+  return { refusal: Object.freeze({
+    kind: 'BLOCKED', code: 'POSTCONDITION_UNPROVEN', attempts: MAX_ATTEMPTS,
+  }) };
+}
+
+function providerReceipt(operationId, observed) {
+  const valid = validateObservation(observed);
+  if (valid.error) fail('AdapterProtocolViolation');
+  return Object.freeze({
+    schema: 'GaiaGitHubRoundEffectReceiptV0', operationId,
+    number: valid.number, headRevision: valid.headRevision, bodyRevision: valid.bodyRevision,
+  });
+}
+
+function appliedRecord(intent, intentRevision, attempts, observed) {
+  const result = Object.freeze({
+    kind: 'APPLIED', operationId: intent.operationId, idempotencyKey: intent.idempotencyKey,
+    attempts, observed: Object.freeze(ownedClone(observed)),
+  });
+  return Object.freeze({
+    schema: 'GaiaManagedRoundEvidenceV0', kind: 'APPLIED', workKey: intent.workKey,
+    operationId: intent.operationId, idempotencyKey: intent.idempotencyKey,
+    intentRevision, providerReceipt: providerReceipt(intent.operationId, observed), result,
+  });
+}
+
+async function persistApplied(port, record) {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const before = await readEvidence(port, record.workKey);
+    const existing = terminalFor(before, record.operationId);
+    if (existing) {
+      if (canonical(existing) !== canonical(record)) fail('EvidenceTerminalConflict');
+      return Object.freeze(ownedClone(existing.result));
+    }
+    const latestIntent = intentFor(before, record.operationId);
+    if (!latestIntent || recordRevision(latestIntent) !== record.intentRevision) {
+      return Object.freeze({
+        kind: 'BLOCKED', code: 'POSTCONDITION_UNPROVEN', attempts: MAX_ATTEMPTS,
+      });
+    }
+    let acknowledgement;
+    try {
+      acknowledgement = await port.compareAndAppend(record.workKey, before.version, record);
+    } catch {
+      acknowledgement = { kind: 'AMBIGUOUS' };
+    }
+    if (!['APPENDED', 'STALE', 'AMBIGUOUS'].includes(acknowledgement?.kind)) {
+      fail('EvidenceProtocolViolation');
+    }
+    const after = await readEvidence(port, record.workKey);
+    const stored = terminalFor(after, record.operationId);
+    if (stored) {
+      if (canonical(stored) !== canonical(record)) fail('EvidenceTerminalConflict');
+      return Object.freeze(ownedClone(stored.result));
+    }
+  }
+  return Object.freeze({
+    kind: 'BLOCKED', code: 'POSTCONDITION_UNPROVEN', attempts: MAX_ATTEMPTS,
+  });
+}
+
+function makeIntent({ workKey, operationId, transition, attempt, expectedHeadRevision,
+  expectedBodyRevision, proposedBodyRevision, effectOwner, receiptRevision }) {
+  return Object.freeze({
+    schema: 'GaiaManagedRoundEvidenceV0', kind: 'INTENT', workKey, operationId,
+    idempotencyKey: operationId, transition, attempt, expectedHeadRevision,
+    expectedBodyRevision, proposedBodyRevision, effectOwner, receiptRevision,
+  });
+}
+
+export function createMemoryManagedRoundEvidencePort() {
+  const ledgers = new Map();
+  const calls = [];
+  return Object.freeze({
+    calls,
+    async read(workKey) {
+      calls.push({ method: 'read', workKey });
+      const records = ledgers.get(workKey) ?? [];
+      if (records.length === 0) return { state: 'UNSEEN' };
+      return {
+        state: 'PRESENT', version: revision(records),
+        records: records.map((record) => ownedClone(record)),
+      };
+    },
+    async compareAndAppend(workKey, expectedVersion, record) {
+      calls.push({ method: 'compareAndAppend', workKey, expectedVersion, record: ownedClone(record) });
+      const records = ledgers.get(workKey) ?? [];
+      const current = records.length === 0 ? 'NONE' : revision(records);
+      if (current !== expectedVersion) return { kind: 'STALE', currentVersion: current };
+      records.push(ownedClone(record));
+      ledgers.set(workKey, records);
+      return { kind: 'APPENDED', version: revision(records) };
+    },
+  });
+}
+
+export function createGitHubManagedRoundEvidencePort({ gitData } = {}) {
+  if (gitData === null || typeof gitData !== 'object'
+    || typeof gitData.read !== 'function' || typeof gitData.compareAndAppend !== 'function') {
+    fail('InvalidEvidencePort');
+  }
+  const ref = (workKey) => `refs/heads/gaia-ledger/managed-rounds-v0/${sha256(workKey, 'InvalidWorkKey')}`;
+  return Object.freeze({
+    async read(workKey) {
+      const observed = await gitData.read(ref(workKey));
+      if (observed?.state === 'UNSEEN') return { state: 'UNSEEN' };
+      if (observed?.state !== 'PRESENT' || !Array.isArray(observed.records)
+        || observed.records.length === 0) fail('EvidenceProtocolViolation');
+      return {
+        state: 'PRESENT', version: observed.records.at(-1)?.oid,
+        records: observed.records.map((record) => ownedClone(record.body, 'EvidenceProtocolViolation')),
+      };
+    },
+    async compareAndAppend(workKey, expectedVersion, record) {
+      const result = await gitData.compareAndAppend(ref(workKey), expectedVersion, record);
+      if (result?.kind === 'STALE') return { kind: 'STALE', currentVersion: result.currentHeadOid };
+      if (result?.kind !== 'APPENDED') fail('EvidenceProtocolViolation');
+      return { kind: 'APPENDED', version: result.oid };
+    },
+  });
+}
+
+export function createMemoryManagedRoundAdapter({ observations = [] } = {}) {
+  if (!Array.isArray(observations)) fail('InvalidAdapter');
+  const drafts = new Map();
+  const operations = new Map();
+  const calls = [];
+  for (const item of observations) {
+    const observed = validateObservation(item);
+    if (observed.error) fail('InvalidAdapter');
+    drafts.set(item.number, ownedClone(item));
+  }
+  let nextNumber = Math.max(68, ...drafts.keys()) + 1;
+  return Object.freeze({
+    calls,
+    async observe(number) {
+      calls.push({ method: 'observe', number });
+      return drafts.has(number) ? ownedClone(drafts.get(number)) : null;
+    },
+    async observeByOperation(operationId) {
+      calls.push({ method: 'observeByOperation', operationId });
+      const number = operations.get(operationId);
+      return number === undefined ? null : ownedClone(drafts.get(number));
+    },
+    async createDraft(effect) {
+      calls.push({ method: 'createDraft', effect: ownedClone(effect) });
+      const existing = operations.get(effect.operationId);
+      if (existing !== undefined) return { kind: 'ACKNOWLEDGED', number: existing };
+      const number = nextNumber;
+      nextNumber += 1;
+      const observed = {
+        number, headRevision: effect.expectedHeadRevision,
+        body: effect.proposedBody, bodyRevision: revision(effect.proposedBody),
+      };
+      drafts.set(number, observed);
+      operations.set(effect.operationId, number);
+      return { kind: 'ACKNOWLEDGED', number };
+    },
+    async compareAndSet(effect) {
+      calls.push({ method: 'compareAndSet', effect: ownedClone(effect) });
+      const current = drafts.get(effect.number);
+      if (current?.headRevision !== effect.expectedHeadRevision
+        || current?.bodyRevision !== effect.expectedBodyRevision) return { kind: 'STALE' };
+      drafts.set(effect.number, {
+        number: effect.number, headRevision: effect.expectedHeadRevision,
+        body: effect.proposedBody, bodyRevision: effect.proposedBodyRevision,
+      });
+      operations.set(effect.operationId, effect.number);
+      return { kind: 'ACKNOWLEDGED' };
+    },
+  });
+}
+
+export function createGitHubManagedRoundAdapter({ api } = {}) {
+  if (api === null || typeof api !== 'object' || typeof api.createDraft !== 'function'
+    || typeof api.observe !== 'function' || typeof api.observeByOperation !== 'function') {
+    fail('InvalidAdapter');
+  }
+  if (typeof api.compareAndSetBody !== 'function') fail('AtomicCasUnavailable');
+  return Object.freeze({
+    createDraft: (effect) => api.createDraft(effect),
+    observe: (number) => api.observe(number),
+    observeByOperation: (operationId) => api.observeByOperation(operationId),
+    compareAndSet: (effect) => api.compareAndSetBody(effect),
+  });
+}
+
+function exactPostcondition(observed, expectedHeadRevision, proposedBodyRevision, proposedBody) {
+  return observed?.headRevision === expectedHeadRevision
+    && observed?.bodyRevision === proposedBodyRevision && observed?.body === proposedBody;
+}
+
+async function reconcileExisting(port, operationId, observed) {
+  const snapshot = await readEvidence(port, observed.workKey);
+  const terminal = terminalFor(snapshot, operationId);
+  if (terminal) return Object.freeze(ownedClone(terminal.result));
+  const intent = intentFor(snapshot, operationId);
+  if (!intent || !exactPostcondition(
+    observed.observation, intent.expectedHeadRevision, intent.proposedBodyRevision,
+    observed.observation.body,
+  )) return null;
+  const record = appliedRecord(
+    intent, recordRevision(intent), intent.attempt, observed.observation,
+  );
+  return persistApplied(port, record);
+}
+
+export async function executeManagedDraftCreation(input) {
+  keys(input, [
+    'workKey', 'headRevision', 'baseBody', 'receipt', 'effectActor', 'adapter', 'evidencePort',
+  ], 'InvalidInput');
+  if (typeof input.baseBody !== 'string' || typeof input.effectActor !== 'string') fail('InvalidInput');
+  const workKey = sha256(input.workKey, 'InvalidInput');
+  const adapter = adapterPort(input.adapter, true);
+  const durable = evidencePort(input.evidencePort);
+  const initial = createInitialManagedRound({
+    workKey, headRevision: input.headRevision, receipt: input.receipt,
+  });
+  if (/<!-- gaia-rounds:(?:begin|end):/u.test(input.baseBody)) {
+    return refusal('ManagedSectionConflict');
+  }
+  if (initial.effectOwner === 'NONE') return refusal('EffectAuthorityAbsent');
+  if (input.effectActor !== initial.effectOwner) return refusal('EffectOwnerMismatch');
+  const proposedBody = input.baseBody.length === 0
+    ? initial.managedSection : `${input.baseBody}\n\n${initial.managedSection}`;
+  const proposedBodyRevision = revision(proposedBody);
+  const intent = makeIntent({
+    workKey, operationId: initial.roundKey, transition: 'CREATE_R0', attempt: 1,
+    expectedHeadRevision: input.headRevision, expectedBodyRevision: revision(input.baseBody),
+    proposedBodyRevision, effectOwner: initial.effectOwner,
+    receiptRevision: initial.receiptRevision,
+  });
+  const persisted = await persistIntent(durable, intent);
+  if (persisted.terminal) return Object.freeze(ownedClone(persisted.terminal.result));
+  if (persisted.refusal) return persisted.refusal;
+  let observed = await adapter.observeByOperation(initial.roundKey);
+  if (!exactPostcondition(observed, input.headRevision, proposedBodyRevision, proposedBody)) {
+    const effect = Object.freeze({
+      operationId: initial.roundKey, idempotencyKey: initial.roundKey, workKey,
+      expectedHeadRevision: input.headRevision, expectedBodyRevision: revision(input.baseBody),
+      proposedBody, proposedBodyRevision, effectOwner: initial.effectOwner,
+      effectActor: input.effectActor,
+    });
+    const acknowledgement = await adapter.createDraft(effect);
+    if (!['ACKNOWLEDGED', 'AMBIGUOUS'].includes(acknowledgement?.kind)) {
+      fail('AdapterProtocolViolation');
+    }
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      observed = await adapter.observeByOperation(initial.roundKey);
+      if (!observed && Number.isSafeInteger(acknowledgement.number)) {
+        observed = await adapter.observe(acknowledgement.number);
+      }
+      if (exactPostcondition(observed, input.headRevision, proposedBodyRevision, proposedBody)) break;
+    }
+  }
+  if (!exactPostcondition(observed, input.headRevision, proposedBodyRevision, proposedBody)) {
+    return Object.freeze({
+      kind: 'BLOCKED', code: 'POSTCONDITION_UNPROVEN', attempts: MAX_ATTEMPTS, observed,
+    });
+  }
+  return persistApplied(durable, appliedRecord(
+    intent, persisted.intentRevision, 1, observed,
+  ));
+}
+
 export async function executeManagedRoundUpdate(input) {
-  keys(input, ['workKey', 'number', 'receipt', 'effectActor', 'adapter'], 'InvalidInput');
+  keys(input, [
+    'workKey', 'number', 'receipt', 'effectActor', 'adapter', 'evidencePort',
+  ], 'InvalidInput');
   if (!Number.isSafeInteger(input.number) || input.number <= 0) fail('InvalidInput');
   if (typeof input.effectActor !== 'string') fail('InvalidInput');
+  const workKey = sha256(input.workKey, 'InvalidInput');
   const adapter = adapterPort(input.adapter);
+  const durable = evidencePort(input.evidencePort);
   let observed;
   let mismatch = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     observed = await adapter.observe(input.number);
-    const plan = planManagedRoundUpdate({
-      workKey: input.workKey, observation: observed, receipt: input.receipt,
-    });
+    const plan = planManagedRoundUpdate({ workKey, observation: observed, receipt: input.receipt });
+    if (plan.kind === 'ALREADY_APPLIED') {
+      const reconciled = await reconcileExisting(durable, plan.idempotencyKey, {
+        workKey, observation: observed,
+      });
+      return reconciled ?? Object.freeze({
+        kind: 'BLOCKED', code: 'POSTCONDITION_UNPROVEN', attempts: MAX_ATTEMPTS, observed,
+      });
+    }
     if (plan.kind !== 'PROPOSED') return plan;
     if (plan.effectOwner === 'NONE') return refusal('EffectAuthorityAbsent');
     if (input.effectActor !== plan.effectOwner) return refusal('EffectOwnerMismatch');
-    const effect = Object.freeze({
-      operationId: plan.operationId,
-      idempotencyKey: plan.idempotencyKey,
-      number: plan.expected.number,
+    const intent = makeIntent({
+      workKey, operationId: plan.operationId, transition: 'ADVANCE_R1', attempt,
       expectedHeadRevision: plan.expected.headRevision,
       expectedBodyRevision: plan.expected.bodyRevision,
-      proposedBody: plan.proposedBody,
-      proposedBodyRevision: plan.proposedBodyRevision,
-      effectOwner: plan.effectOwner,
+      proposedBodyRevision: plan.proposedBodyRevision, effectOwner: plan.effectOwner,
+      receiptRevision: plan.receiptRevision,
+    });
+    const persisted = await persistIntent(durable, intent);
+    if (persisted.terminal) return Object.freeze(ownedClone(persisted.terminal.result));
+    if (persisted.refusal) return persisted.refusal;
+    const effect = Object.freeze({
+      operationId: plan.operationId, idempotencyKey: plan.idempotencyKey,
+      number: plan.expected.number, expectedHeadRevision: plan.expected.headRevision,
+      expectedBodyRevision: plan.expected.bodyRevision, proposedBody: plan.proposedBody,
+      proposedBodyRevision: plan.proposedBodyRevision, effectOwner: plan.effectOwner,
       effectActor: input.effectActor,
     });
     const acknowledgement = await adapter.compareAndSet(effect);
-    if (acknowledgement?.kind !== 'ACKNOWLEDGED'
-      && acknowledgement?.kind !== 'AMBIGUOUS' && acknowledgement?.kind !== 'STALE') {
+    if (!['ACKNOWLEDGED', 'AMBIGUOUS', 'STALE'].includes(acknowledgement?.kind)) {
       fail('AdapterProtocolViolation');
     }
     observed = await adapter.observe(input.number);
-    if (observed?.headRevision === plan.expected.headRevision
-      && observed?.bodyRevision === plan.proposedBodyRevision
-      && observed?.body === plan.proposedBody) {
-      return Object.freeze({
-        kind: 'APPLIED', operationId: plan.operationId,
-        idempotencyKey: plan.idempotencyKey, attempts: attempt, observed,
-      });
+    if (exactPostcondition(
+      observed, plan.expected.headRevision, plan.proposedBodyRevision, plan.proposedBody,
+    )) {
+      return persistApplied(durable, appliedRecord(
+        intent, persisted.intentRevision, attempt, observed,
+      ));
     }
     mismatch = Object.freeze({
       expectedHeadRevision: plan.expected.headRevision,
