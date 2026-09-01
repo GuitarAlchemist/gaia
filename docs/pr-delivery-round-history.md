@@ -307,6 +307,60 @@ requirement of issue #51 and is not satisfied by this slice:
 - **ETA variance modelling.** `R0` publishes a range and a confidence, or `UNKNOWN(reason)`.
 - **Cross-repository and multi-lineage histories.** One repository, one lineage per `workKey`.
 
+## R1 production-composition correction
+
+Fresh review of the R0 tracer found two integration gaps. The pure renderer proved that a canonical
+R0 could exist, but no production-shaped Draft-creation adapter was required to carry it. The R1
+executor proved GitHub-body read-after-write, but could return `APPLIED` before the transition and
+provider receipt existed in durable GitHub evidence. Both gaps are in scope for the one R0-to-R1
+slice and are closed here; DuckDB and later rounds remain deferred.
+
+### Canonical R0 at the create effect
+
+The creation adapter receives a fully validated R0 receipt, `workKey`, exact head revision, and the
+human/provider base body. It calls `createInitialManagedRound`, appends exactly that canonical
+section once, performs the one Draft create, then reads the Draft back and compares the exact head
+and whole-body revision. The adapter cannot synthesize owners, deadlines, evidence, or command
+authority from presentation prose. An absent or malformed R0 receipt refuses before GitHub.
+
+The same black-box contract runs against two adapters: a deterministic in-memory adapter and a
+production-shaped GitHub adapter whose injected API must expose atomic `compareAndSetBody`. That
+capability, not a read followed by an unconditional edit, is the linearization point. A GitHub API
+binding that cannot supply atomic expected-revision update is unsupported and must fail closed;
+the adapter does not emulate CAS with check-then-act.
+
+### Durable GitHub evidence before success
+
+One append-only Git Data ref per `workKey` stores closed `INTENT` and `APPLIED` records. `INTENT`
+binds `workKey`, stable operation identity (`roundKey` for R0 or `advanceKey` for R1), exact expected
+head/body revisions, proposed body revision, effect owner, and receipt revision. `APPLIED` binds the
+intent revision plus the exact GitHub read-back revision and provider receipt. Git Data
+`compareAndAppend` is the evidence linearization point; every append is read back before it is
+accepted.
+
+The executor order is fixed:
+
+1. derive the canonical proposal;
+2. persist or reconcile the idempotent `INTENT`;
+3. perform the provider create/CAS at most once for that intent;
+4. reconcile an ambiguous response by reading GitHub before any retry;
+5. persist and read back `APPLIED`;
+6. only then return success.
+
+A crash after `INTENT` replays by inspecting GitHub first. A duplicate call returns the same
+durable terminal receipt byte-for-byte. Two actors reading one evidence revision race at Git Data
+CAS; the stale loser performs no provider effect. GitHub success followed by a lost response is
+reconciled, never blindly repeated. Evidence append ambiguity is also read back before retry.
+
+### Added R1 falsifiers
+
+1. A production-shaped create body lacks exactly one canonical R0 section.
+2. In-memory and production-shaped adapters disagree on any public effect-contract result.
+3. `APPLIED` is returned before both the GitHub read-back and durable `APPLIED` receipt exist.
+4. Replaying one operation adds a provider effect or changes the terminal receipt bytes.
+5. Removing durable intent, atomic CAS, read-after-write, or evidence reconciliation leaves the
+   contract green.
+
 ## Authority and reversibility
 
 The slice adds exactly one GitHub effect — updating one managed PR body — behind the same closed,
