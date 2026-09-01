@@ -263,7 +263,7 @@ export async function runHostedDraftIntake({
       workKey: record.workKey,
       committedRevision: settledRevision(reconciled, record.committedRevision),
       workItem: record.selector.workItem,
-      unsettledCount: records.length - (settledByThisRun(reconciled) ? 1 : 0),
+      unsettledCount: allRecords.length - (settledByThisRun(reconciled) ? 1 : 0),
     }, reconciled, []);
   }
 
@@ -307,7 +307,7 @@ export async function runHostedDraftIntake({
     return intakeReceipt('ADMIT', {
       operationId, workKey, committedRevision: settledRevision(reconciled, committedRevision),
       workItem: canonicalSelector.workItem,
-      unsettledCount: settledByThisRun(reconciled) ? 0 : 1,
+      unsettledCount: allRecords.length + (settledByThisRun(reconciled) ? 0 : 1),
     }, reconciled, skipped);
   }
 
@@ -315,7 +315,7 @@ export async function runHostedDraftIntake({
     'EXPECTED_NONE',
     {
       operationId: null, workKey: null, committedRevision: null,
-      workItem: null, unsettledCount: 0,
+      workItem: null, unsettledCount: allRecords.length,
     },
     null,
     skipped,
