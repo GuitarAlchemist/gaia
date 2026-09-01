@@ -93,6 +93,7 @@ function fakeGitData({ failOnceOnKind = null, protectionSequence = [] } = {}) {
       },
     }),
     kinds(ref) { return (refs.get(ref) ?? []).map((record) => record.body.kind); },
+    records(ref) { return structuredClone(refs.get(ref) ?? []); },
     replaceRecordOid(ref, index, oid) {
       const records = refs.get(ref);
       assert.ok(records?.[index], 'record to replace exists');
@@ -107,7 +108,7 @@ function ports(store, collector, overrides = {}) {
     provider: overrides.provider
       ?? { async lookupExact() { return null; }, async createDraft() { return null; } },
     admission: overrides.admission ?? { async reserveEffect() { return 'ZERO'; } },
-    executorEpoch: { runId: 6001, runAttempt: 1 },
+    executorEpoch: overrides.executorEpoch ?? { runId: 6001, runAttempt: 1 },
     telemetry: { async append() {} },
     store,
   });
@@ -141,6 +142,103 @@ test('R2 durable enqueue survives restart and NONE cannot bootstrap it twice', a
     git.kinds(`refs/heads/gaia-ledger/draft-operations-v0/${accepted.workKey}`),
     ['WORK_ROOT', 'ENQUEUED'],
   );
+});
+
+test('R3 successor epochs fence CLAIMED and INTENT before issuing commands', async () => {
+  for (const boundary of [
+    { failKind: 'INTENT', durableState: 'CLAIMED' },
+    { failKind: 'EFFECT_STARTED', durableState: 'INTENT' },
+  ]) {
+    const git = fakeGitData({ failOnceOnKind: boundary.failKind });
+    const config = {
+      ledgerRegistryRootOid: OID_A,
+      ledgerRegistryRootRevision: git.registryRootRevision,
+    };
+    const envelope = observedEnvelope();
+    const selector = {
+      repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+      workItem: { kind: 'ISSUE', number: 60 },
+    };
+    const firstStore = createGitDataDraftOperationStore({ gitData: git.port, config });
+    const accepted = await enqueueDraft(selector, 'NONE', ports(firstStore, envelope));
+    const workRef = `refs/heads/gaia-ledger/draft-operations-v0/${accepted.workKey}`;
+    const assertCurrentEpoch = (expectedKind, expectedEpoch) => {
+      const current = git.records(workRef).at(-1)?.body;
+      assert.equal(current?.kind, expectedKind);
+      assert.deepEqual(
+        {
+          runId: current?.executorEpoch?.runId,
+          runAttempt: current?.executorEpoch?.runAttempt,
+        },
+        { runId: expectedEpoch.runId, runAttempt: expectedEpoch.runAttempt },
+      );
+    };
+    await assert.rejects(reconcileDraft(
+      accepted.operationId,
+      accepted.committedRevision,
+      ports(firstStore, envelope, {
+        admission: {
+          async reserveEffect(command) {
+            assertCurrentEpoch('CLAIMED', command.executorEpoch);
+            return 'AVAILABLE';
+          },
+        },
+        executorEpoch: { runId: 6001, runAttempt: 1 },
+      }),
+    ));
+    assert.equal(git.kinds(workRef).at(-1), boundary.durableState);
+
+    const restarted = createGitDataDraftOperationStore({ gitData: git.port, config });
+    const head = await restarted.readHead(accepted.workKey);
+    let successorReservations = 0;
+    const created = await reconcileDraft(
+      accepted.operationId,
+      head.committedRevision,
+      ports(restarted, envelope, {
+        admission: {
+          async reserveEffect(command) {
+            successorReservations += 1;
+            assertCurrentEpoch('CLAIMED', command.executorEpoch);
+            return 'AVAILABLE';
+          },
+        },
+        executorEpoch: { runId: 6002, runAttempt: 1 },
+        provider: {
+          async lookupExact() { return null; },
+          async createDraft(request) {
+            assertCurrentEpoch('EFFECT_STARTED', { runId: 6002, runAttempt: 1 });
+            return {
+              number: 61, url: 'https://github.com/GuitarAlchemist/gaia/pull/61',
+              isDraft: true, state: 'OPEN', operationMarker: request.operationMarker,
+              repository: structuredClone(request.repository),
+              baseRef: request.baseRef, headRef: request.headRef,
+              headRevision: request.headRevision,
+            };
+          },
+        },
+      }),
+    );
+    assert.equal(created.outcome, 'CREATED');
+    assert.equal(successorReservations, boundary.durableState === 'CLAIMED' ? 1 : 0);
+    const epochReceipts = git.records(workRef)
+      .filter(({ body }) => ['CLAIMED', 'INTENT', 'EFFECT_STARTED'].includes(body.kind))
+      .map(({ body }) => ({ kind: body.kind, executorEpoch: body.executorEpoch }));
+    const firstEpoch = { runId: 6001, runAttempt: 1 };
+    const successorEpoch = { runId: 6002, runAttempt: 1 };
+    assert.deepEqual(epochReceipts, boundary.durableState === 'CLAIMED'
+      ? [
+        { kind: 'CLAIMED', executorEpoch: firstEpoch },
+        { kind: 'CLAIMED', executorEpoch: successorEpoch },
+        { kind: 'INTENT', executorEpoch: successorEpoch },
+        { kind: 'EFFECT_STARTED', executorEpoch: successorEpoch },
+      ]
+      : [
+        { kind: 'CLAIMED', executorEpoch: firstEpoch },
+        { kind: 'INTENT', executorEpoch: firstEpoch },
+        { kind: 'INTENT', executorEpoch: successorEpoch },
+        { kind: 'EFFECT_STARTED', executorEpoch: successorEpoch },
+      ]);
+  }
 });
 
 test('R3 work registration refuses an identical root body stored under a different Git OID', async () => {
