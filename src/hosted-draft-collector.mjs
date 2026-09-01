@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 import { isExactInstant } from './local-lane-observation.mjs';
 
@@ -7,6 +9,7 @@ const ALLOWED_PERMISSIONS = new Set(['TRIAGE', 'WRITE', 'MAINTAIN', 'ADMIN']);
 const REQUIRED_METHODS = Object.freeze([
   'resolveRepository', 'readIssue', 'readPermission', 'listHeadRefs', 'readCommit', 'readPolicy',
 ]);
+const execFileAsync = promisify(execFile);
 
 export class HostedDraftCollectorError extends Error {
   constructor(code, message = code) {
@@ -57,6 +60,13 @@ function text(value, code) {
   return value;
 }
 
+function commitMessage(value) {
+  if (typeof value !== 'string' || value.length === 0 || /\u0000/u.test(value)) {
+    fail('CommitObservationInvalid', 'commit message is invalid');
+  }
+  return value;
+}
+
 function oid(value, code) {
   if (typeof value !== 'string' || !GIT_OID.test(value)) fail(code, code);
   return value;
@@ -65,6 +75,12 @@ function oid(value, code) {
 function positiveInteger(value, code) {
   if (!Number.isSafeInteger(value) || value < 1) fail(code, code);
   return value;
+}
+
+function githubSegment(value, code) {
+  const segment = text(value, code);
+  if (!/^[A-Za-z0-9_.-]+$/u.test(segment)) fail(code, code);
+  return segment;
 }
 
 function requireSelector(value) {
@@ -86,11 +102,123 @@ function requireRepository(value) {
   ], code);
   return {
     nodeId: text(value.nodeId, code),
-    owner: text(value.owner, code),
-    name: text(value.name, code),
+    owner: githubSegment(value.owner, code),
+    name: githubSegment(value.name, code),
     defaultBranch: text(value.defaultBranch, code),
     defaultBranchRevision: oid(value.defaultBranchRevision, code),
   };
+}
+
+async function runGh(args) {
+  const { stdout } = await execFileAsync('gh', args, {
+    encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, windowsHide: true,
+  });
+  const output = stdout.trim();
+  if (output.length === 0) return null;
+  return JSON.parse(output);
+}
+
+function repositoryPath(repository) {
+  return `${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+}
+
+function requireRawObject(value, code) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) fail(code, code);
+  return value;
+}
+
+function flattenPages(value, code) {
+  if (!Array.isArray(value) || value.some((page) => !Array.isArray(page))) fail(code, code);
+  return value.flat();
+}
+
+export function createGhDraftCollectorApi({ run = runGh } = {}) {
+  if (typeof run !== 'function') fail('InvalidGhAdapter', 'run must be a function');
+
+  return Object.freeze({
+    async resolveRepository({ owner, name }) {
+      const requestedOwner = githubSegment(owner, 'RepositoryObservationInvalid');
+      const requestedName = githubSegment(name, 'RepositoryObservationInvalid');
+      const raw = requireRawObject(await run([
+        'api', `repos/${encodeURIComponent(requestedOwner)}/${encodeURIComponent(requestedName)}`,
+      ]), 'RepositoryObservationInvalid');
+      const canonicalOwner = githubSegment(raw.owner?.login, 'RepositoryObservationInvalid');
+      const canonicalName = githubSegment(raw.name, 'RepositoryObservationInvalid');
+      const defaultBranch = text(raw.default_branch, 'RepositoryObservationInvalid');
+      const base = requireRawObject(await run([
+        'api', `repos/${encodeURIComponent(canonicalOwner)}/${encodeURIComponent(canonicalName)}`
+          + `/commits/${encodeURIComponent(defaultBranch)}`,
+      ]), 'RepositoryObservationInvalid');
+      return {
+        nodeId: text(raw.node_id, 'RepositoryObservationInvalid'),
+        owner: canonicalOwner,
+        name: canonicalName,
+        defaultBranch,
+        defaultBranchRevision: oid(base.sha, 'RepositoryObservationInvalid'),
+      };
+    },
+
+    async readIssue({ repository, number }) {
+      const path = repositoryPath(repository);
+      const raw = requireRawObject(await run([
+        'api', `repos/${path}/issues/${positiveInteger(number, 'IssueObservationInvalid')}`,
+      ]), 'IssueObservationInvalid');
+      const pages = flattenPages(await run([
+        'api', `repos/${path}/issues/${number}/events?per_page=100`, '--paginate', '--slurp',
+      ]), 'IssueObservationInvalid');
+      if (!Array.isArray(raw.labels)) fail('IssueObservationInvalid', 'issue labels are absent');
+      return {
+        nodeId: text(raw.node_id, 'IssueObservationInvalid'),
+        number: positiveInteger(raw.number, 'IssueObservationInvalid'),
+        state: String(raw.state).toUpperCase(),
+        updatedAt: text(raw.updated_at, 'IssueObservationInvalid'),
+        labels: raw.labels.map((label) => text(label?.name, 'IssueObservationInvalid')),
+        labelEvents: pages.filter((event) => event?.event === 'labeled').map((event) => ({
+          nodeId: text(event.node_id, 'IssueObservationInvalid'),
+          label: text(event.label?.name, 'IssueObservationInvalid'),
+          createdAt: text(event.created_at, 'IssueObservationInvalid'),
+          actor: {
+            nodeId: text(event.actor?.node_id, 'IssueObservationInvalid'),
+            login: githubSegment(event.actor?.login, 'IssueObservationInvalid'),
+          },
+        })),
+      };
+    },
+
+    async readPermission({ repository, login }) {
+      const raw = requireRawObject(await run([
+        'api', `repos/${repositoryPath(repository)}/collaborators/`
+          + `${encodeURIComponent(githubSegment(login, 'PermissionObservationInvalid'))}/permission`,
+      ]), 'PermissionObservationInvalid');
+      return text(raw.permission, 'PermissionObservationInvalid').toUpperCase();
+    },
+
+    async listHeadRefs({ repository }) {
+      const pages = flattenPages(await run([
+        'api', `repos/${repositoryPath(repository)}/git/matching-refs/heads/?per_page=100`,
+        '--paginate', '--slurp',
+      ]), 'HeadObservationInvalid');
+      return pages.map((row) => ({
+        name: text(row?.ref, 'HeadObservationInvalid').replace(/^refs\/heads\//u, ''),
+        revision: oid(row?.object?.sha, 'HeadObservationInvalid'),
+      }));
+    },
+
+    async readCommit({ repository, revision }) {
+      const raw = requireRawObject(await run([
+        'api', `repos/${repositoryPath(repository)}/git/commits/${oid(revision, 'CommitObservationInvalid')}`,
+      ]), 'CommitObservationInvalid');
+      return { message: commitMessage(raw.message) };
+    },
+
+    async readPolicy({ repository, baseRevision }) {
+      const raw = requireRawObject(await run([
+        'api', `repos/${repositoryPath(repository)}/contents/.github/gaia/pump-policy.json`
+          + `?ref=${encodeURIComponent(oid(baseRevision, 'PolicyObservationInvalid'))}`,
+      ]), 'PolicyObservationInvalid');
+      return { revision: oid(raw.sha, 'PolicyObservationInvalid') };
+    },
+  });
 }
 
 function requireActor(value) {
