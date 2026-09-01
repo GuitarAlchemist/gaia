@@ -337,6 +337,16 @@ export function createHostedDraftCollector({ github }) {
       });
       ownDataObject(policy, ['revision'], 'PolicyObservationInvalid');
       const policyRevision = oid(policy.revision, 'PolicyObservationInvalid');
+      const baseReadBack = requireRepository(await github.resolveRepository({
+        owner: repository.owner, name: repository.name,
+      }));
+      if (baseReadBack.nodeId !== repository.nodeId
+          || baseReadBack.owner !== repository.owner
+          || baseReadBack.name !== repository.name
+          || baseReadBack.defaultBranch !== repository.defaultBranch
+          || baseReadBack.defaultBranchRevision !== repository.defaultBranchRevision) {
+        fail('SourceRevisionMoved', 'source revisions moved during collection');
+      }
       const observedSourceRevision = sha256({
         schema: 'GaiaObservedSourceRevisionV0',
         repositoryNodeId: repository.nodeId,

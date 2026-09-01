@@ -99,7 +99,7 @@ test('R1 real enqueue seam accepts the sealed selector and reaches hosted observ
 
   assert.equal(result.kind, 'Enqueued');
   assert.match(result.committedRevision, /^[a-f0-9]{64}$/u);
-  assert.equal(repositoryReads, 1, 'the real collector was reached through the sealed selector');
+  assert.equal(repositoryReads, 2, 'the real collector observed and bounded the sealed selector');
 });
 
 test('R1 moved base read-back is a typed refusal before ENQUEUED', async () => {
@@ -203,6 +203,11 @@ test('R1 concrete gh observations feed the same collector seam', async () => {
       ].join('\n'),
     },
     { sha: 'c'.repeat(40) },
+    {
+      node_id: 'R_kgDTest', name: 'gaia', owner: { login: 'GuitarAlchemist' },
+      default_branch: 'main',
+    },
+    { sha: 'a'.repeat(40) },
   ];
   const run = async () => {
     assert.ok(responses.length > 0, 'gh adapter made only the bounded expected reads');
