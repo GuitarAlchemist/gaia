@@ -6,6 +6,7 @@ import {
   createHostedDraftPumpRuntime,
   main,
 } from '../scripts/hosted-draft-pump.mjs';
+import { GitHubActionsDraftAdmissionError } from '../src/github-actions-draft-admission.mjs';
 
 const OPERATION_ID = 'a'.repeat(64);
 const WORK_KEY = 'b'.repeat(64);
@@ -201,6 +202,26 @@ test('invalid arguments and provider failures return only closed redacted errors
       schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'OperationFailed',
     });
     assert.ok(!errors.text().includes(secret));
+  });
+
+  await context.test('closed admission configuration classification', async () => {
+    const output = sink();
+    const errors = sink();
+    const exitCode = await main({
+      argv: [...commonArgs('enqueue'), '--issue', '60'],
+      env: {}, stdout: output.stream, stderr: errors.stream,
+      runtimeFactory() {
+        return Object.freeze({
+          async enqueue() { throw new GitHubActionsDraftAdmissionError('InvalidConfiguration'); },
+          async reconcile() { assert.fail(); },
+          async listUnsettled() { assert.fail(); },
+        });
+      },
+    });
+    assert.equal(exitCode, 1);
+    assert.deepEqual(errors.json(), {
+      schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'AdmissionConfigurationFailed',
+    });
   });
 
   assert.equal(new HostedDraftPumpCliError('InvalidArguments').message, 'InvalidArguments');

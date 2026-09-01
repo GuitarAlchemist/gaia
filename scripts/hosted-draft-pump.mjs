@@ -17,7 +17,10 @@ import {
   createGhDraftCollectorApi,
   createHostedDraftCollector,
 } from '../src/hosted-draft-collector.mjs';
-import { createGitHubActionsDraftAdmission } from '../src/github-actions-draft-admission.mjs';
+import {
+  GitHubActionsDraftAdmissionError,
+  createGitHubActionsDraftAdmission,
+} from '../src/github-actions-draft-admission.mjs';
 
 const execFileAsync = promisify(execFile);
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -349,8 +352,12 @@ export async function main({
     }
     writeJson(stdout, receipt);
     return 0;
-  } catch {
-    writeJson(stderr, { schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'OperationFailed' });
+  } catch (error) {
+    writeJson(stderr, {
+      schema: 'GaiaHostedDraftPumpCliErrorV0',
+      error: error instanceof GitHubActionsDraftAdmissionError
+        ? 'AdmissionConfigurationFailed' : 'OperationFailed',
+    });
     return 1;
   }
 }
