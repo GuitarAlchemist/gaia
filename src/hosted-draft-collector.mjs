@@ -67,6 +67,11 @@ function commitMessage(value) {
   return value;
 }
 
+function providerInstant(value, code) {
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) fail(code, code);
+  return new Date(value).toISOString();
+}
+
 function oid(value, code) {
   if (typeof value !== 'string' || !GIT_OID.test(value)) fail(code, code);
   return value;
@@ -171,12 +176,12 @@ export function createGhDraftCollectorApi({ run = runGh } = {}) {
         nodeId: text(raw.node_id, 'IssueObservationInvalid'),
         number: positiveInteger(raw.number, 'IssueObservationInvalid'),
         state: String(raw.state).toUpperCase(),
-        updatedAt: text(raw.updated_at, 'IssueObservationInvalid'),
+        updatedAt: providerInstant(raw.updated_at, 'IssueObservationInvalid'),
         labels: raw.labels.map((label) => text(label?.name, 'IssueObservationInvalid')),
         labelEvents: pages.filter((event) => event?.event === 'labeled').map((event) => ({
           nodeId: text(event.node_id, 'IssueObservationInvalid'),
           label: text(event.label?.name, 'IssueObservationInvalid'),
-          createdAt: text(event.created_at, 'IssueObservationInvalid'),
+          createdAt: providerInstant(event.created_at, 'IssueObservationInvalid'),
           actor: {
             nodeId: text(event.actor?.node_id, 'IssueObservationInvalid'),
             login: githubSegment(event.actor?.login, 'IssueObservationInvalid'),

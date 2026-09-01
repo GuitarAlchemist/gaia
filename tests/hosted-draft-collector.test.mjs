@@ -110,15 +110,15 @@ test('R1 concrete gh observations feed the same collector seam', async () => {
     { sha: 'a'.repeat(40) },
     {
       node_id: 'I_test60', number: 60, state: 'open',
-      updated_at: '2026-08-31T19:05:00.000Z', labels: [{ name: 'ready-for-agent' }],
+      updated_at: '2026-08-31T19:05:00Z', labels: [{ name: 'ready-for-agent' }],
     },
     [[
       {
-        node_id: 'LE_old', event: 'labeled', created_at: '2026-08-31T18:00:00.000Z',
+        node_id: 'LE_old', event: 'labeled', created_at: '2026-08-31T18:00:00Z',
         actor: { node_id: 'U_old', login: 'older-actor' }, label: { name: 'ready-for-agent' },
       },
       {
-        node_id: 'LE_latest', event: 'labeled', created_at: '2026-08-31T19:00:00.000Z',
+        node_id: 'LE_latest', event: 'labeled', created_at: '2026-08-31T19:00:00Z',
         actor: { node_id: 'U_actor', login: 'trusted-actor' }, label: { name: 'ready-for-agent' },
       },
     ]],
