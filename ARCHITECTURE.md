@@ -76,10 +76,13 @@ only in the final column and must not escape in a result or refusal.
 
 The architecture-drift seam is the only new seam introduced by this map. One black-box
 contract suite runs against both adapters and includes broken-link, missing-section, stale
-revision, interface-leak, change-impact, ordering, negative, and mechanism-revert controls.
+revision, interface-token advisory, change-impact, malformed-input, ordering, deletion-depth,
+and mechanism-revert controls. The interface-token scan is deliberately advisory: Markdown
+prose cannot prove an abstraction boundary, so a token match requests human review but cannot
+fail the architecture gate or claim that provider details escaped at runtime.
 Removing this module would force the workflow, local verifier, and tests to reimplement link
 resolution, required-section policy, revision freshness, path sensitivity, closed reporting,
-and adapter-leak detection. The other module contracts and deletion rationale are maintained
+and advisory review prompts. The other module contracts and deletion rationale are maintained
 in their linked subsystem designs and tests.
 
 ## Work lifecycle: pumps, funnels, and lanes
@@ -252,11 +255,15 @@ revision are linked here.
 
 ## Verification
 
-Last verified at commit `9ffc54e5fb70bed6bf2a1f934f5cc846bc68eb3b` on 2026-09-01.
+The authoritative machine-readable `Last verified at` record is
+`package.json#gaiaArchitectureVerification`. It binds a verification date and reviewed Git commit
+to the SHA-256 revision of the exact `ARCHITECTURE.md` bytes. The named commit must contain those
+same bytes; merely naming an older reachable commit is stale. Keeping the attestation outside this
+file avoids a self-referential content hash while leaving this map byte-stable after review.
 
-Verification inspected the root README, the pure coordination kernel, append-only event log,
+Verification inspects the root README, the pure coordination kernel, append-only event log,
 operation envelope, portfolio/drain, telemetry/control-room, lane, ecosystem, recovery, security,
-and runtime contracts at that exact commit. `npm run architecture:verify` checks this document's
-required sections, internal links, resolvable verification revision, module-interface abstraction,
-and architecture-sensitive change declaration. Detailed subsystem claims remain owned by the
-linked documents and their black-box tests.
+and runtime contracts at the attested commit. `npm run architecture:verify` checks this document's
+required sections, internal links, exact content revision and commit witness, advisory interface
+tokens, and architecture-sensitive change declaration. Detailed subsystem claims remain owned by
+the linked documents and their black-box tests.
