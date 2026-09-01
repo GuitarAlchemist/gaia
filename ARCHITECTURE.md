@@ -76,13 +76,16 @@ only in the final column and must not escape in a result or refusal.
 
 The architecture-drift seam is the only new seam introduced by this map. One black-box
 contract suite runs against both adapters and includes broken-link, missing-section, stale
-revision, interface-token advisory, change-impact, malformed-input, ordering, deletion-depth,
-and mechanism-revert controls. The interface-token scan is deliberately advisory: Markdown
-prose cannot prove an abstraction boundary, so a token match requests human review but cannot
-fail the architecture gate or claim that provider details escaped at runtime.
+revision, interface-leak, change-impact, malformed-input, ordering, deletion-depth, and
+mechanism-revert controls. Backtick code spans in the Interface column are the structurally
+declared machine contract. Provider identifiers, configuration, transport errors, storage
+layout, payload, retry, path, ref, and object-identifier terms in those spans fail the gate;
+unstructured prose is not treated as proof of either a leak or a clean boundary.
 Removing this module would force the workflow, local verifier, and tests to reimplement link
 resolution, required-section policy, revision freshness, path sensitivity, closed reporting,
-and advisory review prompts. The other module contracts and deletion rationale are maintained
+and interface-boundary checks. A black-box deletion control executes the CLI with the checker
+absent and requires a module-load refusal with no report, rather than inferring depth from source
+wiring. The other module contracts and deletion rationale are maintained
 in their linked subsystem designs and tests.
 
 ## Work lifecycle: pumps, funnels, and lanes
@@ -264,6 +267,10 @@ file avoids a self-referential content hash while leaving this map byte-stable a
 Verification inspects the root README, the pure coordination kernel, append-only event log,
 operation envelope, portfolio/drain, telemetry/control-room, lane, ecosystem, recovery, security,
 and runtime contracts at the attested commit. `npm run architecture:verify` checks this document's
-required sections, internal links, exact content revision and commit witness, advisory interface
-tokens, and architecture-sensitive change declaration. Detailed subsystem claims remain owned by
-the linked documents and their black-box tests.
+required sections, internal links, exact content revision and commit witness, declared interface
+contracts, and architecture-sensitive change declaration. The production CLI derives the commit
+witness from raw `git show --end-of-options <commit>:ARCHITECTURE.md` bytes; callers cannot inject
+revision evidence. An explicit base is limited to a full commit identifier or canonical
+`refs/heads/`, `refs/tags/`, or `refs/remotes/` name and is passed after Git's
+`--end-of-options` delimiter. Detailed subsystem claims remain owned by the linked documents and
+their black-box tests.
