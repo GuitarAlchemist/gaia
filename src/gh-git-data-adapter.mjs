@@ -30,9 +30,10 @@ function canonical(value) {
 const contentRevision = (body) => createHash('sha256')
   .update(canonical(body), 'utf8').digest('hex');
 
-function ownData(value, code = 'GitDataProtocolViolation') {
+function ownData(value, code = 'GitDataProtocolViolation', allowNullPrototype = false) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)
-      || Object.getPrototypeOf(value) !== Object.prototype) fail(code);
+      || (Object.getPrototypeOf(value) !== Object.prototype
+        && !(allowNullPrototype && Object.getPrototypeOf(value) === null))) fail(code);
   const descriptors = Object.getOwnPropertyDescriptors(value);
   if (Reflect.ownKeys(value).some((key) => typeof key !== 'string'
       || !descriptors[key]?.enumerable || !Object.hasOwn(descriptors[key], 'value'))) fail(code);
@@ -158,7 +159,7 @@ function receiptTransportMetadata(body, value, registryRecord, code = 'InvalidTr
     return undefined;
   }
   if (!registryRecord) fail(code);
-  ownData(value, code);
+  ownData(value, code, true);
   const keys = Object.keys(value);
   if (keys.length !== 1 || keys[0] !== 'workRootOid') fail(code);
   return { workRootOid: oid(value.workRootOid, code) };
