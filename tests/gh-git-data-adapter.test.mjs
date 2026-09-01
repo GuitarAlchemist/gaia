@@ -3,6 +3,21 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 const MODULE_URL = new URL('../src/gh-git-data-adapter.mjs', import.meta.url);
+const PUMP_ACTOR = Object.freeze({ actorId: 9173, actorType: 'Integration' });
+
+function ledgerRuleset(overrides = {}) {
+  return {
+    id: 42,
+    enforcement: 'active',
+    conditions: { ref_name: { include: ['refs/heads/gaia-ledger/**'] } },
+    rules: [{ type: 'deletion' }, { type: 'non_fast_forward' }, { type: 'update' }],
+    bypass_actors: [{ actor_id: PUMP_ACTOR.actorId, actor_type: PUMP_ACTOR.actorType,
+      bypass_mode: 'always' }],
+    ...overrides,
+  };
+}
+
+const protectionResponses = (ruleset = ledgerRuleset()) => [[{ id: 42 }], ruleset];
 
 function revision(body) {
   const canonical = JSON.stringify(body, Object.keys(body).sort());
@@ -32,9 +47,7 @@ test('R2 gh Git Data adapter verifies protection, reads receipts, and appends by
   const calls = [];
   const responses = [
     [{ id: 42 }],
-    { id: 42, enforcement: 'active',
-      conditions: { ref_name: { include: ['refs/heads/gaia-ledger/**'] } },
-      rules: [{ type: 'deletion' }, { type: 'non_fast_forward' }] },
+    ledgerRuleset(),
     [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: rootOid } }],
     { sha: rootOid, tree: { sha: '3'.repeat(40) }, parents: [] },
     { tree: [{ path: 'receipt.json', type: 'blob', sha: '4'.repeat(40) }] },
@@ -49,6 +62,7 @@ test('R2 gh Git Data adapter verifies protection, reads receipts, and appends by
   ];
   const api = createGhGitDataApi({
     repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
     run: scriptedRun(responses, calls),
   });
 
@@ -89,6 +103,7 @@ test('R2 gh Git Data adapter creates an absent work ref without force', async ()
   ];
   const api = createGhGitDataApi({
     repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
     run: scriptedRun(responses, calls),
   });
 
@@ -109,6 +124,7 @@ test('R2 gh Git Data adapter refuses a stale head before creating objects', asyn
   const calls = [];
   const api = createGhGitDataApi({
     repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
     run: scriptedRun([[{
       ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: current },
     }]], calls),
@@ -125,6 +141,7 @@ test('R2 gh Git Data adapter redacts provider diagnostics', async () => {
   const { createGhGitDataApi, GhGitDataError } = await import(MODULE_URL);
   const api = createGhGitDataApi({
     repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
     async run() { throw new Error('token, path, and provider response'); },
   });
 
@@ -141,10 +158,103 @@ test('R3 gh Git Data adapter reports an absent operation without leaking refs', 
   const calls = [];
   const api = createGhGitDataApi({
     repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
     run: scriptedRun([[]], calls),
   });
 
   assert.deepEqual(await api.readByOperation('a'.repeat(64)), { state: 'UNSEEN' });
   assert.equal(calls.length, 1);
   assert.equal(JSON.stringify(calls[0]).includes('ledgerHeadOid'), false);
+});
+
+test('R3 protection is restricted to exactly the configured Gaia pump App actor', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const cases = {
+    'missing update restriction': ledgerRuleset({
+      rules: [{ type: 'deletion' }, { type: 'non_fast_forward' }],
+    }),
+    'missing pump actor': ledgerRuleset({ bypass_actors: [] }),
+    'wrong App actor': ledgerRuleset({
+      bypass_actors: [{ actor_id: 9999, actor_type: 'Integration', bypass_mode: 'always' }],
+    }),
+    'broad repository role': ledgerRuleset({
+      bypass_actors: [{ actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' }],
+    }),
+    'extra broad bypass': ledgerRuleset({
+      bypass_actors: [
+        { actor_id: PUMP_ACTOR.actorId, actor_type: PUMP_ACTOR.actorType,
+          bypass_mode: 'always' },
+        { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
+      ],
+    }),
+  };
+
+  for (const [why, ruleset] of Object.entries(cases)) {
+    const api = createGhGitDataApi({
+      repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+      pumpActor: PUMP_ACTOR,
+      run: scriptedRun(protectionResponses(ruleset), []),
+    });
+    assert.equal(await api.verifyProtection({
+      prefix: 'refs/heads/gaia-ledger/', registryRootOid: '1'.repeat(40),
+    }), false, why);
+  }
+});
+
+test('R3 compareAndAppend fails closed before any Git write when protection changes', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    run: scriptedRun(protectionResponses(ledgerRuleset({ bypass_actors: [] })), calls),
+  });
+
+  await assert.rejects(
+    api.compareAndAppend('refs/heads/gaia-ledger/registry-v0', '1'.repeat(40), {
+      schema: 'Receipt', priorCommittedRevision: 'a'.repeat(64), kind: 'RESERVED',
+    }),
+    (error) => error?.code === 'LedgerProtectionUnavailable',
+  );
+  assert.equal(calls.length, 2, 'only the ruleset listing and detail are read');
+  assert.equal(calls.some((call) => ['POST', 'PATCH'].includes(call.args[3])), false,
+    'no blob, tree, commit, or ref write is attempted');
+});
+
+test('R3 reads only a one-entry tree whose blob is byte-canonical', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const body = { schema: 'GaiaDraftRegistryRootV0', kind: 'REGISTRY_ROOT',
+    priorCommittedRevision: 'NONE' };
+  const commitOid = '1'.repeat(40);
+  const treeOid = '2'.repeat(40);
+  const blobOid = '3'.repeat(40);
+  const wrapper = { body, committedRevision: revision(body) };
+  const cases = {
+    'an extra tree entry': {
+      tree: [
+        { path: 'receipt.json', type: 'blob', sha: blobOid },
+        { path: 'hidden.txt', type: 'blob', sha: '4'.repeat(40) },
+      ],
+      bytes: JSON.stringify(wrapper),
+    },
+    'noncanonical receipt bytes': {
+      tree: [{ path: 'receipt.json', type: 'blob', sha: blobOid }],
+      bytes: JSON.stringify(wrapper, null, 2),
+    },
+  };
+
+  for (const [why, fixture] of Object.entries(cases)) {
+    const api = createGhGitDataApi({
+      repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+      pumpActor: PUMP_ACTOR,
+      run: scriptedRun([
+        [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: commitOid } }],
+        { sha: commitOid, tree: { sha: treeOid }, parents: [] },
+        { tree: fixture.tree },
+        { encoding: 'base64', content: Buffer.from(fixture.bytes, 'utf8').toString('base64') },
+      ], []),
+    });
+    await assert.rejects(api.read('refs/heads/gaia-ledger/registry-v0'),
+      (error) => error?.code === 'GitDataProtocolViolation', why);
+  }
 });
