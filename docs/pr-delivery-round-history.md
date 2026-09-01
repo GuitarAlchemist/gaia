@@ -407,6 +407,44 @@ not grant merge, close, ready, force, approval, or any new GitHub authority.
 4. Removing CLAIM CAS or treating INTENT reuse as ownership leaves the concurrency test green.
 5. A stale claimant, unexpired contender, or ambiguous claim response performs a blind create.
 
+## R3 hosted composition and recovery correction
+
+Fresh review found that the hosted executor omitted the managed-round configuration, that recovery
+treated an eventually-consistent null lookup as proof that no Draft existed, that lease takeover
+trusted a contender timestamp, and that the R1 executor remained test-only. R3 closes those four
+production seams without granting another effect or implementing later rounds.
+
+The hosted reconcile input carries one closed, operator-authored managed-round contract. It contains
+the exact R0 receipt, bounded create claim, effect actor, and (when a reproduced blocker is ready)
+the exact R1 advance receipt and target pull-request number. The runtime does not infer any owner,
+command edge, deadline, trigger, or authority from the legacy presentation. It constructs one GitHub
+evidence port from the existing Git Data adapter, passes the R0 contract to the real Draft provider,
+and, after the existing operation reconciliation returns a created or reused exact Draft, invokes
+the public R1 executor only when the explicit advance receipt is present. The R1 adapter is the
+existing atomic GitHub body adapter and success still requires durable APPLIED readback.
+
+A null provider observation means `UNKNOWN`, never `ABSENT`. Recovery after a durable create CLAIM
+may append a successor claim only when two independent facts are available: the evidence port's
+authoritative clock reports the previous lease expired, and the provider positively proves the
+operation absent. The GitHub adapter currently cannot make that strong absence statement and
+therefore returns `UNKNOWN`; it fails closed rather than repeating `gh pr create`. A deterministic
+memory adapter may prove absence from its authoritative operation map.
+
+Lease expiry is a store-clock decision. The new contender's `observedAt` and `leaseExpiresAt` only
+validate the requested lease's positive bounded duration; they cannot expire an earlier claim. An
+evidence port without an authoritative clock returns `UNKNOWN`, which refuses takeover. Thus a
+future-skewed contender, process liveness, elapsed wall time, or prose cannot steal an active claim.
+
+### Added R3 falsifiers
+
+1. The hosted provider receives no exact R0 contract or durable GitHub evidence port.
+2. The hosted reconcile path receives an explicit durable R1 receipt but performs no atomic managed
+   body transition or returns before the update receipt is durable.
+3. An eventually-consistent null lookup after an ambiguous create causes another provider create.
+4. A future-skewed contender timestamp replaces a claim that the evidence store reports active.
+5. Removing positive absence proof, authoritative lease-state validation, or hosted R1 composition
+   leaves its public black-box test green.
+
 ## Authority and reversibility
 
 The slice adds exactly one GitHub effect — updating one managed PR body — behind the same closed,
