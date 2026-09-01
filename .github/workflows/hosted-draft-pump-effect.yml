@@ -23,33 +23,6 @@ on:
         description: Trusted ledger registry root content revision
         required: true
         type: string
-  workflow_call:
-    inputs:
-      work-key:
-        description: Exact sealed Draft work key
-        required: true
-        type: string
-      operation-id:
-        description: Exact durable operation identity
-        required: true
-        type: string
-      committed-revision:
-        description: Expected durable ledger revision
-        required: true
-        type: string
-      ledger-root-oid:
-        description: Trusted ledger registry root Git object ID
-        required: true
-        type: string
-      ledger-root-revision:
-        description: Trusted ledger registry root content revision
-        required: true
-        type: string
-    secrets:
-      GAIA_PUMP_APP_PRIVATE_KEY:
-        description: Private key for the dedicated, bounded Gaia pump GitHub App
-        required: true
-
 permissions:
   actions: read
   contents: read
