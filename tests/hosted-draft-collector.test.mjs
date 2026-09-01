@@ -283,22 +283,24 @@ test('R1 concrete gh timestamps normalize provider precision without widening pa
     label: { name: 'ready-for-agent' },
   }]];
 
-  await context.test('parseable forged instant is refused', async () => {
-    const responses = [
-      issue('2026-08-31T19:05:00Z (forged)'),
-      events('2026-08-31T19:00:00.000Z'),
-    ];
-    const github = createGhDraftCollectorApi({
-      async run() { return structuredClone(responses.shift()); },
+  for (const [field, updatedAt, createdAt] of [
+    ['updated_at', '2026-08-31T19:05:00+00:00', '2026-08-31T19:00:00.000Z'],
+    ['created_at', '2026-08-31T19:05:00.000Z', '2026-08-31T19:00:00+00:00'],
+  ]) {
+    await context.test(`parseable non-canonical ${field} is refused`, async () => {
+      const responses = [issue(updatedAt), events(createdAt)];
+      const github = createGhDraftCollectorApi({
+        async run() { return structuredClone(responses.shift()); },
+      });
+      await assert.rejects(
+        github.readIssue({
+          repository: { owner: 'GuitarAlchemist', name: 'gaia' }, number: 60,
+        }),
+        (error) => error instanceof HostedDraftCollectorError
+          && error.code === 'IssueObservationInvalid',
+      );
     });
-    await assert.rejects(
-      github.readIssue({
-        repository: { owner: 'GuitarAlchemist', name: 'gaia' }, number: 60,
-      }),
-      (error) => error instanceof HostedDraftCollectorError
-        && error.code === 'IssueObservationInvalid',
-    );
-  });
+  }
 
   await context.test('GitHub second precision is normalized to the canonical instant', async () => {
     const responses = [
