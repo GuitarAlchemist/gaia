@@ -19,9 +19,16 @@ function ledgerRuleset(overrides = {}) {
 
 const protectionResponses = (ruleset = ledgerRuleset()) => [[{ id: 42 }], ruleset];
 
+function canonical(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  return `{${Object.keys(value).sort().map(
+    (key) => `${JSON.stringify(key)}:${canonical(value[key])}`,
+  ).join(',')}}`;
+}
+
 function revision(body) {
-  const canonical = JSON.stringify(body, Object.keys(body).sort());
-  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+  return createHash('sha256').update(canonical(body), 'utf8').digest('hex');
 }
 
 function scriptedRun(responses, calls) {
@@ -50,14 +57,20 @@ test('R2 gh Git Data adapter verifies protection, reads receipts, and appends by
     ledgerRuleset(),
     [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: rootOid } }],
     { sha: rootOid, tree: { sha: '3'.repeat(40) }, parents: [] },
-    { tree: [{ path: 'receipt.json', type: 'blob', sha: '4'.repeat(40) }] },
-    { encoding: 'base64', content: Buffer.from(JSON.stringify({
+    { truncated: false,
+      tree: [{ path: 'receipt.json', type: 'blob', sha: '4'.repeat(40) }] },
+    { encoding: 'base64', content: Buffer.from(canonical({
       body: root, committedRevision: revision(root),
     }), 'utf8').toString('base64') },
+    ...protectionResponses(),
     [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: rootOid } }],
+    ...protectionResponses(),
     { sha: '5'.repeat(40) },
+    ...protectionResponses(),
     { sha: '6'.repeat(40) },
+    ...protectionResponses(),
     { sha: nextOid },
+    ...protectionResponses(),
     { object: { sha: nextOid } },
   ];
   const api = createGhGitDataApi({
@@ -95,10 +108,15 @@ test('R2 gh Git Data adapter creates an absent work ref without force', async ()
   const oid = '7'.repeat(40);
   const calls = [];
   const responses = [
+    ...protectionResponses(),
     [],
+    ...protectionResponses(),
     { sha: '5'.repeat(40) },
+    ...protectionResponses(),
     { sha: '6'.repeat(40) },
+    ...protectionResponses(),
     { sha: oid },
+    ...protectionResponses(),
     { object: { sha: oid } },
   ];
   const api = createGhGitDataApi({
@@ -125,7 +143,7 @@ test('R2 gh Git Data adapter refuses a stale head before creating objects', asyn
   const api = createGhGitDataApi({
     repository: { owner: 'GuitarAlchemist', name: 'gaia' },
     pumpActor: PUMP_ACTOR,
-    run: scriptedRun([[{
+    run: scriptedRun([...protectionResponses(), [{
       ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: current },
     }]], calls),
   });
@@ -134,7 +152,9 @@ test('R2 gh Git Data adapter refuses a stale head before creating objects', asyn
     'refs/heads/gaia-ledger/registry-v0', '1'.repeat(40),
     { schema: 'Receipt', priorCommittedRevision: 'a'.repeat(64), kind: 'RESERVED' },
   ), { kind: 'STALE', currentHeadOid: current });
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 3, 'protection is read before the authoritative head');
+  assert.equal(calls.some((call) => ['POST', 'PATCH'].includes(call.args[3])), false,
+    'the stale loser creates no Git object and moves no ref');
 });
 
 test('R2 gh Git Data adapter redacts provider diagnostics', async () => {
@@ -221,6 +241,34 @@ test('R3 compareAndAppend fails closed before any Git write when protection chan
     'no blob, tree, commit, or ref write is attempted');
 });
 
+test('R3 protection is re-read before each Git write and stops a partial append', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const head = '1'.repeat(40);
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    run: scriptedRun([
+      ...protectionResponses(),
+      [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: head } }],
+      ...protectionResponses(),
+      { sha: '2'.repeat(40) },
+      ...protectionResponses(ledgerRuleset({ bypass_actors: [] })),
+    ], calls),
+  });
+
+  await assert.rejects(
+    api.compareAndAppend('refs/heads/gaia-ledger/registry-v0', head, {
+      schema: 'Receipt', priorCommittedRevision: 'a'.repeat(64), kind: 'RESERVED',
+    }),
+    (error) => error?.code === 'LedgerProtectionUnavailable',
+  );
+  assert.deepEqual(calls.filter((call) => call.args[3] === 'POST').map(
+    (call) => call.args[1],
+  ), ['repos/GuitarAlchemist/gaia/git/blobs'],
+  'the already-created blob is inert; no tree, commit, or ref write follows protection loss');
+});
+
 test('R3 reads only a one-entry tree whose blob is byte-canonical', async () => {
   const { createGhGitDataApi } = await import(MODULE_URL);
   const body = { schema: 'GaiaDraftRegistryRootV0', kind: 'REGISTRY_ROOT',
@@ -235,11 +283,18 @@ test('R3 reads only a one-entry tree whose blob is byte-canonical', async () => 
         { path: 'receipt.json', type: 'blob', sha: blobOid },
         { path: 'hidden.txt', type: 'blob', sha: '4'.repeat(40) },
       ],
+      truncated: false,
       bytes: JSON.stringify(wrapper),
     },
     'noncanonical receipt bytes': {
       tree: [{ path: 'receipt.json', type: 'blob', sha: blobOid }],
+      truncated: false,
       bytes: JSON.stringify(wrapper, null, 2),
+    },
+    'a truncated tree that can hide entries': {
+      tree: [{ path: 'receipt.json', type: 'blob', sha: blobOid }],
+      truncated: true,
+      bytes: canonical(wrapper),
     },
   };
 
@@ -250,7 +305,7 @@ test('R3 reads only a one-entry tree whose blob is byte-canonical', async () => 
       run: scriptedRun([
         [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: commitOid } }],
         { sha: commitOid, tree: { sha: treeOid }, parents: [] },
-        { tree: fixture.tree },
+        { truncated: fixture.truncated, tree: fixture.tree },
         { encoding: 'base64', content: Buffer.from(fixture.bytes, 'utf8').toString('base64') },
       ], []),
     });

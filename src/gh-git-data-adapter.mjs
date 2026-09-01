@@ -106,22 +106,39 @@ function requireRulesets(value) {
   return value;
 }
 
-function protectedLedgerRuleset(ruleset) {
+function configuredPumpActor(value) {
+  ownData(value, 'InvalidPumpActor');
+  const keys = Object.keys(value).sort();
+  if (keys.length !== 2 || keys[0] !== 'actorId' || keys[1] !== 'actorType'
+      || !Number.isSafeInteger(value.actorId) || value.actorId <= 0
+      || value.actorType !== 'Integration') fail('InvalidPumpActor');
+  return Object.freeze({ actorId: value.actorId, actorType: value.actorType });
+}
+
+function protectedLedgerRuleset(ruleset, pumpActor) {
   if (ruleset === null || typeof ruleset !== 'object' || ruleset.enforcement !== 'active') return false;
   const includes = ruleset.conditions?.ref_name?.include;
   const types = Array.isArray(ruleset.rules)
     ? new Set(ruleset.rules.map((rule) => rule?.type)) : new Set();
+  const actors = ruleset.bypass_actors;
   return Array.isArray(includes)
     && includes.includes('refs/heads/gaia-ledger/**')
     && types.has('deletion')
-    && types.has('non_fast_forward');
+    && types.has('non_fast_forward')
+    && types.has('update')
+    && Array.isArray(actors)
+    && actors.length === 1
+    && actors[0]?.actor_id === pumpActor.actorId
+    && actors[0]?.actor_type === pumpActor.actorType
+    && actors[0]?.bypass_mode === 'always';
 }
 
-export function createGhGitDataApi({ repository, run = runGh }) {
+export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run = runGh }) {
   ownData(repository, 'InvalidRepository');
   const canonicalRepository = Object.freeze({
     owner: segment(repository.owner), name: segment(repository.name),
   });
+  const pumpActor = configuredPumpActor(pumpActorInput);
   if (typeof run !== 'function') fail('InvalidGitDataAdapter');
   const repo = repositoryPath(canonicalRepository);
   const call = async (method, path, input) => {
@@ -144,25 +161,40 @@ export function createGhGitDataApi({ repository, run = runGh }) {
     return oid(exact[0]?.object?.sha);
   }
 
+  async function protectionAvailable() {
+    const summaries = requireRulesets(await call('GET', 'rulesets?includes_parents=false'));
+    const rulesets = [];
+    for (const summary of summaries) {
+      if (!Number.isSafeInteger(summary?.id) || summary.id <= 0) {
+        fail('GitDataProtocolViolation');
+      }
+      rulesets.push(await call('GET', `rulesets/${summary.id}?includes_parents=false`));
+    }
+    return rulesets.some((ruleset) => protectedLedgerRuleset(ruleset, pumpActor));
+  }
+
+  async function requireProtection() {
+    if (!await protectionAvailable()) fail('LedgerProtectionUnavailable');
+  }
+
   async function readRecord(commitOid) {
     const commit = ownData(await call('GET', `git/commits/${oid(commitOid)}`));
     if (commit.sha !== commitOid || !Array.isArray(commit.parents)
         || commit.parents.length > 1) fail('GitDataProtocolViolation');
     const treeOid = oid(commit.tree?.sha);
     const tree = ownData(await call('GET', `git/trees/${treeOid}`));
-    if (!Array.isArray(tree.tree)) fail('GitDataProtocolViolation');
-    const entries = tree.tree.filter((entry) => entry?.path === RECEIPT_PATH
-      && entry?.type === 'blob');
-    if (entries.length !== 1) fail('GitDataProtocolViolation');
-    const blob = ownData(await call('GET', `git/blobs/${oid(entries[0].sha)}`));
+    if (tree.truncated !== false || !Array.isArray(tree.tree) || tree.tree.length !== 1
+        || tree.tree[0]?.path !== RECEIPT_PATH || tree.tree[0]?.type !== 'blob') {
+      fail('GitDataProtocolViolation');
+    }
+    const blob = ownData(await call('GET', `git/blobs/${oid(tree.tree[0].sha)}`));
     if (blob.encoding !== 'base64' || typeof blob.content !== 'string') {
       fail('GitDataProtocolViolation');
     }
     let receipt;
     try {
-      receipt = JSON.parse(Buffer.from(
-        blob.content.replace(/\s/gu, ''), 'base64',
-      ).toString('utf8'));
+      const bytes = Buffer.from(blob.content.replace(/\s/gu, ''), 'base64').toString('utf8');
+      receipt = JSON.parse(bytes);
       ownData(receipt);
       const keys = Object.keys(receipt).sort();
       if (keys.length !== 2 || keys[0] !== 'body' || keys[1] !== 'committedRevision') {
@@ -174,6 +206,7 @@ export function createGhGitDataApi({ repository, run = runGh }) {
         || receipt.committedRevision !== contentRevision(receipt.body)) {
         fail('GitDataProtocolViolation');
       }
+      if (bytes !== canonical(receipt)) fail('GitDataProtocolViolation');
     } catch (error) {
       if (error instanceof GhGitDataError) throw error;
       fail('GitDataProtocolViolation');
@@ -192,10 +225,13 @@ export function createGhGitDataApi({ repository, run = runGh }) {
     const content = Buffer.from(canonical({
       body, committedRevision: contentRevision(body),
     }), 'utf8').toString('base64');
+    await requireProtection();
     const blob = ownData(await call('POST', 'git/blobs', { content, encoding: 'base64' }));
+    await requireProtection();
     const tree = ownData(await call('POST', 'git/trees', {
       tree: [{ path: RECEIPT_PATH, mode: '100644', type: 'blob', sha: oid(blob.sha) }],
     }));
+    await requireProtection();
     const commit = ownData(await call('POST', 'git/commits', {
       message: `gaia-ledger: ${body.kind ?? 'receipt'}`,
       tree: oid(tree.sha),
@@ -225,15 +261,7 @@ export function createGhGitDataApi({ repository, run = runGh }) {
     async verifyProtection({ prefix, registryRootOid }) {
       if (prefix !== LEDGER_PREFIX) fail('InvalidProtectionRequest');
       oid(registryRootOid, 'InvalidProtectionRequest');
-      const summaries = requireRulesets(await call('GET', 'rulesets?includes_parents=false'));
-      const rulesets = [];
-      for (const summary of summaries) {
-        if (!Number.isSafeInteger(summary?.id) || summary.id <= 0) {
-          fail('GitDataProtocolViolation');
-        }
-        rulesets.push(await call('GET', `rulesets/${summary.id}?includes_parents=false`));
-      }
-      return rulesets.some(protectedLedgerRuleset);
+      return protectionAvailable();
     },
 
     async read(refInput) {
@@ -267,10 +295,12 @@ export function createGhGitDataApi({ repository, run = runGh }) {
       const expectedHeadOid = expectedHeadInput === 'NONE'
         ? 'NONE' : oid(expectedHeadInput, 'InvalidExpectedHead');
       const body = cloneJson(bodyInput);
+      await requireProtection();
       const observed = await currentHead(ref);
       if (observed !== expectedHeadOid) return { kind: 'STALE', currentHeadOid: observed };
       const commitOid = await appendObjects(expectedHeadOid, body);
       try {
+        await requireProtection();
         if (expectedHeadOid === 'NONE') {
           await call('POST', 'git/refs', { ref, sha: commitOid });
         } else {
