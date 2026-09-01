@@ -52,15 +52,33 @@ test('only the ready-for-agent label qualifies an issues-triggered run', () => {
   );
 });
 
-test('intake is serialized repository-wide and never cancels an in-flight operation', () => {
+test('intake partitions labeled issues while scheduled recovery stays serialized', () => {
   const workflow = intake();
   assert.match(workflow, /^concurrency:\s*$/mu);
-  assert.match(workflow, /^ {2}group: gaia-draft-intake\s*$/mu);
+  assert.match(
+    workflow,
+    /^ {2}group: \$\{\{ github\.event_name == 'issues' && format\('gaia-draft-intake-issue-\{0\}', github\.event\.issue\.number\) \|\| 'gaia-draft-intake-recovery' \}\}\s*$/mu,
+  );
   assert.match(workflow, /^ {2}cancel-in-progress: false\s*$/mu);
 
-  // Repository-wide means the group carries no per-run expression.
-  const group = workflow.match(/^ {2}group: (.+)$/mu);
-  assert.doesNotMatch(group[1], /\$\{\{/u, 'the intake group must not interpolate any input');
+  assert.doesNotMatch(
+    workflow,
+    /^ {2}group: gaia-draft-intake\s*$/mu,
+    'unrelated issue runs must not share the old repository-wide group',
+  );
+
+  const group = workflow.match(/^ {2}group: (.+)$/mu)?.[1];
+  assert.ok(group, 'one concurrency group is required');
+  assert.equal(
+    [...group.matchAll(/github\.event\.issue\.number/gu)].length,
+    1,
+    'the issue number is scheduling data exactly once, never effect authority',
+  );
+  assert.equal(
+    [...group.matchAll(/gaia-draft-intake-recovery/gu)].length,
+    1,
+    'every non-issue trigger converges on one recovery group',
+  );
 });
 
 test('intake claims no dispatch authority and no GITHUB_TOKEN authority', () => {
