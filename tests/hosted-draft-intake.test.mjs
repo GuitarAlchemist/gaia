@@ -48,10 +48,10 @@ async function intake() {
   return mod.runHostedDraftIntake;
 }
 
-test('an unsettled operation is resumed before any candidate is listed or admitted', async () => {
+test('scheduled recovery resumes unsettled work before any candidate is listed or admitted', async () => {
   const run = await intake();
   const calls = [];
-  const receipt = await run({ repository: REPOSITORY, candidates: [61, 62] }, {
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
     ledgerPorts: {},
     operationPortsFor() { return {}; },
     operationPortsForSelector() { return {}; },
@@ -78,6 +78,54 @@ test('an unsettled operation is resumed before any candidate is listed or admitt
   assert.equal(receipt.phase, 'RESUME');
   assert.equal(receipt.operationId, SHA_A);
   assert.deepEqual(receipt.skipped, []);
+});
+
+test('concurrent issue lanes cannot be consumed by unrelated unsettled recovery work', async () => {
+  const run = await intake();
+  const enqueued = [];
+  const reconciled = [];
+  const ports = {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() {
+      return [{
+        operationId: SHA_A, workKey: SHA_B, committedRevision: SHA_C,
+        selector: selectorFor(51),
+      }];
+    },
+    async listReadyIssues() { assert.fail('an issue lane uses its explicit candidate only'); },
+    async enqueueDraft(candidate) {
+      const number = candidate.workItem.number;
+      enqueued.push(number);
+      return {
+        kind: 'Enqueued',
+        operationId: number === 61 ? SHA_A : SHA_B,
+        workKey: number === 61 ? SHA_C : SHA_D,
+        generationKey: SHA_A,
+        committedRevision: SHA_C,
+      };
+    },
+    async reconcileDraft(operationId) {
+      reconciled.push(operationId);
+      return {
+        kind: 'Terminal', outcome: 'CREATED', effect: 'CREATE_DRAFT',
+        operationId, committedRevision: SHA_D,
+      };
+    },
+  };
+
+  const [issue61, issue62] = await Promise.all([
+    run({ repository: REPOSITORY, candidates: [61] }, ports),
+    run({ repository: REPOSITORY, candidates: [62] }, ports),
+  ]);
+
+  assert.deepEqual(enqueued.sort((left, right) => left - right), [61, 62]);
+  assert.deepEqual(reconciled.sort(), [SHA_A, SHA_B]);
+  assert.equal(issue61.phase, 'ADMIT');
+  assert.equal(issue61.workItem.number, 61);
+  assert.equal(issue62.phase, 'ADMIT');
+  assert.equal(issue62.workItem.number, 62);
 });
 
 test('candidates are probed in ascending order, terminal keys skipped, at most one admitted', async () => {
