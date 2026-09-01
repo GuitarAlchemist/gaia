@@ -10,6 +10,10 @@ const RED = '3'.repeat(40);
 const GREEN = '4'.repeat(40);
 const RECEIPT_0 = 'b'.repeat(64);
 const RECEIPT_1 = 'c'.repeat(64);
+const ACCOUNTABLE = 'github:user:gaia-operator';
+const SUPERVISOR = `gaia:operation:${'5'.repeat(64)}`;
+const EXECUTION = `gaia:lane:${'6'.repeat(64)}:${HEAD}`;
+const EFFECT = 'github:app:gaia-draft-pump';
 
 const digest = (text) => createHash('sha256').update(text, 'utf8').digest('hex');
 
@@ -50,6 +54,34 @@ function evidence(overrides = {}) {
   };
 }
 
+function responsibility(overrides = {}) {
+  return {
+    ownershipRevision: '7'.repeat(64),
+    accountableOwner: ACCOUNTABLE,
+    supervisor: SUPERVISOR,
+    executionOwner: EXECUTION,
+    reportsTo: SUPERVISOR,
+    reviewOwners: {
+      standards: 'github:user:standards-reviewer',
+      spec: 'github:user:spec-reviewer',
+    },
+    effectOwner: EFFECT,
+    escalatesTo: ACCOUNTABLE,
+    ...overrides,
+  };
+}
+
+function command(overrides = {}) {
+  return {
+    commandRevision: '8'.repeat(64),
+    commandOwner: SUPERVISOR,
+    commandPath: [SUPERVISOR, EXECUTION],
+    generation: HEAD,
+    capabilities: ['ASSIGN', 'REVOKE', 'STOP', 'RETRY', 'ESCALATE'],
+    ...overrides,
+  };
+}
+
 function openReceipt(overrides = {}) {
   return {
     schema: 'GaiaRoundReceiptV0',
@@ -59,6 +91,8 @@ function openReceipt(overrides = {}) {
     predecessorRoundKey: 'NONE',
     trigger: 'DRAFT_CREATED',
     roundBudget: 2,
+    responsibility: responsibility(),
+    command: command(),
     evidence: evidence(),
     ...overrides,
   };
@@ -72,6 +106,8 @@ function advanceReceipt(predecessorRoundKey, overrides = {}) {
     ordinal: 1,
     predecessorRoundKey,
     trigger: 'REPRODUCED_BLOCKER',
+    responsibility: responsibility(),
+    command: command(),
     evidence: evidence({
       greenCommit: GREEN,
       testEvidenceReceipt: 'd'.repeat(64),
@@ -105,8 +141,12 @@ function observation(body, overrides = {}) {
 
 test('R0 is byte deterministic and every non-movement field is present', async () => {
   const { createInitialManagedRound } = await api();
-  const left = createInitialManagedRound({ workKey: WORK_KEY, receipt: openReceipt() });
-  const right = createInitialManagedRound({ workKey: WORK_KEY, receipt: openReceipt() });
+  const left = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
+  const right = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
 
   assert.deepEqual(left, right);
   assert.equal(left.kind, 'INITIAL');
@@ -118,12 +158,25 @@ test('R0 is byte deterministic and every non-movement field is present', async (
   assert.match(left.managedSection, /Next transition: `RED_EVIDENCE_RECORDED`/u);
   assert.match(left.managedSection, /Escalation action: `REQUEST_ARCHITECTURE_REASSESSMENT`/u);
   assert.match(left.managedSection, /Origin: ready-receipt:141ef124/u);
+  assert.match(left.managedSection, /Accountable owner: `github:user:gaia-operator`/u);
+  assert.match(left.managedSection, /Supervisor: `gaia:operation:/u);
+  assert.match(left.managedSection, /Execution owner: `gaia:lane:/u);
+  assert.match(left.managedSection, /Reports to: `gaia:operation:/u);
+  assert.match(left.managedSection, /Standards review owner: `github:user:standards-reviewer`/u);
+  assert.match(left.managedSection, /Spec review owner: `github:user:spec-reviewer`/u);
+  assert.match(left.managedSection, /Effect owner: `github:app:gaia-draft-pump`/u);
+  assert.match(left.managedSection, /Escalates to: `github:user:gaia-operator`/u);
+  assert.match(left.managedSection, /Command owner: `gaia:operation:/u);
+  assert.match(left.managedSection, /Command path: `gaia:operation:[^`]+ -> gaia:lane:/u);
+  assert.match(left.managedSection, /Command generation: `1{40}`/u);
   assert.equal((left.managedSection.match(/#### R0/gu) ?? []).length, 1);
 });
 
 test('one durable reproduced blocker advances R0 to R1 while preserving human bytes', async () => {
   const { createInitialManagedRound, planManagedRoundUpdate } = await api();
-  const initial = createInitialManagedRound({ workKey: WORK_KEY, receipt: openReceipt() });
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
   const body = `human prefix\r\n${initial.managedSection}\r\nhuman suffix`;
   const receipt = advanceReceipt(initial.roundKey);
 
@@ -145,7 +198,9 @@ test('one durable reproduced blocker advances R0 to R1 while preserving human by
 
 test('duplicate receipt converges and a competing R1 receipt is a typed stale loser', async () => {
   const { createInitialManagedRound, planManagedRoundUpdate } = await api();
-  const initial = createInitialManagedRound({ workKey: WORK_KEY, receipt: openReceipt() });
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
   const first = planManagedRoundUpdate({
     workKey: WORK_KEY,
     observation: observation(initial.managedSection),
@@ -172,7 +227,9 @@ test('duplicate receipt converges and a competing R1 receipt is a typed stale lo
 
 test('retry, restart, heartbeat, formatting and missing evidence never advance', async (context) => {
   const { createInitialManagedRound, planManagedRoundUpdate } = await api();
-  const initial = createInitialManagedRound({ workKey: WORK_KEY, receipt: openReceipt() });
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
   for (const trigger of ['RETRY', 'RESTART', 'HEARTBEAT', 'FORMATTING']) {
     await context.test(trigger, () => {
       const refused = planManagedRoundUpdate({
@@ -197,7 +254,9 @@ test('retry, restart, heartbeat, formatting and missing evidence never advance',
 
 test('malformed markers, stale observation and exhausted budget fail closed', async (context) => {
   const { createInitialManagedRound, planManagedRoundUpdate } = await api();
-  const initial = createInitialManagedRound({ workKey: WORK_KEY, receipt: openReceipt() });
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
   const cases = [
     ['', 'ManagedSectionMalformed'],
     [`${initial.managedSection}\n${initial.managedSection}`, 'ManagedSectionMalformed'],
@@ -220,7 +279,7 @@ test('malformed markers, stale observation and exhausted budget fail closed', as
   assert.equal(stale.code, 'StaleBody');
 
   const oneRound = createInitialManagedRound({
-    workKey: WORK_KEY, receipt: openReceipt({ roundBudget: 1 }),
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt({ roundBudget: 1 }),
   });
   const exhausted = planManagedRoundUpdate({
     workKey: WORK_KEY, observation: observation(oneRound.managedSection),
@@ -231,7 +290,9 @@ test('malformed markers, stale observation and exhausted budget fail closed', as
 
 test('deadline is an intervention boundary and emits only a pure escalation intent at expiry', async () => {
   const { createInitialManagedRound, planManagedRoundUpdate } = await api();
-  const initial = createInitialManagedRound({ workKey: WORK_KEY, receipt: openReceipt() });
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
   const before = planManagedRoundUpdate({
     workKey: WORK_KEY,
     observation: observation(initial.managedSection),
@@ -269,6 +330,93 @@ test('deadline is an intervention boundary and emits only a pure escalation inte
   assert.equal('proposedBody' in expired, false);
 });
 
+test('responsibility and command chains refuse missing links, cycles, or duplicate authority', async (context) => {
+  const { createInitialManagedRound, DeliveryRoundError } = await api();
+  const invalid = [
+    ['missing accountable owner', (() => {
+      const value = responsibility();
+      delete value.accountableOwner;
+      return { responsibility: value };
+    })(), 'ResponsibilityMalformed'],
+    ['unresolvable reportsTo', {
+      responsibility: responsibility({ reportsTo: 'github:user:unrelated' }),
+    }, 'UnresolvableReportsTo'],
+    ['duplicate effect authority', {
+      responsibility: responsibility({ effectOwner: [EFFECT, 'github:app:other'] }),
+    }, 'DuplicateEffectAuthority'],
+    ['review owner overlaps effect owner', {
+      responsibility: responsibility({
+        reviewOwners: { standards: EFFECT, spec: 'github:user:spec-reviewer' },
+      }),
+    }, 'ReviewOwnerConflict'],
+    ['command self-cycle', {
+      command: command({ commandPath: [SUPERVISOR, SUPERVISOR] }),
+    }, 'CommandCycle'],
+    ['orphan execution lane', {
+      command: command({ commandPath: [SUPERVISOR, `gaia:lane:${'9'.repeat(64)}:${HEAD}`] }),
+    }, 'OrphanExecutionOwner'],
+    ['dual commanders', {
+      command: command({ commandOwner: [SUPERVISOR, ACCOUNTABLE] }),
+    }, 'DualCommandOwner'],
+    ['stale generation', {
+      command: command({ generation: '9'.repeat(40) }),
+    }, 'StaleCommandGeneration'],
+  ];
+
+  for (const [name, override, code] of invalid) {
+    await context.test(name, () => {
+      const receipt = openReceipt({
+        responsibility: override.responsibility ?? responsibility(),
+        command: override.command ?? command(),
+      });
+      assert.throws(
+        () => createInitialManagedRound({ workKey: WORK_KEY, headRevision: HEAD, receipt }),
+        (error) => error instanceof DeliveryRoundError && error.code === code,
+      );
+    });
+  }
+});
+
+test('revision-bound owner handoff advances once and stale ownership claims are refused', async () => {
+  const { createInitialManagedRound, planManagedRoundUpdate } = await api();
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
+  const nextExecution = `gaia:lane:${'9'.repeat(64)}:${HEAD}`;
+  const handoff = advanceReceipt(initial.roundKey, {
+    responsibility: responsibility({
+      ownershipRevision: '9'.repeat(64), executionOwner: nextExecution,
+    }),
+    command: command({
+      commandRevision: 'e'.repeat(64), commandPath: [SUPERVISOR, nextExecution],
+    }),
+  });
+  const plan = planManagedRoundUpdate({
+    workKey: WORK_KEY, observation: observation(initial.managedSection), receipt: handoff,
+  });
+  assert.equal(plan.kind, 'PROPOSED');
+  assert.ok(plan.proposedBody.includes(`Execution owner: ${'`'}${nextExecution}${'`'}`));
+  assert.match(plan.proposedBody, /Ownership revision: `9{64}`/u);
+  assert.match(plan.proposedBody, /Command revision: `e{64}`/u);
+
+  const replay = planManagedRoundUpdate({
+    workKey: WORK_KEY, observation: observation(plan.proposedBody), receipt: handoff,
+  });
+  assert.equal(replay.kind, 'ALREADY_APPLIED');
+
+  const staleClaim = planManagedRoundUpdate({
+    workKey: WORK_KEY,
+    observation: observation(initial.managedSection),
+    receipt: advanceReceipt(initial.roundKey, {
+      responsibility: responsibility({ executionOwner: nextExecution }),
+      command: command({ commandRevision: 'e'.repeat(64), commandPath: [SUPERVISOR, nextExecution] }),
+    }),
+  });
+  assert.deepEqual({ kind: staleClaim.kind, code: staleClaim.code }, {
+    kind: 'REFUSED', code: 'OwnershipRevisionRequired',
+  });
+});
+
 function scriptedAdapter(initial, script) {
   let current = structuredClone(initial);
   const calls = [];
@@ -296,7 +444,9 @@ function scriptedAdapter(initial, script) {
 
 test('effect boundary linearizes at exact CAS and reconciles an ambiguous acknowledgement', async () => {
   const { createInitialManagedRound, executeManagedRoundUpdate } = await api();
-  const initial = createInitialManagedRound({ workKey: WORK_KEY, receipt: openReceipt() });
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
   const state = observation(initial.managedSection);
   const fixture = scriptedAdapter(state, [
     (effect, _current, set) => {
@@ -318,7 +468,9 @@ test('effect boundary linearizes at exact CAS and reconciles an ambiguous acknow
 
 test('forced CAS mutation preserves human edits and stale losers perform no effect', async () => {
   const { createInitialManagedRound, executeManagedRoundUpdate } = await api();
-  const initial = createInitialManagedRound({ workKey: WORK_KEY, receipt: openReceipt() });
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
   const fixture = scriptedAdapter(observation(`before\n${initial.managedSection}\nafter`), [
     (_effect, current, set) => {
       set(observation(`human edit\n${current.body}`));
@@ -350,7 +502,9 @@ test('forced CAS mutation preserves human edits and stale losers perform no effe
 
 test('five unproved postconditions end in typed POSTCONDITION_UNPROVEN', async () => {
   const { createInitialManagedRound, executeManagedRoundUpdate } = await api();
-  const initial = createInitialManagedRound({ workKey: WORK_KEY, receipt: openReceipt() });
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
   const fixture = scriptedAdapter(observation(initial.managedSection), Array(5).fill('AMBIGUOUS'));
 
   const result = await executeManagedRoundUpdate({
@@ -364,4 +518,3 @@ test('five unproved postconditions end in typed POSTCONDITION_UNPROVEN', async (
   assert.equal(result.observed.bodyRevision, digest(initial.managedSection));
   assert.equal(fixture.calls.filter((call) => call.method === 'compareAndSet').length, 5);
 });
-
