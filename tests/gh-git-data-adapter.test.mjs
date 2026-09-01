@@ -443,3 +443,28 @@ test('R3 CONFIRMED carries its work-root OID only as private transport metadata'
     }],
   });
 });
+
+test('R3 closed transport metadata still refuses accessors without evaluating them', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const metadata = Object.create(null);
+  Object.defineProperty(metadata, 'workRootOid', {
+    enumerable: true,
+    get() { assert.fail('transport metadata accessors must not run'); },
+  });
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    async run() { assert.fail('invalid metadata must fail before GitHub'); },
+  });
+  await assert.rejects(
+    api.compareAndAppend(
+      'refs/heads/gaia-ledger/registry-v0', '1'.repeat(40),
+      {
+        schema: 'GaiaDraftRegistryReceiptV0', priorCommittedRevision: 'a'.repeat(64),
+        kind: 'CONFIRMED', workKey: 'b'.repeat(64), bootstrapCommittedRevision: 'c'.repeat(64),
+      },
+      metadata,
+    ),
+    (error) => error?.code === 'InvalidTransportMetadata',
+  );
+});
