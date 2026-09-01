@@ -21,6 +21,9 @@ async function api() {
   const loaded = await import(MODULE_URL);
   for (const name of [
     'createInitialManagedRound', 'planManagedRoundUpdate', 'executeManagedRoundUpdate',
+    'executeManagedDraftCreation', 'createMemoryManagedRoundAdapter',
+    'createGitHubManagedRoundAdapter', 'createMemoryManagedRoundEvidencePort',
+    'createGitHubManagedRoundEvidencePort',
     'DeliveryRoundError',
   ]) assert.equal(typeof loaded[name], name === 'DeliveryRoundError' ? 'function' : 'function');
   return loaded;
@@ -136,6 +139,50 @@ function observation(body, overrides = {}) {
     body,
     bodyRevision: digest(body),
     ...overrides,
+  };
+}
+
+function githubApiFixture(initial = []) {
+  const drafts = new Map(initial.map((item) => [item.number, structuredClone(item)]));
+  const operations = new Map();
+  const calls = [];
+  let nextNumber = 69;
+  return {
+    calls,
+    api: {
+      async createDraft(effect) {
+        calls.push({ method: 'createDraft', effect: structuredClone(effect) });
+        const number = nextNumber;
+        nextNumber += 1;
+        const created = observation(effect.proposedBody, {
+          number, headRevision: effect.expectedHeadRevision,
+        });
+        drafts.set(number, created);
+        operations.set(effect.operationId, number);
+        return { kind: 'ACKNOWLEDGED', number };
+      },
+      async observe(number) {
+        calls.push({ method: 'observe', number });
+        return structuredClone(drafts.get(number) ?? null);
+      },
+      async observeByOperation(operationId) {
+        calls.push({ method: 'observeByOperation', operationId });
+        const number = operations.get(operationId);
+        return number === undefined ? null : structuredClone(drafts.get(number));
+      },
+      async compareAndSetBody(effect) {
+        calls.push({ method: 'compareAndSetBody', effect: structuredClone(effect) });
+        const current = drafts.get(effect.number);
+        if (current?.headRevision !== effect.expectedHeadRevision
+          || current?.bodyRevision !== effect.expectedBodyRevision) return { kind: 'STALE' };
+        const updated = observation(effect.proposedBody, {
+          number: effect.number, headRevision: effect.expectedHeadRevision,
+        });
+        drafts.set(effect.number, updated);
+        operations.set(effect.operationId, effect.number);
+        return { kind: 'ACKNOWLEDGED' };
+      },
+    },
   };
 }
 
@@ -443,7 +490,9 @@ function scriptedAdapter(initial, script) {
 }
 
 test('effect boundary linearizes at exact CAS and reconciles an ambiguous acknowledgement', async () => {
-  const { createInitialManagedRound, executeManagedRoundUpdate } = await api();
+  const {
+    createInitialManagedRound, executeManagedRoundUpdate, createMemoryManagedRoundEvidencePort,
+  } = await api();
   const initial = createInitialManagedRound({
     workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
   });
@@ -458,6 +507,7 @@ test('effect boundary linearizes at exact CAS and reconciles an ambiguous acknow
   const result = await executeManagedRoundUpdate({
     workKey: WORK_KEY, number: 69,
     receipt: advanceReceipt(initial.roundKey), effectActor: EFFECT, adapter: fixture.adapter,
+    evidencePort: createMemoryManagedRoundEvidencePort(),
   });
 
   assert.equal(result.kind, 'APPLIED');
@@ -467,7 +517,9 @@ test('effect boundary linearizes at exact CAS and reconciles an ambiguous acknow
 });
 
 test('forced CAS mutation preserves human edits and stale losers perform no effect', async () => {
-  const { createInitialManagedRound, executeManagedRoundUpdate } = await api();
+  const {
+    createInitialManagedRound, executeManagedRoundUpdate, createMemoryManagedRoundEvidencePort,
+  } = await api();
   const initial = createInitialManagedRound({
     workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
   });
@@ -482,6 +534,7 @@ test('forced CAS mutation preserves human edits and stale losers perform no effe
   const result = await executeManagedRoundUpdate({
     workKey: WORK_KEY, number: 69,
     receipt: advanceReceipt(initial.roundKey), effectActor: EFFECT, adapter: fixture.adapter,
+    evidencePort: createMemoryManagedRoundEvidencePort(),
   });
   assert.equal(result.kind, 'APPLIED');
   assert.equal(result.attempts, 2);
@@ -492,6 +545,7 @@ test('forced CAS mutation preserves human edits and stale losers perform no effe
     workKey: WORK_KEY, number: 69,
     receipt: advanceReceipt(initial.roundKey, { revision: 'f'.repeat(64) }),
     effectActor: EFFECT, adapter: fixture.adapter,
+    evidencePort: createMemoryManagedRoundEvidencePort(),
   });
   assert.deepEqual({ kind: loser.kind, code: loser.code }, {
     kind: 'REFUSED', code: 'RoundLineageConflict',
@@ -509,6 +563,7 @@ test('forced CAS mutation preserves human edits and stale losers perform no effe
     workKey: WORK_KEY, number: 69,
     receipt: advanceReceipt(initial.roundKey), effectActor: EFFECT,
     adapter: managedMutation.adapter,
+    evidencePort: createMemoryManagedRoundEvidencePort(),
   });
   assert.deepEqual({ kind: conflict.kind, code: conflict.code }, {
     kind: 'REFUSED', code: 'ManagedSectionConflict',
@@ -518,7 +573,9 @@ test('forced CAS mutation preserves human edits and stale losers perform no effe
 });
 
 test('five unproved postconditions end in typed POSTCONDITION_UNPROVEN', async () => {
-  const { createInitialManagedRound, executeManagedRoundUpdate } = await api();
+  const {
+    createInitialManagedRound, executeManagedRoundUpdate, createMemoryManagedRoundEvidencePort,
+  } = await api();
   const initial = createInitialManagedRound({
     workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
   });
@@ -527,6 +584,7 @@ test('five unproved postconditions end in typed POSTCONDITION_UNPROVEN', async (
   const result = await executeManagedRoundUpdate({
     workKey: WORK_KEY, number: 69,
     receipt: advanceReceipt(initial.roundKey), effectActor: EFFECT, adapter: fixture.adapter,
+    evidencePort: createMemoryManagedRoundEvidencePort(),
   });
 
   assert.equal(result.kind, 'BLOCKED');
@@ -537,7 +595,9 @@ test('five unproved postconditions end in typed POSTCONDITION_UNPROVEN', async (
 });
 
 test('only the single receipt-bound effect owner reaches CAS and handoffs are read-back proven', async () => {
-  const { createInitialManagedRound, executeManagedRoundUpdate } = await api();
+  const {
+    createInitialManagedRound, executeManagedRoundUpdate, createMemoryManagedRoundEvidencePort,
+  } = await api();
   const initial = createInitialManagedRound({
     workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
   });
@@ -555,6 +615,7 @@ test('only the single receipt-bound effect owner reaches CAS and handoffs are re
     const denied = scriptedAdapter(observation(initial.managedSection), []);
     const result = await executeManagedRoundUpdate({
       workKey: WORK_KEY, number: 69, receipt, effectActor, adapter: denied.adapter,
+      evidencePort: createMemoryManagedRoundEvidencePort(),
     });
     assert.deepEqual({ kind: result.kind, code: result.code }, {
       kind: 'REFUSED', code: 'EffectOwnerMismatch',
@@ -565,9 +626,173 @@ test('only the single receipt-bound effect owner reaches CAS and handoffs are re
   const allowed = scriptedAdapter(observation(initial.managedSection), ['APPLY']);
   const applied = await executeManagedRoundUpdate({
     workKey: WORK_KEY, number: 69, receipt, effectActor: EFFECT, adapter: allowed.adapter,
+    evidencePort: createMemoryManagedRoundEvidencePort(),
   });
   assert.equal(applied.kind, 'APPLIED');
   assert.equal(applied.attempts, 1);
   assert.ok(applied.observed.body.includes(nextExecution));
   assert.equal(allowed.calls.filter((call) => call.method === 'compareAndSet').length, 1);
+});
+
+test('every managed Draft is created with canonical R0 through both public adapters', async (context) => {
+  const {
+    createInitialManagedRound, executeManagedDraftCreation, createMemoryManagedRoundAdapter,
+    createGitHubManagedRoundAdapter, createMemoryManagedRoundEvidencePort, DeliveryRoundError,
+  } = await api();
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
+  const github = githubApiFixture();
+  const cases = [
+    ['memory', createMemoryManagedRoundAdapter(), null],
+    ['github', createGitHubManagedRoundAdapter({ api: github.api }), github],
+  ];
+
+  for (const [name, adapter, fixture] of cases) {
+    await context.test(name, async () => {
+      const evidencePort = createMemoryManagedRoundEvidencePort();
+      const result = await executeManagedDraftCreation({
+        workKey: WORK_KEY,
+        headRevision: HEAD,
+        baseBody: 'human-authored prefix\r\nwith exact bytes',
+        receipt: openReceipt(),
+        effectActor: EFFECT,
+        adapter,
+        evidencePort,
+      });
+      assert.equal(result.kind, 'APPLIED');
+      assert.equal(result.operationId, initial.roundKey);
+      assert.equal(result.observed.body,
+        `human-authored prefix\r\nwith exact bytes\n\n${initial.managedSection}`);
+      assert.equal((result.observed.body.match(/<!-- gaia-rounds:begin:/gu) ?? []).length, 1);
+      assert.equal((result.observed.body.match(/#### R0/gu) ?? []).length, 1);
+      const evidenceSnapshot = await evidencePort.read(WORK_KEY);
+      assert.deepEqual(evidenceSnapshot.records.map((record) => record.kind), ['INTENT', 'APPLIED']);
+      if (fixture) {
+        assert.equal(fixture.calls.filter((call) => call.method === 'createDraft').length, 1);
+        assert.ok(fixture.calls.some((call) => call.method === 'observeByOperation'));
+      }
+    });
+  }
+
+  assert.throws(
+    () => createGitHubManagedRoundAdapter({
+      api: { createDraft() {}, observe() {}, observeByOperation() {} },
+    }),
+    (error) => error instanceof DeliveryRoundError && error.code === 'AtomicCasUnavailable',
+  );
+});
+
+test('one black-box R0-to-R1 effect contract agrees across memory and GitHub adapters', async (context) => {
+  const {
+    createInitialManagedRound, executeManagedRoundUpdate, createMemoryManagedRoundAdapter,
+    createGitHubManagedRoundAdapter, createMemoryManagedRoundEvidencePort,
+  } = await api();
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
+  const starting = observation(`before\n${initial.managedSection}\nafter`);
+  const github = githubApiFixture([starting]);
+  const cases = [
+    ['memory', createMemoryManagedRoundAdapter({ observations: [starting] })],
+    ['github', createGitHubManagedRoundAdapter({ api: github.api })],
+  ];
+  const results = [];
+
+  for (const [name, adapter] of cases) {
+    await context.test(name, async () => {
+      const result = await executeManagedRoundUpdate({
+        workKey: WORK_KEY,
+        number: 69,
+        receipt: advanceReceipt(initial.roundKey),
+        effectActor: EFFECT,
+        adapter,
+        evidencePort: createMemoryManagedRoundEvidencePort(),
+      });
+      assert.equal(result.kind, 'APPLIED');
+      assert.equal((result.observed.body.match(/#### R1/gu) ?? []).length, 1);
+      results.push(JSON.parse(JSON.stringify(result)));
+    });
+  }
+  assert.deepEqual(results[0], results[1]);
+  assert.equal(github.calls.filter((call) => call.method === 'compareAndSetBody').length, 1);
+});
+
+test('GitHub evidence persists INTENT and read-back-proven APPLIED before byte-identical success', async () => {
+  const {
+    executeManagedDraftCreation, createMemoryManagedRoundAdapter,
+    createGitHubManagedRoundEvidencePort,
+  } = await api();
+  const records = [];
+  const calls = [];
+  const gitData = {
+    async read(ref) {
+      calls.push({ method: 'read', ref });
+      return records.length === 0 ? { state: 'UNSEEN' } : {
+        state: 'PRESENT',
+        records: records.map((record) => structuredClone(record)),
+      };
+    },
+    async compareAndAppend(ref, expectedHeadOid, body) {
+      calls.push({ method: 'compareAndAppend', ref, expectedHeadOid, body: structuredClone(body) });
+      const current = records.at(-1)?.oid ?? 'NONE';
+      if (current !== expectedHeadOid) return { kind: 'STALE', currentHeadOid: current };
+      const oid = String(records.length + 1).repeat(40);
+      const record = { oid, body: structuredClone(body), committedRevision: digest(JSON.stringify(body)) };
+      records.push(record);
+      return { kind: 'APPENDED', ...structuredClone(record) };
+    },
+  };
+  const evidencePort = createGitHubManagedRoundEvidencePort({ gitData });
+  const adapter = createMemoryManagedRoundAdapter();
+  const input = {
+    workKey: WORK_KEY, headRevision: HEAD, baseBody: 'human', receipt: openReceipt(),
+    effectActor: EFFECT, adapter, evidencePort,
+  };
+
+  const first = await executeManagedDraftCreation(input);
+  assert.equal(first.kind, 'APPLIED');
+  assert.deepEqual(records.map((record) => record.body.kind), ['INTENT', 'APPLIED']);
+  assert.ok(calls.filter((call) => call.method === 'read').length >= 4,
+    'each durable append is reconciled through read-after-write');
+  assert.deepEqual(records[1].body.providerReceipt, {
+    schema: 'GaiaGitHubRoundEffectReceiptV0',
+    operationId: first.operationId,
+    number: first.observed.number,
+    headRevision: HEAD,
+    bodyRevision: first.observed.bodyRevision,
+  });
+
+  const replay = await executeManagedDraftCreation(input);
+  assert.equal(JSON.stringify(replay), JSON.stringify(first));
+  assert.equal(adapter.calls.filter((call) => call.method === 'createDraft').length, 1);
+});
+
+test('durable intent CAS makes a competing advance a stale loser with no provider effect', async () => {
+  const {
+    createInitialManagedRound, executeManagedRoundUpdate, createMemoryManagedRoundAdapter,
+    createMemoryManagedRoundEvidencePort,
+  } = await api();
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
+  const adapter = createMemoryManagedRoundAdapter({
+    observations: [observation(initial.managedSection)],
+  });
+  const evidencePort = createMemoryManagedRoundEvidencePort();
+  const winner = await executeManagedRoundUpdate({
+    workKey: WORK_KEY, number: 69, receipt: advanceReceipt(initial.roundKey),
+    effectActor: EFFECT, adapter, evidencePort,
+  });
+  assert.equal(winner.kind, 'APPLIED');
+
+  const loser = await executeManagedRoundUpdate({
+    workKey: WORK_KEY, number: 69,
+    receipt: advanceReceipt(initial.roundKey, { revision: 'f'.repeat(64) }),
+    effectActor: EFFECT, adapter, evidencePort,
+  });
+  assert.deepEqual({ kind: loser.kind, code: loser.code }, {
+    kind: 'REFUSED', code: 'RoundLineageConflict',
+  });
+  assert.equal(adapter.calls.filter((call) => call.method === 'compareAndSet').length, 1);
 });
