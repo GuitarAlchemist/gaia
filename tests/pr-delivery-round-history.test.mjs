@@ -860,7 +860,7 @@ test('two same-operation creators linearize on one durable claim before provider
     effectActor: EFFECT, adapter, evidencePort,
   };
 
-  const [left, right] = await Promise.all([
+  const settled = await Promise.allSettled([
     executeManagedDraftCreation({ ...input, effectClaim: effectClaim('a'.repeat(64)) }),
     executeManagedDraftCreation({ ...input, effectClaim: effectClaim('b'.repeat(64), {
       revision: '7'.repeat(64),
@@ -868,6 +868,8 @@ test('two same-operation creators linearize on one durable claim before provider
   ]);
 
   assert.equal(creates, 1);
+  assert.ok(settled.every((result) => result.status === 'fulfilled'));
+  const [left, right] = settled.map((result) => result.value);
   assert.equal([left, right].filter((result) => result.kind === 'APPLIED').length, 1);
   assert.equal([left, right].filter(
     (result) => result.kind === 'REFUSED' && result.code === 'EffectClaimHeld',
