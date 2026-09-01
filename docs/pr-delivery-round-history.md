@@ -130,6 +130,24 @@ When a durable deadline-observation receipt proves that boundary has expired, th
 emits an `ESCALATE` intent naming the recorded action and owner. That intent grants no effect:
 the adapter cannot merge, close, force, approve, or otherwise act on it.
 
+Responsibility and command are separate closed subcontracts on every round. Responsibility names
+`accountableOwner` (a GitHub-resolvable durable identity), `supervisor` (the durable operation or
+controller identity), `executionOwner` (the bounded lane identity), `reportsTo`, distinct
+read-only `reviewOwners.standard` and `reviewOwners.spec`, one `effectOwner` or `NONE`, and
+`escalatesTo`. `reportsTo` must resolve directly to the supervisor or accountable owner. The
+responsibility assignment carries its own durable `ownershipRevision`; changing any link without
+changing that revision is refused.
+
+Command names one `commandOwner`, one direct two-node `commandPath` from that owner to the
+execution owner, the exact head generation it governs, and its own durable `commandRevision`.
+The fixed command vocabulary is `ASSIGN`, `REVOKE`, `STOP`, `RETRY`, and `ESCALATE`; it is not
+transitive. Reporting carries evidence upward and grants none of these actions. Command authority
+cannot be inferred from prose, liveness, completion, GitHub assignment, or `reportsTo`. Missing
+links, self-cycles, orphan lanes, two commanders, duplicate effect owners, stale generations, and
+review identities that overlap an effect or execution owner are malformed and produce no write.
+Owner handoffs therefore use the same durable-receipt, exact-CAS, read-after-write, and idempotent
+replay path as the round transition; no check-then-act ownership claim exists at the adapter seam.
+
 Published rounds are append-only within the section: `R1` is added after `R0`, and the text
 recorded for `R0` is never rewritten. A correction is a new round, not an edit of an old one.
 
@@ -192,6 +210,11 @@ advanceKey      = sha256(canonical({ schema: 'GaiaRoundAdvanceKeyV0',
   observation time. Before expiry it is a non-event; at or after expiry it produces a pure
   escalation intent and no GitHub mutation. It never predicts completion or grants the escalation
   action it names.
+- **INV-12 — one direct command edge.** One revision-bound command owner may command one bounded
+  execution owner for the exact observed generation. The reporting graph and review identities
+  carry no command or effect authority, and command never flows transitively through them.
+- **INV-13 — one effect owner.** A round names either one effect owner or `NONE`. The effect adapter
+  remains separately injected and capability-bounded; naming an owner is evidence, not a grant.
 
 ## Failure modes
 
@@ -257,6 +280,13 @@ falsifier or a Done-when item in issue #51:
 14. **Non-movement and deadline.** Every round renders the closed blocker explanation. A deadline
     observation before expiry is a typed non-event; one at expiry emits the recorded escalation
     intent with no provider write, merge, close, force, or approval capability.
+15. **Responsibility versus command.** Positive cases render every responsibility link and the
+    direct command edge. Negative cases refuse missing links, self-cycles, orphan lanes, dual
+    commanders, duplicate effect authority, overlapping review/effect owners, unresolvable
+    `reportsTo`, and stale command generations.
+16. **Ownership handoff.** A changed chain requires a changed durable ownership/command receipt;
+    exact replay converges to one successor and uses the same read-after-write proof as any other
+    managed-section update.
 
 Tests bind to a deterministic in-memory provider adapter and to the production-shaped `gh` adapter
 through the same black-box contract, per ENG-03.
