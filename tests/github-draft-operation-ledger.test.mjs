@@ -190,6 +190,25 @@ test('R3 successor epochs fence CLAIMED and INTENT before issuing commands', asy
 
     const restarted = createGitDataDraftOperationStore({ gitData: git.port, config });
     const head = await restarted.readHead(accepted.workKey);
+    const staleEpoch = await reconcileDraft(
+      accepted.operationId,
+      head.committedRevision,
+      ports(restarted, envelope, {
+        admission: {
+          async reserveEffect() { assert.fail('a stale epoch cannot reserve capacity'); },
+        },
+        executorEpoch: { runId: 6000, runAttempt: 1 },
+        provider: {
+          async lookupExact() { return null; },
+          async createDraft() { assert.fail('a stale epoch cannot create a Draft'); },
+        },
+      }),
+    );
+    assert.equal(staleEpoch.kind, 'StaleRevision');
+    assert.equal(
+      (await restarted.readHead(accepted.workKey)).committedRevision,
+      head.committedRevision,
+    );
     let successorReservations = 0;
     const created = await reconcileDraft(
       accepted.operationId,

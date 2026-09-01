@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 const SHA256 = /^[a-f0-9]{64}$/u;
 const GIT_OID = /^[a-f0-9]{40}$/u;
 const TERMINAL = new Set(['CREATED', 'REUSED', 'REFUSED', 'CANCELLED']);
+const EPOCH_STATES = new Set(['CLAIMED', 'INTENT', 'EFFECT_STARTED']);
 
 export class DraftOperationError extends Error {
   constructor(code, message = code) {
@@ -254,6 +255,7 @@ class MemoryDraftOperationStore {
         ],
         committedRevision,
         state: 'ENQUEUED',
+        executorEpoch: null,
         terminal: null,
       };
       this.#work.set(identity.workKey, work);
@@ -293,6 +295,7 @@ class MemoryDraftOperationStore {
       work.records.push({ body, committedRevision });
       work.committedRevision = committedRevision;
       work.state = kind;
+      if (EPOCH_STATES.has(kind)) work.executorEpoch = payload.executorEpoch;
       if (TERMINAL.has(kind)) work.terminal = { ...payload, outcome: kind, committedRevision };
       return { stale: false, current: this.#snapshot(work) };
     });
@@ -314,6 +317,7 @@ class MemoryDraftOperationStore {
       envelope: work.envelope,
       committedRevision: work.committedRevision,
       state: work.state,
+      executorEpoch: work.executorEpoch,
       terminal: work.terminal,
     });
   }
@@ -357,8 +361,8 @@ function validateGitDataSnapshot(snapshot) {
 function validateLedgerTransition(previous, next) {
   const allowed = {
     ENQUEUED: new Set(['CLAIMED', 'REUSED', 'REFUSED', 'CANCELLED']),
-    CLAIMED: new Set(['INTENT', 'REUSED', 'REFUSED', 'CANCELLED']),
-    INTENT: new Set(['EFFECT_STARTED', 'REUSED', 'REFUSED', 'CANCELLED']),
+    CLAIMED: new Set(['CLAIMED', 'INTENT', 'REUSED', 'REFUSED', 'CANCELLED']),
+    INTENT: new Set(['INTENT', 'EFFECT_STARTED', 'REUSED', 'REFUSED', 'CANCELLED']),
     EFFECT_STARTED: new Set(['EFFECT_AMBIGUOUS', 'CREATED', 'REUSED']),
     EFFECT_AMBIGUOUS: new Set(['REUSED']),
   };
@@ -371,6 +375,15 @@ function validateLedgerEpoch(value) {
     || !Number.isSafeInteger(value.runAttempt) || value.runAttempt <= 0) {
     throw new DraftOperationError('LedgerCorrupt');
   }
+}
+
+function sameLedgerEpoch(left, right) {
+  return left?.runId === right?.runId && left?.runAttempt === right?.runAttempt;
+}
+
+function isSuccessorLedgerEpoch(next, previous) {
+  return next.runId > previous.runId
+    || next.runId === previous.runId && next.runAttempt > previous.runAttempt;
 }
 
 function validateOperationRecord(record, identity, envelope, previous) {
@@ -541,10 +554,20 @@ class GitDataDraftOperationStore {
       || identity.generationKey !== enqueued.body.generationKey
       || identity.operationId !== enqueued.body.operationId) throw new DraftOperationError('LedgerCorrupt');
     let state = 'ENQUEUED';
+    let executorEpoch = null;
     let terminal = null;
     for (const record of snapshot.records.slice(2)) {
       if (terminal) throw new DraftOperationError('LedgerCorrupt');
       terminal = validateOperationRecord(record, identity, identity.envelope, state);
+      if (EPOCH_STATES.has(record.body.kind)) {
+        if (EPOCH_STATES.has(state)) {
+          const validEpoch = state === record.body.kind
+            ? isSuccessorLedgerEpoch(record.body.executorEpoch, executorEpoch)
+            : sameLedgerEpoch(record.body.executorEpoch, executorEpoch);
+          if (!validEpoch) throw new DraftOperationError('LedgerCorrupt');
+        }
+        executorEpoch = record.body.executorEpoch;
+      }
       state = record.body.kind;
     }
     return {
@@ -559,6 +582,7 @@ class GitDataDraftOperationStore {
       headOid: snapshot.headOid,
       committedRevision: snapshot.committedRevision,
       state,
+      executorEpoch,
       terminal,
     };
   }
@@ -596,6 +620,7 @@ class GitDataDraftOperationStore {
       envelope: work.envelope,
       committedRevision: work.committedRevision,
       state: work.state,
+      executorEpoch: work.executorEpoch,
       terminal: work.terminal,
     });
   }
@@ -1062,21 +1087,45 @@ export async function reconcileDraft(operationId, expectedCommittedRevision, por
       snapshot = claimed.snapshot;
     }
 
-    let capacity;
-    try {
-      capacity = await ports.admission.reserveEffect(closedObject([
-        ['workKey', snapshot.identity.workKey],
-        ['operationId', operationId],
-        ['executorEpoch', ports.executorEpoch],
-        ['claimedRevision', snapshot.committedRevision],
-      ]));
-    } catch {
-      capacity = 'ZERO';
+    if (snapshot.state === 'CLAIMED'
+      && !sameLedgerEpoch(snapshot.executorEpoch, ports.executorEpoch)) {
+      if (!isSuccessorLedgerEpoch(ports.executorEpoch, snapshot.executorEpoch)) {
+        return stale(snapshot);
+      }
+      const claimed = await appendOrCurrent(
+        ports, operationId, snapshot.committedRevision, 'CLAIMED',
+        { executorEpoch: ports.executorEpoch },
+      );
+      if (!claimed.ok) return claimed.result;
+      snapshot = claimed.snapshot;
     }
-    if (capacity === 'ZERO') return refuse(ports, snapshot, 'NoEffectCapacity');
-    if (capacity !== 'AVAILABLE') throw new DraftOperationError('InvalidAdmission');
 
     if (snapshot.state === 'CLAIMED') {
+      let capacity;
+      try {
+        capacity = await ports.admission.reserveEffect(closedObject([
+          ['workKey', snapshot.identity.workKey],
+          ['operationId', operationId],
+          ['executorEpoch', ports.executorEpoch],
+          ['claimedRevision', snapshot.committedRevision],
+        ]));
+      } catch {
+        capacity = 'ZERO';
+      }
+      if (capacity === 'ZERO') return refuse(ports, snapshot, 'NoEffectCapacity');
+      if (capacity !== 'AVAILABLE') throw new DraftOperationError('InvalidAdmission');
+      const intent = await appendOrCurrent(
+        ports, operationId, snapshot.committedRevision, 'INTENT',
+        { executorEpoch: ports.executorEpoch },
+      );
+      if (!intent.ok) return intent.result;
+      snapshot = intent.snapshot;
+    }
+    if (snapshot.state === 'INTENT'
+      && !sameLedgerEpoch(snapshot.executorEpoch, ports.executorEpoch)) {
+      if (!isSuccessorLedgerEpoch(ports.executorEpoch, snapshot.executorEpoch)) {
+        return stale(snapshot);
+      }
       const intent = await appendOrCurrent(
         ports, operationId, snapshot.committedRevision, 'INTENT',
         { executorEpoch: ports.executorEpoch },
