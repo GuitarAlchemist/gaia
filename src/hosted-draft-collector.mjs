@@ -69,8 +69,8 @@ function commitMessage(value) {
 }
 
 function providerInstant(value, code) {
-  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) fail(code, code);
-  return new Date(value).toISOString();
+  if (!isExactInstant(value)) fail(code, code);
+  return value;
 }
 
 function oid(value, code) {
