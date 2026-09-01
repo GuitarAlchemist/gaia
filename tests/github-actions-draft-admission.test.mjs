@@ -10,7 +10,6 @@ const WORK_KEY = 'a'.repeat(64);
 const OPERATION_ID = 'b'.repeat(64);
 const CLAIMED_REVISION = 'c'.repeat(64);
 const EPOCH = Object.freeze({ runId: 73001, runAttempt: 2 });
-const GROUP = `gaia-draft-${WORK_KEY}`;
 
 function context(overrides = {}) {
   return {
@@ -28,9 +27,6 @@ function observation(overrides = {}) {
     id: EPOCH.runId,
     run_attempt: EPOCH.runAttempt,
     status: 'in_progress',
-    // The Actions REST workflow-run shape has no concurrency-group field. The injected read
-    // boundary must add this only after independently verifying the workflow control-plane value.
-    verifiedConcurrencyGroup: GROUP,
     ...overrides,
   };
 }
@@ -49,7 +45,7 @@ function adapter(readWorkflowAdmission, environment = {}) {
   });
 }
 
-test('an exact in-progress run and verified work-key concurrency group reserve one effect slot', async () => {
+test('an exact in-progress run reserves one effect slot under the workflow-owned concurrency lock', async () => {
   const calls = [];
   const admission = adapter(async (request) => {
     calls.push(structuredClone(request));
@@ -92,8 +88,6 @@ test('unavailable or mismatched workflow evidence never grants capacity', async 
     observation({ run_attempt: EPOCH.runAttempt + 1 }),
     observation({ status: 'queued' }),
     observation({ status: 'completed' }),
-    observation({ verifiedConcurrencyGroup: `gaia-draft-${'d'.repeat(64)}` }),
-    observation({ verifiedConcurrencyGroup: undefined }),
     null,
   ];
 

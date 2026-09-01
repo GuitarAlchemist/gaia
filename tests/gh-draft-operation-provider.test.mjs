@@ -14,8 +14,6 @@ const REPOSITORY = Object.freeze({
   name: 'gaia',
 });
 const PRESENTATION = Object.freeze({
-  title: 'feat: deliver issue 60',
-  issueUrl: 'https://github.com/GuitarAlchemist/gaia/issues/60',
   owner: 'Gaia hosted Draft pump',
   gate: 'R4_PROVIDER',
   checklist: Object.freeze([
@@ -32,6 +30,7 @@ function request(overrides = {}) {
     headRef: 'codex/hosted-draft-pump-r0',
     headRevision: HEAD_REVISION,
     operationMarker: OPERATION_MARKER,
+    workItem: { kind: 'ISSUE', number: 60 },
     ...overrides,
   };
 }
@@ -203,7 +202,8 @@ test('createDraft creates with --draft and deterministic presentation, then veri
     {
       args: [
         'pr', 'create', '--repo', 'GuitarAlchemist/gaia', '--draft', '--base', 'main',
-        '--head', 'GuitarAlchemist:codex/hosted-draft-pump-r0', '--title', PRESENTATION.title,
+        '--head', 'GuitarAlchemist:codex/hosted-draft-pump-r0',
+        '--title', 'draft: deliver issue #60',
         '--body', exactBody(),
       ],
       stdout: `${createdUrl}\n`,

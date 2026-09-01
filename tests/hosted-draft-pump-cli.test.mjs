@@ -87,8 +87,6 @@ test('reconcile binds one durable operation, Actions work key, and concise Draft
       '--work-key', WORK_KEY,
       '--expected-revision', REVISION,
       '--repository-node-id', 'R_kgDOGaia',
-      '--title', 'feat: deliver issue 60',
-      '--issue-url', 'https://github.com/GuitarAlchemist/gaia/issues/60',
       '--owner', 'Gaia hosted Draft pump',
       '--gate', 'R4_PROVIDER',
       '--check', 'Bind the exact generation',
@@ -99,7 +97,6 @@ test('reconcile binds one durable operation, Actions work key, and concise Draft
       GITHUB_REPOSITORY: 'GuitarAlchemist/gaia',
       GITHUB_RUN_ID: '9001',
       GITHUB_RUN_ATTEMPT: '2',
-      GAIA_VERIFIED_CONCURRENCY_GROUP: `gaia-draft-${WORK_KEY}`,
     },
     stdout: output.stream, stderr: errors.stream,
     runtimeFactory(configuration, telemetry) {
@@ -121,8 +118,6 @@ test('reconcile binds one durable operation, Actions work key, and concise Draft
   assert.equal(exitCode, 0);
   assert.equal(errors.text(), '');
   assert.deepEqual(observedConfiguration.presentation, {
-    title: 'feat: deliver issue 60',
-    issueUrl: 'https://github.com/GuitarAlchemist/gaia/issues/60',
     owner: 'Gaia hosted Draft pump',
     gate: 'R4_PROVIDER',
     checklist: ['Bind the exact generation', 'Publish provider evidence'],
@@ -230,10 +225,7 @@ test('the production runtime composition wires existing collector, Git Data, pro
     workKey: WORK_KEY,
     expectedRevision: REVISION,
     repositoryNodeId: 'R_kgDOGaia',
-    verifiedConcurrencyGroup: `gaia-draft-${WORK_KEY}`,
     presentation: {
-      title: 'feat: deliver issue 60',
-      issueUrl: 'https://github.com/GuitarAlchemist/gaia/issues/60',
       owner: 'Gaia hosted Draft pump',
       gate: 'R4_PROVIDER',
       checklist: ['Bind the exact generation'],
@@ -241,7 +233,15 @@ test('the production runtime composition wires existing collector, Git Data, pro
     },
   };
   const gitData = { name: 'git-data' };
-  const store = { name: 'store' };
+  const store = {
+    name: 'store',
+    async inspectByOperation() {
+      return {
+        identity: { workKey: WORK_KEY },
+        envelope: { workItem: { kind: 'ISSUE', number: 60 } },
+      };
+    },
+  };
   const collectorApi = { name: 'collector-api' };
   const collector = { collect() {} };
   const provider = { lookupExact() {}, createDraft() {} };
@@ -282,6 +282,58 @@ test('the production runtime composition wires existing collector, Git Data, pro
   assert.equal(calls.find(([kind]) => kind === 'store')[1].gitData, gitData);
   assert.equal(calls.find(([kind]) => kind === 'provider')[1].expectedRepository.nodeId,
     'R_kgDOGaia');
+  assert.equal(calls.find(([kind]) => kind === 'provider')[1].presentation.title,
+    'draft: deliver issue #60');
+  assert.equal(calls.find(([kind]) => kind === 'provider')[1].presentation.issueUrl,
+    'https://github.com/GuitarAlchemist/gaia/issues/60');
   assert.equal(calls.find(([kind]) => kind === 'admission')[1].expectedWorkKey, WORK_KEY);
   assert.equal(calls.find(([kind]) => kind === 'reconcile-core')[3].executorEpoch.runId, 9001);
+});
+
+test('reconcile rejects a mismatched work key before provider, admission, or durable mutation', async () => {
+  const calls = [];
+  const configuration = {
+    command: 'reconcile', repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActorId: 1234, ledgerRootOid: ROOT_OID, ledgerRootRevision: ROOT_REVISION,
+    environment: {
+      GITHUB_REPOSITORY: 'GuitarAlchemist/gaia', GITHUB_RUN_ID: '9001',
+      GITHUB_RUN_ATTEMPT: '2',
+    },
+    operationId: OPERATION_ID, workKey: WORK_KEY, expectedRevision: REVISION,
+    repositoryNodeId: 'R_kgDOGaia',
+    presentation: {
+      owner: 'Gaia hosted Draft pump', gate: 'DELIVERY',
+      checklist: ['Persist one terminal receipt'],
+      eta: { minimumMinutes: 60, maximumMinutes: 120 },
+    },
+  };
+  const dependencies = {
+    createGhGitDataApi() { return {}; },
+    createGitDataDraftOperationStore() {
+      return {
+        async inspectByOperation() {
+          return {
+            identity: { workKey: 'f'.repeat(64) },
+            envelope: { workItem: { kind: 'ISSUE', number: 60 } },
+          };
+        },
+      };
+    },
+    createGhDraftCollectorApi() { return {}; },
+    createHostedDraftCollector() { return {}; },
+    createGhDraftOperationProvider() { calls.push('provider'); return {}; },
+    createGitHubActionsDraftAdmission() { calls.push('admission'); return {}; },
+    createDraftOperationPorts() { calls.push('ports'); return {}; },
+    async enqueueDraft() {},
+    async reconcileDraft() { calls.push('mutation'); },
+    async listUnsettledDrafts() { return []; },
+    async readWorkflowAdmission() { return {}; },
+  };
+  const runtime = createHostedDraftPumpRuntime(configuration, { async append() {} }, dependencies);
+  await assert.rejects(
+    runtime.reconcile({ operationId: OPERATION_ID, workKey: WORK_KEY,
+      expectedRevision: REVISION }),
+    (error) => error?.code === 'OperationBindingMismatch',
+  );
+  assert.deepEqual(calls, ['ports']);
 });

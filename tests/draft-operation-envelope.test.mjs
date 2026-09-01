@@ -583,6 +583,8 @@ test('R15 authority decisions ignore monkeypatched public inspection snapshots',
   ), 'CREATED');
   const providerRequest = provider.calls.find(({ method }) => method === 'createDraft')?.request;
   assert.equal(providerRequest.headRevision, OID_B, 'provider receives the sealed head revision');
+  assert.deepEqual(providerRequest.workItem, { kind: 'ISSUE', number: 56 },
+    'provider presentation is bound to the sealed work item');
   assert.equal(created.generation.headRevision, OID_B);
   assert.equal(created.generation.policyRevision, OID_A);
   assert.equal(created.observedSourceRevision, SHA_B);

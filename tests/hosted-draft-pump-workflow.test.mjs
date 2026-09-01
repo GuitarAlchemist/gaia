@@ -10,7 +10,6 @@ const workflow = readFileSync(
 );
 
 const INPUTS = [
-  'issue-number',
   'work-key',
   'operation-id',
   'committed-revision',
@@ -52,19 +51,16 @@ test('one work key owns the exact non-cancelling Actions concurrency group', () 
   );
   assert.equal(
     occurrences(workflow, GROUP_EXPRESSION),
-    2,
-    'the concurrency group and trusted adapter environment must use one expression',
+    1,
+    'the workflow declaration is the only concurrency-group authority',
   );
-  assert.match(
-    workflow,
-    /^\s+GAIA_VERIFIED_CONCURRENCY_GROUP: \$\{\{ format\('gaia-draft-\{0\}', inputs\['work-key'\]\) \}\}$/mu,
-  );
+  assert.doesNotMatch(workflow, /GAIA_VERIFIED_CONCURRENCY_GROUP/u);
 });
 
 test('the job uses only the required GitHub permissions and a dedicated pump App token', () => {
   assert.match(
     workflow,
-    /^permissions:\r?\n  actions: read\r?\n  contents: write\r?\n  pull-requests: write$/mu,
+    /^permissions:\r?\n  actions: read\r?\n  contents: read$/mu,
   );
   assert.match(workflow, /uses: actions\/create-github-app-token@v\d+/u);
   assert.match(workflow, /app-id: \$\{\{ vars\.GAIA_PUMP_APP_ID \}\}/u);
@@ -73,6 +69,7 @@ test('the job uses only the required GitHub permissions and a dedicated pump App
   assert.match(workflow, /GAIA_REPOSITORY_NODE_ID: \$\{\{ vars\.GAIA_REPOSITORY_NODE_ID \}\}/u);
   assert.match(workflow, /GH_TOKEN: \$\{\{ steps\.pump-token\.outputs\.token \}\}/u);
   assert.match(workflow, /persist-credentials: false/u);
+  assert.match(workflow, /ref: \$\{\{ github\.workflow_sha \}\}/u);
   assert.doesNotMatch(workflow, /(?:secrets\.GITHUB_TOKEN|github\.token)/u);
 });
 
@@ -92,8 +89,7 @@ test('the executor reconciles once and uploads its closed receipt', () => {
       `${argument} must be supplied exactly once`);
   }
   assert.doesNotMatch(workflow, /--(?:issue-number|committed-revision|receipt-path)/u);
-  assert.match(workflow, /GAIA_DRAFT_TITLE: \$\{\{ format\('draft: deliver issue #\{0\}', inputs\['issue-number'\]\) \}\}/u);
-  assert.match(workflow, /GAIA_ISSUE_URL: \$\{\{ format\('\{0\}\/\{1\}\/issues\/\{2\}', github\.server_url, github\.repository, inputs\['issue-number'\]\) \}\}/u);
+  assert.doesNotMatch(workflow, /issue-number|GAIA_DRAFT_TITLE|GAIA_ISSUE_URL/u);
   assert.match(workflow, /GAIA_DRAFT_OWNER: Gaia hosted Draft pump/u);
   assert.match(workflow, /GAIA_DRAFT_GATE: DELIVERY/u);
   assert.match(workflow, /GAIA_CHECKLIST_JSON: '\["Create or reuse one exact Draft pull request","Persist one terminal receipt"\]'/u);
@@ -125,9 +121,6 @@ test('the workflow argv and deterministic environment satisfy the real CLI parse
     GITHUB_REPOSITORY: 'GuitarAlchemist/gaia',
     GITHUB_RUN_ID: '9001',
     GITHUB_RUN_ATTEMPT: '2',
-    GAIA_VERIFIED_CONCURRENCY_GROUP: `gaia-draft-${sha('a')}`,
-    GAIA_DRAFT_TITLE: 'draft: deliver issue #60',
-    GAIA_ISSUE_URL: 'https://github.com/GuitarAlchemist/gaia/issues/60',
     GAIA_DRAFT_OWNER: 'Gaia hosted Draft pump',
     GAIA_DRAFT_GATE: 'DELIVERY',
     GAIA_CHECKLIST_JSON:
@@ -159,8 +152,6 @@ test('the workflow argv and deterministic environment satisfy the real CLI parse
   assert.equal(exitCode, 0, output);
   assert.equal(parsed.expectedRevision, sha('c'));
   assert.deepEqual(parsed.presentation, {
-    title: 'draft: deliver issue #60',
-    issueUrl: 'https://github.com/GuitarAlchemist/gaia/issues/60',
     owner: 'Gaia hosted Draft pump',
     gate: 'DELIVERY',
     checklist: [
