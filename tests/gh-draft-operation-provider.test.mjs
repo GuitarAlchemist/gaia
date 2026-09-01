@@ -58,7 +58,9 @@ function exactPullRequest(overrides = {}) {
     baseRefName: 'main',
     headRefName: 'codex/hosted-draft-pump-r0',
     headRefOid: HEAD_REVISION,
-    headRepositoryOwner: { login: 'GuitarAlchemist' },
+    // `gh pr list/view --json headRepositoryOwner` returns both fields even though the
+    // adapter only needs the login for the repository-owner binding.
+    headRepositoryOwner: { id: 'O_kgDOBbiypg', login: 'GuitarAlchemist' },
     body: exactBody(),
     ...overrides,
   };
