@@ -3,10 +3,6 @@ name: Hosted Draft pump effect
 on:
   workflow_dispatch:
     inputs:
-      issue-number:
-        description: Exact GitHub issue number sealed by the collector
-        required: true
-        type: number
       work-key:
         description: Exact sealed Draft work key
         required: true
@@ -29,10 +25,6 @@ on:
         type: string
   workflow_call:
     inputs:
-      issue-number:
-        description: Exact GitHub issue number sealed by the collector
-        required: true
-        type: number
       work-key:
         description: Exact sealed Draft work key
         required: true
@@ -60,8 +52,7 @@ on:
 
 permissions:
   actions: read
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: ${{ format('gaia-draft-{0}', inputs['work-key']) }}
@@ -104,6 +95,7 @@ jobs:
         with:
           token: ${{ steps.pump-token.outputs.token }}
           persist-credentials: false
+          ref: ${{ github.workflow_sha }}
 
       - uses: actions/setup-node@v7
         with:
@@ -115,14 +107,11 @@ jobs:
           GH_TOKEN: ${{ steps.pump-token.outputs.token }}
           GAIA_PUMP_ACTOR_ID: ${{ vars.GAIA_PUMP_ACTOR_ID }}
           GAIA_REPOSITORY_NODE_ID: ${{ vars.GAIA_REPOSITORY_NODE_ID }}
-          GAIA_VERIFIED_CONCURRENCY_GROUP: ${{ format('gaia-draft-{0}', inputs['work-key']) }}
           GAIA_WORK_KEY: ${{ inputs['work-key'] }}
           GAIA_OPERATION_ID: ${{ inputs['operation-id'] }}
           GAIA_EXPECTED_REVISION: ${{ inputs['committed-revision'] }}
           GAIA_LEDGER_ROOT_OID: ${{ inputs['ledger-root-oid'] }}
           GAIA_LEDGER_ROOT_REVISION: ${{ inputs['ledger-root-revision'] }}
-          GAIA_DRAFT_TITLE: ${{ format('draft: deliver issue #{0}', inputs['issue-number']) }}
-          GAIA_ISSUE_URL: ${{ format('{0}/{1}/issues/{2}', github.server_url, github.repository, inputs['issue-number']) }}
           GAIA_DRAFT_OWNER: Gaia hosted Draft pump
           GAIA_DRAFT_GATE: DELIVERY
           GAIA_CHECKLIST_JSON: '["Create or reuse one exact Draft pull request","Persist one terminal receipt"]'

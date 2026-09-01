@@ -76,34 +76,27 @@ function sameRepository(left, right) {
 
 function validateRequest(value, expectedRepository) {
   const code = 'InvalidRequest';
-  exactKeys(value, ['repository', 'baseRef', 'headRef', 'headRevision', 'operationMarker'], code);
+  exactKeys(value, [
+    'repository', 'baseRef', 'headRef', 'headRevision', 'operationMarker', 'workItem',
+  ], code);
   const candidateRepository = repository(value.repository, code);
   if (!sameRepository(candidateRepository, expectedRepository)) fail('RequestBindingMismatch');
+  exactKeys(value.workItem, ['kind', 'number'], code);
+  if (value.workItem.kind !== 'ISSUE' || !Number.isSafeInteger(value.workItem.number)
+    || value.workItem.number <= 0) fail(code);
   return Object.freeze({
     repository: expectedRepository,
     baseRef: branch(value.baseRef, code),
     headRef: branch(value.headRef, code),
     headRevision: gitOid(value.headRevision, code),
     operationMarker: operationMarker(value.operationMarker, code),
+    workItem: Object.freeze({ kind: 'ISSUE', number: value.workItem.number }),
   });
 }
 
-function presentation(value, expectedRepository) {
+function presentation(value) {
   const code = 'InvalidPresentation';
-  exactKeys(value, ['title', 'issueUrl', 'owner', 'gate', 'checklist', 'eta'], code);
-  const title = text(value.title, code, 200);
-  const issueUrl = text(value.issueUrl, code, 512);
-  let parsed;
-  try {
-    parsed = new URL(issueUrl);
-  } catch {
-    fail(code);
-  }
-  const issuePrefix = `/${expectedRepository.owner}/${expectedRepository.name}/issues/`;
-  if (parsed.protocol !== 'https:' || parsed.hostname !== 'github.com'
-    || !parsed.pathname.startsWith(issuePrefix)
-    || !/^\d+$/u.test(parsed.pathname.slice(issuePrefix.length))
-    || parsed.search !== '' || parsed.hash !== '') fail(code);
+  exactKeys(value, ['owner', 'gate', 'checklist', 'eta'], code);
   const owner = text(value.owner, code, 120);
   const gate = text(value.gate, code, 120);
   if (!Array.isArray(value.checklist) || value.checklist.length === 0
@@ -114,8 +107,17 @@ function presentation(value, expectedRepository) {
   if (!Number.isSafeInteger(minimumMinutes) || minimumMinutes <= 0
     || !Number.isSafeInteger(maximumMinutes) || maximumMinutes < minimumMinutes) fail(code);
   return Object.freeze({
-    title, issueUrl, owner, gate, checklist,
+    owner, gate, checklist,
     eta: Object.freeze({ minimumMinutes, maximumMinutes }),
+  });
+}
+
+function boundPresentation(template, request) {
+  return Object.freeze({
+    ...template,
+    title: `draft: deliver issue #${request.workItem.number}`,
+    issueUrl: `https://github.com/${request.repository.owner}/${request.repository.name}`
+      + `/issues/${request.workItem.number}`,
   });
 }
 
@@ -188,7 +190,7 @@ export function createGhDraftOperationProvider({
   run = defaultRun,
 }) {
   const expected = repository(expectedRepository, 'InvalidConfiguration');
-  const display = presentation(suppliedPresentation, expected);
+  const displayTemplate = presentation(suppliedPresentation);
   if (typeof run !== 'function') fail('InvalidAdapter');
   const repositoryName = `${expected.owner}/${expected.name}`;
   const invoke = async (...args) => {
@@ -243,6 +245,7 @@ export function createGhDraftOperationProvider({
       )).trim();
       if (!GIT_OID.test(observedHead)) fail('ProviderProtocolViolation');
       if (observedHead !== request.headRevision) fail('RequestBindingMismatch');
+      const display = boundPresentation(displayTemplate, request);
       const body = renderBody(display, request.operationMarker);
       const createdUrl = (await invoke(
         'pr', 'create', '--repo', repositoryName, '--draft', '--base', request.baseRef,

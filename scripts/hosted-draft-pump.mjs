@@ -31,7 +31,7 @@ const COMMAND_FLAGS = Object.freeze({
   enqueue: new Set([...COMMON_FLAGS, 'issue']),
   reconcile: new Set([
     ...COMMON_FLAGS, 'operation-id', 'work-key', 'expected-revision', 'repository-node-id',
-    'title', 'issue-url', 'owner', 'gate', 'check', 'eta-minutes',
+    'owner', 'gate', 'check', 'eta-minutes',
   ]),
   'list-unsettled': COMMON_FLAGS,
 });
@@ -156,12 +156,7 @@ function parseConfiguration(argv, env) {
     configuration.repositoryNodeId = configuredText(flagOrEnv(
       flags, 'repository-node-id', env, 'GAIA_REPOSITORY_NODE_ID',
     ));
-    configuration.verifiedConcurrencyGroup = configuredText(
-      envValue(env, 'GAIA_VERIFIED_CONCURRENCY_GROUP'),
-    );
     configuration.presentation = {
-      title: flagOrEnv(flags, 'title', env, 'GAIA_DRAFT_TITLE'),
-      issueUrl: flagOrEnv(flags, 'issue-url', env, 'GAIA_ISSUE_URL'),
       owner: flagOrEnv(flags, 'owner', env, 'GAIA_DRAFT_OWNER'),
       gate: flagOrEnv(flags, 'gate', env, 'GAIA_DRAFT_GATE'),
       checklist: checklist(flags, env),
@@ -191,7 +186,6 @@ async function readWorkflowAdmission(configuration, { repository, runId, runAtte
     id: observed.id,
     run_attempt: observed.run_attempt,
     status: observed.status,
-    verifiedConcurrencyGroup: configuration.verifiedConcurrencyGroup,
   };
 }
 
@@ -246,6 +240,13 @@ export function createHostedDraftPumpRuntime(
       return dependencies.enqueueDraft(selector, 'NONE', enqueuePorts);
     },
     async reconcile({ operationId, workKey, expectedRevision }) {
+      const snapshot = await store.inspectByOperation(operationId);
+      if (snapshot?.identity?.workKey !== workKey
+        || snapshot?.envelope?.workItem?.kind !== 'ISSUE'
+        || !Number.isSafeInteger(snapshot.envelope.workItem.number)
+        || snapshot.envelope.workItem.number <= 0) {
+        fail('OperationBindingMismatch');
+      }
       const expectedRepository = Object.freeze({
         nodeId: configuration.repositoryNodeId,
         owner: configuration.repository.owner,

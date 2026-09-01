@@ -279,10 +279,12 @@ Actions uses `concurrency.group = gaia-draft-<workKey>`, `cancel-in-progress: fa
 
 An executor epoch is the closed pair `{ runId, runAttempt }` taken from the running GitHub Actions
 context, never from the caller envelope. A job CAS-appends `CLAIMED` before it can append `INTENT`.
-The hosted admission controller grants effect capacity only when the GitHub Actions API reports
-that exact run/attempt `in_progress`, its concurrency group matches `workKey`, and the ledger head
-names its current `CLAIMED` epoch. Otherwise it returns `ZERO`; no `INTENT`, `EFFECT_STARTED`, or
-provider create call is legal. The memory
+The sealed workflow structurally binds `concurrency.group` to the supplied `workKey`; GitHub's run
+API does not expose that group, so Gaia never fabricates an observed group value. Before durable
+mutation, the executor binds the supplied `workKey` to the stored operation. The hosted admission
+controller then grants effect capacity only when the GitHub Actions API reports that exact
+run/attempt `in_progress` and the ledger head names its current `CLAIMED` epoch. Otherwise it
+returns `ZERO`; no `INTENT`, `EFFECT_STARTED`, or provider create call is legal. The memory
 adapter supplies the same trusted `reserveEffect` seam for deterministic `AVAILABLE` and `ZERO`
 tests. Thus capacity is an executor fact, not caller data. Exact-Draft lookup and `REUSED`
 adoption happen before `reserveEffect`, so adoption remains legal at zero effect capacity.

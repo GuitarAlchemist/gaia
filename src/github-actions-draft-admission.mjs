@@ -86,30 +86,26 @@ function exactClaim(value, expectedWorkKey, expectedEpoch) {
     && sameEpoch(ownData(value, 'executorEpoch').value, expectedEpoch);
 }
 
-function exactObservation(value, expectedRepository, expectedEpoch, expectedGroup) {
+function exactObservation(value, expectedRepository, expectedEpoch) {
   if (!record(value)) return false;
   const repository = ownData(value, 'repository');
   const id = ownData(value, 'id');
   const attempt = ownData(value, 'run_attempt');
   const status = ownData(value, 'status');
-  const group = ownData(value, 'verifiedConcurrencyGroup');
-  if (!repository.ok || !id.ok || !attempt.ok || !status.ok || !group.ok) return false;
+  if (!repository.ok || !id.ok || !attempt.ok || !status.ok) return false;
   const fullName = ownData(repository.value, 'full_name');
   return fullName.ok && fullName.value === expectedRepository
     && id.value === expectedEpoch.runId
     && attempt.value === expectedEpoch.runAttempt
-    && status.value === 'in_progress'
-    && group.value === expectedGroup;
+    && status.value === 'in_progress';
 }
 
 /**
  * Bind the existing reserveEffect seam to one GitHub Actions run attempt.
  *
- * GitHub's workflow-run REST representation does not expose the concurrency group. Consequently,
- * `readWorkflowAdmission` is deliberately a narrower trusted boundary than a raw REST call: it
- * must return the official run identity/status fields and add `verifiedConcurrencyGroup` only
- * after independently reading the workflow control-plane value. Missing group evidence refuses
- * admission; this adapter never infers it from a workflow name, branch, or caller assertion.
+ * GitHub's workflow-run REST representation does not expose the concurrency group. The exact
+ * group is therefore a structural invariant of the sealed workflow, while this adapter verifies
+ * only the official run identity and status. It never fabricates observed group provenance.
  */
 export function createGitHubActionsDraftAdmission({
   expectedRepository,
@@ -128,7 +124,6 @@ export function createGitHubActionsDraftAdmission({
     environmentData(environment, 'GITHUB_RUN_ATTEMPT').value,
   );
   const executorEpoch = Object.freeze({ runId, runAttempt });
-  const concurrencyGroup = `gaia-draft-${workKey}`;
 
   return Object.freeze({
     executorEpoch,
@@ -140,9 +135,7 @@ export function createGitHubActionsDraftAdmission({
           runId,
           runAttempt,
         }));
-        return exactObservation(
-          observed, repository, executorEpoch, concurrencyGroup,
-        ) ? 'AVAILABLE' : 'ZERO';
+        return exactObservation(observed, repository, executorEpoch) ? 'AVAILABLE' : 'ZERO';
       } catch {
         return 'ZERO';
       }

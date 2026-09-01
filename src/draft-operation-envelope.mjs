@@ -990,6 +990,10 @@ function providerRequest(snapshot) {
     ['headRef', envelope.generation.headRef],
     ['headRevision', envelope.generation.headRevision],
     ['operationMarker', identity.operationId],
+    ['workItem', closedObject([
+      ['kind', envelope.workItem.kind],
+      ['number', envelope.workItem.number],
+    ])],
   ]);
 }
 

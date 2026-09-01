@@ -282,10 +282,8 @@ test('the production runtime composition wires existing collector, Git Data, pro
   assert.equal(calls.find(([kind]) => kind === 'store')[1].gitData, gitData);
   assert.equal(calls.find(([kind]) => kind === 'provider')[1].expectedRepository.nodeId,
     'R_kgDOGaia');
-  assert.equal(calls.find(([kind]) => kind === 'provider')[1].presentation.title,
-    'draft: deliver issue #60');
-  assert.equal(calls.find(([kind]) => kind === 'provider')[1].presentation.issueUrl,
-    'https://github.com/GuitarAlchemist/gaia/issues/60');
+  assert.deepEqual(calls.find(([kind]) => kind === 'provider')[1].presentation,
+    configuration.presentation);
   assert.equal(calls.find(([kind]) => kind === 'admission')[1].expectedWorkKey, WORK_KEY);
   assert.equal(calls.find(([kind]) => kind === 'reconcile-core')[3].executorEpoch.runId, 9001);
 });
