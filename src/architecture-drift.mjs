@@ -32,7 +32,7 @@ const ARCHITECTURE_REVISION_FIELDS = Object.freeze(['commit', 'contentRevision']
 const VERIFICATION_FIELDS = Object.freeze(['commit', 'contentRevision', 'date', 'schema']);
 const IMPACT_KINDS = new Set(['UPDATED', 'NO_IMPACT', 'UNDECLARED']);
 const EXCLUDED_DIRECTORIES = new Set(['.git', 'node_modules']);
-const INTERFACE_LEAK = /github|duckdb|jsonl|config|storage|provider|payload|transport|retry|(?:^|[^a-z])path/i;
+const INTERFACE_LEAK = /github|duckdb|jsonl|config|storage|provider|payload|transport|retry|object.?id|(?:^|[^a-z0-9])(?:path|ref|oid|error)(?:[^a-z0-9]|$)/i;
 const COMMIT = /^[0-9a-f]{40}$/;
 const CONTENT_REVISION = /^sha256:[0-9a-f]{64}$/;
 
@@ -221,6 +221,10 @@ function interfaceRows(markdown) {
   return rows.slice(2).map((line) => line.split('|').slice(1, -1).map((cell) => cell.trim()));
 }
 
+function declaredInterfaceFragments(cell) {
+  return [...cell.matchAll(/`([^`\r\n]+)`/g)].map((match) => match[1]);
+}
+
 function architectureSensitive(path) {
   return path === 'package.json'
     || path === '.mcp.json'
@@ -271,8 +275,8 @@ export function checkArchitectureDrift(inventoryAdapter) {
   }
 
   for (const row of interfaceRows(markdown)) {
-    if (row.length >= 2 && INTERFACE_LEAK.test(row[1])) {
-      advisories.push(violation('MODULE_INTERFACE_TOKEN_ADVISORY', row[0] || 'UNNAMED'));
+    if (row.length >= 2 && declaredInterfaceFragments(row[1]).some((fragment) => INTERFACE_LEAK.test(fragment))) {
+      violations.push(violation('MODULE_INTERFACE_LEAK', row[0] || 'UNNAMED'));
     }
   }
 

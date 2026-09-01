@@ -11,6 +11,25 @@ import {
 } from '../src/architecture-drift.mjs';
 import { pluginRoot } from '../src/templates.mjs';
 
+const COMMIT = /^[0-9a-f]{40}$/;
+const CANONICAL_REF = /^refs\/(?:heads|tags|remotes)\/[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+
+function isClosedBase(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 255) return false;
+  if (COMMIT.test(value)) return true;
+  if (!CANONICAL_REF.test(value) || value.includes('..') || value.includes('//')) return false;
+  const components = value.split('/').slice(2);
+  return components.every((component) => component.length > 0
+    && !component.startsWith('.')
+    && !component.endsWith('.')
+    && !component.endsWith('.lock'));
+}
+
+function validateBase(value) {
+  if (!isClosedBase(value)) throw new ArchitectureDriftRefusal('CLI_BASE_INVALID');
+  return value;
+}
+
 function parseArgs(argv) {
   const result = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -18,7 +37,7 @@ function parseArgs(argv) {
     if (token !== '--base') throw new ArchitectureDriftRefusal('CLI_ARGUMENT_INVALID');
     const value = argv[index += 1];
     if (value === undefined || value.length === 0) throw new ArchitectureDriftRefusal('CLI_ARGUMENT_INVALID');
-    result.base = value;
+    result.base = validateBase(value);
   }
   return result;
 }
@@ -46,7 +65,7 @@ function architectureRevisions(root) {
   }
   const run = spawnSync('git', [
     '-c', `safe.directory=${root.replaceAll('\\', '/')}`,
-    'show', `${record.commit}:ARCHITECTURE.md`,
+    'show', '--end-of-options', `${record.commit}:ARCHITECTURE.md`,
   ], { cwd: root, windowsHide: true });
   if (run.status !== 0 || !Buffer.isBuffer(run.stdout)) {
     throw new ArchitectureDriftRefusal('REPOSITORY_READ_FAILED');
@@ -79,8 +98,8 @@ function main() {
   const root = pluginRoot();
   const revision = git(root, ['rev-parse', 'HEAD']);
   const configuredBase = args.base ?? process.env.GAIA_ARCHITECTURE_BASE?.trim();
-  const base = configuredBase || `${revision}^`;
-  const changed = git(root, ['diff', '--name-only', `${base}...${revision}`]);
+  const base = configuredBase ? validateBase(configuredBase) : `${revision}^`;
+  const changed = git(root, ['diff', '--name-only', '--end-of-options', `${base}...${revision}`]);
   const changedPaths = changed === '' ? [] : changed.split(/\r?\n/).map((path) => path.replaceAll('\\', '/'));
   const report = checkArchitectureDrift(createFilesystemArchitectureInventory({
     root,
