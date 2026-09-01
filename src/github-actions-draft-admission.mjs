@@ -1,6 +1,8 @@
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
+const GIT_SHA = /^[a-f0-9]{40}$/u;
 const POSITIVE_INTEGER = /^[1-9]\d*$/u;
+const WORKFLOW_PATH = /^\.github\/workflows\/[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$/u;
 
 export class GitHubActionsDraftAdmissionError extends Error {
   constructor(code) {
@@ -25,6 +27,16 @@ function configuredRepository(value) {
 
 function configuredWorkKey(value) {
   if (typeof value !== 'string' || !SHA256.test(value)) invalidConfiguration();
+  return value;
+}
+
+function configuredWorkflowPath(value) {
+  if (!canonicalText(value) || !WORKFLOW_PATH.test(value)) invalidConfiguration();
+  return value;
+}
+
+function configuredWorkflowSha(value) {
+  if (typeof value !== 'string' || !GIT_SHA.test(value)) invalidConfiguration();
   return value;
 }
 
@@ -86,18 +98,24 @@ function exactClaim(value, expectedWorkKey, expectedEpoch) {
     && sameEpoch(ownData(value, 'executorEpoch').value, expectedEpoch);
 }
 
-function exactObservation(value, expectedRepository, expectedEpoch) {
+function exactObservation(value, expectedRepository, expectedEpoch, expectedPath, expectedSha) {
   if (!record(value)) return false;
   const repository = ownData(value, 'repository');
   const id = ownData(value, 'id');
   const attempt = ownData(value, 'run_attempt');
   const status = ownData(value, 'status');
-  if (!repository.ok || !id.ok || !attempt.ok || !status.ok) return false;
+  const path = ownData(value, 'path');
+  const headSha = ownData(value, 'head_sha');
+  if (!repository.ok || !id.ok || !attempt.ok || !status.ok || !path.ok || !headSha.ok) {
+    return false;
+  }
   const fullName = ownData(repository.value, 'full_name');
   return fullName.ok && fullName.value === expectedRepository
     && id.value === expectedEpoch.runId
     && attempt.value === expectedEpoch.runAttempt
-    && status.value === 'in_progress';
+    && status.value === 'in_progress'
+    && path.value === expectedPath
+    && headSha.value === expectedSha;
 }
 
 /**
@@ -110,12 +128,20 @@ function exactObservation(value, expectedRepository, expectedEpoch) {
 export function createGitHubActionsDraftAdmission({
   expectedRepository,
   expectedWorkKey,
+  expectedWorkflowPath,
   environment = process.env,
   readWorkflowAdmission,
 }) {
   const repository = configuredRepository(expectedRepository);
   const workKey = configuredWorkKey(expectedWorkKey);
+  const workflowPath = configuredWorkflowPath(expectedWorkflowPath);
+  const workflowSha = configuredWorkflowSha(
+    environmentData(environment, 'GITHUB_WORKFLOW_SHA').value,
+  );
+  const workflowRef = environmentData(environment, 'GITHUB_WORKFLOW_REF').value;
   if (environmentData(environment, 'GITHUB_REPOSITORY').value !== repository
+    || !canonicalText(workflowRef)
+    || !workflowRef.startsWith(`${repository}/${workflowPath}@`)
     || typeof readWorkflowAdmission !== 'function') {
     invalidConfiguration();
   }
@@ -134,8 +160,12 @@ export function createGitHubActionsDraftAdmission({
           repository,
           runId,
           runAttempt,
+          workflowPath,
+          workflowSha,
         }));
-        return exactObservation(observed, repository, executorEpoch) ? 'AVAILABLE' : 'ZERO';
+        return exactObservation(
+          observed, repository, executorEpoch, workflowPath, workflowSha,
+        ) ? 'AVAILABLE' : 'ZERO';
       } catch {
         return 'ZERO';
       }

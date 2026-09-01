@@ -227,9 +227,10 @@ compareAndAppend(ref, expectedHeadOid, closedRecord)
 
 Refs and Git OIDs remain inside this private transport/store composition. `readByOperation` scans
 the protected work-ref family and returns exactly one validated chain or fails closed on duplicate
-identity; it never puts a ref or Git OID in a public operation result. A future supervisor may add a
-bounded unsettled-work projection over the same private scan, but this tracer bullet does not claim
-that scheduler yet.
+identity; it never puts a ref or Git OID in a public operation result. `listUnsettledDrafts` exposes
+a bounded deterministic projection over the same private scan, and the pure supervisor can resume
+one such operation. Hosted scheduled redispatch is not implemented or claimed; provisioning remains
+the explicit #62 gate.
 
 The `{ ledgerHeadOid, committedRevision }` pair is private to the composition. Public code supplies only
 `NONE` or an expected 64-hex `committedRevision`; the adapter atomically reads the current ref,
@@ -355,7 +356,9 @@ refusal. No local lock directory or elapsed-time lock breaking is part of the pr
 ## Provider boundary
 
 The provider receives exactly a new frozen null-prototype record containing repository, base ref,
-head ref, head revision, and operation marker. It receives no ready-item data, policy payload,
+head ref, head revision, operation marker, and the sealed `{ kind: 'ISSUE', number }` work item.
+The Draft title and issue URL derive exclusively from that sealed work item. It receives no other
+ready-item data, policy payload,
 requested authority, expected revision, storage token, caller object, or terminal projection.
 
 Provider errors are caught at every lookup and creation call. The public result exposes only the

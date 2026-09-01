@@ -65,6 +65,8 @@ test('an exact in-progress run reserves one effect slot under the workflow-owned
     repository: REPOSITORY,
     runId: EPOCH.runId,
     runAttempt: EPOCH.runAttempt,
+    workflowPath: WORKFLOW_PATH,
+    workflowSha: WORKFLOW_SHA,
   }]);
 });
 

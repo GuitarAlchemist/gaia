@@ -24,6 +24,7 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const GIT_OID = /^[a-f0-9]{40}$/u;
 const REPOSITORY = /^([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)$/u;
 const COMMANDS = new Set(['enqueue', 'reconcile', 'list-unsettled']);
+const EFFECT_WORKFLOW_PATH = '.github/workflows/hosted-draft-pump-effect.yml';
 const COMMON_FLAGS = new Set([
   'repository', 'pump-actor-id', 'ledger-root-oid', 'ledger-root-revision',
 ]);
@@ -186,6 +187,8 @@ async function readWorkflowAdmission(configuration, { repository, runId, runAtte
     id: observed.id,
     run_attempt: observed.run_attempt,
     status: observed.status,
+    path: observed.path,
+    head_sha: observed.head_sha,
   };
 }
 
@@ -259,6 +262,7 @@ export function createHostedDraftPumpRuntime(
       const admission = dependencies.createGitHubActionsDraftAdmission({
         expectedRepository: `${configuration.repository.owner}/${configuration.repository.name}`,
         expectedWorkKey: workKey,
+        expectedWorkflowPath: EFFECT_WORKFLOW_PATH,
         environment: configuration.environment,
         readWorkflowAdmission: (identity) => dependencies.readWorkflowAdmission(
           configuration, identity,
