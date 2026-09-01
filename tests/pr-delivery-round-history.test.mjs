@@ -813,3 +813,47 @@ test('durable intent CAS makes a competing advance a stale loser with no provide
   });
   assert.equal(adapter.calls.filter((call) => call.method === 'compareAndSet').length, 1);
 });
+
+test('two same-operation creators linearize on one durable claim before provider effect', async () => {
+  const {
+    executeManagedDraftCreation, createMemoryManagedRoundEvidencePort,
+  } = await api();
+  let firstObservations = 0;
+  let release;
+  const barrier = new Promise((resolve) => { release = resolve; });
+  let current = null;
+  let creates = 0;
+  const adapter = {
+    async observe() { return current === null ? null : structuredClone(current); },
+    async observeByOperation() {
+      if (firstObservations < 2) {
+        firstObservations += 1;
+        if (firstObservations === 2) release();
+        await barrier;
+        return null;
+      }
+      return current === null ? null : structuredClone(current);
+    },
+    async createDraft(effect) {
+      creates += 1;
+      current = observation(effect.proposedBody);
+      return { kind: 'ACKNOWLEDGED', number: 69 };
+    },
+    async compareAndSet() { return { kind: 'STALE' }; },
+  };
+  const evidencePort = createMemoryManagedRoundEvidencePort();
+  const input = {
+    workKey: WORK_KEY, headRevision: HEAD, baseBody: 'human', receipt: openReceipt(),
+    effectActor: EFFECT, adapter, evidencePort,
+  };
+
+  const [left, right] = await Promise.all([
+    executeManagedDraftCreation(input), executeManagedDraftCreation(input),
+  ]);
+
+  assert.equal(creates, 1);
+  assert.equal([left, right].filter((result) => result.kind === 'APPLIED').length, 1);
+  assert.equal([left, right].filter(
+    (result) => result.kind === 'REFUSED' && result.code === 'EffectClaimHeld',
+  ).length, 1);
+});
