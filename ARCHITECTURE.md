@@ -2,6 +2,12 @@
 
 This is the authoritative architecture index for Gaia. Detailed designs remain authoritative for their own bounded contracts; this file records the system-wide boundaries and points to those contracts without duplicating them.
 
+## Scope and verification
+
+This index describes Gaia's implemented coordination and delivery boundaries. It does not make provider-specific adapters, local operator tooling, or proposed research part of the kernel. Planned architecture remains non-normative until its implementation and evidence are linked here.
+
+Last verified at commit `ec1723e3f83c2e2a5bc66bab8c64596d976ddbae` on 2026-09-01.
+
 ## Kernel and authority
 
 Gaia's coordination kernel has exactly six non-privileged verbs: `register`, `send`, `inbox`, `ack`, `heartbeat`, and `handoff`. Observation, delivery, acknowledgement, acceptance, and authority are separate transitions. Text, activity, and completion markers never grant commit, push, merge, deployment, spending, credential, or configuration authority.
