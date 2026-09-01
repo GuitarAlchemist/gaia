@@ -28,6 +28,14 @@ function closedObject(entries) {
   return Object.freeze(value);
 }
 
+function deepOwnedFrozen(value) {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return Object.freeze(value.map(deepOwnedFrozen));
+  const owned = Object.create(null);
+  for (const key of Object.keys(value)) owned[key] = deepOwnedFrozen(value[key]);
+  return Object.freeze(owned);
+}
+
 function ownDataKeys(value, code) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new DraftOperationError(code);
@@ -182,11 +190,21 @@ function makeRecord(kind, priorCommittedRevision, identity, payload = {}) {
   return closedObject(entries);
 }
 
+const memoryStoreCapabilities = new WeakMap();
+
 class MemoryDraftOperationStore {
   #work = new Map();
   #operations = new Map();
   #locks = new Map();
   #executors = new Map();
+
+  constructor() {
+    memoryStoreCapabilities.set(this, Object.freeze({
+      bootstrapAndEnqueue: this.#bootstrapAndEnqueue.bind(this),
+      append: this.#append.bind(this),
+      withExecutor: this.#withExecutor.bind(this),
+    }));
+  }
 
   async #exclusive(lockMap, key, action) {
     const prior = lockMap.get(key) ?? Promise.resolve();
@@ -203,11 +221,11 @@ class MemoryDraftOperationStore {
     }
   }
 
-  withExecutor(workKey, action) {
+  #withExecutor(workKey, action) {
     return this.#exclusive(this.#executors, workKey, action);
   }
 
-  async bootstrapAndEnqueue(identity, envelope, expectedCommittedRevision) {
+  async #bootstrapAndEnqueue(identity, envelope, expectedCommittedRevision) {
     return this.#exclusive(this.#locks, identity.workKey, async () => {
       const current = this.#work.get(identity.workKey);
       if (current || expectedCommittedRevision !== 'NONE') {
@@ -222,8 +240,13 @@ class MemoryDraftOperationStore {
       const rootRevision = contentRevision(rootBody);
       const enqueued = makeRecord('ENQUEUED', rootRevision, identity, { envelope });
       const committedRevision = contentRevision(enqueued);
+      const storedIdentity = closedObject([
+        ['workKey', identity.workKey],
+        ['generationKey', identity.generationKey],
+        ['operationId', identity.operationId],
+      ]);
       const work = {
-        identity, envelope, records: [
+        identity: storedIdentity, envelope, records: [
           { body: rootBody, committedRevision: rootRevision },
           { body: enqueued, committedRevision },
         ],
@@ -247,7 +270,7 @@ class MemoryDraftOperationStore {
     return this.inspectByWork(workKey);
   }
 
-  async append(operationId, expectedCommittedRevision, kind, payload = {}) {
+  async #append(operationId, expectedCommittedRevision, kind, payload = {}) {
     const workKey = this.#operations.get(operationId);
     if (!workKey) throw new DraftOperationError('UnknownOperation');
     return this.#exclusive(this.#locks, workKey, async () => {
@@ -267,23 +290,29 @@ class MemoryDraftOperationStore {
 
   async readHead(workKey) {
     const snapshot = await this.inspectByWork(workKey);
-    if (!snapshot) return { state: 'UNSEEN' };
-    return {
+    if (!snapshot) return Object.freeze({ state: 'UNSEEN' });
+    return Object.freeze({
       state: 'PRESENT', committedRevision: snapshot.committedRevision,
       recordKind: snapshot.state,
-    };
+    });
   }
 
   #snapshot(work) {
     if (!work) return null;
-    return {
+    return deepOwnedFrozen({
       identity: work.identity,
       envelope: work.envelope,
       committedRevision: work.committedRevision,
       state: work.state,
-      terminal: work.terminal ? structuredClone(work.terminal) : null,
-    };
+      terminal: work.terminal,
+    });
   }
+}
+
+function memoryCapabilities(store) {
+  const capabilities = memoryStoreCapabilities.get(store);
+  if (!capabilities) throw new DraftOperationError('InvalidPorts');
+  return capabilities;
 }
 
 export function createMemoryDraftOperationStore() {
@@ -354,7 +383,7 @@ export async function enqueueDraft(selectorInput, expectedCommittedRevision, por
     }
     return stale(current);
   }
-  const committed = await ports.store.bootstrapAndEnqueue(
+  const committed = await memoryCapabilities(ports.store).bootstrapAndEnqueue(
     identity, identity.envelope, expectedCommittedRevision,
   );
   if (committed.stale) return stale({ committedRevision: committed.currentCommittedRevision });
@@ -380,24 +409,56 @@ function providerRequest(snapshot) {
   ]);
 }
 
+function readProviderFieldOnce(value, key) {
+  if (value === null || typeof value !== 'object') {
+    throw new DraftOperationError('ProviderProtocolViolation');
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new DraftOperationError('ProviderProtocolViolation');
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor?.enumerable) throw new DraftOperationError('ProviderProtocolViolation');
+  if (Object.hasOwn(descriptor, 'value')) return descriptor.value;
+  if (typeof descriptor.get !== 'function') throw new DraftOperationError('ProviderProtocolViolation');
+  try {
+    return Reflect.apply(descriptor.get, value, []);
+  } catch {
+    throw new DraftOperationError('ProviderProtocolViolation');
+  }
+}
+
 function sanitizeExactDraft(candidate, request) {
   if (candidate === null || candidate === undefined) return null;
-  if (typeof candidate !== 'object'
-    || !Number.isSafeInteger(candidate.number) || candidate.number <= 0
-    || typeof candidate.url !== 'string'
-    || candidate.isDraft !== true || candidate.state !== 'OPEN'
-    || candidate.operationMarker !== request.operationMarker
-    || candidate.baseRef !== request.baseRef
-    || candidate.headRef !== request.headRef
-    || candidate.headRevision !== request.headRevision
-    || candidate.repository?.nodeId !== request.repository.nodeId
-    || candidate.repository?.owner !== request.repository.owner
-    || candidate.repository?.name !== request.repository.name) {
+  const number = readProviderFieldOnce(candidate, 'number');
+  const url = readProviderFieldOnce(candidate, 'url');
+  const isDraft = readProviderFieldOnce(candidate, 'isDraft');
+  const state = readProviderFieldOnce(candidate, 'state');
+  const operationMarker = readProviderFieldOnce(candidate, 'operationMarker');
+  const repositoryCandidate = readProviderFieldOnce(candidate, 'repository');
+  const baseRef = readProviderFieldOnce(candidate, 'baseRef');
+  const headRef = readProviderFieldOnce(candidate, 'headRef');
+  const headRevision = readProviderFieldOnce(candidate, 'headRevision');
+  const repository = {
+    nodeId: readProviderFieldOnce(repositoryCandidate, 'nodeId'),
+    owner: readProviderFieldOnce(repositoryCandidate, 'owner'),
+    name: readProviderFieldOnce(repositoryCandidate, 'name'),
+  };
+  if (!Number.isSafeInteger(number) || number <= 0
+    || typeof url !== 'string' || url.length === 0 || /[\u0000-\u001f\u007f]/u.test(url)
+    || isDraft !== true || state !== 'OPEN'
+    || operationMarker !== request.operationMarker
+    || baseRef !== request.baseRef
+    || headRef !== request.headRef
+    || headRevision !== request.headRevision
+    || repository.nodeId !== request.repository.nodeId
+    || repository.owner !== request.repository.owner
+    || repository.name !== request.repository.name) {
     throw new DraftOperationError('ProviderProtocolViolation');
   }
   return closedObject([
-    ['number', candidate.number],
-    ['url', candidate.url],
+    ['number', number],
+    ['url', url],
     ['isDraft', true],
     ['state', 'OPEN'],
     ['operationMarker', request.operationMarker],
@@ -446,7 +507,9 @@ function currentResult(snapshot) {
 }
 
 async function appendOrCurrent(ports, operationId, expected, kind, payload = {}) {
-  const appended = await ports.store.append(operationId, expected, kind, payload);
+  const appended = await memoryCapabilities(ports.store).append(
+    operationId, expected, kind, payload,
+  );
   return appended.stale ? { ok: false, result: currentResult(appended.current) }
     : { ok: true, snapshot: appended.current };
 }
@@ -474,7 +537,7 @@ export async function reconcileDraft(operationId, expectedCommittedRevision, por
   requireRevision(expectedCommittedRevision);
   const initial = await ports.store.inspectByOperation(operationId);
   if (!initial) throw new DraftOperationError('UnknownOperation');
-  return ports.store.withExecutor(initial.identity.workKey, async () => {
+  return memoryCapabilities(ports.store).withExecutor(initial.identity.workKey, async () => {
     let snapshot = await ports.store.inspectByOperation(operationId);
     if (snapshot.committedRevision !== expectedCommittedRevision) return stale(snapshot);
     if (snapshot.terminal) return terminalResult(snapshot);
