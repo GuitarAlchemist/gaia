@@ -180,6 +180,22 @@ export function priorEngineeringFlowOf(snapshotPath) {
 }
 
 /**
+ * The last hosted Draft pump reading this publisher wrote, on the same carrier and for the same
+ * reason. The work key travels with it because the ledger is compare-and-swap append-only, so a
+ * committed revision that went backwards for one work key is a producer reading a stale ref.
+ */
+export function priorHostedDraftPumpOf(snapshotPath) {
+  const block = verifiedPublication(snapshotPath)?.hostedDraftPump;
+  if (block === undefined) return null;
+  return {
+    observedAt: block.observedAt,
+    sequence: block.sequence,
+    workKey: block.workKey,
+    committedRevision: block.committedRevision,
+  };
+}
+
+/**
  * Where the observation window starts, for the file-fed path.
  *
  * The window is the interval over which this publisher has continuously observed this exact
@@ -247,6 +263,8 @@ export function runFactoryDashboardCli(argv, {
     ? resolve(flags['merge-queue-capability']) : null;
   const prReviewThreadGatePath = flags['pr-review-thread-gate']
     ? resolve(flags['pr-review-thread-gate']) : null;
+  const hostedDraftPumpPath = flags['hosted-draft-pump']
+    ? resolve(flags['hosted-draft-pump']) : null;
   const htmlPath = resolve(flags['html-out']);
   const snapshotPath = resolve(flags['snapshot-out']);
   const activityPath = flags['activity-out'] ? resolve(flags['activity-out']) : null;
@@ -254,7 +272,7 @@ export function runFactoryDashboardCli(argv, {
   const inputs = [
     projectionPath, portfolioPath, receiptsPath, holdsPath, dependenciesPath, progressPath,
     historyPath, telemetryPath, localLanesPath, engineeringFlowPath, mergeQueueCapabilityPath,
-    prReviewThreadGatePath,
+    prReviewThreadGatePath, hostedDraftPumpPath,
   ].filter(Boolean);
   // Filesystem identity, not a spelling test. Comparing resolved STRINGS accepted
   // `--projection <dir>/projection.json --snapshot-out <dir>/Projection.json` on the platform this
@@ -312,6 +330,8 @@ export function runFactoryDashboardCli(argv, {
     : readJson(mergeQueueCapabilityPath, 'merge queue capability');
   const prReviewThreadGate = prReviewThreadGatePath === null
     ? null : readJson(prReviewThreadGatePath, 'PR review-thread gate');
+  const hostedDraftPump = hostedDraftPumpPath === null
+    ? null : readJson(hostedDraftPumpPath, 'hosted Draft pump observation');
   const windowStart = declaredBasis(resolveSourceChangedAt({
     projectionRevision: projection.revision,
     firstObservation: firstObservationOf(snapshotPath, projection.revision),
@@ -341,6 +361,8 @@ export function runFactoryDashboardCli(argv, {
     // configuration itself, and administers nothing.
     mergeQueueCapability,
     prReviewThreadGate,
+    hostedDraftPump,
+    priorHostedDraftPump: hostedDraftPump === null ? null : priorHostedDraftPumpOf(snapshotPath),
     priorEngineeringFlow: engineeringFlowPath === null
       ? null
       : priorEngineeringFlowOf(snapshotPath),

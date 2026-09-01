@@ -17,7 +17,7 @@ const ALLOWED_OPTIONS = new Set([
   'organization', 'policy-revision', 'portfolio-out', 'snapshot-out', 'html-out',
   'receipts', 'holds', 'progress', 'history', 'telemetry', 'capacity', 'language',
   'activity', 'activity-out', 'watch-ms',
-  'pr-review-thread-gate',
+  'pr-review-thread-gate', 'hosted-draft-pump',
 ]);
 /**
  * `MAX_PATH_DEPTH` and `pathIdentity` used to live here. They now live in `src/path-identity.mjs`,
@@ -104,7 +104,7 @@ function dashboardArgs(flags, portfolioPath, snapshotPath, htmlPath, activityPat
   ];
   for (const name of [
     'receipts', 'holds', 'progress', 'history', 'telemetry', 'capacity', 'language',
-    'pr-review-thread-gate',
+    'pr-review-thread-gate', 'hosted-draft-pump',
   ]) {
     if (flags[name] !== undefined) result.push(`--${name}`, flags[name]);
   }
@@ -119,6 +119,7 @@ function assertPathConstraints(flags, outputPaths) {
   }
   const inputIdentities = [
     'receipts', 'holds', 'progress', 'history', 'telemetry', 'pr-review-thread-gate',
+    'hosted-draft-pump',
   ]
     .filter((name) => flags[name] !== undefined)
     .map((name) => pathIdentity(flags[name]));
