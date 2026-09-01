@@ -139,18 +139,25 @@ function flattenPages(value, code) {
 
 export function createGhDraftCollectorApi({ run = runGh } = {}) {
   if (typeof run !== 'function') fail('InvalidGhAdapter', 'run must be a function');
+  const call = async (args) => {
+    try {
+      return await run(args);
+    } catch {
+      fail('GitHubObservationUnavailable', 'GitHub observation is unavailable');
+    }
+  };
 
   return Object.freeze({
     async resolveRepository({ owner, name }) {
       const requestedOwner = githubSegment(owner, 'RepositoryObservationInvalid');
       const requestedName = githubSegment(name, 'RepositoryObservationInvalid');
-      const raw = requireRawObject(await run([
+      const raw = requireRawObject(await call([
         'api', `repos/${encodeURIComponent(requestedOwner)}/${encodeURIComponent(requestedName)}`,
       ]), 'RepositoryObservationInvalid');
       const canonicalOwner = githubSegment(raw.owner?.login, 'RepositoryObservationInvalid');
       const canonicalName = githubSegment(raw.name, 'RepositoryObservationInvalid');
       const defaultBranch = text(raw.default_branch, 'RepositoryObservationInvalid');
-      const base = requireRawObject(await run([
+      const base = requireRawObject(await call([
         'api', `repos/${encodeURIComponent(canonicalOwner)}/${encodeURIComponent(canonicalName)}`
           + `/commits/${encodeURIComponent(defaultBranch)}`,
       ]), 'RepositoryObservationInvalid');
@@ -165,10 +172,10 @@ export function createGhDraftCollectorApi({ run = runGh } = {}) {
 
     async readIssue({ repository, number }) {
       const path = repositoryPath(repository);
-      const raw = requireRawObject(await run([
+      const raw = requireRawObject(await call([
         'api', `repos/${path}/issues/${positiveInteger(number, 'IssueObservationInvalid')}`,
       ]), 'IssueObservationInvalid');
-      const pages = flattenPages(await run([
+      const pages = flattenPages(await call([
         'api', `repos/${path}/issues/${number}/events?per_page=100`, '--paginate', '--slurp',
       ]), 'IssueObservationInvalid');
       if (!Array.isArray(raw.labels)) fail('IssueObservationInvalid', 'issue labels are absent');
@@ -191,7 +198,7 @@ export function createGhDraftCollectorApi({ run = runGh } = {}) {
     },
 
     async readPermission({ repository, login }) {
-      const raw = requireRawObject(await run([
+      const raw = requireRawObject(await call([
         'api', `repos/${repositoryPath(repository)}/collaborators/`
           + `${encodeURIComponent(githubSegment(login, 'PermissionObservationInvalid'))}/permission`,
       ]), 'PermissionObservationInvalid');
@@ -199,7 +206,7 @@ export function createGhDraftCollectorApi({ run = runGh } = {}) {
     },
 
     async listHeadRefs({ repository }) {
-      const pages = flattenPages(await run([
+      const pages = flattenPages(await call([
         'api', `repos/${repositoryPath(repository)}/git/matching-refs/heads/?per_page=100`,
         '--paginate', '--slurp',
       ]), 'HeadObservationInvalid');
@@ -210,14 +217,14 @@ export function createGhDraftCollectorApi({ run = runGh } = {}) {
     },
 
     async readCommit({ repository, revision }) {
-      const raw = requireRawObject(await run([
+      const raw = requireRawObject(await call([
         'api', `repos/${repositoryPath(repository)}/git/commits/${oid(revision, 'CommitObservationInvalid')}`,
       ]), 'CommitObservationInvalid');
       return { message: commitMessage(raw.message) };
     },
 
     async readPolicy({ repository, baseRevision }) {
-      const raw = requireRawObject(await run([
+      const raw = requireRawObject(await call([
         'api', `repos/${repositoryPath(repository)}/contents/.github/gaia/pump-policy.json`
           + `?ref=${encodeURIComponent(oid(baseRevision, 'PolicyObservationInvalid'))}`,
       ]), 'PolicyObservationInvalid');
