@@ -50,7 +50,7 @@ function observedEnvelope() {
   };
 }
 
-function fakeGitData() {
+function fakeGitData({ failOnceOnKind = null, protectionSequence = [] } = {}) {
   const registryRoot = {
     schema: 'GaiaDraftRegistryRootV0', priorCommittedRevision: 'NONE', kind: 'REGISTRY_ROOT',
   };
@@ -61,13 +61,27 @@ function fakeGitData() {
   return {
     registryRootRevision: revision(registryRoot),
     port: Object.freeze({
-      async verifyProtection() { return true; },
+      async verifyProtection() {
+        return protectionSequence.length > 0 ? protectionSequence.shift() : true;
+      },
       async read(ref) {
         const records = refs.get(ref);
         if (!records) return { state: 'UNSEEN' };
         return { state: 'PRESENT', records: structuredClone(records) };
       },
+      async readByOperation(operationId) {
+        const matches = [...refs.values()].filter(
+          (records) => records.some((record) => record.body.operationId === operationId),
+        );
+        if (matches.length === 0) return { state: 'UNSEEN' };
+        assert.equal(matches.length, 1, 'operation identity is unique across work refs');
+        return { state: 'PRESENT', records: structuredClone(matches[0]) };
+      },
       async compareAndAppend(ref, expectedHeadOid, body) {
+        if (body.kind === failOnceOnKind) {
+          failOnceOnKind = null;
+          throw new Error('simulated process loss');
+        }
         const records = refs.get(ref) ?? [];
         const current = records.at(-1)?.oid ?? 'NONE';
         if (current !== expectedHeadOid) return { kind: 'STALE', currentHeadOid: current };
@@ -177,5 +191,118 @@ test('R3 hosted reconciliation persists one CREATED effect and replays it after 
   assert.deepEqual(
     git.kinds(`refs/heads/gaia-ledger/draft-operations-v0/${accepted.workKey}`),
     ['WORK_ROOT', 'ENQUEUED', 'CLAIMED', 'INTENT', 'EFFECT_STARTED', 'CREATED'],
+  );
+});
+
+test('R2 restart resumes every deterministic bootstrap crash boundary', async () => {
+  for (const failOnceOnKind of ['WORK_ROOT', 'CONFIRMED', 'ENQUEUED']) {
+    const git = fakeGitData({ failOnceOnKind });
+    const config = {
+      ledgerRegistryRootOid: OID_A,
+      ledgerRegistryRootRevision: git.registryRootRevision,
+    };
+    const selector = {
+      repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+      workItem: { kind: 'ISSUE', number: 60 },
+    };
+    const first = createGitDataDraftOperationStore({ gitData: git.port, config });
+    await assert.rejects(enqueueDraft(selector, 'NONE', ports(first, observedEnvelope())));
+
+    const restarted = createGitDataDraftOperationStore({ gitData: git.port, config });
+    const accepted = await enqueueDraft(
+      selector, 'NONE', ports(restarted, observedEnvelope()),
+    );
+    assert.equal(accepted.kind, 'Enqueued', failOnceOnKind);
+    assert.deepEqual(
+      git.kinds(REGISTRY_REF), ['REGISTRY_ROOT', 'RESERVED', 'CONFIRMED'], failOnceOnKind,
+    );
+    assert.deepEqual(
+      git.kinds(`refs/heads/gaia-ledger/draft-operations-v0/${accepted.workKey}`),
+      ['WORK_ROOT', 'ENQUEUED'], failOnceOnKind,
+    );
+  }
+});
+
+test('R3 ambiguous create is never retried and exact observation settles it after restart', async () => {
+  const git = fakeGitData();
+  const config = {
+    ledgerRegistryRootOid: OID_A,
+    ledgerRegistryRootRevision: git.registryRootRevision,
+  };
+  const envelope = observedEnvelope();
+  const selector = {
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    workItem: { kind: 'ISSUE', number: 60 },
+  };
+  const store = createGitDataDraftOperationStore({ gitData: git.port, config });
+  const accepted = await enqueueDraft(selector, 'NONE', ports(store, envelope));
+  let creates = 0;
+  const ambiguous = await reconcileDraft(
+    accepted.operationId, accepted.committedRevision,
+    ports(store, envelope, {
+      provider: {
+        async lookupExact() { return null; },
+        async createDraft() { creates += 1; throw new Error('response lost'); },
+      },
+      admission: { async reserveEffect() { return 'AVAILABLE'; } },
+    }),
+  );
+  assert.equal(ambiguous.kind, 'Pending');
+  assert.equal(ambiguous.state, 'EFFECT_AMBIGUOUS');
+
+  const restarted = createGitDataDraftOperationStore({ gitData: git.port, config });
+  const reused = await reconcileDraft(
+    accepted.operationId, ambiguous.committedRevision,
+    ports(restarted, envelope, {
+      provider: {
+        async lookupExact(request) {
+          return {
+            number: 61, url: 'https://github.com/GuitarAlchemist/gaia/pull/61',
+            isDraft: true, state: 'OPEN', operationMarker: request.operationMarker,
+            repository: structuredClone(request.repository),
+            baseRef: request.baseRef, headRef: request.headRef,
+            headRevision: request.headRevision,
+          };
+        },
+        async createDraft() { assert.fail('ambiguous effects are lookup-only'); },
+      },
+      admission: { async reserveEffect() { assert.fail('reuse needs no capacity'); } },
+    }),
+  );
+  assert.equal(reused.outcome, 'REUSED');
+  assert.equal(creates, 1);
+});
+
+test('R3 protection loss refuses the next ledger write before any Draft effect', async () => {
+  const git = fakeGitData({ protectionSequence: [true, true, true, true, false] });
+  const config = {
+    ledgerRegistryRootOid: OID_A,
+    ledgerRegistryRootRevision: git.registryRootRevision,
+  };
+  const envelope = observedEnvelope();
+  const selector = {
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    workItem: { kind: 'ISSUE', number: 60 },
+  };
+  const store = createGitDataDraftOperationStore({ gitData: git.port, config });
+  const accepted = await enqueueDraft(selector, 'NONE', ports(store, envelope));
+  let creates = 0;
+  await assert.rejects(
+    reconcileDraft(
+      accepted.operationId, accepted.committedRevision,
+      ports(store, envelope, {
+        provider: {
+          async lookupExact() { return null; },
+          async createDraft() { creates += 1; return null; },
+        },
+        admission: { async reserveEffect() { return 'AVAILABLE'; } },
+      }),
+    ),
+    (error) => error?.code === 'LedgerProtectionMissing',
+  );
+  assert.equal(creates, 0);
+  assert.deepEqual(
+    git.kinds(`refs/heads/gaia-ledger/draft-operations-v0/${accepted.workKey}`),
+    ['WORK_ROOT', 'ENQUEUED'],
   );
 });

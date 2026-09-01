@@ -209,17 +209,26 @@ The five operation kinds from `ENQUEUED` through `EFFECT_AMBIGUOUS` are nontermi
 is never projected as work. `EFFECT_AMBIGUOUS` means a create request may already have reached
 GitHub and only exact observation can settle it; it is never projected as refusal or completion.
 
-The Git Data adapter exposes only:
+The public durable store exposes `readHead(workKey)` for observation; enqueue, reconcile, and cancel
+hold its mutation capabilities privately in the module's `WeakMap`. The concrete Git Data transport
+behind that store exposes only:
 
 ```text
-readHead(workKey) -> { state: 'UNSEEN' }
-  | { state: 'PRESENT', ledgerHeadOid, committedRevision, records }
-append(workKey, { ledgerHeadOid, committedRevision }, closedRecord)
-  -> { ledgerHeadOid, committedRevision }
-listUnsettled(refPrefix) -> closed operation identities
+verifyProtection({ prefix, registryRootOid }) -> true | false
+read(ref) -> { state: 'UNSEEN' } | { state: 'PRESENT', records }
+readByOperation(operationId) -> { state: 'UNSEEN' } | { state: 'PRESENT', records }
+compareAndAppend(ref, expectedHeadOid, closedRecord)
+  -> { kind: 'STALE', currentHeadOid }
+  | { kind: 'APPENDED', oid, body, committedRevision }
 ```
 
-The `{ ledgerHeadOid, committedRevision }` pair is private to the adapter. Public code supplies only
+Refs and Git OIDs remain inside this private transport/store composition. `readByOperation` scans
+the protected work-ref family and returns exactly one validated chain or fails closed on duplicate
+identity; it never puts a ref or Git OID in a public operation result. A future supervisor may add a
+bounded unsettled-work projection over the same private scan, but this tracer bullet does not claim
+that scheduler yet.
+
+The `{ ledgerHeadOid, committedRevision }` pair is private to the composition. Public code supplies only
 `NONE` or an expected 64-hex `committedRevision`; the adapter atomically reads the current ref,
 requires its
 validated receipt to carry that content revision, and uses the corresponding hidden OID for the

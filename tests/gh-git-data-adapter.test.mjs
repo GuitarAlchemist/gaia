@@ -38,7 +38,9 @@ test('R2 gh Git Data adapter verifies protection, reads receipts, and appends by
     [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: rootOid } }],
     { sha: rootOid, tree: { sha: '3'.repeat(40) }, parents: [] },
     { tree: [{ path: 'receipt.json', type: 'blob', sha: '4'.repeat(40) }] },
-    { encoding: 'base64', content: Buffer.from(JSON.stringify(root), 'utf8').toString('base64') },
+    { encoding: 'base64', content: Buffer.from(JSON.stringify({
+      body: root, committedRevision: revision(root),
+    }), 'utf8').toString('base64') },
     [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: rootOid } }],
     { sha: '5'.repeat(40) },
     { sha: '6'.repeat(40) },
@@ -63,6 +65,11 @@ test('R2 gh Git Data adapter verifies protection, reads receipts, and appends by
   );
   assert.equal(responses.length, 0);
   assert.deepEqual(calls.at(-1).input, { sha: nextOid, force: false });
+  const blobWrite = calls.find((call) => call.input?.encoding === 'base64');
+  assert.deepEqual(
+    JSON.parse(Buffer.from(blobWrite.input.content, 'base64').toString('utf8')),
+    { body: next, committedRevision: revision(next) },
+  );
 });
 
 test('R2 gh Git Data adapter creates an absent work ref without force', async () => {
@@ -127,4 +134,17 @@ test('R2 gh Git Data adapter redacts provider diagnostics', async () => {
       && error.code === 'GitHubGitDataUnavailable'
       && !error.message.includes('token'),
   );
+});
+
+test('R3 gh Git Data adapter reports an absent operation without leaking refs', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    run: scriptedRun([[]], calls),
+  });
+
+  assert.deepEqual(await api.readByOperation('a'.repeat(64)), { state: 'UNSEEN' });
+  assert.equal(calls.length, 1);
+  assert.equal(JSON.stringify(calls[0]).includes('ledgerHeadOid'), false);
 });

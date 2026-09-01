@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
 const GIT_OID = /^[a-f0-9]{40}$/u;
+const SHA256 = /^[a-f0-9]{64}$/u;
 const LEDGER_PREFIX = 'refs/heads/gaia-ledger/';
 const RECEIPT_PATH = 'receipt.json';
 
@@ -157,23 +158,40 @@ export function createGhGitDataApi({ repository, run = runGh }) {
     if (blob.encoding !== 'base64' || typeof blob.content !== 'string') {
       fail('GitDataProtocolViolation');
     }
-    let body;
+    let receipt;
     try {
-      body = JSON.parse(Buffer.from(blob.content.replace(/\s/gu, ''), 'base64').toString('utf8'));
-      ownData(body);
+      receipt = JSON.parse(Buffer.from(
+        blob.content.replace(/\s/gu, ''), 'base64',
+      ).toString('utf8'));
+      ownData(receipt);
+      const keys = Object.keys(receipt).sort();
+      if (keys.length !== 2 || keys[0] !== 'body' || keys[1] !== 'committedRevision') {
+        fail('GitDataProtocolViolation');
+      }
+      ownData(receipt.body);
+      if (typeof receipt.committedRevision !== 'string'
+        || !SHA256.test(receipt.committedRevision)
+        || receipt.committedRevision !== contentRevision(receipt.body)) {
+        fail('GitDataProtocolViolation');
+      }
     } catch (error) {
       if (error instanceof GhGitDataError) throw error;
       fail('GitDataProtocolViolation');
     }
     const parents = commit.parents.map((parent) => oid(parent?.sha));
     return {
-      record: { oid: commitOid, body, committedRevision: contentRevision(body) },
+      record: {
+        oid: commitOid, body: receipt.body,
+        committedRevision: receipt.committedRevision,
+      },
       parent: parents[0] ?? 'NONE',
     };
   }
 
   async function appendObjects(expectedHeadOid, body) {
-    const content = Buffer.from(JSON.stringify(body), 'utf8').toString('base64');
+    const content = Buffer.from(canonical({
+      body, committedRevision: contentRevision(body),
+    }), 'utf8').toString('base64');
     const blob = ownData(await call('POST', 'git/blobs', { content, encoding: 'base64' }));
     const tree = ownData(await call('POST', 'git/trees', {
       tree: [{ path: RECEIPT_PATH, mode: '100644', type: 'blob', sha: oid(blob.sha) }],
@@ -184,6 +202,23 @@ export function createGhGitDataApi({ repository, run = runGh }) {
       parents: expectedHeadOid === 'NONE' ? [] : [oid(expectedHeadOid, 'InvalidExpectedHead')],
     }));
     return oid(commit.sha);
+  }
+
+  async function readRef(refInput) {
+    const ref = ledgerRef(refInput);
+    let cursor = await currentHead(ref);
+    if (cursor === 'NONE') return { state: 'UNSEEN' };
+    const records = [];
+    const visited = new Set();
+    while (cursor !== 'NONE') {
+      if (visited.has(cursor)) fail('GitDataProtocolViolation');
+      visited.add(cursor);
+      const { record, parent } = await readRecord(cursor);
+      records.push(record);
+      cursor = parent;
+    }
+    records.reverse();
+    return { state: 'PRESENT', records };
   }
 
   return Object.freeze({
@@ -202,20 +237,29 @@ export function createGhGitDataApi({ repository, run = runGh }) {
     },
 
     async read(refInput) {
-      const ref = ledgerRef(refInput);
-      let cursor = await currentHead(ref);
-      if (cursor === 'NONE') return { state: 'UNSEEN' };
-      const records = [];
-      const visited = new Set();
-      while (cursor !== 'NONE') {
-        if (visited.has(cursor)) fail('GitDataProtocolViolation');
-        visited.add(cursor);
-        const { record, parent } = await readRecord(cursor);
-        records.push(record);
-        cursor = parent;
+      return readRef(refInput);
+    },
+
+    async readByOperation(operationId) {
+      if (typeof operationId !== 'string' || !SHA256.test(operationId)) {
+        fail('InvalidOperationId');
       }
-      records.reverse();
-      return { state: 'PRESENT', records };
+      const prefix = 'refs/heads/gaia-ledger/draft-operations-v0/';
+      const path = encodedRefPath(prefix);
+      const rows = await call('GET', `git/matching-refs/${path}`);
+      if (!Array.isArray(rows)) fail('GitDataProtocolViolation');
+      const matches = [];
+      for (const row of rows) {
+        if (typeof row?.ref !== 'string' || !row.ref.startsWith(prefix)) continue;
+        const snapshot = await readRef(row.ref);
+        if (snapshot.state === 'PRESENT'
+          && snapshot.records.some((record) => record.body?.operationId === operationId)) {
+          matches.push(snapshot);
+        }
+      }
+      if (matches.length === 0) return { state: 'UNSEEN' };
+      if (matches.length !== 1) fail('GitDataProtocolViolation');
+      return matches[0];
     },
 
     async compareAndAppend(refInput, expectedHeadInput, bodyInput) {
