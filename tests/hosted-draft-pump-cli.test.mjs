@@ -383,11 +383,11 @@ test('intake is an accepted command and reaches the runtime as such', async () =
   const seen = [];
   const exitCode = await main({
     argv: [...commonArgs('intake'), '--repository-node-id', 'R_node', '--owner', 'GuitarAlchemist'],
-    env: { GAIA_ISSUE_NUMBER: '70' },
+    env: { GAIA_ISSUE_NUMBER: '70', GAIA_MANAGED_ROUND_JSON: MANAGED_JSON },
     stdout: output.stream,
     stderr: errors.stream,
     runtimeFactory(configuration) {
-      seen.push(configuration.command);
+      seen.push(configuration);
       return Object.freeze({
         async listUnsettled() { return []; },
         async enqueue() { return { kind: 'StaleRevision', currentCommittedRevision: REVISION }; },
@@ -398,7 +398,8 @@ test('intake is an accepted command and reaches the runtime as such', async () =
 
   assert.equal(errors.text(), '');
   assert.equal(exitCode, 0);
-  assert.deepEqual(seen, ['intake']);
+  assert.equal(seen[0].command, 'intake');
+  assert.deepEqual(seen[0].managedRound, JSON.parse(MANAGED_JSON));
   assert.equal(output.json().command, 'intake');
 });
 

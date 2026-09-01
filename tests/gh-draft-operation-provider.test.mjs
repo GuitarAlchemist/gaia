@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   GhDraftOperationProviderError,
   createGhDraftOperationProvider,
+  createGhManagedRoundApi,
 } from '../src/gh-draft-operation-provider.mjs';
 import {
   createInitialManagedRound,
@@ -150,6 +151,18 @@ const PR_LIST_ARGS = [
 ];
 const PR_FIELDS =
   'number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body';
+const API_BODY = 'human body';
+const API_ETAG = '"resource-v1"';
+const API_REPO_ARGS = REPO_VIEW_ARGS;
+const API_GET_ARGS = ['api', '-i', 'repos/GuitarAlchemist/gaia/pulls/61'];
+
+function apiPull(body = API_BODY) {
+  return { number: 61, state: 'open', draft: true, head: { sha: HEAD_REVISION }, body };
+}
+
+function included(etag, body) {
+  return `HTTP/2 200 OK\r\netag: ${etag}\r\n\r\n${JSON.stringify(body)}`;
+}
 
 test('lookupExact returns only the open Draft bound to the exact repository, generation, and marker', async () => {
   const fake = fakeRun([
@@ -346,4 +359,94 @@ test('createDraft refuses a moved remote head and redacts provider failures', as
         && !String(error.stack).includes(secret),
     );
   });
+});
+
+test('managed body API binds the repository node id before its ETag observation', async () => {
+  const fake = fakeRun([
+    { args: API_REPO_ARGS,
+      stdout: JSON.stringify({ id: REPOSITORY.nodeId, nameWithOwner: 'GuitarAlchemist/gaia' }) },
+    { args: API_GET_ARGS, stdout: included(API_ETAG, apiPull()) },
+  ]);
+  const api = createGhManagedRoundApi({ expectedRepository: REPOSITORY, run: fake.run });
+
+  assert.deepEqual(await api.observe(61), {
+    number: 61, headRevision: HEAD_REVISION, body: API_BODY,
+    bodyRevision: 'd97078ab8ce8664588d967df94779d0a8bd17eebb03f2055ebcc5d167d10eafb',
+  });
+  assert.deepEqual(fake.calls.map((call) => call.args), [API_REPO_ARGS, API_GET_ARGS]);
+
+  const mismatch = fakeRun([{
+    args: API_REPO_ARGS,
+    stdout: JSON.stringify({ id: 'R_DIFFERENT', nameWithOwner: 'GuitarAlchemist/gaia' }),
+  }]);
+  const refused = createGhManagedRoundApi({ expectedRepository: REPOSITORY, run: mismatch.run });
+  await assert.rejects(
+    refused.observe(61),
+    (error) => error instanceof GhDraftOperationProviderError
+      && error.code === 'RepositoryIdentityMismatch',
+  );
+  assert.equal(mismatch.calls.length, 1, 'node-id mismatch performs no PR GET or PATCH');
+});
+
+test('managed body API PATCHes once with the observed ETag and exact proposed body', async () => {
+  const proposedBody = 'human body\n\nmanaged R1';
+  const patchArgs = [
+    'api', '-i', '-X', 'PATCH', 'repos/GuitarAlchemist/gaia/pulls/61',
+    '-H', `If-Match: ${API_ETAG}`, '-f', `body=${proposedBody}`,
+  ];
+  const fake = fakeRun([
+    { args: API_REPO_ARGS,
+      stdout: JSON.stringify({ id: REPOSITORY.nodeId, nameWithOwner: 'GuitarAlchemist/gaia' }) },
+    { args: API_GET_ARGS, stdout: included(API_ETAG, apiPull()) },
+    { args: API_REPO_ARGS,
+      stdout: JSON.stringify({ id: REPOSITORY.nodeId, nameWithOwner: 'GuitarAlchemist/gaia' }) },
+    { args: patchArgs, stdout: included('"resource-v2"', apiPull(proposedBody)) },
+  ]);
+  const api = createGhManagedRoundApi({ expectedRepository: REPOSITORY, run: fake.run });
+  const observed = await api.observe(61);
+  const acknowledgement = await api.compareAndSetBody({
+    number: 61, expectedHeadRevision: observed.headRevision,
+    expectedBodyRevision: observed.bodyRevision, proposedBody,
+    proposedBodyRevision: 'f'.repeat(64),
+  });
+
+  assert.deepEqual(acknowledgement, { kind: 'ACKNOWLEDGED' });
+  assert.equal(fake.calls.filter((call) => call.args.includes('PATCH')).length, 1);
+  assert.deepEqual(fake.calls.at(-1).args, patchArgs);
+});
+
+test('managed body API redacts repository and PATCH diagnostics', async (context) => {
+  const secret = 'ghp_managed-round-secret';
+  for (const stage of ['repository', 'patch']) {
+    await context.test(stage, async () => {
+      const steps = stage === 'repository'
+        ? [{ args: API_REPO_ARGS, error: new Error(secret) }]
+        : [
+          { args: API_REPO_ARGS,
+            stdout: JSON.stringify({ id: REPOSITORY.nodeId,
+              nameWithOwner: 'GuitarAlchemist/gaia' }) },
+          { args: API_GET_ARGS, stdout: included(API_ETAG, apiPull()) },
+          { args: API_REPO_ARGS,
+            stdout: JSON.stringify({ id: REPOSITORY.nodeId,
+              nameWithOwner: 'GuitarAlchemist/gaia' }) },
+          { args: [
+            'api', '-i', '-X', 'PATCH', 'repos/GuitarAlchemist/gaia/pulls/61',
+            '-H', `If-Match: ${API_ETAG}`, '-f', 'body=next',
+          ], error: new Error(secret) },
+        ];
+      const fake = fakeRun(steps);
+      const api = createGhManagedRoundApi({ expectedRepository: REPOSITORY, run: fake.run });
+      if (stage === 'patch') {
+        const observed = await api.observe(61);
+        assert.deepEqual(await api.compareAndSetBody({
+          number: 61, expectedHeadRevision: observed.headRevision,
+          expectedBodyRevision: observed.bodyRevision, proposedBody: 'next',
+          proposedBodyRevision: 'f'.repeat(64),
+        }), { kind: 'STALE' });
+      } else {
+        await assert.rejects(api.observe(61), (error) => error.code === 'ProviderUnavailable'
+          && error.message === 'ProviderUnavailable' && !String(error.stack).includes(secret));
+      }
+    });
+  }
 });
