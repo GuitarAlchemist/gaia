@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: gaia-draft-intake
+  group: ${{ github.event_name == 'issues' && format('gaia-draft-intake-issue-{0}', github.event.issue.number) || 'gaia-draft-intake-recovery' }}
   cancel-in-progress: false
 
 jobs:

@@ -2,6 +2,11 @@
 
 Status: design gate for issue #70. Base `cb318d222ebe94a25afda43fba9029e984a60540`.
 
+The original repository-wide concurrency policy below was superseded by issue #84. Current
+label-triggered runs are partitioned by issue number while scheduled recovery remains serialized;
+see [Hosted parallel intake lanes R0](hosted-parallel-intake-lanes.md). The rest of this design,
+including the durable CAS and authority boundary, remains current.
+
 ## Problem
 
 PR #69 proved the sealed effect executor, but a human still enqueues and dispatches every Draft
@@ -45,7 +50,8 @@ to one workflow file. Unpinning that constant into a sealed per-command map is t
 
 - `on: issues: types: [labeled]` and `on: schedule` with one bounded cron, four runs per day.
 - `permissions: actions: read` and `contents: read`, nothing more.
-- `concurrency: group: gaia-draft-intake` with `cancel-in-progress: false`.
+- a composite non-cancelling concurrency group: per issue number for label triggers and one
+  `gaia-draft-intake-recovery` group for scheduled recovery.
 
 The job is gated by an `if:` that admits every non-`issues` event and, for `issues`, only the
 `ready-for-agent` label. The gate is a filter, never authority. Steps mirror the effect workflow one
@@ -59,9 +65,10 @@ The issue number reaches the CLI only through an `env:` binding of `github.event
 interpolated into a `run:` body. It is re-validated as a positive integer and then fully re-derived
 from the API by `createHostedDraftCollector`. Nothing from the webhook payload becomes authority.
 
-The repository-wide group is strictly stronger than the effect workflow's per-work-key group: at most
-one intake run is in progress across the repository, therefore at most one intake-originated effect
-is in flight.
+Label-triggered intake runs for distinct issues may overlap. Duplicate events for one issue share
+one workflow group, while the existing ledger CAS remains the correctness mechanism and chooses the
+one effect winner. Scheduled recovery stays repository-wide because it selects from the shared
+unsettled set.
 
 `GITHUB_TOKEN` is never referenced; every mutating call runs under the App installation token. The
 `permissions:` block is a minimality declaration over an unused token, not the grant. Not required:
@@ -228,9 +235,9 @@ There is no re-enqueue path and no new-generation path, and this design adds nei
 `src/github-actions-draft-admission.mjs` documents that GitHub's workflow-run representation does not
 expose the concurrency group, so the exact group is a **structural invariant of the sealed workflow**.
 With two admission-granting workflows at different group scopes — per-work-key for the effect
-workflow, repository-wide for intake — Actions alone no longer guarantees "at most one in-progress
-effect per work key". A manually dispatched effect run and a scheduled intake run can both hold
-`AVAILABLE` for the same work key.
+workflow, per-issue for labeled intake, and repository-wide for recovery — Actions alone does not
+guarantee "at most one in-progress effect per work key". A manually dispatched effect run and an
+intake run can both hold `AVAILABLE` for the same work key.
 
 The system remains duplicate-free, but for a different reason, and that reason must be stated in its
 own words rather than inherited from the sealed-workflow argument: **the ledger CAS, not Actions,
@@ -246,10 +253,10 @@ tests are not touched.
 
 Two facts make a recovery-only schedule and a lowest-numbered selector both wrong.
 
-**Pending runs coalesce.** With `cancel-in-progress: false`, Actions keeps at most one pending run
-per group and cancels older pending runs. If three issues are labelled while an intake run executes,
-at most one of the three label events survives. The schedule is therefore the only path that
-re-admits the lost ones: it must be an **admission** path, not merely a recovery path.
+**Pending duplicate runs coalesce.** With `cancel-in-progress: false`, Actions bounds pending runs
+inside one issue group. Independent issue labels no longer coalesce with each other. The schedule is
+still the recovery path for work whose label event predated this policy or whose run never reached
+durable enqueue, so it remains an **admission** path, not merely a recovery path.
 
 **A refusal is terminal for a work key forever.** `enqueueDraft` returns `StaleRevision` for any work
 key that already carries a record when the expected committed revision is `NONE`. Verified live at
@@ -268,7 +275,8 @@ Every failure mode denies rather than proceeds, and every denial is a typed, red
 
 | Failure | Detection | Outcome |
 |---|---|---|
-| Two intake triggers race | repository-wide group, `cancel-in-progress: false` | second run queues, then re-reads durable state |
+| Two triggers for one issue race | per-issue group, `cancel-in-progress: false` | second run queues, then re-reads durable state |
+| Two distinct issue triggers overlap | distinct issue groups plus per-work-key CAS | independent work may advance; same-key loser performs no effect |
 | Two processes reconcile one operation | CAS on `CLAIMED` | one advances; loser `StaleRevision`, no provider call |
 | Crash after enqueue | `listUnsettledDrafts` | next intake resumes at step 2 |
 | Crash after `EFFECT_STARTED`, PR created | marker lookup | `REUSED` |
