@@ -70,8 +70,7 @@ accessors:
     baseRef,
     headRef,
     headRevision,
-    policyRevision,
-    ordinal
+    policyRevision
   },
   requestedEffect: 'CREATE_DRAFT'
 }
@@ -79,8 +78,8 @@ accessors:
 
 All strings are non-empty canonical text with no control characters. Content revisions are exact
 64-lowercase-hex SHA-256 values; `headRevision` and `policyRevision` are exact
-40-lowercase-hex GitHub Git object ids. `number` and `ordinal` are safe positive integers, and every
-vocabulary is closed. Canonicalization never silently trims, folds, or coerces caller data.
+40-lowercase-hex GitHub Git object ids. `number` and `occurrence` are safe positive integers, and
+every vocabulary is closed. Canonicalization never silently trims, folds, or coerces caller data.
 Capacity and admission are deliberately absent: an untrusted dispatcher cannot mint effect
 authority by writing `AVAILABLE` into its envelope.
 
@@ -123,9 +122,11 @@ observedSourceRevision = sha256(canonical({
 `Gaia-Issue` is the decimal issue number and `Gaia-Ready-Receipt` is the exact
 `queueReceiptRevision`; both trailers must occur exactly once in the evidence commit.
 
-Zero or multiple matching events or branches, insufficient label-actor permission, a moving ref
-during the two read-backs, missing policy, or any API ambiguity refuses before `ENQUEUED`. Tests
-provide a fake hosted collector; they never accept caller-authored receipt or source revisions.
+Zero matching label events, multiple matching branches, insufficient label-actor permission, an
+incomplete timeline, a moving ref during the two read-backs, missing policy, or any API ambiguity
+refuses before `ENQUEUED`. Repeated ready occurrences are legal: the collector selects the latest
+matching label event and derives its one-based ordinal deterministically. Tests provide a fake
+hosted collector; they never accept caller-authored receipt or source revisions.
 
 ## Two identities, one lookup rule
 
@@ -173,6 +174,13 @@ because a queue revision changed.
 The hosted ledger uses a registry ref `refs/heads/gaia-ledger/registry-v0` plus the ref family
 `refs/heads/gaia-ledger/draft-operations-v0/<workKey>`, one append-only branch per logical work.
 Workflow triggers must exclude `gaia-ledger/**`; moving these refs is storage, not a source change.
+Production never bootstraps the registry. An explicit one-time provisioning step creates its root
+and commits that exact `ledgerRegistryRootOid` plus 64-hex `ledgerRegistryRootRevision` into
+`.github/gaia/pump-policy.json` on the default branch before the pump is enabled. The hosted adapter
+requires the configured root to be an ancestor of the current registry head. Missing configuration,
+a missing registry ref, or a non-descendant head always fails closed; it can never mean first use.
+Provisioning and policy mutation are outside pump authority.
+
 The registry records each work branch's reservation and bootstrap root; a missing work ref that is
 already registered is corruption, never a new bootstrap. A required GitHub ruleset forbids deletion
 and non-fast-forward updates for `gaia-ledger/**` and restricts updates to the Gaia pump GitHub App.
@@ -204,8 +212,11 @@ append(workKey, { ledgerHeadOid, committedRevision }, closedRecord)
 listUnsettled(refPrefix) -> closed operation identities
 ```
 
-Every expected revision must contain both values. The registry has the same two-revision protocol
-and adds `reserveWork(workKey)` and
+The `{ ledgerHeadOid, committedRevision }` pair is private to the adapter. Public code supplies only
+an expected 64-hex `committedRevision`; the adapter atomically reads the current ref, requires its
+validated receipt to carry that content revision, and uses the corresponding hidden OID for the
+non-force update. The registry has the same private two-revision protocol and adds
+`reserveWork(workKey)` and
 `confirmWork(workKey, bootstrapHeadOid)`. A crash after reservation but before confirmation may
 resume only that exact deterministic bootstrap. Once confirmed, absence can never bootstrap again.
 
@@ -213,14 +224,15 @@ resume only that exact deterministic bootstrap. Once confirmed, absence can neve
 parent is `expectedRevision.ledgerHeadOid`, then
 updates the ref with `force: false`. Two candidates from the same parent are siblings: after one
 fast-forward succeeds, the other update is non-fast-forward and must fail as `StaleRevision` before
-any Draft effect. The adapter rereads but never silently rebases an effect-bearing record. Bootstrap
-creates one root record; concurrent bootstrap losers reread the winning ref. Missing, deleted,
+any Draft effect. The adapter rereads but never silently rebases an effect-bearing record. Work-ref
+bootstrap creates one root record after registry reservation; concurrent bootstrap losers reread
+the winning ref. Missing, deleted,
 force-rewritten, multi-parent, non-canonical, discontinuous, or corrupt history fails closed and
 alerts. The registry, ruleset, branches, and their commit chains are retained append-only: the pump
 never force-updates, deletes, squashes, truncates, or garbage-collects them.
 
-`enqueueDraft(selector, expectedRevision, ports)` uses the hosted collector to build and seal the
-observed envelope, derives `workKey`, refuses a
+`enqueueDraft(selector, expectedCommittedRevision, ports)` uses the hosted collector to build and
+seal the observed envelope, derives `workKey`, refuses a
 different generation while that work has a nonterminal generation, then CAS-appends `ENQUEUED`.
 Only after that accepted append may a dispatcher request a workflow. A failed,
 cancelled, replaced, or queue-overflowed dispatch therefore leaves durable unsettled work. A
@@ -247,14 +259,14 @@ workflow. No live probe grants Draft, merge, configuration, or branch-rewrite au
 
 ## One ordered reconciliation transaction
 
-`reconcileDraft(operationId, expectedRevision, ports)` performs these steps under one module owner
+`reconcileDraft(operationId, expectedCommittedRevision, ports)` performs these steps under one module owner
 after `enqueueDraft` has returned the accepted operation id and committed revision:
 
 1. load and validate the sealed envelope from its accepted `ENQUEUED` receipt, then derive its three
    identities again and require the same `operationId`;
 2. enter the executor serialized by `workKey`;
-3. compare `expectedRevision` with the current durable revision before lookup, adoption, capacity,
-   intent, or effect;
+3. compare `expectedCommittedRevision` with the current public content revision before lookup,
+   adoption, capacity, intent, or effect; the adapter owns the corresponding hidden Git OID;
 4. find terminal state and latest intent by `workKey`;
 5. query the provider through the closed provider request;
 6. adopt an exact Draft before reserving effect capacity; an exact Draft therefore succeeds even
@@ -271,19 +283,21 @@ Every path which appends state, including effect-free adoption, is revision-gate
 returns `StaleRevision` and writes nothing. A stale or cross-generation owner performs no effect.
 
 The public reconciliation result is exactly one of `Terminal(CREATED|REUSED|REFUSED|CANCELLED)`,
-`Pending(EFFECT_AMBIGUOUS)`, `StaleRevision`, or `CrossGenerationIntent`. `Pending` is neither
+`Pending(EFFECT_AMBIGUOUS)`, `StaleRevision`, or `CrossGenerationIntent`. The cancellation result
+is exactly `Terminal(CREATED|REUSED|REFUSED|CANCELLED)`, `CancellationDeferred(EFFECT_STARTED)`,
+`CancellationDeferred(EFFECT_AMBIGUOUS)`, or `StaleRevision`. A pending/deferred result is neither
 success nor refusal and carries no completion percentage. Provider error categories appear only
 inside the compatible terminal or pending variant defined below.
 
-`cancelDraft(operationId, expectedRevision, store)` is the only cancellation seam. It reloads the
+`cancelDraft(operationId, expectedCommittedRevision, store)` is the only cancellation seam. It reloads the
 sealed envelope from `ENQUEUED` and uses the same `workKey` executor and durable revision as
 reconciliation. If cancellation commits before
-`EFFECT_STARTED`, reconciliation returns `Cancelled` with zero effect. If reconciliation already
+`EFFECT_STARTED`, reconciliation returns `Terminal(CANCELLED)` with zero effect. If reconciliation already
 owns the executor but has not started the effect, the same ordering decides one winner. At or after
 `EFFECT_STARTED`, cancellation cannot append `CANCELLED`: it returns `CancellationDeferred` with
-the current terminal record or nonterminal `EFFECT_AMBIGUOUS`. Later exact reconciliation may
-become `CREATED` or `REUSED`; cancellation can never turn possible remote success into false
-absence. Cancellation carries no provider or merge authority.
+the current terminal record, nonterminal `EFFECT_STARTED`, or nonterminal `EFFECT_AMBIGUOUS`.
+Later exact reconciliation may become `CREATED` or `REUSED`; cancellation can never turn possible
+remote success into false absence. Cancellation carries no provider or merge authority.
 
 The production adapter uses the GitHub Actions group and ledger protocol above. Its receipt chain
 records executor run id and attempt. A successor replays GitHub-persisted receipts and fences every
@@ -346,7 +360,7 @@ counterexamples RED against the new public seam:
    effect and returns `CrossGenerationIntent`;
 2. an unknown authority-like field is refused before the provider, and a malicious provider cannot
    mutate terminal generation or source;
-3. exact-Draft adoption from a stale `expectedRevision` writes nothing; and
+3. exact-Draft adoption from a stale `expectedCommittedRevision` writes nothing; and
 4. lookup and create transport failures return typed redacted results with no raw diagnostic.
 
 The suite must also retain the original eleven-row fault matrix, including cancellation/completion
