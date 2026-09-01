@@ -715,3 +715,115 @@ test('the refresh adapter refuses a tampered continuity carrier rather than inve
   assert.equal(fourth.sourceChangedAtBasis, 'MEASURED');
   assert.match(readFileSync(htmlPath, 'utf8'), /Throughput stalled/u);
 });
+
+// -----------------------------------------------------------------------------------------------
+// Hosted Draft pump observation on the refresh path (issue #70, bullet 7).
+//
+// The refresh adapter is the one an operator actually runs for a hosted fact, and it currently
+// forwards only `pr-review-thread-gate` among the optional evidence blocks. A pump block added to
+// factory-dashboard.mjs alone would be invisible here, which is precisely where the bug would not
+// be noticed. Both gates below therefore assert the forwarding, not the derivation.
+// -----------------------------------------------------------------------------------------------
+
+function hostedDraftPumpArtifact() {
+  const body = {
+    schema: 'gaia-hosted-draft-pump/1',
+    effect: 'NONE',
+    authority: 'NONE',
+    observedAt: '2026-08-29T19:50:00.000Z',
+    windowStartedAt: '2026-08-29T18:50:00.000Z',
+    sequence: 41,
+    repository: 'GuitarAlchemist/gaia',
+    repositoryNodeId: 'R_kgDOT3lpUg',
+    ledgerRootOid: '1'.repeat(40),
+    ledgerRootRevision: '2'.repeat(64),
+    transition: {
+      tickAt: '2026-08-29T19:49:02.000Z',
+      trigger: 'SCHEDULED_RECOVERY',
+      outcome: 'EXPECTED_NONE',
+      effect: 'NONE',
+      operationId: null,
+      workKey: null,
+      generationKey: null,
+      committedRevision: null,
+      observedSourceRevision: 'f'.repeat(64),
+      workItem: null,
+      pullRequest: null,
+      blocker: 'NONE',
+    },
+    unsettledCount: 0,
+  };
+  return { ...body, revision: createHash('sha256').update(canonicalJson(body)).digest('hex') };
+}
+
+test('refresh accepts --hosted-draft-pump rather than refusing it as an unknown option', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-pump-option-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const pumpPath = join(scratch, 'hosted-draft-pump.json');
+  writeFileSync(pumpPath, JSON.stringify(hostedDraftPumpArtifact()), 'utf8');
+
+  await runFactoryDashboardRefreshCli([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', join(scratch, 'portfolio.json'),
+    '--snapshot-out', join(scratch, 'control-room.json'),
+    '--html-out', join(scratch, 'control-room.html'),
+    '--hosted-draft-pump', pumpPath,
+  ], {
+    now: () => new Date('2026-08-29T20:00:00.000Z'),
+    surveyPortfolio: async () => portfolio([]),
+    writeStdout: () => {},
+  });
+});
+
+test('the hosted pump block reaches the published snapshot through the GitHub refresh adapter', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-pump-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const snapshotPath = join(scratch, 'control-room.json');
+  const htmlPath = join(scratch, 'control-room.html');
+  const pumpPath = join(scratch, 'hosted-draft-pump.json');
+  writeFileSync(pumpPath, JSON.stringify(hostedDraftPumpArtifact()), 'utf8');
+
+  const snapshot = await runFactoryDashboardRefreshCli([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', join(scratch, 'portfolio.json'),
+    '--snapshot-out', snapshotPath,
+    '--html-out', htmlPath,
+    '--hosted-draft-pump', pumpPath,
+  ], {
+    now: () => new Date('2026-08-29T20:00:00.000Z'),
+    surveyPortfolio: async () => portfolio([]),
+    writeStdout: () => {},
+  });
+
+  assert.notEqual(snapshot.hostedDraftPump, undefined,
+    '--hosted-draft-pump must be forwarded by the refresh adapter, not silently dropped');
+  assert.equal(snapshot.hostedDraftPump.source, 'GAIA_HOSTED_DRAFT_PUMP');
+  // A scheduled tick that correctly admitted nothing is the healthiest possible reading, and it
+  // must be distinguishable from a pump that never ran.
+  assert.equal(snapshot.hostedDraftPump.state, 'EXPECTED_NONE');
+  assert.equal(snapshot.hostedDraftPump.trigger, 'SCHEDULED_RECOVERY');
+  assert.equal(snapshot.hostedDraftPump.operationId, null);
+  assert.match(readFileSync(htmlPath, 'utf8'), /data-state="EXPECTED_NONE"/u);
+});
+
+test('the refresh adapter refuses a pump evidence path that aliases one of its outputs', async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-control-room-refresh-pump-alias-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const pumpPath = join(scratch, 'hosted-draft-pump.json');
+  writeFileSync(pumpPath, JSON.stringify(hostedDraftPumpArtifact()), 'utf8');
+
+  await assert.rejects(runFactoryDashboardRefreshCli([
+    '--organization', 'GuitarAlchemist',
+    '--policy-revision', 'sha256:portfolio-policy-v1',
+    '--portfolio-out', pumpPath,
+    '--snapshot-out', join(scratch, 'control-room.json'),
+    '--html-out', join(scratch, 'control-room.html'),
+    '--hosted-draft-pump', pumpPath,
+  ], {
+    surveyPortfolio: async () => portfolio([]),
+  }), /output path aliases an input evidence path/u);
+
+  assert.deepEqual(JSON.parse(readFileSync(pumpPath, 'utf8')), hostedDraftPumpArtifact());
+});
