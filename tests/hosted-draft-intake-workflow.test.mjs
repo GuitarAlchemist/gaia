@@ -76,13 +76,14 @@ test('intake claims no dispatch authority and no GITHUB_TOKEN authority', () => 
   assert.doesNotMatch(workflow, /workflow_dispatch/u);
 });
 
-test('intake reuses the existing pump identity and adds no new secret or configuration', () => {
+test('intake reuses the pump identity and carries one data-only managed-round configuration', () => {
   const workflow = intake();
   for (const name of [
     'vars.GAIA_PUMP_APP_ID',
     'secrets.GAIA_PUMP_APP_PRIVATE_KEY',
     'vars.GAIA_PUMP_ACTOR_ID',
     'vars.GAIA_REPOSITORY_NODE_ID',
+    'vars.GAIA_MANAGED_ROUND_JSON',
   ]) {
     assert.ok(workflow.includes(name), `intake must reuse ${name}`);
   }

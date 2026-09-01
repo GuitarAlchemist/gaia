@@ -351,8 +351,19 @@ export function createGhManagedRoundApi({ expectedRepository, run = defaultRun }
       fail('ProviderUnavailable');
     }
   };
+  const assertRepositoryIdentity = async () => {
+    const response = await invoke([
+      'repo', 'view', repositoryName, '--json', 'id,nameWithOwner',
+    ]);
+    const observed = parseJson(response?.stdout);
+    exactKeys(observed, ['id', 'nameWithOwner'], 'ProviderProtocolViolation');
+    if (observed.id !== expected.nodeId || observed.nameWithOwner !== repositoryName) {
+      fail('RepositoryIdentityMismatch');
+    }
+  };
   const observe = async (number) => {
     if (!Number.isSafeInteger(number) || number <= 0) fail('InvalidInput');
+    await assertRepositoryIdentity();
     const response = await invoke(['api', '-i', `repos/${repositoryName}/pulls/${number}`]);
     const included = parseIncludedResponse(response?.stdout);
     const value = included.body;
@@ -377,6 +388,7 @@ export function createGhManagedRoundApi({ expectedRepository, run = defaultRun }
       const cached = etags.get(effect?.number);
       if (!cached || cached.headRevision !== effect.expectedHeadRevision
         || cached.bodyRevision !== effect.expectedBodyRevision) return { kind: 'STALE' };
+      await assertRepositoryIdentity();
       const response = await invoke([
         'api', '-i', '-X', 'PATCH', `repos/${repositoryName}/pulls/${effect.number}`,
         '-H', `If-Match: ${cached.etag}`, '-f', `body=${effect.proposedBody}`,

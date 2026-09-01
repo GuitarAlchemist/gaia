@@ -421,6 +421,9 @@ test('intake admission is sealed to the intake workflow path, with no CLI or env
       createGhDraftCollectorApi() { return {}; },
       createHostedDraftCollector() { return {}; },
       createGhDraftOperationProvider() { return {}; },
+      createGitHubManagedRoundEvidencePort() {
+        return { read() {}, compareAndAppend() {}, leaseState() {} };
+      },
       createGitHubActionsDraftAdmission({ expectedWorkflowPath }) {
         paths.push(expectedWorkflowPath);
         return {};
@@ -447,6 +450,7 @@ test('intake admission is sealed to the intake workflow path, with no CLI or env
     ledgerRootOid: ROOT_OID,
     ledgerRootRevision: ROOT_REVISION,
     presentation: undefined,
+    managedRound: { create: MANAGED_CREATE, advance: null },
   });
 
   const intake = createHostedDraftPumpRuntime(

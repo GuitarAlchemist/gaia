@@ -31,6 +31,14 @@ const ROOT_OID = 'd'.repeat(40);
 const ROOT_REVISION = 'e'.repeat(64);
 const GENERATION_KEY = 'f'.repeat(64);
 const LABELLED_ISSUE = 70;
+const MANAGED_ROUND_JSON = JSON.stringify({
+  create: {
+    receipt: { schema: 'GaiaRoundReceiptV0', kind: 'OPEN' },
+    effectActor: 'github:app:gaia-draft-pump',
+    effectClaim: { schema: 'GaiaManagedRoundEffectClaimV0' },
+  },
+  advance: null,
+});
 
 function workflowText() {
   return readFileSync(INTAKE_URL, 'utf8');
@@ -50,6 +58,7 @@ function expressions(event, temp) {
     ['steps.pump-token.outputs.token', 'ghs_fixture_installation_token'],
     ['vars.GAIA_PUMP_ACTOR_ID', '1234'],
     ['vars.GAIA_REPOSITORY_NODE_ID', 'R_kgDOGaia'],
+    ['vars.GAIA_MANAGED_ROUND_JSON', MANAGED_ROUND_JSON],
     ['vars.GAIA_PUMP_APP_ID', '424242'],
     ['secrets.GAIA_PUMP_APP_PRIVATE_KEY', 'fixture-private-key'],
     ['steps.policy.outputs.oid', ROOT_OID],
@@ -233,6 +242,7 @@ test('a scheduled recovery tick reaches the CLI and is admitted as a schedule, n
     'an empty GAIA_ISSUE_NUMBER is absent on a schedule event, never a malformed argument',
   );
   assert.equal(output.json().trigger, 'SCHEDULE');
+  assert.deepEqual(configuration.managedRound, JSON.parse(MANAGED_ROUND_JSON));
 });
 
 test('a labelled issue reaches the CLI carrying exactly that issue identity', async () => {

@@ -256,6 +256,9 @@ function parseConfiguration(argv, env) {
       checklist: suppliedChecklist ? checklist(flags, env) : INTAKE_PRESENTATION.checklist,
       eta: suppliedEta === undefined ? INTAKE_PRESENTATION.eta : eta(suppliedEta),
     };
+    configuration.managedRound = managedRound(flagOrEnv(
+      flags, 'managed-round', env, 'GAIA_MANAGED_ROUND_JSON',
+    ));
     const observationOut = optionalFlagOrEnv(
       flags, 'observation-out', env, 'GAIA_OBSERVATION_PATH',
     );
