@@ -549,6 +549,21 @@ test('C14: a forged generation cannot borrow the observation work key', () => {
     'a valid stale SHA-256 generation of this same PR remains superseded');
 });
 
+test('C14: a claim generation has exactly one canonical repository spelling', () => {
+  const canonical = claimOn();
+  assert.equal(classify({}, canonical).classification, 'ESCALATION_REQUIRED',
+    'the canonical current generation remains current');
+  const noncanonical = {
+    ...canonical,
+    generation: `${REPOSITORY}#${PULL_REQUEST}:${BASE}:${HEAD}`,
+  };
+  assert.notEqual(noncanonical.generation, canonical.generation);
+  assert.throws(() => classify({}, noncanonical), PrConflictError,
+    'a case variant is ambiguous input, not a stale generation');
+  assert.equal(classify({}, claimOn('a'.repeat(40), HEAD)).classification, 'SUPERSEDED',
+    'a canonical same-PR generation with stale OIDs still supersedes');
+});
+
 test('C14: a malformed claim is refused, not treated as no claim', () => {
   assert.deepEqual([...PR_CONFLICT_CLAIM_FIELDS], ['generation', 'workKey']);
   for (const bad of [
@@ -618,6 +633,44 @@ test('C15: incoherent identity is refused rather than repaired', () => {
   ]) {
     assert.throws(() => requirePrConflictObservation(fixture([identicalEntry(bad)])),
       PrConflictError, `${canonicalJson(bad)} is refused`);
+  }
+});
+
+test('C15: bounded Git paths accept spaces and Unicode and preserve the exact JS string', () => {
+  const composed = 'docs/contrat-évidence.md';
+  const decomposed = 'docs/contrat-e\u0301vidence.md';
+  const paths = ['docs/My Contract.md', composed, decomposed];
+  const reading = classifyPrConflict({
+    observation: fixture(paths.map((path) => identicalEntry({ path }))), claim: null,
+  });
+  assert.deepEqual(reading.conflictPaths, [...paths].sort(),
+    'classification retains spaces and both Unicode spellings without normalization');
+  const composedRevision = classifyPrConflict({
+    observation: fixture([identicalEntry({ path: composed })]), claim: null,
+  }).revision;
+  const decomposedRevision = classifyPrConflict({
+    observation: fixture([identicalEntry({ path: decomposed })]), claim: null,
+  }).revision;
+  assert.notEqual(composedRevision, decomposedRevision,
+    'canonically equivalent Unicode paths remain byte-distinct JS strings in the revision');
+});
+
+test('C15: a Git path refuses only bounded structural hazards, without platform guessing', () => {
+  for (const path of [
+    '', '/absolute.md', '.', '..', './file.md', 'docs/./file.md', 'docs/../file.md',
+    'docs//file.md', 'docs/file.md/', 'docs/\0secret.md',
+  ]) {
+    assert.throws(
+      () => requirePrConflictObservation(fixture([identicalEntry({ path })])),
+      PrConflictError,
+      `${JSON.stringify(path)} is not a bounded repository-relative Git path`,
+    );
+  }
+  for (const path of ['C:/literal-git-name.md', 'docs/back\\slash.md']) {
+    assert.doesNotThrow(
+      () => requirePrConflictObservation(fixture([identicalEntry({ path })])),
+      `${JSON.stringify(path)} is not rewritten using host platform path rules`,
+    );
   }
 });
 
@@ -802,4 +855,30 @@ test('MR5: reinstating fixture-only automatic classification violates the empty 
     'the forged automatic verdict is not backed by the closed registry');
   assert.equal(classifyPrConflict({ observation: synthetic, claim: null }).classification,
     'ESCALATION_REQUIRED');
+});
+
+test('MR6: dropping canonical-generation equality misclassifies a case variant as stale', async () => {
+  const mutant = await importMutant('canonical-claim-check-removed', (source) => source.replace(
+    'if (claim.generation !== canonicalGeneration) {',
+    'if (false) {',
+  ));
+  const noncanonical = {
+    ...claimOn(), generation: `${REPOSITORY}#${PULL_REQUEST}:${BASE}:${HEAD}`,
+  };
+  assert.equal(mutant.classifyPrConflict({ observation: observation(), claim: noncanonical })
+    .classification, 'SUPERSEDED', 'the mutant turns representation drift into generation drift');
+  assert.throws(() => classifyPrConflict({ observation: observation(), claim: noncanonical }),
+    PrConflictError, 'the shipped rule refuses the noncanonical representation');
+});
+
+test('MR7: restoring the ASCII path whitelist rejects valid lossless Git paths', async () => {
+  const mutant = await importMutant('ascii-path-whitelist-restored', (source) => source.replace(
+    'if (!isBoundedGitPath(entry.path)) {',
+    "if (typeof entry.path !== 'string' || !/^[A-Za-z0-9._][A-Za-z0-9._/-]{0,254}$/u.test(entry.path)) {",
+  ));
+  const unicode = fixture([identicalEntry({ path: 'docs/contrat-évidence.md' })]);
+  assert.throws(() => mutant.classifyPrConflict({ observation: unicode, claim: null }),
+    mutant.PrConflictError, 'the mutant recreates the valid-path refusal');
+  assert.deepEqual(classifyPrConflict({ observation: unicode, claim: null }).conflictPaths,
+    ['docs/contrat-évidence.md']);
 });
