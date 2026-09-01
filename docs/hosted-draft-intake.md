@@ -83,21 +83,24 @@ runtime methods:
 
 ```
 1. unsettled = listUnsettledDrafts(ports)
-2. if unsettled is non-empty:
+2. if this is an issue-triggered run, retain only unsettled work for that explicit issue candidate
+3. if the applicable unsettled set is non-empty:
        reconcile unsettled[0] at its committed revision
        emit receipt phase RESUME; stop, admitting no new work this run
-3. candidates:
+4. candidates:
        issues-labeled run -> [ the event issue number ]
        scheduled run      -> open ready-for-agent issues, number ascending, capped at N = 5
-4. for each candidate, at most N probes:
+5. for each candidate, at most N probes:
        enqueue; on a typed collector error or any non-Enqueued result, record a skip and continue
        reconcile the enqueued operation at its committed revision
        emit receipt phase ADMIT; stop
 5. emit receipt phase EXPECTED_NONE
 ```
 
-Step 2 is requirement 3 verbatim: exactly one unsettled operation is resumed, and a resuming run
-admits nothing. Step 4 admits at most one candidate per run, satisfying requirement 4. Both the
+Step 3 is requirement 3 verbatim for scheduled recovery: exactly one unsettled operation is resumed,
+and a resuming run admits nothing. An issue-triggered lane resumes only the operation for its own
+issue, so unrelated recovery cannot steal the lane. Step 5 admits at most one candidate per run,
+satisfying requirement 4. Both the
 unsettled list and the candidate list are deterministically ordered; the chosen order is asserted in
 tests and recorded in the receipt. Note that `listUnsettledDrafts` sorts by `workKey` while
 `runHostedDraftSupervisor` re-sorts by `operationId` — two different deterministic orders over the

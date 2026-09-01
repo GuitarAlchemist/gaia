@@ -56,7 +56,11 @@ runs have no issue and collapse into the single recovery group. `cancel-in-progr
 - Different issues: workflow runs may overlap and use distinct work keys, operation identities,
   receipt artifacts, and observation revisions.
 - Lost response: exact Draft reconciliation precedes retry, unchanged from the shipped envelope.
-- Recovery: scheduled runs remain serialized and resume unsettled work before admitting new work.
+- Recovery: scheduled runs remain serialized and resume repository-wide unsettled work before
+  admitting new work.
+- Lane alignment: an issue-triggered run may resume only an unsettled operation whose selector is
+  that same issue. Unrelated unsettled work belongs to its own issue lane or to scheduled recovery;
+  it cannot consume this lane and starve the triggering issue.
 
 The workflow group is not the correctness mechanism. Removing it must increase redundant runner
 activity but cannot permit a duplicate Draft effect; removing the CAS must fail existing mutation
@@ -70,6 +74,12 @@ R0 changes no JavaScript public interface. Tests observe:
 2. the existing `runHostedDraftIntake` receipt seam for same-key convergence and distinct-key
    independence;
 3. the unchanged workflow authority surface.
+
+The runtime already receives the event issue as the explicit `candidates` list. Explicit candidates
+therefore scope unsettled selection to those same issue numbers. A null candidate list denotes
+scheduled recovery and retains the repository-wide lowest-work-key resume rule. This closed
+distinction aligns the workflow concurrency identity with the resource the run may process without
+adding a new flag or trusting webhook data as authority.
 
 ## Provider boundary
 
