@@ -94,6 +94,9 @@ function impactFromEvent() {
 }
 
 function main() {
+  // Architecture impact is declared in the pull-request body. A push has no truthful
+  // equivalent witness, so the post-merge invocation is intentionally a no-op.
+  if (process.env.GITHUB_EVENT_NAME === 'push') return 0;
   const args = parseArgs(process.argv.slice(2));
   const root = pluginRoot();
   const revision = git(root, ['rev-parse', 'HEAD']);
