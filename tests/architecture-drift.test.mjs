@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   ArchitectureDriftRefusal,
@@ -41,7 +42,7 @@ function architecture(overrides = {}) {
     if (heading === 'Module and seam map') {
       return `## ${heading}\n\n| Module | Interface | Seam | Concrete adapters |\n`
         + '| --- | --- | --- | --- |\n'
-        + `| Drift gate | ${overrides.moduleInterface ?? 'check inventory and return a closed report or refusal'} | Repository inventory | Filesystem; in-memory |`;
+        + `| Drift gate | \`${overrides.moduleInterface ?? 'check(inventory) -> report or refusal'}\` | Repository inventory | Filesystem; in-memory |`;
     }
     if (heading === 'Detailed architecture references') {
       return `## ${heading}\n\n[Subsystem contract](${overrides.link ?? 'docs/subsystem.md'})`;
@@ -118,6 +119,77 @@ function forEachAdapter(input, assertion) {
   }
 }
 
+const CLI_PRODUCT_PATHS = [
+  'scripts/architecture-drift.mjs',
+  'src/architecture-drift.mjs',
+  'src/templates.mjs',
+  'src/event-log.mjs',
+  'src/ecosystem.mjs',
+];
+
+function run(root, command, args, env = {}) {
+  return spawnSync(command, args, {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+    env: { ...process.env, ...env },
+  });
+}
+
+function git(root, args) {
+  const result = run(root, 'git', args);
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+function copyCliProduct(root, { checker = true, scriptSource = null } = {}) {
+  for (const path of CLI_PRODUCT_PATHS) {
+    if (!checker && path === 'src/architecture-drift.mjs') continue;
+    const content = path === 'scripts/architecture-drift.mjs' && scriptSource !== null
+      ? scriptSource
+      : readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+    writeTree(root, { [path]: content });
+  }
+}
+
+function createCliGitFixture({ checker = true, scriptSource = null } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'gaia-architecture-cli-'));
+  copyCliProduct(root, { checker, scriptSource });
+  writeTree(root, {
+    'ARCHITECTURE.md': architecture(),
+    'docs/subsystem.md': '# Subsystem\n',
+    'package.json': '{"name":"architecture-cli-fixture","private":true}\n',
+  });
+  git(root, ['init', '--quiet']);
+  git(root, ['config', 'user.name', 'Gaia Architecture Test']);
+  git(root, ['config', 'user.email', 'architecture-test@example.invalid']);
+  git(root, ['add', '.']);
+  git(root, ['commit', '--quiet', '-m', 'fixture: older architecture']);
+  const reviewedCommit = git(root, ['rev-parse', 'HEAD']);
+
+  const currentArchitecture = architecture().replace(
+    "This is Gaia's authoritative architecture map.",
+    "This is Gaia's authoritative architecture map. Reviewed current bytes.",
+  );
+  writeTree(root, {
+    'ARCHITECTURE.md': currentArchitecture,
+    'package.json': verificationPackage({
+      schema: 'gaia-architecture-verification/1',
+      commit: reviewedCommit,
+      date: '2026-09-01',
+      contentRevision: digest(currentArchitecture),
+    }),
+  });
+  git(root, ['add', '.']);
+  git(root, ['commit', '--quiet', '-m', 'fixture: current architecture']);
+  git(root, ['branch', 'base-fixture', reviewedCommit]);
+  return { root, reviewedCommit };
+}
+
+function runCli(root, args) {
+  return run(root, process.execPath, ['scripts/architecture-drift.mjs', ...args]);
+}
+
 test('the public drift seam has the same closed report for filesystem and in-memory inventories', () => {
   const input = snapshot();
   forEachAdapter(input, (adapter, name) => {
@@ -175,15 +247,21 @@ test('both adapters bind the attestation to the exact current ARCHITECTURE.md by
   });
 });
 
-test('both adapters report interface prose tokens as advisory rather than architectural proof', () => {
-  for (const leakedInterface of ['check GitHub payload', 'read configPath', 'query DuckDB table', 'return storageLayout']) {
+test('both adapters fail when provider, configuration, or storage terms enter a declared interface', () => {
+  for (const leakedInterface of [
+    'check(githubPayload)',
+    'read(configPath)',
+    'query(duckdbTable)',
+    'return(storageLayout)',
+    'retry(providerError)',
+  ]) {
     const input = snapshot({ architecture: architecture({ moduleInterface: leakedInterface }) });
     forEachAdapter(input, (adapter, name) => {
       const report = checkArchitectureDrift(adapter);
-      assert.equal(report.verdict, 'PASS', name);
-      assert.deepEqual(report.violations, [], name);
-      assert.deepEqual(report.advisories,
-        [{ code: 'MODULE_INTERFACE_TOKEN_ADVISORY', subject: 'Drift gate' }], name);
+      assert.equal(report.verdict, 'FAIL', name);
+      assert.deepEqual(report.violations,
+        [{ code: 'MODULE_INTERFACE_LEAK', subject: 'Drift gate' }], name);
+      assert.deepEqual(report.advisories, [], name);
     });
   }
 });
@@ -220,14 +298,48 @@ test('both adapters turn malformed verification input into the same typed refusa
   });
 });
 
-test('DELETION DEPTH: the public checker is one policy owner used by local and CI gates', () => {
-  const cli = readFileSync(new URL('../scripts/architecture-drift.mjs', import.meta.url), 'utf8');
-  const packageJson = readFileSync(new URL('../package.json', import.meta.url), 'utf8');
-  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  assert.match(cli, /checkArchitectureDrift/);
-  assert.match(packageJson, /"architecture:verify": "node scripts\/architecture-drift\.mjs"/);
-  assert.match(workflow, /npm run architecture:verify/);
-  assert.doesNotMatch(cli, /MISSING_REQUIRED_SECTION|BROKEN_INTERNAL_LINK|STALE_VERIFIED_COMMIT/);
+test('the public CLI rejects an option-shaped base before Git can create an output file', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-architecture-base-'));
+  try {
+    const productRoot = fileURLToPath(new URL('..', import.meta.url));
+    const outputPrefix = join(scratch, 'git-output-').replaceAll('\\', '/');
+    const result = runCli(productRoot, ['--base', `--output=${outputPrefix}`]);
+    assert.equal(result.status, 2);
+    assert.equal(result.stderr, 'CLI_BASE_INVALID\n');
+    assert.deepEqual(readdirSync(scratch), []);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('the public CLI derives stale verification from Git bytes for commit and canonical-ref bases', () => {
+  const fixture = createCliGitFixture();
+  try {
+    for (const base of [fixture.reviewedCommit, 'refs/heads/base-fixture']) {
+      const result = runCli(fixture.root, ['--base', base]);
+      assert.equal(result.status, 1, result.stderr);
+      const report = JSON.parse(result.stdout);
+      assert.deepEqual(report.violations,
+        [{ code: 'STALE_VERIFIED_COMMIT', subject: fixture.reviewedCommit }]);
+    }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('DELETION DEPTH: removing the checker makes the public CLI refuse without a report', () => {
+  const fixture = createCliGitFixture({ checker: false });
+  try {
+    const before = git(fixture.root, ['status', '--short']);
+    const result = runCli(fixture.root, ['--base', fixture.reviewedCommit]);
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /ERR_MODULE_NOT_FOUND|Cannot find module/);
+    assert.match(result.stderr, /architecture-drift\.mjs/);
+    assert.equal(git(fixture.root, ['status', '--short']), before);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
 });
 
 test('MECHANISM REVERT: removing the commit-content witness makes the stale-revision case escape', async () => {
@@ -250,6 +362,32 @@ test('MECHANISM REVERT: removing the commit-content witness makes the stale-revi
     );
     assert.equal(report.verdict, 'PASS');
   } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('MECHANISM REVERT: removing base validation and option termination restores the Git write', () => {
+  const source = readFileSync(new URL('../scripts/architecture-drift.mjs', import.meta.url), 'utf8');
+  const validation = "if (!isClosedBase(value)) throw new ArchitectureDriftRefusal('CLI_BASE_INVALID');";
+  let mutant = source.replace(
+    validation,
+    "if (false && !isClosedBase(value)) throw new ArchitectureDriftRefusal('CLI_BASE_INVALID');",
+  );
+  assert.notEqual(mutant, source, 'the closed base validation mutation must be applied');
+  const terminated = "'diff', '--name-only', '--end-of-options',";
+  const unterminated = "'diff', '--name-only',";
+  const withoutTerminator = mutant.replace(terminated, unterminated);
+  assert.notEqual(withoutTerminator, mutant, 'the Git option termination mutation must be applied');
+  mutant = withoutTerminator;
+
+  const fixture = createCliGitFixture({ scriptSource: mutant });
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-architecture-base-mutant-'));
+  try {
+    const outputPrefix = join(scratch, 'git-output-').replaceAll('\\', '/');
+    runCli(fixture.root, ['--base', `--output=${outputPrefix}`]);
+    assert.ok(readdirSync(scratch).some((name) => name.startsWith('git-output-')));
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
     rmSync(scratch, { recursive: true, force: true });
   }
 });
