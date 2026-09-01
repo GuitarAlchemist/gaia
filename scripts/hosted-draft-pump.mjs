@@ -5,15 +5,20 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
+  DraftOperationError,
   createDraftOperationPorts,
   createGitDataDraftOperationStore,
   enqueueDraft,
   listUnsettledDrafts,
   reconcileDraft,
 } from '../src/draft-operation-envelope.mjs';
-import { createGhDraftOperationProvider } from '../src/gh-draft-operation-provider.mjs';
-import { createGhGitDataApi } from '../src/gh-git-data-adapter.mjs';
 import {
+  GhDraftOperationProviderError,
+  createGhDraftOperationProvider,
+} from '../src/gh-draft-operation-provider.mjs';
+import { GhGitDataError, createGhGitDataApi } from '../src/gh-git-data-adapter.mjs';
+import {
+  HostedDraftCollectorError,
   createGhDraftCollectorApi,
   createHostedDraftCollector,
 } from '../src/hosted-draft-collector.mjs';
@@ -299,6 +304,15 @@ function writeJson(stream, value) {
   stream.write(`${JSON.stringify(value)}\n`);
 }
 
+function closedRuntimeFailure(error) {
+  if (error instanceof GitHubActionsDraftAdmissionError) return 'AdmissionConfigurationFailed';
+  if (error instanceof GhDraftOperationProviderError) return 'ProviderFailed';
+  if (error instanceof GhGitDataError) return 'GitDataFailed';
+  if (error instanceof DraftOperationError) return 'DraftOperationFailed';
+  if (error instanceof HostedDraftCollectorError) return 'CollectorFailed';
+  return 'OperationFailed';
+}
+
 export async function main({
   argv = process.argv.slice(2),
   env = process.env,
@@ -355,8 +369,7 @@ export async function main({
   } catch (error) {
     writeJson(stderr, {
       schema: 'GaiaHostedDraftPumpCliErrorV0',
-      error: error instanceof GitHubActionsDraftAdmissionError
-        ? 'AdmissionConfigurationFailed' : 'OperationFailed',
+      error: closedRuntimeFailure(error),
     });
     return 1;
   }
