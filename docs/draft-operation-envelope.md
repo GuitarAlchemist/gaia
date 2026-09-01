@@ -189,14 +189,23 @@ The registry records each work branch's reservation and adapter-neutral bootstra
 a missing work ref that is
 already registered is corruption, never a new bootstrap. A required GitHub ruleset forbids deletion
 and non-fast-forward updates for `gaia-ledger/**` and restricts updates to the Gaia pump GitHub App.
-The adapter verifies that ruleset before every write and fails closed when it is absent or changed;
-the pump has no authority to create, loosen, or bypass it.
+Provisioning verifies through an administrator credential that the App is the ruleset's sole
+`always` bypass actor. The runtime App deliberately has no Administration-write permission. GitHub
+therefore redacts `bypass_actors` from its ruleset response; the adapter instead requires GitHub's
+server-derived `current_user_can_bypass: 'always'` plus the exact active target, include/exclude,
+deletion, non-fast-forward, and update restrictions before every write. It fails closed when any
+runtime-visible protection or the App's own bypass changes. An administrator adding another bypass
+actor is not observable to this least-privilege token and remains a provisioning/audit residual,
+not authority granted to the pump. The pump cannot create or loosen the ruleset.
 
 Each ref head is a hidden `ledgerHeadOid`, the exact 40-lowercase-hex Git object id used only for
 Git CAS. It is not a source or content revision. Each commit has exactly one parent (except a
 registered bootstrap root), one canonical JSON `receipt.json` blob, and no caller-authored commit
-metadata used by replay. The blob is `{ body, committedRevision }`, where `body` is a closed
-null-prototype record containing schema, `priorCommittedRevision`, record kind, work key,
+metadata used by replay. The blob is `{ body, committedRevision }`, except that the registry's
+`CONFIRMED` blob is `{ body, committedRevision, transportMetadata: { workRootOid } }`. That closed
+transport metadata anchors the observed work-root Git object privately; it is excluded from `body`
+and from the `committedRevision` preimage. `body` is a closed null-prototype record containing
+schema, `priorCommittedRevision`, record kind, work key,
 generation key when known, operation id when known, executor epoch when known, and the
 minimum closed payload for that kind. `committedRevision` is the SHA-256 of the canonical UTF-8
 bytes of `body` and is therefore exact 64-lowercase-hex. Raw prompts, provider prose, credentials,
@@ -209,17 +218,27 @@ The five operation kinds from `ENQUEUED` through `EFFECT_AMBIGUOUS` are nontermi
 is never projected as work. `EFFECT_AMBIGUOUS` means a create request may already have reached
 GitHub and only exact observation can settle it; it is never projected as refusal or completion.
 
-The Git Data adapter exposes only:
+The public durable store exposes `readHead(workKey)` for observation; enqueue, reconcile, and cancel
+hold its mutation capabilities privately in the module's `WeakMap`. The concrete Git Data transport
+behind that store exposes only:
 
 ```text
-readHead(workKey) -> { state: 'UNSEEN' }
-  | { state: 'PRESENT', ledgerHeadOid, committedRevision, records }
-append(workKey, { ledgerHeadOid, committedRevision }, closedRecord)
-  -> { ledgerHeadOid, committedRevision }
-listUnsettled(refPrefix) -> closed operation identities
+verifyProtection({ prefix, registryRootOid }) -> true | false
+read(ref) -> { state: 'UNSEEN' } | { state: 'PRESENT', records }
+readByOperation(operationId) -> { state: 'UNSEEN' } | { state: 'PRESENT', records }
+compareAndAppend(ref, expectedHeadOid, closedRecord)
+  -> { kind: 'STALE', currentHeadOid }
+  | { kind: 'APPENDED', oid, body, committedRevision }
 ```
 
-The `{ ledgerHeadOid, committedRevision }` pair is private to the adapter. Public code supplies only
+Refs and Git OIDs remain inside this private transport/store composition. `readByOperation` scans
+the protected work-ref family and returns exactly one validated chain or fails closed on duplicate
+identity; it never puts a ref or Git OID in a public operation result. `listUnsettledDrafts` exposes
+a bounded deterministic projection over the same private scan, and the pure supervisor can resume
+one such operation. Hosted scheduled redispatch is not implemented or claimed; provisioning remains
+the explicit #62 gate.
+
+The `{ ledgerHeadOid, committedRevision }` pair is private to the composition. Public code supplies only
 `NONE` or an expected 64-hex `committedRevision`; the adapter atomically reads the current ref,
 requires its
 validated receipt to carry that content revision, and uses the corresponding hidden OID for the
@@ -257,20 +276,23 @@ it runs the registry reservation/`WORK_ROOT`/confirmation protocol internally an
 `ENQUEUED` from the returned bootstrap content revision. A racing first caller loses registry CAS
 and returns `StaleRevision`; no caller supplies or observes a Git OID. On a present work ref,
 `NONE` is stale and cannot rebootstrap. Only then does it CAS-append `ENQUEUED`.
-Only after that accepted append may a dispatcher request a workflow. A failed,
-cancelled, replaced, or queue-overflowed dispatch therefore leaves durable unsettled work. A
-scheduled supervisor reads `listUnsettled` and redispatches it; duplicate dispatch is harmless
+Only after that accepted append may an explicit dispatcher request a workflow. A failed,
+cancelled, or replaced dispatch therefore leaves durable unsettled work. The implemented
+`listUnsettled` projection and pure supervisor make a future hosted redispatcher possible, but no
+scheduled redispatch is implemented or claimed in this revision. Duplicate dispatch remains safe
 because every executor begins by loading the accepted `ENQUEUED` envelope and performing the same
-ledger CAS and exact provider reconciliation. GitHub
-Actions uses `concurrency.group = gaia-draft-<workKey>`, `cancel-in-progress: false`, and
-`queue: max`. The queue bound improves throughput but is not a delivery guarantee; the ledger is.
+ledger CAS and exact provider reconciliation. The effect workflow uses
+`concurrency.group = gaia-draft-<workKey>` with `cancel-in-progress: false`; GitHub queue behavior
+is not a delivery guarantee, so the ledger remains authoritative.
 
 An executor epoch is the closed pair `{ runId, runAttempt }` taken from the running GitHub Actions
 context, never from the caller envelope. A job CAS-appends `CLAIMED` before it can append `INTENT`.
-The hosted admission controller grants effect capacity only when the GitHub Actions API reports
-that exact run/attempt `in_progress`, its concurrency group matches `workKey`, and the ledger head
-names its current `CLAIMED` epoch. Otherwise it returns `ZERO`; no `INTENT`, `EFFECT_STARTED`, or
-provider create call is legal. The memory
+The sealed workflow structurally binds `concurrency.group` to the supplied `workKey`; GitHub's run
+API does not expose that group, so Gaia never fabricates an observed group value. Before durable
+mutation, the executor binds the supplied `workKey` to the stored operation. The hosted admission
+controller then grants effect capacity only when the GitHub Actions API reports that exact
+run/attempt `in_progress` and the ledger head names its current `CLAIMED` epoch. Otherwise it
+returns `ZERO`; no `INTENT`, `EFFECT_STARTED`, or provider create call is legal. The memory
 adapter supplies the same trusted `reserveEffect` seam for deterministic `AVAILABLE` and `ZERO`
 tests. Thus capacity is an executor fact, not caller data. Exact-Draft lookup and `REUSED`
 adoption happen before `reserveEffect`, so adoption remains legal at zero effect capacity.
@@ -341,7 +363,9 @@ refusal. No local lock directory or elapsed-time lock breaking is part of the pr
 ## Provider boundary
 
 The provider receives exactly a new frozen null-prototype record containing repository, base ref,
-head ref, head revision, and operation marker. It receives no ready-item data, policy payload,
+head ref, head revision, operation marker, and the sealed `{ kind: 'ISSUE', number }` work item.
+The Draft title and issue URL derive exclusively from that sealed work item. It receives no other
+ready-item data, policy payload,
 requested authority, expected revision, storage token, caller object, or terminal projection.
 
 Provider errors are caught at every lookup and creation call. The public result exposes only the

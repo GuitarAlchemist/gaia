@@ -289,7 +289,7 @@ test('R05 the envelope is closed and provider mutation cannot change terminal pr
       assert.equal(Object.getPrototypeOf(request), null);
       assert.ok(Object.isFrozen(request));
       assert.deepEqual(Object.keys(request).sort(), [
-        'baseRef', 'headRef', 'headRevision', 'operationMarker', 'repository',
+        'baseRef', 'headRef', 'headRevision', 'operationMarker', 'repository', 'workItem',
       ]);
       try { request.headRevision = OID_C; } catch (error) { mutationError = error; }
       return exactDraft(request, {
@@ -583,6 +583,8 @@ test('R15 authority decisions ignore monkeypatched public inspection snapshots',
   ), 'CREATED');
   const providerRequest = provider.calls.find(({ method }) => method === 'createDraft')?.request;
   assert.equal(providerRequest.headRevision, OID_B, 'provider receives the sealed head revision');
+  assert.deepEqual({ ...providerRequest.workItem }, { kind: 'ISSUE', number: 56 },
+    'provider presentation is bound to the sealed work item');
   assert.equal(created.generation.headRevision, OID_B);
   assert.equal(created.generation.policyRevision, OID_A);
   assert.equal(created.observedSourceRevision, SHA_B);
