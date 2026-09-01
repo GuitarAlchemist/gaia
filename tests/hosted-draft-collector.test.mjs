@@ -139,6 +139,43 @@ test('R1 moved base read-back is a typed refusal before ENQUEUED', async () => {
   );
 });
 
+test('R1 moved head read-back is a typed refusal before ENQUEUED', async () => {
+  const { createHostedDraftCollector, HostedDraftCollectorError } = await api();
+  const stable = githubBoundary();
+  let headReads = 0;
+  const collector = createHostedDraftCollector({
+    github: {
+      ...stable,
+      async listHeadRefs() {
+        headReads += 1;
+        const observed = await stable.listHeadRefs();
+        return headReads === 1
+          ? observed
+          : observed.map((head) => ({ ...head, revision: 'd'.repeat(40) }));
+      },
+    },
+  });
+  const { createMemoryDraftOperationStore, enqueueDraft } = await import(
+    '../src/draft-operation-envelope.mjs'
+  );
+  const store = createMemoryDraftOperationStore();
+
+  await assert.rejects(
+    enqueueDraft(SELECTOR, 'NONE', {
+      collector, store, telemetry: { async append() {} },
+    }),
+    (error) => error instanceof HostedDraftCollectorError
+      && error.code === 'SourceRevisionMoved'
+      && error.message === 'source revisions moved during collection',
+  );
+  assert.equal(headReads, 2, 'head is read once for observation and once as a bound');
+  assert.deepEqual(
+    await store.readHead('422cc18399e518789008735065aab635516df14956ba0e53e45697de56760ccc'),
+    { state: 'UNSEEN' },
+    'moved evidence cannot create WORK_ROOT or ENQUEUED',
+  );
+});
+
 test('R1 hosted GitHub facts become one canonical Operation Envelope', async () => {
   const { createHostedDraftCollector } = await api();
   const collector = createHostedDraftCollector({ github: githubBoundary() });
