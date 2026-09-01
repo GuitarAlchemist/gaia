@@ -63,3 +63,47 @@ Deleting and rebuilding DuckDB from GitHub evidence must reproduce the same metr
 - A changed base or head supersedes the prior generation.
 - Tests prove the classifier is deterministic and the receipt vocabulary is closed.
 
+
+## Slice 1 corrections, from reading the tooling
+
+The design above was written before the tooling was read. Three of its claims did not survive that
+read. `src/pr-conflict-reconciler.mjs` implements the corrections structurally rather than as
+advice, and `tests/pr-conflict-reconciler.test.mjs` holds each one.
+
+**Conflicting paths are injected evidence, not a field.** No provider mergeability response carries
+the conflicting paths: `mergeable`, `mergeStateStatus`, `baseRefOid`, `headRefOid` and
+`potentialMergeCommit` are all it returns. Point 2 of the slice boundary — "capture the exact base
+OID, head OID, merge base, and conflicting paths" — is therefore unsatisfiable from a mergeability
+read alone. Every observation names the source of its paths (`MERGE_TREE` from a merge performed
+elsewhere, or `INJECTED_FIXTURE`), and a reading with no named source may carry no paths at all.
+
+**Mergeability is bound to the exact generation or it is `UNKNOWN`.** A provider computes
+mergeability asynchronously against whatever the base was at the time, and the OIDs are read
+separately. An observation records whether the two agree; an `UNBOUND` reading decides `UNKNOWN`
+whatever the provider said, and may carry no conflict evidence.
+
+**Byte-identical add/add is not reachable from a real merge.** The `ort` driver resolves an add/add
+whose two blobs *and* file modes agree without reporting it, so it can never appear in
+`MERGE_TREE` evidence, and evidence claiming it did is refused as not having come from a merge. The
+add/add a merge does report is identical content under a differing file mode — a permission change,
+which this design already escalates. `IDENTICAL_ADD_ADD/1` stays registered and stays reachable
+from a fixture source, so `AUTO_RESOLVABLE` is exercised code rather than a promise no test can
+hold. Modes are read from tree entries, never from a checkout: `core.filemode=false` reports every
+file as `100644` and would hide exactly this conflict.
+
+**Work identity is separate from generation identity.** The single key `repo#pr:baseOid:headOid`
+names a generation and cannot detect two live generations of one pull request. `workKey` is
+`sha256(lowercased repository + "#" + number)` and is stable for the life of the pull request;
+`generation` is the key above. Generations compare by equality only — an object name has no
+temporal order, and comparing two with `<` is how a stale replay comes to look newer than a live
+one. A claim carrying a foreign `workKey` is refused as a mis-delivery, not answered as
+`SUPERSEDED`.
+
+### Not in slice 1, and why
+
+The remaining registry candidates — regenerated authoritative output, and a lockfile rebuilt from
+conflict-free manifests — both require running a generator, which is an effect. They belong to the
+registry version that ships with the executor. `src/github-read-adapter.mjs` cannot feed the
+generation key either: it reports a literal `headOid: 'UNKNOWN'` and a `baseOid` taken from the
+default branch tip rather than the pull request's base, so slice 2 must read `baseRefOid` and
+`headRefOid` from the pull request itself.
