@@ -27,17 +27,17 @@ function flagOccurrences(text, flag) {
   return [...text.matchAll(new RegExp(`${escaped}(?=\\s)`, 'gu'))].length;
 }
 
-test('the effect executor exposes only closed manual and reusable workflow inputs', () => {
+test('the effect executor exposes only closed manual workflow inputs', () => {
   assert.match(workflow, /^on:\s*$/mu);
   assert.match(workflow, /^  workflow_dispatch:\s*$/mu);
-  assert.match(workflow, /^  workflow_call:\s*$/mu);
+  assert.doesNotMatch(workflow, /^  workflow_call:\s*$/mu);
   assert.doesNotMatch(workflow, /^  (?:schedule|push|pull_request|issues|repository_dispatch):/mu);
 
   for (const input of INPUTS) {
     assert.equal(
       occurrences(workflow, `      ${input}:`),
-      2,
-      `${input} must be declared once for dispatch and once for workflow_call`,
+      1,
+      `${input} must be declared once for dispatch`,
     );
   }
   assert.equal(occurrences(workflow, '      concurrency-group:'), 0);
