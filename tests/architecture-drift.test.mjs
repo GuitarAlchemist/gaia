@@ -291,13 +291,20 @@ test('both adapters bind the attestation to the exact current ARCHITECTURE.md by
   });
 });
 
-test('both adapters fail when provider, configuration, or storage terms enter a declared interface', () => {
+test('both adapters structurally reject adapter and object-identifier terms in a declared interface', () => {
   for (const leakedInterface of [
     'check(githubPayload)',
     'read(configPath)',
     'query(duckdbTable)',
     'return(storageLayout)',
     'retry(providerError)',
+    'checkArchitectureDrift(commitSha)',
+    'checkArchitectureDrift(commitSHA)',
+    'checkArchitectureDrift(commit_sha)',
+    'read(commitHash)',
+    'read(objectIdentifier)',
+    'read(object_id)',
+    'read(gitObjectId)',
   ]) {
     const input = snapshot({ architecture: architecture({ moduleInterface: leakedInterface }) });
     forEachAdapter(input, (adapter, name) => {
@@ -306,6 +313,21 @@ test('both adapters fail when provider, configuration, or storage terms enter a 
       assert.deepEqual(report.violations,
         [{ code: 'MODULE_INTERFACE_LEAK', subject: 'Drift gate' }], name);
       assert.deepEqual(report.advisories, [], name);
+    });
+  }
+});
+
+test('both adapters preserve domain identifiers that only contain forbidden character sequences', () => {
+  for (const domainInterface of [
+    'configure(intent) -> result',
+    'retryable(intent) -> result',
+    'commit(expected revision, events) -> receipt',
+    'resolve(referencePoint) -> result',
+    'classify(objectIdentity) -> reading',
+  ]) {
+    const input = snapshot({ architecture: architecture({ moduleInterface: domainInterface }) });
+    forEachAdapter(input, (adapter, name) => {
+      assert.equal(checkArchitectureDrift(adapter).verdict, 'PASS', `${name}: ${domainInterface}`);
     });
   }
 });
@@ -491,6 +513,32 @@ test('MECHANISM REVERT: removing the commit-content witness makes the stale-revi
     const mutantPath = join(scratch, 'architecture-drift.mjs');
     writeFileSync(mutantPath, mutant, 'utf8');
     const mutatedModule = await import(`${pathToFileURL(mutantPath).href}?mutation=commit-content-witness`);
+    const report = mutatedModule.checkArchitectureDrift(
+      mutatedModule.createInMemoryArchitectureInventory(input),
+    );
+    assert.equal(report.verdict, 'PASS');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('MECHANISM REVERT: removing the SHA token makes an object identifier escape the public seam', async () => {
+  const input = snapshot({
+    architecture: architecture({ moduleInterface: 'checkArchitectureDrift(commitSha)' }),
+  });
+  assert.deepEqual(
+    checkArchitectureDrift(createInMemoryArchitectureInventory(input)).violations,
+    [{ code: 'MODULE_INTERFACE_LEAK', subject: 'Drift gate' }],
+  );
+
+  const source = readFileSync(new URL('../src/architecture-drift.mjs', import.meta.url), 'utf8');
+  const mutant = source.replace("  'sha',\n", '');
+  assert.notEqual(mutant, source, 'the closed SHA-token mutation must be applied');
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-architecture-interface-mutant-'));
+  try {
+    const mutantPath = join(scratch, 'architecture-drift.mjs');
+    writeFileSync(mutantPath, mutant, 'utf8');
+    const mutatedModule = await import(`${pathToFileURL(mutantPath).href}?mutation=interface-sha-token`);
     const report = mutatedModule.checkArchitectureDrift(
       mutatedModule.createInMemoryArchitectureInventory(input),
     );
