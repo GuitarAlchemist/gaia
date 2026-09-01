@@ -57,7 +57,7 @@ accessors:
 ```js
 {
   schema: 'GaiaDraftOperationEnvelopeV0',
-  repository: { owner, name },
+  repository: { nodeId, owner, name },
   workItem: { kind: 'ISSUE', number },
   readyItem: {
     schema: 'GaiaReadyItemIdentityV0',
@@ -93,6 +93,9 @@ caller reference crosses validation. The module reads only that sealed copy afte
 
 Before sealing, the hosted collector must obtain all authority-bearing values from GitHub APIs:
 
+- resolve the selector through the GitHub repository API and replace both caller strings with the
+  response's immutable repository `nodeId` and current canonical owner/name; aliases, case variants,
+  and redirects therefore converge before identity is derived;
 - the issue must be open and currently carry `ready-for-agent`;
 - `queueReceiptRevision` is SHA-256 over the canonical issue node id, latest matching label-event
   node id, event instant, and actor node id; the actor must currently have `triage` or stronger
@@ -113,7 +116,8 @@ queueReceiptRevision = sha256(canonical({
   readyLabelEventNodeId, readyLabelEventAt, readyLabelActorNodeId
 }))
 observedSourceRevision = sha256(canonical({
-  schema: 'GaiaObservedSourceRevisionV0', issueNodeId, issueUpdatedAt,
+  schema: 'GaiaObservedSourceRevisionV0', repositoryNodeId, canonicalOwner,
+  canonicalName, issueNodeId, issueUpdatedAt,
   readyLabelEventNodeId, baseRef, baseRevision, headRef, headRevision,
   policyRevision
 }))
@@ -144,7 +148,7 @@ bytes are hashed with SHA-256 and rendered as 64 lowercase hex characters. The p
 
 ```text
 workKey = sha256(canonical({
-  schema: 'GaiaDraftWorkKeyV0', repository, workItem,
+  schema: 'GaiaDraftWorkKeyV0', repositoryNodeId: repository.nodeId, workItem,
   requestedEffect: 'CREATE_DRAFT'
 }))
 generationKey = sha256(canonical({
@@ -199,27 +203,33 @@ bytes of `body` and is therefore exact 64-lowercase-hex. Raw prompts, provider p
 paths, and account data are forbidden. `ENQUEUED` alone carries the complete sealed envelope;
 executors reload that copy and never accept an envelope from workflow inputs.
 
-The closed record kinds are `ENQUEUED`, `CLAIMED`, `INTENT`, `EFFECT_STARTED`,
-`EFFECT_AMBIGUOUS`, `CREATED`, `REUSED`, `REFUSED`, and `CANCELLED`. The first five are
-nonterminal. `EFFECT_AMBIGUOUS` means a create request may already have reached GitHub and only
-exact observation can settle it; it is never projected as refusal or completion.
+The closed record kinds are infrastructure `WORK_ROOT`, then operation `ENQUEUED`, `CLAIMED`,
+`INTENT`, `EFFECT_STARTED`, `EFFECT_AMBIGUOUS`, `CREATED`, `REUSED`, `REFUSED`, and `CANCELLED`.
+The five operation kinds from `ENQUEUED` through `EFFECT_AMBIGUOUS` are nonterminal. `WORK_ROOT`
+is never projected as work. `EFFECT_AMBIGUOUS` means a create request may already have reached
+GitHub and only exact observation can settle it; it is never projected as refusal or completion.
 
 The Git Data adapter exposes only:
 
 ```text
-readHead(workKey) -> { ledgerHeadOid, committedRevision, records }
+readHead(workKey) -> { state: 'UNSEEN' }
+  | { state: 'PRESENT', ledgerHeadOid, committedRevision, records }
 append(workKey, { ledgerHeadOid, committedRevision }, closedRecord)
   -> { ledgerHeadOid, committedRevision }
 listUnsettled(refPrefix) -> closed operation identities
 ```
 
 The `{ ledgerHeadOid, committedRevision }` pair is private to the adapter. Public code supplies only
-an expected 64-hex `committedRevision`; the adapter atomically reads the current ref, requires its
+`NONE` or an expected 64-hex `committedRevision`; the adapter atomically reads the current ref,
+requires its
 validated receipt to carry that content revision, and uses the corresponding hidden OID for the
 non-force update. The registry has the same private two-revision protocol and adds
 `reserveWork(workKey)` and
-`confirmWork(workKey, bootstrapCommittedRevision)`. Its canonical receipt body records only the
-adapter-neutral 64-hex bootstrap content revision. The hosted adapter privately maps that revision
+`confirmWork(workKey, bootstrapCommittedRevision)`. `reserveWork(workKey, 'NONE')` is legal only
+when the registry has never registered that key; it creates the canonical `WORK_ROOT` body
+`{ schema: 'GaiaDraftWorkRootV0', kind: 'WORK_ROOT', workKey }`. Its canonical registry receipt
+body records only the adapter-neutral 64-hex bootstrap content revision. The hosted adapter
+privately maps that revision
 to the work ref's bootstrap OID and validates both; neither OID enters registry content. A crash
 after reservation but before confirmation may resume only that exact deterministic bootstrap.
 Once confirmed, absence can never bootstrap again.
@@ -239,7 +249,12 @@ garbage-collects them.
 
 `enqueueDraft(selector, expectedCommittedRevision, ports)` uses the hosted collector to build and
 seal the observed envelope, derives `workKey`, refuses a
-different generation while that work has a nonterminal generation, then CAS-appends `ENQUEUED`.
+different generation while that work has a nonterminal generation, and requires the public expected
+revision to be either `NONE` for first use or the exact current 64-hex content revision. On `NONE`,
+it runs the registry reservation/`WORK_ROOT`/confirmation protocol internally and then CAS-appends
+`ENQUEUED` from the returned bootstrap content revision. A racing first caller loses registry CAS
+and returns `StaleRevision`; no caller supplies or observes a Git OID. On a present work ref,
+`NONE` is stale and cannot rebootstrap. Only then does it CAS-append `ENQUEUED`.
 Only after that accepted append may a dispatcher request a workflow. A failed,
 cancelled, replaced, or queue-overflowed dispatch therefore leaves durable unsettled work. A
 scheduled supervisor reads `listUnsettled` and redispatches it; duplicate dispatch is harmless
@@ -298,10 +313,11 @@ inside the compatible terminal or pending variant defined below.
 `cancelDraft(operationId, expectedCommittedRevision, store)` is the only cancellation seam. It reloads the
 sealed envelope from `ENQUEUED` and uses the same `workKey` executor and durable revision as
 reconciliation. If cancellation commits before
-`EFFECT_STARTED`, reconciliation returns `Terminal(CANCELLED)` with zero effect. If reconciliation already
-owns the executor but has not started the effect, the same ordering decides one winner. At or after
-`EFFECT_STARTED`, cancellation cannot append `CANCELLED`: it returns `CancellationDeferred` with
-the current terminal record, nonterminal `EFFECT_STARTED`, or nonterminal `EFFECT_AMBIGUOUS`.
+`EFFECT_STARTED`, reconciliation returns `Terminal(CANCELLED)` with zero effect. If reconciliation
+already owns the executor but has not started the effect, the same ordering decides one winner. At or after
+`EFFECT_STARTED`, cancellation cannot append `CANCELLED`. If a terminal record already exists it
+returns `Terminal(existing)` directly. Otherwise it returns
+`CancellationDeferred(EFFECT_STARTED|EFFECT_AMBIGUOUS)` matching the exact current nonterminal.
 Later exact reconciliation may become `CREATED` or `REUSED`; cancellation can never turn possible
 remote success into false absence. Cancellation carries no provider or merge authority.
 
@@ -384,7 +400,10 @@ receipt/source values, fail closed when a registered work ref is missing, retain
 cancelled dispatch, and return `CancellationDeferred + EFFECT_AMBIGUOUS` for cancellation after a
 possibly successful lost response. The hosted collector fake must prove that changing any
 authoritative issue event, ref OID, or policy OID changes the observed envelope while changing an
-untrusted caller field cannot.
+untrusted caller field cannot. It must also prove repository aliases resolve to one node-id-based
+`workKey`, the first `NONE -> WORK_ROOT -> ENQUEUED` race has one winner, `NONE` cannot recreate a
+present or registered work ref, and cancellation after `CREATED` returns that existing terminal
+rather than a deferred variant.
 
 ## Success and rejection criteria
 
