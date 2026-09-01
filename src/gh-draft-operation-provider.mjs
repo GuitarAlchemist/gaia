@@ -157,7 +157,7 @@ function validateCandidate(candidate, request) {
     'number', 'url', 'isDraft', 'state', 'baseRefName', 'headRefName', 'headRefOid',
     'headRepositoryOwner', 'body',
   ], code);
-  exactKeys(candidate.headRepositoryOwner, ['login'], code);
+  exactKeys(candidate.headRepositoryOwner, ['id', 'login'], code);
   const match = typeof candidate.url === 'string' ? PULL_REQUEST_URL.exec(candidate.url) : null;
   if (!Number.isSafeInteger(candidate.number) || candidate.number <= 0
     || match === null || Number(match[3]) !== candidate.number
@@ -165,6 +165,8 @@ function validateCandidate(candidate, request) {
     || candidate.isDraft !== true || candidate.state !== 'OPEN'
     || candidate.baseRefName !== request.baseRef || candidate.headRefName !== request.headRef
     || candidate.headRefOid !== request.headRevision
+    || typeof candidate.headRepositoryOwner.id !== 'string'
+    || candidate.headRepositoryOwner.id.length === 0
     || candidate.headRepositoryOwner.login !== request.repository.owner
     || !hasExactMarker(candidate.body, request.operationMarker)) fail(code);
   return Object.freeze({
