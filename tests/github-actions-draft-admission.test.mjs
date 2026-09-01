@@ -128,3 +128,19 @@ test('configuration is bound to canonical Actions identity values', () => {
     );
   }
 });
+
+test('the Actions epoch can be read from the exotic process.env-style object', async () => {
+  const environment = Object.assign(Object.create({ environmentMarker: true }), {
+    GITHUB_REPOSITORY: REPOSITORY,
+    GITHUB_RUN_ID: String(EPOCH.runId),
+    GITHUB_RUN_ATTEMPT: String(EPOCH.runAttempt),
+  });
+  const admission = createGitHubActionsDraftAdmission({
+    expectedRepository: REPOSITORY,
+    expectedWorkKey: WORK_KEY,
+    environment,
+    readWorkflowAdmission: async () => observation(),
+  });
+
+  assert.equal(await admission.reserveEffect(context()), 'AVAILABLE');
+});
