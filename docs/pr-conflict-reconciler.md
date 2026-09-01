@@ -5,10 +5,11 @@ classification boundary remains lifecycle design only.
 
 ## Operator outcome
 
-Given a structured observation, the shipped module validates whether mergeability was independently
-bound to one exact `(repository, pullRequest, baseOid, headOid)` generation. It returns a frozen,
-content-addressed reading. A running process, an occupied lane, and `mergeable=UNKNOWN` are not
-conflict evidence.
+Given a structured observation, the shipped module validates that its declared mergeability-binding
+OIDs equal one exact `(repository, pullRequest, baseOid, headOid)` generation. It returns a frozen,
+content-addressed reading. This structural equality is not proof of independent provider provenance;
+a later producer must establish and preserve that provenance. A running process, an occupied lane,
+and `mergeable=UNKNOWN` are not conflict evidence.
 
 ## Lifecycle design (not shipped in slice 1)
 
@@ -31,7 +32,7 @@ does not establish a single-writer guarantee and cannot perform any transition a
 The implemented first slice is read-only. It does exactly the following:
 
 1. validate the closed `gaia-pr-conflict-observation/2` shape;
-2. require `EXACT_OIDS` to carry independent binding base/head OIDs equal to the observation OIDs,
+2. require `EXACT_OIDS` to carry declared binding base/head OIDs equal to the observation OIDs,
    while `UNBOUND` carries null binding OIDs, no conflict evidence, and reads as `UNKNOWN`;
 3. parse a supplied claim generation and require the same normalized repository and pull request
    before a valid stale generation can return `SUPERSEDED`;
@@ -69,6 +70,9 @@ with a foreign repository or pull request, a malformed OID, or a mismatched work
 well-formed claim for a stale generation of the same pull request reads as `SUPERSEDED` before the
 current observation's mergeability or paths are exposed.
 
+The raw generation string must equal the canonical reconstruction (including the lowercased
+repository). A case variant is refused rather than misclassified as a stale generation.
+
 These are pure classification semantics, not a durable concurrency protocol. Claim persistence,
 compare-and-swap, ownership, retries, deadlines, and pre-effect revalidation belong to a later slice.
 
@@ -102,11 +106,19 @@ OID, head OID, merge base, and conflicting paths" — is therefore unsatisfiable
 read alone. Every observation names the source of its paths (`MERGE_TREE` from a merge performed
 elsewhere, or `INJECTED_FIXTURE`), and a reading with no named source may carry no paths at all.
 
-**Mergeability is bound to the exact generation or it is `UNKNOWN`.** A provider computes
+**Mergeability declares an exact generation or it is `UNKNOWN`.** A provider computes
 mergeability asynchronously against whatever the base was at the time, and the OIDs are read
 separately. `EXACT_OIDS` therefore carries `bindingBaseOid` and `bindingHeadOid`, and both must equal
 the observation OIDs. `UNBOUND` carries null binding OIDs, decides `UNKNOWN` whatever the provider
 said, and may carry no conflict evidence.
+
+Those fields make mismatched OIDs structurally unrepresentable inside a valid observation; they do
+not prove who observed the OIDs or where they came from. The later producer must bind them to its
+provider read and preserve evidence of that provenance.
+
+**Conflict paths are bounded Git names, not host paths.** Spaces and Unicode are accepted and kept
+as the exact JavaScript string supplied; no Unicode normalization or platform separator conversion
+occurs. Empty names, NUL, a leading slash, empty components, and `.` or `..` components are refused.
 
 **Byte-identical add/add is not reachable from a real merge.** The `ort` driver resolves an add/add
 whose two blobs *and* file modes agree without reporting it, so it can never appear in

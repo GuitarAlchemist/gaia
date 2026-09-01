@@ -23,8 +23,8 @@
  *  3. `workKey` is not `generation`. One pull request has one work key for its whole life and a
  *     new generation per base/head pair; a claim carrying a foreign work key is a mis-delivery,
  *     not a supersession, and the generation itself must parse back to that same PR (C12-C14).
- *  4. `EXACT_OIDS` is not a caller assertion: the binding carries independently observed base and
- *     head OIDs and both must equal the observation before it can classify (C6).
+ *  4. `EXACT_OIDS` is not a bare token: the binding carries declared base and head OIDs and both
+ *     must equal the observation before it can classify; producer provenance is a later contract.
  */
 
 import assert from 'node:assert/strict';
@@ -268,7 +268,7 @@ test('C6: mergeability not bound to the exact base and head OIDs reads as UNKNOW
   assert.deepEqual(reading.refusals, []);
 });
 
-test('C6: EXACT_OIDS carries independently observed OIDs equal to the observation', () => {
+test('C6: EXACT_OIDS carries declared OIDs equal to the observation', () => {
   assert.ok(PR_CONFLICT_OBSERVATION_FIELDS.includes('bindingBaseOid'));
   assert.ok(PR_CONFLICT_OBSERVATION_FIELDS.includes('bindingHeadOid'));
   assert.doesNotThrow(() => requirePrConflictObservation(observation({
@@ -302,7 +302,7 @@ test('C6: UNBOUND carries null binding OIDs and remains UNKNOWN without conflict
     { ...unbound, bindingHeadOid: HEAD },
   ]) {
     assert.throws(() => requirePrConflictObservation(bad), PrConflictError,
-      'an unbound token cannot smuggle independently bound OIDs');
+      'an unbound token cannot smuggle declared binding OIDs');
   }
 });
 
@@ -658,7 +658,7 @@ test('C15: bounded Git paths accept spaces and Unicode and preserve the exact JS
 test('C15: a Git path refuses only bounded structural hazards, without platform guessing', () => {
   for (const path of [
     '', '/absolute.md', '.', '..', './file.md', 'docs/./file.md', 'docs/../file.md',
-    'docs//file.md', 'docs/file.md/', 'docs/\0secret.md',
+    'docs//file.md', 'docs/file.md/', 'docs/\0secret.md', 'x'.repeat(4097),
   ]) {
     assert.throws(
       () => requirePrConflictObservation(fixture([identicalEntry({ path })])),
@@ -771,6 +771,8 @@ test('C16: the design document names the slice-1 boundary this module implements
   ]) {
     assert.ok(!doc.includes(absent), `slice 1 must not claim unshipped behavior: ${absent}`);
   }
+  assert.ok(doc.includes('not proof of independent provider provenance'));
+  assert.ok(doc.includes('later producer must establish and preserve that provenance'));
 });
 
 // -------------------------------------------------------------------------------------------

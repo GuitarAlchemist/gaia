@@ -26,8 +26,9 @@
  *    or from a declared fixture. Every reading therefore republishes the source of its paths, and
  *    a reading with no named source may not carry paths at all.
  * 3. **A mergeability nobody bound to these two commits is about some other pair of commits.**
- *    `EXACT_OIDS` carries the independently observed base and head OIDs and they must equal this
- *    observation. `UNBOUND` carries neither OID, decides `UNKNOWN`, and carries no conflict paths.
+ *    `EXACT_OIDS` carries declared binding base and head OIDs and they must equal this observation.
+ *    This is structural equality, not provider provenance; a later producer must establish where
+ *    those values came from. `UNBOUND` carries neither OID and decides `UNKNOWN`.
  * 4. **The strategy registry is closed and versioned, and refuses by default.** An entry is
  *    admitted only by a registered strategy's own predicate. Anything unregistered — arbitrary
  *    source overlap, modify/delete, rename ambiguity, binaries, protected paths, permission
@@ -76,7 +77,7 @@ export const PR_CONFLICT_STRATEGY_REGISTRY_VERSION = 'gaia-pr-conflict-strategie
  */
 export const PR_CONFLICT_MERGEABILITIES = Object.freeze(['UNKNOWN', 'CLEAN', 'CONFLICTING']);
 
-/** Whether independently observed binding OIDs are absent or tied to this exact base and head. */
+/** Whether declared binding OIDs are absent or structurally equal to this exact base and head. */
 export const PR_CONFLICT_MERGEABILITY_BINDINGS = Object.freeze(['UNBOUND', 'EXACT_OIDS']);
 
 /**
@@ -161,9 +162,9 @@ const DIGEST = /^[0-9a-f]{64}$/u;
 const REPOSITORY_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const CLAIM_GENERATION = /^([A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63})#([1-9][0-9]*):([0-9a-f]{40}|[0-9a-f]{64}):([0-9a-f]{40}|[0-9a-f]{64})$/u;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/u;
-const PATH = /^[A-Za-z0-9._][A-Za-z0-9._/-]{0,254}$/u;
 
 const MAX_CONFLICTS = 512;
+const MAX_CONFLICT_PATH_LENGTH = 4096;
 const MAX_PULL_REQUEST = 1_000_000;
 
 /** Ordinal comparison. Not `localeCompare`, which is host- and ICU-version-dependent. */
@@ -237,6 +238,22 @@ function requirePullRequestNumber(value) {
   if (!Number.isSafeInteger(value) || value < 1 || value > MAX_PULL_REQUEST) {
     refuse('the pull request must be a positive integer number');
   }
+}
+
+/**
+ * Git paths are slash-delimited repository-relative names, not host filesystem paths.
+ *
+ * Keep the caller's JS string exactly: no Unicode normalization, separator conversion, resolve,
+ * or filesystem access. The bound limits hostile observations without narrowing valid names to
+ * ASCII. Empty components are not tree entries, and dot segments would make the name ambiguous.
+ */
+function isBoundedGitPath(value) {
+  if (typeof value !== 'string' || value.length === 0
+      || value.length > MAX_CONFLICT_PATH_LENGTH || value.includes('\0')
+      || value.startsWith('/')) {
+    return false;
+  }
+  return value.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..');
 }
 
 /**
@@ -366,8 +383,7 @@ function requireConflictEntry(entry, source) {
   for (const field of PR_CONFLICT_ENTRY_FIELDS) {
     if (!Object.hasOwn(entry, field)) refuse(`a conflict entry is missing ${field}`);
   }
-  if (typeof entry.path !== 'string' || !PATH.test(entry.path)
-      || entry.path.split('/').includes('..')) {
+  if (!isBoundedGitPath(entry.path)) {
     refuse('a conflict path must be a bounded repository-relative path');
   }
   if (!PR_CONFLICT_ENTRY_KINDS.includes(entry.kind)) {
@@ -512,12 +528,16 @@ function requireClaim(claim, observation, workKey) {
   if (parsed === null) {
     refuse('the claim generation must carry exact lowercase SHA-1 or SHA-256 object names');
   }
-  const [, repository, pullRequestText] = parsed;
+  const [, repository, pullRequestText, baseOid, headOid] = parsed;
   const pullRequest = Number(pullRequestText);
   requirePullRequestNumber(pullRequest);
   if (repository.toLowerCase() !== observation.repository.toLowerCase()
       || pullRequest !== observation.pullRequest) {
     refuse('the claim generation names a different pull request than the observation');
+  }
+  const canonicalGeneration = prConflictGeneration({ repository, pullRequest, baseOid, headOid });
+  if (claim.generation !== canonicalGeneration) {
+    refuse('the claim generation must use its one canonical normalized representation');
   }
   if (claim.workKey !== workKey) {
     // Not supersession. A claim about another pull request delivered here is a routing failure,
