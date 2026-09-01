@@ -288,7 +288,8 @@ function renderRound(round) {
     `- Blocker origin: ${round.evidence.blocker.origin}`,
     `- Origin: ${round.evidence.origin}`,
   );
-  return lines.join('\n');
+  const payload = lines.join('\n');
+  return `${payload}\n- Round content revision: \`${revision(payload)}\``;
 }
 
 function renderSection(workKey, rounds) {
@@ -366,6 +367,15 @@ function parseManaged(body, workKey, headRevision) {
   if (blocks.length < 1 || blocks.length > 2) return { error: 'ManagedSectionMalformed' };
   try {
     const rounds = blocks.map((block, index) => {
+      const roundLines = block.split('\n').filter((line) => !line.startsWith('<!-- gaia-rounds:end:'));
+      const revisionLines = roundLines.filter((line) => line.startsWith('- Round content revision: '));
+      if (revisionLines.length !== 1) fail('ManagedSectionConflict');
+      const recordedContentRevision = revisionLines[0].slice('- Round content revision: `'.length, -1);
+      const contentPayload = roundLines.filter(
+        (line) => !line.startsWith('- Round content revision: '),
+      ).join('\n');
+      if (!SHA256.test(recordedContentRevision)
+        || revision(contentPayload) !== recordedContentRevision) fail('ManagedSectionConflict');
       const heading = /^#### R(\d+)$/mu.exec(block);
       if (!heading || Number(heading[1]) !== index) fail('ManagedSectionMalformed');
       const blocker = parseField(block, 'Blocker');
