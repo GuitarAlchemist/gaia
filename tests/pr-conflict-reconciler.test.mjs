@@ -2,7 +2,7 @@
  * pr-conflict-reconciler.test.mjs — slice 1 of issue #82: the read-only detector and the
  * deterministic classifier, and nothing that touches a branch.
  *
- * Gates C1-C16 and the two mechanism reverts MR1/MR2 of `docs/pr-conflict-reconciler.md`.
+ * Gates C1-C16 and the mechanism reverts of `docs/pr-conflict-reconciler.md`.
  *
  * The operator failure behind this file is that a merge conflict is a terminal hole in the pump:
  * GitHub exposes it and no durable Gaia transition owns it, so a pull request stays open until a
@@ -11,19 +11,20 @@
  * semantic overlap, or acts for a generation that has already moved. Most of what is asserted
  * here is therefore what the classifier refuses to say.
  *
- * Three spec corrections are gated here, each from a verified read of the tooling:
+ * Four spec corrections are gated here, each from a verified read of the tooling:
  *
  *  1. No GitHub field carries conflicting paths. Paths are injected evidence with a named source,
  *     and a reading whose mergeability was not bound to the exact base/head OIDs may not carry
  *     them at all (C5, C6).
  *  2. The `ort` merge driver resolves a byte-identical add/add with an equal file mode silently,
- *     so that entry never appears in `merge-tree` output. Evidence claiming it did is refused as
- *     not having come from a merge (C9); the reachable add/add — identical blob, differing mode —
- *     is a permission change and escalates (C10). The strategy stays registered and live because
- *     a fixture source can produce it (C8).
+ *     so that entry never appears in `merge-tree` output. A fixture is test evidence, not an
+ *     authoritative production strategy; slice 1 therefore reserves automatic classification
+ *     but registers no strategy (C8-C11).
  *  3. `workKey` is not `generation`. One pull request has one work key for its whole life and a
  *     new generation per base/head pair; a claim carrying a foreign work key is a mis-delivery,
- *     not a supersession (C12, C14).
+ *     not a supersession, and the generation itself must parse back to that same PR (C12-C14).
+ *  4. `EXACT_OIDS` is not a caller assertion: the binding carries independently observed base and
+ *     head OIDs and both must equal the observation before it can classify (C6).
  */
 
 import assert from 'node:assert/strict';
@@ -260,6 +261,44 @@ test('C6: mergeability not bound to the exact base and head OIDs reads as UNKNOW
   assert.deepEqual(reading.refusals, []);
 });
 
+test('C6: EXACT_OIDS carries independently observed OIDs equal to the observation', () => {
+  assert.ok(PR_CONFLICT_OBSERVATION_FIELDS.includes('bindingBaseOid'));
+  assert.ok(PR_CONFLICT_OBSERVATION_FIELDS.includes('bindingHeadOid'));
+  assert.doesNotThrow(() => requirePrConflictObservation(observation({
+    bindingBaseOid: BASE, bindingHeadOid: HEAD,
+  })));
+  for (const bad of [
+    { bindingBaseOid: null },
+    { bindingHeadOid: null },
+    { bindingBaseOid: 'a'.repeat(40) },
+    { bindingHeadOid: 'e'.repeat(40) },
+    { bindingBaseOid: BASE.toUpperCase() },
+    { bindingHeadOid: 'f'.repeat(41) },
+  ]) {
+    assert.throws(() => requirePrConflictObservation(observation({
+      bindingBaseOid: BASE, bindingHeadOid: HEAD, ...bad,
+    })), PrConflictError,
+      `${canonicalJson(bad)} cannot forge an exact binding`);
+  }
+});
+
+test('C6: UNBOUND carries null binding OIDs and remains UNKNOWN without conflict evidence', () => {
+  const unbound = observation({
+    mergeabilityBinding: 'UNBOUND', conflictEvidence: 'NONE', conflicts: [], conflictsComplete: false,
+    bindingBaseOid: null, bindingHeadOid: null,
+  });
+  assert.equal(unbound.bindingBaseOid, null);
+  assert.equal(unbound.bindingHeadOid, null);
+  assert.equal(classifyPrConflict({ observation: unbound, claim: null }).classification, 'UNKNOWN');
+  for (const bad of [
+    { ...unbound, bindingBaseOid: BASE },
+    { ...unbound, bindingHeadOid: HEAD },
+  ]) {
+    assert.throws(() => requirePrConflictObservation(bad), PrConflictError,
+      'an unbound token cannot smuggle independently bound OIDs');
+  }
+});
+
 test('C6: an unbound reading may not carry conflict evidence at all', () => {
   for (const bad of [
     { mergeabilityBinding: 'UNBOUND' },
@@ -284,15 +323,14 @@ test('C7: an incomplete conflict enumeration escalates however safe the entries 
 // C8-C11 — the closed, versioned registry, and the add/add contradiction resolved.
 // -------------------------------------------------------------------------------------------
 
-test('C8: a byte-identical add/add from a fixture source is AUTO_RESOLVABLE', () => {
+test('C8: a synthetic byte-identical fixture is evidence, not an automatic strategy', () => {
   const reading = classifyPrConflict({
     observation: fixture([identicalEntry({ path: 'src/one.mjs' }), identicalEntry({ path: 'src/two.mjs' })]),
     claim: null,
   });
-  assert.equal(reading.classification, 'AUTO_RESOLVABLE');
-  assert.equal(reading.strategy, 'IDENTICAL_ADD_ADD/1');
-  assert.ok(PR_CONFLICT_STRATEGIES.includes(reading.strategy), 'and it is a registered one');
-  assert.deepEqual(reading.refusals, []);
+  assert.equal(reading.classification, 'ESCALATION_REQUIRED');
+  assert.equal(reading.strategy, null);
+  assert.deepEqual(reading.refusals, ['UNREGISTERED_CONFLICT_KIND']);
   assert.deepEqual(reading.conflictPaths, ['src/one.mjs', 'src/two.mjs']);
 });
 
@@ -340,9 +378,8 @@ test('C10: a mode outside the closed set, or a missing one, is refused not guess
     'a mode nobody read is recorded as unread, never as unchanged');
 });
 
-test('C11: every conflict kind but a byte-identical add/add escalates', () => {
+test('C11: every conflict kind escalates while slice 1 has no authoritative strategy', () => {
   for (const kind of PR_CONFLICT_ENTRY_KINDS) {
-    if (kind === 'ADD_ADD') continue;
     const reading = classifyPrConflict({
       observation: fixture([identicalEntry({ kind, headDigest: OTHER })]), claim: null,
     });
@@ -379,7 +416,10 @@ test('C11: a protected path escalates even when its two sides are byte-identical
     assert.equal(reading.classification, 'ESCALATION_REQUIRED', `${prefix} must escalate`);
     assert.deepEqual(reading.refusals, ['PROTECTED_PATH']);
   }
-  for (const path of ['.github/workflows/ci.yml', '.github/CODEOWNERS']) {
+  for (const path of [
+    '.github/workflows/ci.yml', '.github/CODEOWNERS', '.env', 'ARCHITECTURE.md', 'SECURITY.md',
+    'docs/contracts/schema.json',
+  ]) {
     const reading = classifyPrConflict({
       observation: fixture([identicalEntry({ path })]), claim: null,
     });
@@ -399,11 +439,10 @@ test('C11: one unsafe entry in an otherwise mechanical set escalates the whole r
     'and the escalation names every conflicting path, not only the refused one');
 });
 
-test('C11: the strategy registry is closed, versioned, and admits by function', () => {
-  assert.equal(PR_CONFLICT_STRATEGY_REGISTRY_VERSION, 'gaia-pr-conflict-strategies/1');
-  assert.deepEqual([...PR_CONFLICT_STRATEGIES], ['IDENTICAL_ADD_ADD/1'],
-    'slice 1 registers exactly one strategy; a generated-output or lockfile strategy needs an '
-    + 'effect this read-only slice does not have');
+test('C11: the strategy registry is closed, versioned, and empty until production evidence exists', () => {
+  assert.equal(PR_CONFLICT_STRATEGY_REGISTRY_VERSION, 'gaia-pr-conflict-strategies/2');
+  assert.deepEqual([...PR_CONFLICT_STRATEGIES], [],
+    'fixture-only evidence does not register an automatic production strategy');
   assert.deepEqual(Object.keys(PR_CONFLICT_STRATEGY_REGISTRY).sort(), [...PR_CONFLICT_STRATEGIES],
     'the registry and its published vocabulary cannot drift apart');
   for (const id of PR_CONFLICT_STRATEGIES) {
@@ -478,6 +517,26 @@ test('C14: a claim carrying a foreign work key is a mis-delivery, not a superses
   };
   assert.throws(() => classifyPrConflict({ observation: observation(), claim: foreign }),
     PrConflictError, 'answering a claim about another pull request would be the worse failure');
+});
+
+test('C14: a forged generation cannot borrow the observation work key', () => {
+  const workKey = claimOn().workKey;
+  for (const generation of [
+    `Other/Repo#999:${'a'.repeat(40)}:${'b'.repeat(40)}`,
+    `${REPOSITORY}#999:${'a'.repeat(40)}:${'b'.repeat(40)}`,
+    `Other/Repo#${PULL_REQUEST}:${'a'.repeat(40)}:${'b'.repeat(40)}`,
+    `${REPOSITORY}#${PULL_REQUEST}:${'a'.repeat(41)}:${'b'.repeat(40)}`,
+    `${REPOSITORY}#${PULL_REQUEST}:${'a'.repeat(40)}:${'b'.repeat(63)}`,
+    `${REPOSITORY}#${PULL_REQUEST}:${'A'.repeat(40)}:${'b'.repeat(40)}`,
+  ]) {
+    assert.throws(
+      () => classifyPrConflict({ observation: observation(), claim: { workKey, generation } }),
+      PrConflictError,
+      `${generation} is a malformed or foreign identity, not a stale generation`,
+    );
+  }
+  assert.equal(classify({}, claimOn('a'.repeat(64), 'e'.repeat(64))).classification, 'SUPERSEDED',
+    'a valid stale SHA-256 generation of this same PR remains superseded');
 });
 
 test('C14: a malformed claim is refused, not treated as no claim', () => {
@@ -641,6 +700,12 @@ test('C16: the design document names the slice-1 boundary this module implements
     'ESCALATION_REQUIRED', 'SUPERSEDED', 'repo#pr:baseOid:headOid']) {
     assert.ok(doc.includes(claim), `the design names ${claim}`);
   }
+  for (const absent of [
+    'persist a GitHub-backed receipt', 'receipt records owner', 'one active writer',
+    'with owner, deadline',
+  ]) {
+    assert.ok(!doc.includes(absent), `slice 1 must not claim unshipped behavior: ${absent}`);
+  }
 });
 
 // -------------------------------------------------------------------------------------------
@@ -670,11 +735,59 @@ test('MR2: accepting a stale generation is what lets an old actor act after it l
   const given = fixture([identicalEntry()]);
   const stale = claimOn('a'.repeat(40), HEAD);
   const mutated = mutant.classifyPrConflict({ observation: given, claim: stale });
-  assert.equal(mutated.classification, 'AUTO_RESOLVABLE',
-    'the mutant hands a repair to a claimant whose base already moved');
-  assert.equal(mutated.strategy, 'IDENTICAL_ADD_ADD/1');
+  assert.equal(mutated.classification, 'ESCALATION_REQUIRED',
+    'the mutant hands the current generation conflict evidence to a claimant whose base moved');
   const shipped = classifyPrConflict({ observation: given, claim: stale });
   assert.equal(shipped.classification, 'SUPERSEDED',
     'and the shipped rule ends the stale claimant before any effect is proposed');
   assert.equal(shipped.strategy, null);
+});
+
+test('MR3: dropping binding-OID equality admits a forged EXACT_OIDS token', async () => {
+  const mutant = await importMutant('binding-oid-equality-removed', (source) => source.replace(
+    'if (value.bindingBaseOid !== value.baseOid || value.bindingHeadOid !== value.headOid) {',
+    'if (false) {',
+  ));
+  const forged = observation({ bindingBaseOid: 'a'.repeat(40) });
+  assert.equal(
+    mutant.classifyPrConflict({ observation: forged, claim: null }).classification,
+    'ESCALATION_REQUIRED',
+    'without equality, a caller assertion reaches conflicting classification',
+  );
+  assert.throws(() => classifyPrConflict({ observation: forged, claim: null }), PrConflictError,
+    'the shipped schema refuses evidence bound to another base');
+});
+
+test('MR4: dropping an exact protected path loses its safety refusal', async () => {
+  const mutant = await importMutant('protected-exact-path-removed', (source) => source.replace(
+    'PR_CONFLICT_PROTECTED_PATHS.includes(path)',
+    'false',
+  ));
+  const protectedFixture = fixture([identicalEntry({ path: 'SECURITY.md' })]);
+  assert.deepEqual(
+    mutant.classifyPrConflict({ observation: protectedFixture, claim: null }).refusals,
+    ['UNREGISTERED_CONFLICT_KIND'],
+    'the mutant no longer identifies the security policy as protected',
+  );
+  assert.deepEqual(
+    classifyPrConflict({ observation: protectedFixture, claim: null }).refusals,
+    ['PROTECTED_PATH'],
+  );
+});
+
+test('MR5: reinstating fixture-only automatic classification violates the empty registry', async () => {
+  const mutant = await importMutant('synthetic-auto-reinstated', (source) => source.replace(
+    "return 'UNREGISTERED_CONFLICT_KIND'; // no authoritative slice-1 strategy admits this entry",
+    'return null; // mutant treats a synthetic shape as automatically admitted',
+  ).replace(
+    'return escalationReading(observation, identity, conflictPaths, refusals);',
+    "if (refusals.size === 0) return reading(observation, identity, { classification: 'AUTO_RESOLVABLE', strategy: 'IDENTICAL_ADD_ADD/1', conflictPaths, conflictEvidence: observation.conflictEvidence });\n  return escalationReading(observation, identity, conflictPaths, refusals);",
+  ));
+  const synthetic = fixture([identicalEntry()]);
+  const mutated = mutant.classifyPrConflict({ observation: synthetic, claim: null });
+  assert.equal(mutated.classification, 'AUTO_RESOLVABLE');
+  assert.ok(!mutant.PR_CONFLICT_STRATEGIES.includes(mutated.strategy),
+    'the forged automatic verdict is not backed by the closed registry');
+  assert.equal(classifyPrConflict({ observation: synthetic, claim: null }).classification,
+    'ESCALATION_REQUIRED');
 });
