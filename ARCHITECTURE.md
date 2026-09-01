@@ -80,9 +80,13 @@ The architecture-drift verification seam is the only seam introduced by this map
 black-box contract suite runs against both adapters and includes broken-link, missing-section, stale
 revision, interface-leak, change-impact, malformed-input, ordering, deletion-depth, and
 mechanism-revert controls. Backtick code spans in the Interface column are the structurally
-declared machine contract. Provider identifiers, configuration, transport errors, storage
-layout, payload, retry, path, ref, and object-identifier terms in those spans fail the gate;
-unstructured prose is not treated as proof of either a leak or a clean boundary.
+declared machine contract. The gate splits identifiers at punctuation, snake/kebab separators,
+lower-to-upper transitions, and acronym-to-word transitions, then compares complete normalized
+tokens with a closed adapter/mechanism vocabulary. Provider, configuration, transport-error,
+storage-layout, payload, retry, path, ref, and object-identifier tokens in those spans fail the
+gate; Git object forms such as commit-plus-SHA/hash and object-plus-ID are closed combinations.
+Domain words that merely contain one of those character sequences remain valid. Unstructured prose
+is not treated as proof of either a leak or a clean boundary.
 Removing this module would force the workflow, local verifier, and tests to reimplement link
 resolution, required-section policy, revision freshness, path sensitivity, closed reporting,
 and interface-boundary checks. A black-box deletion control substitutes a shallow pass-through at
@@ -281,8 +285,10 @@ are linked here.
 The authoritative machine-readable `Last verified at` record is
 `package.json#gaiaArchitectureVerification`. It binds a verification date and reviewed Git commit
 to the SHA-256 revision of the exact `ARCHITECTURE.md` bytes. The named commit must contain those
-same bytes; merely naming an older reachable commit is stale. Keeping the attestation outside this
-file avoids a self-referential content hash while leaving this map byte-stable after review.
+same bytes and the behavior this map marks implemented; a design-only commit is not a final
+attestation merely because its tree contains the prose. Keeping the attestation outside this file
+avoids a self-referential content hash while leaving this map byte-stable after review. The record
+is therefore written only after the behavior-bearing commit exists and names that commit.
 
 Verification inspects the root README, the pure coordination kernel, append-only event log,
 operation envelope, portfolio/drain, telemetry/control-room, lane, ecosystem, recovery, security,
