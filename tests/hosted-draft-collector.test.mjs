@@ -98,3 +98,55 @@ test('R1 hosted GitHub facts become one canonical Operation Envelope', async () 
   });
   assertDeepFrozen(envelope);
 });
+
+test('R1 concrete gh observations feed the same collector seam', async () => {
+  const { createGhDraftCollectorApi, createHostedDraftCollector } = await api();
+  assert.equal(typeof createGhDraftCollectorApi, 'function');
+  const responses = [
+    {
+      node_id: 'R_kgDTest', name: 'gaia', owner: { login: 'GuitarAlchemist' },
+      default_branch: 'main',
+    },
+    { sha: 'a'.repeat(40) },
+    {
+      node_id: 'I_test60', number: 60, state: 'open',
+      updated_at: '2026-08-31T19:05:00.000Z', labels: [{ name: 'ready-for-agent' }],
+    },
+    [[
+      {
+        node_id: 'LE_old', event: 'labeled', created_at: '2026-08-31T18:00:00.000Z',
+        actor: { node_id: 'U_old', login: 'older-actor' }, label: { name: 'ready-for-agent' },
+      },
+      {
+        node_id: 'LE_latest', event: 'labeled', created_at: '2026-08-31T19:00:00.000Z',
+        actor: { node_id: 'U_actor', login: 'trusted-actor' }, label: { name: 'ready-for-agent' },
+      },
+    ]],
+    { permission: 'triage' },
+    [[{ ref: 'refs/heads/codex/hosted-draft-pump-r0', object: { sha: 'b'.repeat(40) } }]],
+    {
+      message: [
+        'feat: begin hosted pump', '',
+        'Gaia-Issue: 60',
+        'Gaia-Ready-Receipt: 797eabd4b579944ec4634babd5c018815481b0c8bf0170d90cdaf90353f8e494',
+      ].join('\n'),
+    },
+    { sha: 'c'.repeat(40) },
+  ];
+  const run = async () => {
+    assert.ok(responses.length > 0, 'gh adapter made only the bounded expected reads');
+    return structuredClone(responses.shift());
+  };
+  const collector = createHostedDraftCollector({ github: createGhDraftCollectorApi({ run }) });
+
+  const envelope = await collector.collect({
+    repository: { owner: 'old-owner', name: 'old-name' },
+    workItem: { kind: 'ISSUE', number: 60 },
+  });
+
+  assert.equal(envelope.repository.nodeId, 'R_kgDTest');
+  assert.equal(envelope.readyItem.id,
+    '1f9efd37f156b4ab51a50f885414f851095aafab1ac3c2a2b8b8ffc271efd69e');
+  assert.equal(envelope.generation.headRevision, 'b'.repeat(40));
+  assert.equal(responses.length, 0);
+});
