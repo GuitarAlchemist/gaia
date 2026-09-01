@@ -134,7 +134,9 @@ test('lookupExact rejects an unsealed or differently bound provider request befo
       && error.message === 'InvalidRequest',
   );
   await assert.rejects(
-    provider.lookupExact(request({ headRevision: 'c'.repeat(40) })),
+    provider.lookupExact(request({
+      repository: { ...REPOSITORY, name: 'different-repository' },
+    })),
     (error) => error instanceof GhDraftOperationProviderError
       && error.code === 'RequestBindingMismatch',
   );
