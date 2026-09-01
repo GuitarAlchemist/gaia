@@ -142,12 +142,12 @@ function git(root, args) {
   return result.stdout.trim();
 }
 
-function copyCliProduct(root, { checker = true, scriptSource = null } = {}) {
+function copyCliProduct(root, { checker = true, checkerSource = null, scriptSource = null } = {}) {
   for (const path of CLI_PRODUCT_PATHS) {
     if (!checker && path === 'src/architecture-drift.mjs') continue;
-    const content = path === 'scripts/architecture-drift.mjs' && scriptSource !== null
-      ? scriptSource
-      : readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+    let content = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+    if (path === 'scripts/architecture-drift.mjs' && scriptSource !== null) content = scriptSource;
+    if (path === 'src/architecture-drift.mjs' && checkerSource !== null) content = checkerSource;
     writeTree(root, { [path]: content });
   }
 }
@@ -186,8 +186,52 @@ function createCliGitFixture({ checker = true, scriptSource = null } = {}) {
   return { root, reviewedCommit };
 }
 
-function runCli(root, args) {
-  return run(root, process.execPath, ['scripts/architecture-drift.mjs', ...args]);
+function createPolicyCliFixture({
+  witnessArchitecture = architecture(),
+  currentArchitecture = witnessArchitecture,
+  changedFiles = { 'README.md': '# Current fixture\n' },
+  eventBody = 'Architecture impact: none\nArchitecture evidence: Test-only fixture.',
+  checkerSource = null,
+} = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'gaia-architecture-policy-cli-'));
+  copyCliProduct(root, { checkerSource });
+  writeTree(root, {
+    'ARCHITECTURE.md': witnessArchitecture,
+    'docs/subsystem.md': '# Subsystem\n',
+    'package.json': '{"name":"architecture-policy-fixture","private":true}\n',
+  });
+  git(root, ['init', '--quiet']);
+  git(root, ['config', 'user.name', 'Gaia Architecture Test']);
+  git(root, ['config', 'user.email', 'architecture-test@example.invalid']);
+  git(root, ['add', '.']);
+  git(root, ['commit', '--quiet', '-m', 'fixture: architecture witness']);
+  const reviewedCommit = git(root, ['rev-parse', 'HEAD']);
+
+  writeTree(root, {
+    'ARCHITECTURE.md': currentArchitecture,
+    'package.json': verificationPackage({
+      schema: 'gaia-architecture-verification/1',
+      commit: reviewedCommit,
+      date: '2026-09-01',
+      contentRevision: digest(currentArchitecture),
+    }),
+  });
+  git(root, ['add', '.']);
+  git(root, ['commit', '--quiet', '-m', 'fixture: attest architecture']);
+  const baseCommit = git(root, ['rev-parse', 'HEAD']);
+
+  writeTree(root, changedFiles);
+  git(root, ['add', '.']);
+  git(root, ['commit', '--quiet', '-m', 'fixture: proposed change']);
+  const eventPath = join(root, '.git', 'event.json');
+  writeFileSync(eventPath, JSON.stringify(eventBody === null ? {} : {
+    pull_request: { body: eventBody },
+  }), 'utf8');
+  return { root, reviewedCommit, baseCommit, eventPath };
+}
+
+function runCli(root, args, env = {}) {
+  return run(root, process.execPath, ['scripts/architecture-drift.mjs', ...args], env);
 }
 
 test('the public drift seam has the same closed report for filesystem and in-memory inventories', () => {
@@ -327,6 +371,27 @@ test('the public CLI derives stale verification from Git bytes for commit and ca
   }
 });
 
+test('a production push event does not run the pull-request-only architecture impact gate', () => {
+  const fixture = createPolicyCliFixture({
+    changedFiles: { 'src/push-sensitive.mjs': 'export const changed = true;\n' },
+    eventBody: null,
+  });
+  try {
+    const result = runCli(fixture.root, ['--base', fixture.baseCommit], {
+      GITHUB_EVENT_NAME: 'push',
+      GITHUB_EVENT_PATH: fixture.eventPath,
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(result.stdout, '');
+
+    const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+    const architectureJob = workflow.match(/^  architecture:\r?\n([\s\S]*?)(?=^  supported:)/m)?.[0] ?? '';
+    assert.match(architectureJob, /^    if: github\.event_name == 'pull_request'$/m);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('DELETION DEPTH: removing the checker makes the public CLI refuse without a report', () => {
   const fixture = createCliGitFixture({ checker: false });
   try {
@@ -339,6 +404,75 @@ test('DELETION DEPTH: removing the checker makes the public CLI refuse without a
     assert.equal(git(fixture.root, ['status', '--short']), before);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('DELETION DEPTH: a shallow replacement lets every hidden policy escape at the public caller', () => {
+  const shallowChecker = `export class ArchitectureDriftRefusal extends Error {
+  constructor(code) { super(code); this.code = code; }
+}
+export function createFilesystemArchitectureInventory(options) { return options; }
+export function checkArchitectureDrift() {
+  return { schema: 'gaia-architecture-drift-report/1', verdict: 'PASS',
+    verifiedCommit: null, architectureContentRevision: null, advisories: [], violations: [] };
+}
+`;
+  const missingSection = architecture({
+    headings: REQUIRED_HEADINGS.filter((heading) => heading !== 'Durable and rebuildable state'),
+  });
+  const leakedInterface = architecture({ moduleInterface: 'check(githubPayload)' });
+  const cases = [
+    {
+      name: 'broken link',
+      witnessArchitecture: architecture({ link: 'docs/missing.md' }),
+      expectedCode: 'BROKEN_INTERNAL_LINK',
+    },
+    {
+      name: 'missing section',
+      witnessArchitecture: missingSection,
+      expectedCode: 'MISSING_REQUIRED_SECTION',
+    },
+    {
+      name: 'stale revision',
+      witnessArchitecture: architecture(),
+      currentArchitecture: architecture().replace('Implemented boundary.', 'Changed boundary.'),
+      expectedCode: 'STALE_VERIFIED_COMMIT',
+    },
+    {
+      name: 'interface leak',
+      witnessArchitecture: leakedInterface,
+      expectedCode: 'MODULE_INTERFACE_LEAK',
+    },
+    {
+      name: 'undeclared impact',
+      changedFiles: { 'src/undeclared-sensitive.mjs': 'export const changed = true;\n' },
+      eventBody: '',
+      expectedCode: 'ARCHITECTURE_IMPACT_UNDECLARED',
+    },
+  ];
+
+  for (const policyCase of cases) {
+    const production = createPolicyCliFixture(policyCase);
+    const shallow = createPolicyCliFixture({ ...policyCase, checkerSource: shallowChecker });
+    try {
+      const productionResult = runCli(production.root, ['--base', production.baseCommit], {
+        GITHUB_EVENT_NAME: 'pull_request',
+        GITHUB_EVENT_PATH: production.eventPath,
+      });
+      assert.equal(productionResult.status, 1, `${policyCase.name}: ${productionResult.stderr}`);
+      assert.ok(JSON.parse(productionResult.stdout).violations
+        .some(({ code }) => code === policyCase.expectedCode), policyCase.name);
+
+      const shallowResult = runCli(shallow.root, ['--base', shallow.baseCommit], {
+        GITHUB_EVENT_NAME: 'pull_request',
+        GITHUB_EVENT_PATH: shallow.eventPath,
+      });
+      assert.equal(shallowResult.status, 0, `${policyCase.name}: ${shallowResult.stderr}`);
+      assert.equal(JSON.parse(shallowResult.stdout).verdict, 'PASS', policyCase.name);
+    } finally {
+      rmSync(production.root, { recursive: true, force: true });
+      rmSync(shallow.root, { recursive: true, force: true });
+    }
   }
 });
 
