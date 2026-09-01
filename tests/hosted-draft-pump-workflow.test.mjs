@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { main } from '../scripts/hosted-draft-pump.mjs';
+
 const workflow = readFileSync(
   new URL('../.github/workflows/hosted-draft-pump-effect.yml', import.meta.url),
   'utf8',
@@ -72,19 +74,93 @@ test('the job uses only the required GitHub permissions and a dedicated pump App
 test('the executor reconciles once and uploads its closed receipt', () => {
   assert.match(workflow, /node scripts\/hosted-draft-pump\.mjs reconcile/u);
   for (const argument of [
-    '--issue-number',
+    '--repository',
+    '--pump-actor-id',
+    '--repository-node-id',
     '--work-key',
     '--operation-id',
-    '--committed-revision',
+    '--expected-revision',
     '--ledger-root-oid',
     '--ledger-root-revision',
-    '--receipt-path',
   ]) {
     assert.equal(occurrences(workflow, argument), 1, `${argument} must be supplied exactly once`);
   }
+  assert.doesNotMatch(workflow, /--(?:issue-number|committed-revision|receipt-path)/u);
+  assert.match(workflow, /GAIA_DRAFT_TITLE: \$\{\{ format\('draft: deliver issue #\{0\}', inputs\['issue-number'\]\) \}\}/u);
+  assert.match(workflow, /GAIA_ISSUE_URL: \$\{\{ format\('\{0\}\/\{1\}\/issues\/\{2\}', github\.server_url, github\.repository, inputs\['issue-number'\]\) \}\}/u);
+  assert.match(workflow, /GAIA_DRAFT_OWNER: Gaia hosted Draft pump/u);
+  assert.match(workflow, /GAIA_DRAFT_GATE: DELIVERY/u);
+  assert.match(workflow, /GAIA_CHECKLIST_JSON: '\["Create or reuse one exact Draft pull request","Persist one terminal receipt"\]'/u);
+  assert.match(workflow, /GAIA_ETA_MINUTES: '60:120'/u);
+  assert.match(workflow, /1> \$env:GAIA_RECEIPT_PATH 2> \$env:GAIA_ERROR_PATH/u);
+  assert.match(workflow, /Move-Item -LiteralPath \$env:GAIA_ERROR_PATH -Destination \$env:GAIA_RECEIPT_PATH -Force/u);
   assert.match(workflow, /uses: actions\/upload-artifact@v\d+/u);
   assert.match(workflow, /name: gaia-hosted-draft-pump-receipt/u);
   assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/gaia-hosted-draft-pump-receipt\.json/u);
   assert.match(workflow, /if-no-files-found: error/u);
   assert.doesNotMatch(workflow, /docker/iu);
+});
+
+test('the workflow argv and deterministic environment satisfy the real CLI parser', async () => {
+  const sha = (letter) => letter.repeat(64);
+  const rootOid = 'd'.repeat(40);
+  const argv = [
+    'reconcile',
+    '--repository', 'GuitarAlchemist/gaia',
+    '--pump-actor-id', '1234',
+    '--repository-node-id', 'R_kgDOGaia',
+    '--work-key', sha('a'),
+    '--operation-id', sha('b'),
+    '--expected-revision', sha('c'),
+    '--ledger-root-oid', rootOid,
+    '--ledger-root-revision', sha('e'),
+  ];
+  const environment = {
+    GITHUB_REPOSITORY: 'GuitarAlchemist/gaia',
+    GITHUB_RUN_ID: '9001',
+    GITHUB_RUN_ATTEMPT: '2',
+    GAIA_VERIFIED_CONCURRENCY_GROUP: `gaia-draft-${sha('a')}`,
+    GAIA_DRAFT_TITLE: 'draft: deliver issue #60',
+    GAIA_ISSUE_URL: 'https://github.com/GuitarAlchemist/gaia/issues/60',
+    GAIA_DRAFT_OWNER: 'Gaia hosted Draft pump',
+    GAIA_DRAFT_GATE: 'DELIVERY',
+    GAIA_CHECKLIST_JSON:
+      '["Create or reuse one exact Draft pull request","Persist one terminal receipt"]',
+    GAIA_ETA_MINUTES: '60:120',
+  };
+  let parsed;
+  let output = '';
+  const exitCode = await main({
+    argv,
+    env: environment,
+    stdout: { write(chunk) { output += String(chunk); } },
+    stderr: { write() {} },
+    runtimeFactory(configuration) {
+      parsed = configuration;
+      return Object.freeze({
+        async enqueue() { assert.fail('the effect workflow cannot enqueue'); },
+        async listUnsettled() { assert.fail('the effect workflow cannot select'); },
+        async reconcile() {
+          return {
+            kind: 'Terminal', outcome: 'REUSED', effect: 'NONE',
+            operationId: sha('b'), committedRevision: sha('f'),
+          };
+        },
+      });
+    },
+  });
+
+  assert.equal(exitCode, 0, output);
+  assert.equal(parsed.expectedRevision, sha('c'));
+  assert.deepEqual(parsed.presentation, {
+    title: 'draft: deliver issue #60',
+    issueUrl: 'https://github.com/GuitarAlchemist/gaia/issues/60',
+    owner: 'Gaia hosted Draft pump',
+    gate: 'DELIVERY',
+    checklist: [
+      'Create or reuse one exact Draft pull request',
+      'Persist one terminal receipt',
+    ],
+    eta: { minimumMinutes: 60, maximumMinutes: 120 },
+  });
 });
