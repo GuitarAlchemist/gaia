@@ -338,3 +338,17 @@ test('revert control: dropping the observation flag leaves the Control Room with
   assert.ok(!argv.includes('--observation-out'));
   assert.ok(!Object.hasOwn(output.json(), 'observation'));
 });
+
+test('revert control: dropping managed-round intake data refuses both real event paths', async () => {
+  const reverted = withoutLines(
+    workflowText(), (line) => line.includes('GAIA_MANAGED_ROUND_JSON:'),
+  );
+  for (const event of ['schedule', 'issues']) {
+    const driven = await drive(reverted, event);
+    assert.equal(driven.exitCode, 2);
+    assert.equal(driven.output.text(), '');
+    assert.deepEqual(driven.errors.json(), {
+      schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'InvalidArguments',
+    });
+  }
+});

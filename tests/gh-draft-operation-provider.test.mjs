@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import {
@@ -162,6 +166,20 @@ function apiPull(body = API_BODY) {
 
 function included(etag, body) {
   return `HTTP/2 200 OK\r\netag: ${etag}\r\n\r\n${JSON.stringify(body)}`;
+}
+
+async function importMutant(name, mutate) {
+  const sourceUrl = new URL('../src/gh-draft-operation-provider.mjs', import.meta.url);
+  const dependencyUrl = new URL('../src/pr-delivery-round-history.mjs', import.meta.url).href;
+  const original = readFileSync(sourceUrl, 'utf8').replace(
+    "'./pr-delivery-round-history.mjs'", JSON.stringify(dependencyUrl),
+  );
+  const mutated = mutate(original);
+  assert.notEqual(mutated, original, `${name} must alter the provider mechanism`);
+  const directory = mkdtempSync(join(tmpdir(), `gaia-managed-api-${name}-`));
+  const path = join(directory, 'provider.mjs');
+  writeFileSync(path, mutated, 'utf8');
+  return import(`${pathToFileURL(path).href}?mutant=${name}`);
 }
 
 test('lookupExact returns only the open Draft bound to the exact repository, generation, and marker', async () => {
@@ -442,11 +460,84 @@ test('managed body API redacts repository and PATCH diagnostics', async (context
           number: 61, expectedHeadRevision: observed.headRevision,
           expectedBodyRevision: observed.bodyRevision, proposedBody: 'next',
           proposedBodyRevision: 'f'.repeat(64),
-        }), { kind: 'STALE' });
+        }), { kind: 'AMBIGUOUS' });
       } else {
         await assert.rejects(api.observe(61), (error) => error.code === 'ProviderUnavailable'
           && error.message === 'ProviderUnavailable' && !String(error.stack).includes(secret));
       }
     });
   }
+});
+
+test('managed body API reconciles a lost PATCH response without repeating the effect', async () => {
+  let body = API_BODY;
+  let patches = 0;
+  const calls = [];
+  const run = async (_command, args) => {
+    calls.push([...args]);
+    if (args[0] === 'repo') {
+      return { stdout: JSON.stringify({ id: REPOSITORY.nodeId,
+        nameWithOwner: 'GuitarAlchemist/gaia' }) };
+    }
+    if (args.includes('PATCH')) {
+      patches += 1;
+      body = 'body after lost response';
+      throw new Error('connection reset after GitHub committed');
+    }
+    return { stdout: included(patches === 0 ? API_ETAG : '"resource-v2"', apiPull(body)) };
+  };
+  const api = createGhManagedRoundApi({ expectedRepository: REPOSITORY, run });
+  const before = await api.observe(61);
+  const acknowledgement = await api.compareAndSetBody({
+    number: 61, expectedHeadRevision: before.headRevision,
+    expectedBodyRevision: before.bodyRevision, proposedBody: 'body after lost response',
+    proposedBodyRevision: 'f'.repeat(64),
+  });
+  const after = await api.observe(61);
+
+  assert.deepEqual(acknowledgement, { kind: 'AMBIGUOUS' });
+  assert.equal(after.body, 'body after lost response');
+  assert.equal(patches, 1);
+  assert.equal(calls.filter((args) => args.includes('PATCH')).length, 1);
+});
+
+test('MECHANISM REVERT: removing node-id binding exposes the foreign repository', async () => {
+  const mutant = await importMutant('node-id', (source) => source.replaceAll(
+    'observed.id !== expected.nodeId || observed.nameWithOwner !== repositoryName',
+    'false || observed.nameWithOwner !== repositoryName',
+  ));
+  const fake = fakeRun([
+    { args: API_REPO_ARGS,
+      stdout: JSON.stringify({ id: 'R_FOREIGN', nameWithOwner: 'GuitarAlchemist/gaia' }) },
+    { args: API_GET_ARGS, stdout: included(API_ETAG, apiPull()) },
+  ]);
+  const api = mutant.createGhManagedRoundApi({ expectedRepository: REPOSITORY, run: fake.run });
+  assert.equal((await api.observe(61)).number, 61,
+    'the mutant reaches foreign PR data, while the production public test refuses it');
+});
+
+test('MECHANISM REVERT: removing If-Match exposes an unconditional PATCH', async () => {
+  const mutant = await importMutant('if-match', (source) => source.replace(
+    "'-H', `If-Match: ${cached.etag}`, '-f', `body=${effect.proposedBody}`",
+    "'-f', `body=${effect.proposedBody}`",
+  ));
+  const calls = [];
+  const run = async (_command, args) => {
+    calls.push([...args]);
+    if (args[0] === 'repo') return { stdout: JSON.stringify({
+      id: REPOSITORY.nodeId, nameWithOwner: 'GuitarAlchemist/gaia',
+    }) };
+    return { stdout: included(API_ETAG, apiPull(args.includes('PATCH') ? 'next' : API_BODY)) };
+  };
+  const api = mutant.createGhManagedRoundApi({ expectedRepository: REPOSITORY, run });
+  const observed = await api.observe(61);
+  await api.compareAndSetBody({
+    number: 61, expectedHeadRevision: observed.headRevision,
+    expectedBodyRevision: observed.bodyRevision, proposedBody: 'next',
+    proposedBodyRevision: 'f'.repeat(64),
+  });
+  const patch = calls.find((args) => args.includes('PATCH'));
+  assert.ok(patch);
+  assert.ok(!patch.some((argument) => String(argument).startsWith('If-Match:')),
+    'the mutant demonstrates the unconditional provider write the public contract detects');
 });
