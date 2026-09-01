@@ -93,6 +93,11 @@ function fakeGitData({ failOnceOnKind = null, protectionSequence = [] } = {}) {
       },
     }),
     kinds(ref) { return (refs.get(ref) ?? []).map((record) => record.body.kind); },
+    replaceRecordOid(ref, index, oid) {
+      const records = refs.get(ref);
+      assert.ok(records?.[index], 'record to replace exists');
+      records[index] = { ...records[index], oid };
+    },
   };
 }
 
@@ -135,6 +140,29 @@ test('R2 durable enqueue survives restart and NONE cannot bootstrap it twice', a
   assert.deepEqual(
     git.kinds(`refs/heads/gaia-ledger/draft-operations-v0/${accepted.workKey}`),
     ['WORK_ROOT', 'ENQUEUED'],
+  );
+});
+
+test('R3 work registration refuses an identical root body stored under a different Git OID', async () => {
+  const git = fakeGitData();
+  const config = {
+    ledgerRegistryRootOid: OID_A,
+    ledgerRegistryRootRevision: git.registryRootRevision,
+  };
+  const selector = {
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    workItem: { kind: 'ISSUE', number: 60 },
+  };
+  const store = createGitDataDraftOperationStore({ gitData: git.port, config });
+  const accepted = await enqueueDraft(selector, 'NONE', ports(store, observedEnvelope()));
+  const workRef = `refs/heads/gaia-ledger/draft-operations-v0/${accepted.workKey}`;
+
+  git.replaceRecordOid(workRef, 0, OID_B);
+
+  const restarted = createGitDataDraftOperationStore({ gitData: git.port, config });
+  await assert.rejects(
+    restarted.readHead(accepted.workKey),
+    (error) => error?.code === 'LedgerCorrupt',
   );
 });
 

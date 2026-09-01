@@ -488,16 +488,18 @@ class GitDataDraftOperationStore {
       } else if (record.body.kind === 'CONFIRMED') {
         requireExactKeys(record.body, [
           'schema', 'priorCommittedRevision', 'kind', 'workKey',
-          'bootstrapCommittedRevision',
+          'bootstrapCommittedRevision', 'bootstrapOid',
         ], 'LedgerCorrupt');
         requireRevision(record.body.workKey, 'LedgerCorrupt');
         requireRevision(record.body.bootstrapCommittedRevision, 'LedgerCorrupt');
+        requireGitOid(record.body.bootstrapOid, 'LedgerCorrupt');
         if (entries.get(record.body.workKey)?.state !== 'RESERVED') {
           throw new DraftOperationError('LedgerCorrupt');
         }
         entries.set(record.body.workKey, {
           state: 'CONFIRMED',
           bootstrapCommittedRevision: record.body.bootstrapCommittedRevision,
+          bootstrapOid: record.body.bootstrapOid,
         });
       } else {
         throw new DraftOperationError('LedgerCorrupt');
@@ -553,6 +555,7 @@ class GitDataDraftOperationStore {
       },
       envelope: identity.envelope,
       bootstrapCommittedRevision: root.committedRevision,
+      bootstrapOid: root.oid,
       headOid: snapshot.headOid,
       committedRevision: snapshot.committedRevision,
       state,
@@ -605,6 +608,9 @@ class GitDataDraftOperationStore {
     if (work && entry.bootstrapCommittedRevision !== work.bootstrapCommittedRevision) {
       throw new DraftOperationError('LedgerCorrupt');
     }
+    if (work && entry.bootstrapOid !== work.bootstrapOid) {
+      throw new DraftOperationError('LedgerCorrupt');
+    }
     return work;
   }
 
@@ -612,7 +618,8 @@ class GitDataDraftOperationStore {
     if (!work) return null;
     const entry = registry.entries.get(work.identity.workKey);
     if (entry?.state !== 'CONFIRMED'
-      || entry.bootstrapCommittedRevision !== work.bootstrapCommittedRevision) {
+      || entry.bootstrapCommittedRevision !== work.bootstrapCommittedRevision
+      || entry.bootstrapOid !== work.bootstrapOid) {
       throw new DraftOperationError('LedgerCorrupt');
     }
     return work;
@@ -632,6 +639,7 @@ class GitDataDraftOperationStore {
         if (entry.bootstrapCommittedRevision !== root.committedRevision) {
           throw new DraftOperationError('LedgerCorrupt');
         }
+        if (entry.bootstrapOid !== root.oid) throw new DraftOperationError('LedgerCorrupt');
         return null;
       }
     }
@@ -740,15 +748,21 @@ class GitDataDraftOperationStore {
           ['kind', 'CONFIRMED'],
           ['workKey', identity.workKey],
           ['bootstrapCommittedRevision', root.committedRevision],
+          ['bootstrapOid', root.oid],
         ]);
         const confirmed = await this.#append(REGISTRY_REF, registry.headOid, confirmedBody);
         if (confirmed.stale) {
           return { stale: true, currentCommittedRevision: root.committedRevision };
         }
-        entry = { state: 'CONFIRMED', bootstrapCommittedRevision: root.committedRevision };
+        entry = {
+          state: 'CONFIRMED',
+          bootstrapCommittedRevision: root.committedRevision,
+          bootstrapOid: root.oid,
+        };
       }
       if (entry.state !== 'CONFIRMED' || !root
-        || entry.bootstrapCommittedRevision !== root.committedRevision) {
+        || entry.bootstrapCommittedRevision !== root.committedRevision
+        || entry.bootstrapOid !== root.oid) {
         throw new DraftOperationError('LedgerCorrupt');
       }
       if (!root.rootOnly) {
