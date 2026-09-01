@@ -31,12 +31,15 @@ test('R2 gh Git Data adapter verifies protection, reads receipts, and appends by
   const nextOid = '2'.repeat(40);
   const calls = [];
   const responses = [
-    [{ enforcement: 'active', conditions: { ref_name: { include: ['refs/heads/gaia-ledger/**'] } },
-      rules: [{ type: 'deletion' }, { type: 'non_fast_forward' }] }],
-    { object: { sha: rootOid } },
+    [{ id: 42 }],
+    { id: 42, enforcement: 'active',
+      conditions: { ref_name: { include: ['refs/heads/gaia-ledger/**'] } },
+      rules: [{ type: 'deletion' }, { type: 'non_fast_forward' }] },
+    [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: rootOid } }],
     { sha: rootOid, tree: { sha: '3'.repeat(40) }, parents: [] },
     { tree: [{ path: 'receipt.json', type: 'blob', sha: '4'.repeat(40) }] },
     { encoding: 'base64', content: Buffer.from(JSON.stringify(root), 'utf8').toString('base64') },
+    [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: rootOid } }],
     { sha: '5'.repeat(40) },
     { sha: '6'.repeat(40) },
     { sha: nextOid },
@@ -71,6 +74,7 @@ test('R2 gh Git Data adapter creates an absent work ref without force', async ()
   const oid = '7'.repeat(40);
   const calls = [];
   const responses = [
+    [],
     { sha: '5'.repeat(40) },
     { sha: '6'.repeat(40) },
     { sha: oid },
@@ -90,4 +94,37 @@ test('R2 gh Git Data adapter creates an absent work ref without force', async ()
   assert.deepEqual(calls.at(-1).input, {
     ref: `refs/heads/gaia-ledger/draft-operations-v0/${body.workKey}`, sha: oid,
   });
+});
+
+test('R2 gh Git Data adapter refuses a stale head before creating objects', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const current = '8'.repeat(40);
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    run: scriptedRun([[{
+      ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: current },
+    }]], calls),
+  });
+
+  assert.deepEqual(await api.compareAndAppend(
+    'refs/heads/gaia-ledger/registry-v0', '1'.repeat(40),
+    { schema: 'Receipt', priorCommittedRevision: 'a'.repeat(64), kind: 'RESERVED' },
+  ), { kind: 'STALE', currentHeadOid: current });
+  assert.equal(calls.length, 1);
+});
+
+test('R2 gh Git Data adapter redacts provider diagnostics', async () => {
+  const { createGhGitDataApi, GhGitDataError } = await import(MODULE_URL);
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    async run() { throw new Error('token, path, and provider response'); },
+  });
+
+  await assert.rejects(
+    api.read('refs/heads/gaia-ledger/registry-v0'),
+    (error) => error instanceof GhGitDataError
+      && error.code === 'GitHubGitDataUnavailable'
+      && !error.message.includes('token'),
+  );
 });
