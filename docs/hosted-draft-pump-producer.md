@@ -175,6 +175,34 @@ repository-wide non-cancelling concurrency group executes the queue in order, so
 monotonic in practice. Where it is not, `requireMonotonic` refuses the reading rather than
 publishing a reordered one — fail closed, never a fabricated advance.
 
+### What carries monotonic evidence, and what cannot
+
+Only two fields on this observation carry order: `observedAt`, the instant the ledger was read, and
+`sequence`, the Actions run id. Those are the whole of the monotonic evidence, and `requireMonotonic`
+compares them and nothing else.
+
+`committedRevision` is a SHA-256 content address. A content address is an opaque identity: it is
+derived from the bytes of a record, not from when that record was written, so two committed
+revisions have no temporal relation to each other at all. Comparing two such digests with `<` or `>`
+orders them lexicographically, and lexicographic order over a hash is indistinguishable from a coin
+flip — a legitimate forward append whose new digest happens to sort lower than the previous one
+would be refused, while a genuinely stale replay whose digest happens to sort higher would pass. A
+guard that is right half the time on random input is not a guard; it manufactures
+`IncoherentHostedDraftPump` refusals against real forward progress, which is a release blocker
+because a refused observation ages into `STALE` and re-creates issue #70's motivating defect from
+the opposite direction.
+
+Being append-only under compare-and-swap does not confer order on the digests either. CAS gives the
+ledger a linearization *of records*; it says a record's stored prior pointer must match what the
+writer read. That chain is walked by following `committedRevision` links, never by sorting them.
+
+`committedRevision` may therefore be validated for shape (a 64-character lowercase SHA-256, or
+`null`), compared for equality (to recognise the same record, or a replay of it), and checked for
+binding (that it belongs to the work key and operation identity carried alongside it). It must never
+be ordered relatively. Where a real backwards-ledger guard is wanted, the evidence for it is the
+prior-pointer chain the ledger already stores, not the digests' byte values; this observation does
+not carry that chain and so does not attempt the check.
+
 ### Honest no-authority semantics
 
 The document declares `effect: 'NONE'` and `authority: 'NONE'` in its body, and the derived block
