@@ -191,6 +191,12 @@ function assertTerminal(result, outcome) {
   return result;
 }
 
+function assertDeepFrozen(value, path = 'snapshot') {
+  if (value === null || typeof value !== 'object') return;
+  assert.ok(Object.isFrozen(value), `${path} must be frozen`);
+  for (const key of Reflect.ownKeys(value)) assertDeepFrozen(value[key], `${path}.${String(key)}`);
+}
+
 test('R01 canonical repository aliases converge to one node-id work identity', async () => {
   const mod = await api('R01 canonical aliases');
   const canonicalCollector = fakeCollector();
@@ -449,4 +455,88 @@ test('R11 fixed inputs replay byte-identically with one coherent terminal revisi
   const second = assertTerminal(await run(), 'CREATED');
   assert.equal(JSON.stringify(first), JSON.stringify(second));
   assert.equal(first.observedSourceRevision, SHA_B);
+});
+
+test('R12 an accessor-backed exact Draft is read at most once and cannot change projection', async () => {
+  const mod = await api('R12 provider accessor isolation');
+  const secret = 'ghp_accessor_secret_changed_value';
+  let reads = 0;
+  const provider = fakeProvider({
+    lookup(request) {
+      const candidate = exactDraft(request);
+      Object.defineProperty(candidate, 'number', {
+        enumerable: true,
+        configurable: true,
+        get() {
+          reads += 1;
+          return reads === 1 ? 58 : secret;
+        },
+      });
+      return candidate;
+    },
+  });
+  const fixture = await harness(mod, { provider });
+  const accepted = assertEnqueued(await enqueue(mod, fixture));
+  const result = await mod.reconcileDraft(
+    accepted.operationId, accepted.committedRevision, fixture.ports,
+  );
+
+  assert.ok(reads <= 1, `provider accessor was evaluated ${reads} times`);
+  const published = JSON.stringify({ result, telemetry: fixture.telemetry.events });
+  assert.ok(!published.includes(secret), 'changed accessor data must never be published');
+  if (result.kind === 'Terminal' && result.outcome === 'REUSED') {
+    assert.equal(result.pullRequest.number, 58);
+  } else {
+    assertTerminal(result, 'REFUSED');
+    assert.equal(result.refusal, 'ProviderProtocolViolation');
+  }
+});
+
+test('R13 the public memory store exposes no seam that can forge a terminal effect', async () => {
+  const mod = await api('R13 unforgeable memory store');
+  const fixture = await harness(mod);
+  const accepted = assertEnqueued(await enqueue(mod, fixture));
+
+  assert.equal(typeof fixture.store.append, 'undefined', 'append must remain module-private');
+  assert.equal(
+    typeof fixture.store.bootstrapAndEnqueue,
+    'undefined',
+    'bootstrap mutation must remain module-private',
+  );
+  assert.equal(typeof fixture.store.withExecutor, 'undefined', 'executor ownership is not caller authority');
+
+  const snapshot = await fixture.store.inspectByOperation(accepted.operationId);
+  assert.equal(snapshot.state, 'ENQUEUED');
+  assert.equal(snapshot.terminal, null);
+  assert.equal(fixture.provider.calls.length, 0);
+  assert.equal(fixture.admission.calls.length, 0);
+});
+
+test('R14 inspection snapshots are deep owned and frozen and cannot poison reconciliation', async () => {
+  const mod = await api('R14 owned inspection snapshots');
+  const fixture = await harness(mod);
+  const accepted = assertEnqueued(await enqueue(mod, fixture));
+  const created = assertTerminal(await mod.reconcileDraft(
+    accepted.operationId, accepted.committedRevision, fixture.ports,
+  ), 'CREATED');
+
+  const byWork = await fixture.store.inspectByWork(accepted.workKey);
+  const byOperation = await fixture.store.inspectByOperation(accepted.operationId);
+  assertDeepFrozen(byWork, 'inspectByWork');
+  assertDeepFrozen(byOperation, 'inspectByOperation');
+  assert.notStrictEqual(byWork.identity, byOperation.identity);
+  assert.notStrictEqual(byWork.envelope, byOperation.envelope);
+  assert.notStrictEqual(byWork.terminal, byOperation.terminal);
+
+  assert.throws(() => { byWork.identity.operationId = SHA_C; }, TypeError);
+  assert.throws(() => { byWork.envelope.generation.headRevision = OID_C; }, TypeError);
+  assert.throws(() => { byWork.terminal.outcome = 'REFUSED'; }, TypeError);
+  assert.throws(() => { byWork.terminal.pullRequest.number = 999; }, TypeError);
+
+  const replay = assertTerminal(await mod.reconcileDraft(
+    accepted.operationId, created.committedRevision, fixture.ports,
+  ), 'CREATED');
+  assert.equal(replay.operationId, accepted.operationId);
+  assert.equal(replay.generation.headRevision, OID_B);
+  assert.equal(replay.pullRequest.number, 58);
 });
