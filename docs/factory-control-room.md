@@ -1031,9 +1031,12 @@ monotonicity carrier. This module never discovers it, never fetches GitHub, and 
 producer exists. Absent means the key is **omitted**, never a present `null`, for the digest-
 stability reason every optional block above states.
 
-**Authority is the Git Data ledger, and only that.** The producer performs a read-only pass over
-`refs/heads/gaia-ledger/**` and seals what it read into `gaia-hosted-draft-pump/1`, content-addressed
-over its canonical body. The JSON file an adapter reads is transport: its path, its mtime and its
+**Authority is the Git Data ledger, and only that.** The producer
+(`src/hosted-draft-pump-producer.mjs`) seals into `gaia-hosted-draft-pump/1`, content-addressed over
+its canonical body, the transition the hosted intake run just settled through the ledger's own
+compare-and-swap. It acquires no view of its own: it is a pure function over the receipt that run
+produced, and it refuses rather than publishes whenever that receipt is not a verified terminal or
+reconciled outcome. The JSON file an adapter reads is transport: its path, its mtime and its
 existence take no part in verification, and the artifact's own `revision` is what makes it
 verifiable regardless of which file it arrived in. A workflow receipt is retention-bounded and is a
 *report of* a transition rather than the transition; provenance is `committedRevision` and
@@ -1065,6 +1068,8 @@ and no animation — a pump transition is a standing fact, and a spinner would s
 happening about it. `observationAgeMs` and `transitionAgeMs` are two separate published facts, so a
 reading taken two seconds ago about a three-day-old transition cannot read as recent.
 
-The producer that writes the artifact is out of scope here, and so is closing the obstruction
-reading: `NO_ELIGIBLE_WORK` can still be published beside a stale pump. Both are later slices, and
-both will be written against this transition rather than against a guess.
+The producer that writes the artifact shipped in the following slice and is specified by
+docs/hosted-draft-pump-producer.md: the hosted intake run seals its own transition and uploads it,
+so the section is reachable without a human hand-authoring JSON. Closing the obstruction reading is
+still out of scope: `NO_ELIGIBLE_WORK` can be published beside a stale pump. That is a later slice,
+and it will be written against this transition rather than against a guess.

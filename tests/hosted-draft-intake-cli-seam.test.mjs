@@ -161,6 +161,11 @@ function invocation(workflow, event, temp) {
   return { argv, environment };
 }
 
+/** Remove whole lines from the workflow, so a revert control mutates it the way an editor would. */
+function withoutLines(workflow, drop) {
+  return workflow.split(/\r?\n/u).filter((line) => !drop(line)).join('\n');
+}
+
 function sink() {
   let value = '';
   return {
@@ -284,9 +289,9 @@ test('the workflow uploads exactly the observation path it told the CLI to write
 // ---------------------------------------------------------------------------
 
 test('revert control: deleting the issue-number binding loses the labelled issue identity', async () => {
-  const mutated = workflowText().split(/\r?\n/u)
-    .filter((line) => !/^ {10}GAIA_ISSUE_NUMBER:/u.test(line))
-    .join('\n');
+  const mutated = withoutLines(
+    workflowText(), (line) => /^ {10}GAIA_ISSUE_NUMBER:/u.test(line),
+  );
   assert.notEqual(mutated, workflowText(), 'the mutation must actually remove a line');
 
   const { exitCode, configuration } = await drive(mutated, 'issues');
@@ -311,8 +316,10 @@ test('revert control: a flag left without its value refuses the whole invocation
 });
 
 test('revert control: dropping the observation flag leaves the Control Room with nothing to read', async () => {
-  const mutated = workflowText().replace(
-    /\s*--observation-out \$env:GAIA_OBSERVATION_PATH `/u, ' `',
+  // Both the flag and its env binding go: either alone still reaches the CLI, because the CLI
+  // reads GAIA_OBSERVATION_PATH from the environment when the flag is absent.
+  const mutated = withoutLines(
+    workflowText(), (line) => line.includes('GAIA_OBSERVATION_PATH'),
   );
   assert.notEqual(mutated, workflowText(), 'the mutation must actually drop the flag');
 

@@ -76,6 +76,7 @@ jobs:
           GAIA_LEDGER_ROOT_OID: ${{ steps.policy.outputs.oid }}
           GAIA_LEDGER_ROOT_REVISION: ${{ steps.policy.outputs.revision }}
           GAIA_RECEIPT_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-receipt.json
+          GAIA_OBSERVATION_PATH: ${{ runner.temp }}/gaia-hosted-draft-pump-observation.json
           GAIA_ERROR_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-error.json
         run: |
           & node scripts/hosted-draft-pump.mjs intake `
@@ -84,6 +85,8 @@ jobs:
             --repository-node-id $env:GAIA_REPOSITORY_NODE_ID `
             --ledger-root-oid $env:GAIA_LEDGER_ROOT_OID `
             --ledger-root-revision $env:GAIA_LEDGER_ROOT_REVISION `
+            --observation-out $env:GAIA_OBSERVATION_PATH `
+            --run-id $env:GITHUB_RUN_ID `
             1> $env:GAIA_RECEIPT_PATH 2> $env:GAIA_ERROR_PATH
           $exitCode = $LASTEXITCODE
           if ($exitCode -ne 0) {
@@ -98,5 +101,19 @@ jobs:
           name: gaia-hosted-draft-intake-receipt
           path: ${{ runner.temp }}/gaia-hosted-draft-intake-receipt.json
           if-no-files-found: error
+          retention-days: 14
+          overwrite: false
+
+      # A typed observation refusal is a legitimate outcome, already named in the receipt above, so
+      # an absent document is `warn` rather than `error`. The Control Room reads the absence as a
+      # reading that aged out, which is the honest reading of a run that could not say what the
+      # pump did.
+      - name: Upload the verified pump observation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gaia-hosted-draft-pump-observation
+          path: ${{ runner.temp }}/gaia-hosted-draft-pump-observation.json
+          if-no-files-found: warn
           retention-days: 14
           overwrite: false

@@ -70,8 +70,9 @@ is in flight.
 ## The `intake` command
 
 One new command in `scripts/hosted-draft-pump.mjs`, added to `COMMANDS` and `COMMAND_FLAGS`
-(`COMMON_FLAGS` plus `issue`, `repository-node-id`, `owner`, `gate`, `check`, `eta-minutes`, with
-`issue` optional). Control flow, composed entirely from existing runtime methods:
+(`COMMON_FLAGS` plus `issue`, `repository-node-id`, `owner`, `gate`, `check`, `eta-minutes`,
+`observation-out`, `run-id`, with `issue` optional). Control flow, composed entirely from existing
+runtime methods:
 
 ```
 1. unsettled = listUnsettledDrafts(ports)
@@ -136,6 +137,16 @@ explicit flag still wins, leaving the sealed effect workflow's behaviour unchang
 reduced: the Git Data store re-verifies the root oid **and** its content revision against the live
 registry ref and throws `LedgerRegistryMismatch` otherwise. A tampered policy file fails closed.
 
+### The issue number, and why an empty environment value is absent
+
+`GAIA_ISSUE_NUMBER` binds `github.event.issue.number`, which Actions interpolates to the **empty
+string** on a `schedule` event. `envValue` therefore treats a present-and-empty environment value as
+absent, so a scheduled tick reaches the CLI as a schedule instead of dying at argument parsing. The
+rule is about environments only: an explicitly typed empty flag value stays a terminal
+`InvalidArguments`. `tests/hosted-draft-intake-cli-seam.test.mjs` reconstructs the exact environment
+and argv this workflow hands the CLI, from the workflow text itself, and drives both event paths
+through the real `main()`.
+
 ### Receipt
 
 One closed JSON document on stdout, uploaded as an artifact, emitted on every path including refusal:
@@ -149,14 +160,23 @@ One closed JSON document on stdout, uploaded as an artifact, emitted on every pa
   "operationId": "<sha256>|null",
   "workKey": "<sha256>|null",
   "committedRevision": "<sha256>|null",
+  "workItem": { "kind": "ISSUE", "number": 70 },
+  "unsettledCount": 0,
   "result": { "existing Terminal / Pending / StaleRevision / CrossGenerationIntent shape": "..." },
   "skipped": [{ "number": 51, "reason": "StaleRevision" }],
-  "telemetry": []
+  "telemetry": [],
+  "observation": { "state": "PRODUCED | REFUSED", "revision": "<sha256>", "reason": "<code>" }
 }
 ```
 
 `EXPECTED_NONE` and typed refusals are first-class phases, satisfying requirement 6. Error paths keep
 the existing closed redaction: no provider or transport diagnostic escapes.
+
+`workItem` is the issue the transition is bound to, and `unsettledCount` is what remained unsettled
+**after** this run acted — publishing the starting count would read a completed recovery as a stuck
+queue. Both are facts this run knows and nothing downstream can recover, and both are required by
+the observation body. `observation` appears only when one was requested, and carries either the
+sealed document's revision or the typed reason it was refused.
 
 ## Concurrency contract
 
@@ -286,6 +306,12 @@ append-only ledger the pump writes and derives nothing of its own:
 The Control Room surface is a **separate change** from the trigger. It adds `src/control-room*.mjs`
 to the file scope and needs its own RED pass; folding it into the intake change would blur two review
 surfaces. This section fixes its contract so that the later change cannot drift.
+
+The read model landed first and the producer landed after it, specified by
+docs/hosted-draft-pump-producer.md. The intake run seals its own transition through
+`src/hosted-draft-pump-producer.mjs` and writes it to `--observation-out`, which the workflow
+uploads as `gaia-hosted-draft-pump-observation`. No human hand-authors the document, and a run that
+cannot honestly say what the pump did publishes nothing and names the refusal in its receipt.
 
 ## Deliberately not built
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -19,6 +20,7 @@ import {
 } from '../src/hosted-draft-collector.mjs';
 import { createGitHubActionsDraftAdmission } from '../src/github-actions-draft-admission.mjs';
 import { runHostedDraftIntake } from '../src/hosted-draft-pump.mjs';
+import { produceHostedDraftPumpObservation } from '../src/hosted-draft-pump-producer.mjs';
 
 const execFileAsync = promisify(execFile);
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -53,6 +55,7 @@ const COMMAND_FLAGS = Object.freeze({
   'list-unsettled': COMMON_FLAGS,
   intake: new Set([
     ...COMMON_FLAGS, 'issue', 'repository-node-id', 'owner', 'gate', 'check', 'eta-minutes',
+    'observation-out', 'run-id',
   ]),
 });
 
@@ -85,10 +88,24 @@ function parseFlags(argv) {
   return { command, flags };
 }
 
+/**
+ * One environment read, where present-and-empty means absent.
+ *
+ * GitHub Actions interpolates a null event field to the empty string, so on a `schedule` event the
+ * intake workflow's `GAIA_ISSUE_NUMBER` binding arrives present and empty. An environment carrying
+ * `''` carries no value, and reading it as a malformed argument killed every scheduled recovery
+ * tick at argument parsing, before the ledger was ever read.
+ *
+ * The rule is about environments only. A flag typed as an empty value is a caller who got an
+ * argument wrong, and `configuredText` still refuses it — which is why this lives here and not
+ * there. Nothing required changes behaviour: an empty required value failed before through
+ * `configuredText('')` and fails after through `configuredText(undefined)`.
+ */
 function envValue(env, name) {
   const descriptor = env !== null && typeof env === 'object'
     ? Object.getOwnPropertyDescriptor(env, name) : null;
-  return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  if (!descriptor || !Object.hasOwn(descriptor, 'value')) return undefined;
+  return descriptor.value === '' ? undefined : descriptor.value;
 }
 
 function configuredText(value, maximum = 512) {
@@ -204,6 +221,18 @@ function parseConfiguration(argv, env) {
       checklist: suppliedChecklist ? checklist(flags, env) : INTAKE_PRESENTATION.checklist,
       eta: suppliedEta === undefined ? INTAKE_PRESENTATION.eta : eta(suppliedEta),
     };
+    const observationOut = optionalFlagOrEnv(
+      flags, 'observation-out', env, 'GAIA_OBSERVATION_PATH',
+    );
+    const runId = optionalFlagOrEnv(flags, 'run-id', env, 'GITHUB_RUN_ID');
+    if (observationOut !== undefined) {
+      // An observation is sequenced by the run that produced it. Without the run identity the
+      // reading could not be ordered against the one already published, and an unorderable
+      // reading is how a stale replay reads as current.
+      if (runId === undefined) fail();
+      configuration.observationOut = observationOut;
+      configuration.sequence = positiveInteger(runId);
+    }
   }
   return Object.freeze(configuration);
 }
@@ -344,12 +373,51 @@ function writeJson(stream, value) {
   stream.write(`${JSON.stringify(value)}\n`);
 }
 
+/**
+ * The refusal codes an observation attempt may report, closed.
+ *
+ * A refusal is named rather than swallowed, and no diagnostic text escapes with it: the receipt is
+ * an uploaded artifact, and the existing error paths already redact provider and transport detail.
+ */
+const OBSERVATION_REFUSALS = new Set([
+  'InvalidHostedDraftPumpReceipt', 'UnobservableHostedDraftPumpReceipt',
+  'InvalidHostedDraftPump', 'IncoherentHostedDraftPump',
+]);
+
+/**
+ * The receipt this run just produced, to one sealed observation the Control Room can verify.
+ *
+ * A refusal here does not fail the run: the intake itself succeeded, and a run that cannot honestly
+ * say what the pump did must publish nothing rather than a guess. The absent observation ages into
+ * STALE, which is the true reading. A write failure is not a refusal and is left to propagate.
+ */
+function observeTransition(configuration, receipt, instants) {
+  try {
+    return {
+      artifact: produceHostedDraftPumpObservation({
+        receipt,
+        repository: `${configuration.repository.owner}/${configuration.repository.name}`,
+        repositoryNodeId: configuration.repositoryNodeId,
+        ledgerRootOid: configuration.ledgerRootOid,
+        ledgerRootRevision: configuration.ledgerRootRevision,
+        sequence: configuration.sequence,
+        ...instants,
+      }),
+    };
+  } catch (error) {
+    const code = error?.code;
+    return { refusal: OBSERVATION_REFUSALS.has(code) ? code : 'ObservationFailed' };
+  }
+}
+
 export async function main({
   argv = process.argv.slice(2),
   env = process.env,
   stdout = process.stdout,
   stderr = process.stderr,
   runtimeFactory = createHostedDraftPumpRuntime,
+  now = () => new Date().toISOString(),
+  writeFile = (path, text) => writeFileSync(path, text, 'utf8'),
 } = {}) {
   let configuration;
   try {
@@ -389,6 +457,7 @@ export async function main({
         telemetry: cloneJson(telemetry.events),
       };
     } else if (configuration.command === 'intake') {
+      const windowStartedAt = now();
       const intake = cloneJson(await runHostedDraftIntake({
         repository: configuration.repository,
         candidates: configuration.issue === undefined ? null : [configuration.issue],
@@ -404,6 +473,7 @@ export async function main({
           return runtime.reconcile({ operationId, workKey: ports.workKey, expectedRevision });
         },
       }));
+      const tickAt = now();
       receipt = {
         schema: 'GaiaHostedDraftPumpCliReceiptV0', command: 'intake',
         trigger: configuration.issue === undefined ? 'SCHEDULE' : 'ISSUES_LABELED',
@@ -411,10 +481,26 @@ export async function main({
         operationId: intake.operationId,
         workKey: intake.workKey,
         committedRevision: intake.committedRevision,
+        workItem: intake.workItem,
+        unsettledCount: intake.unsettledCount,
         result: intake.result,
         skipped: intake.skipped,
         telemetry: cloneJson(telemetry.events),
       };
+      if (configuration.observationOut !== undefined) {
+        const observed = observeTransition(configuration, receipt, {
+          windowStartedAt, tickAt, observedAt: now(),
+        });
+        if (observed.artifact === undefined) {
+          receipt = { ...receipt, observation: { state: 'REFUSED', reason: observed.refusal } };
+        } else {
+          writeFile(configuration.observationOut, `${JSON.stringify(observed.artifact)}\n`);
+          receipt = {
+            ...receipt,
+            observation: { state: 'PRODUCED', revision: observed.artifact.revision },
+          };
+        }
+      }
     } else {
       receipt = {
         schema: 'GaiaHostedDraftPumpCliReceiptV0', command: 'list-unsettled',

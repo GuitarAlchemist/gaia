@@ -179,6 +179,14 @@ async function boundPorts(create, argument) {
   return ports;
 }
 
+/**
+ * The closed intake receipt.
+ *
+ * `workItem` and `unsettledCount` are published because they are facts this run knows and nobody
+ * downstream can recover: the issue a transition belongs to is requirement 7's binding, and the
+ * count is what remained unsettled AFTER this run acted, not what it found before it. Publishing
+ * the starting count would read a completed recovery as a stuck queue.
+ */
 function intakeReceipt(phase, binding, value, skipped) {
   return freeze({
     schema: 'GaiaHostedDraftIntakeReceiptV0',
@@ -186,9 +194,16 @@ function intakeReceipt(phase, binding, value, skipped) {
     operationId: binding.operationId,
     workKey: binding.workKey,
     committedRevision: binding.committedRevision,
+    workItem: binding.workItem,
+    unsettledCount: binding.unsettledCount,
     result: value,
     skipped,
   });
+}
+
+/** A settled operation is one that reached a terminal outcome; everything else is still open. */
+function settledByThisRun(value) {
+  return value.kind === 'Terminal';
 }
 
 function settledRevision(value, fallback) {
@@ -237,6 +252,8 @@ export async function runHostedDraftIntake({
       operationId: record.operationId,
       workKey: record.workKey,
       committedRevision: settledRevision(reconciled, record.committedRevision),
+      workItem: record.selector.workItem,
+      unsettledCount: records.length - (settledByThisRun(reconciled) ? 1 : 0),
     }, reconciled, []);
   }
 
@@ -280,12 +297,17 @@ export async function runHostedDraftIntake({
     const reconciled = result(await deps.reconcileDraft(operationId, committedRevision, ports));
     return intakeReceipt('ADMIT', {
       operationId, workKey, committedRevision: settledRevision(reconciled, committedRevision),
+      workItem: canonicalSelector.workItem,
+      unsettledCount: settledByThisRun(reconciled) ? 0 : 1,
     }, reconciled, skipped);
   }
 
   return intakeReceipt(
     'EXPECTED_NONE',
-    { operationId: null, workKey: null, committedRevision: null },
+    {
+      operationId: null, workKey: null, committedRevision: null,
+      workItem: null, unsettledCount: 0,
+    },
     null,
     skipped,
   );
