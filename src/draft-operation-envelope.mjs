@@ -206,6 +206,7 @@ class MemoryDraftOperationStore {
       withExecutor: this.#withExecutor.bind(this),
       inspectByWork: this.#inspectByWork.bind(this),
       inspectByOperation: this.#inspectByOperation.bind(this),
+      listUnsettled: this.#listUnsettled.bind(this),
     }));
   }
 
@@ -272,6 +273,15 @@ class MemoryDraftOperationStore {
     const workKey = this.#operations.get(operationId);
     if (!workKey) return null;
     return this.#inspectByWork(workKey);
+  }
+
+  async #listUnsettled() {
+    const unsettled = [];
+    for (const workKey of [...this.#work.keys()].sort()) {
+      const snapshot = await this.#inspectByWork(workKey);
+      if (snapshot && !snapshot.terminal) unsettled.push(snapshot);
+    }
+    return Object.freeze(unsettled);
   }
 
   async inspectByWork(workKey) {
@@ -461,6 +471,7 @@ class GitDataDraftOperationStore {
       append: this.#appendOperation.bind(this),
       withExecutor: this.#withExecutor.bind(this),
       inspectByOperation: this.#inspectByOperation.bind(this),
+      listUnsettled: this.#listUnsettled.bind(this),
     }));
   }
 
@@ -684,6 +695,16 @@ class GitDataDraftOperationStore {
     return this.#snapshot(await this.#stateByOperation(operationId));
   }
 
+  async #listUnsettled() {
+    const registry = await this.#registry();
+    const unsettled = [];
+    for (const workKey of [...registry.entries.keys()].sort()) {
+      const snapshot = await this.#inspectByWork(workKey);
+      if (snapshot && !snapshot.terminal) unsettled.push(snapshot);
+    }
+    return Object.freeze(unsettled);
+  }
+
   async #stateByOperation(operationId) {
     const observed = await this.#gitData.readByOperation(operationId);
     const located = validateGitDataSnapshot(observed);
@@ -889,6 +910,31 @@ export function createMemoryDraftOperationPorts(options) {
 
 export function createDraftOperationPorts(options) {
   return createOperationPorts(options, false);
+}
+
+function projectUnsettled(snapshot) {
+  return closedObject([
+    ['operationId', snapshot.identity.operationId],
+    ['workKey', snapshot.identity.workKey],
+    ['committedRevision', snapshot.committedRevision],
+    ['selector', closedObject([
+      ['repository', closedObject([
+        ['owner', snapshot.envelope.repository.owner],
+        ['name', snapshot.envelope.repository.name],
+      ])],
+      ['workItem', closedObject([
+        ['kind', snapshot.envelope.workItem.kind],
+        ['number', snapshot.envelope.workItem.number],
+      ])],
+    ])],
+  ]);
+}
+
+export async function listUnsettledDrafts(ports) {
+  const snapshots = await storeCapabilities(ports?.store).listUnsettled();
+  return Object.freeze(snapshots
+    .map(projectUnsettled)
+    .sort((left, right) => left.workKey.localeCompare(right.workKey)));
 }
 
 function stale(current) {
