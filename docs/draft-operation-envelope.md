@@ -45,10 +45,14 @@ process termination and the concurrency group. A dedicated append-only Git ref i
 ingress and receipt ledger; Actions is only an executor, never the queue or ledger. The memory
 adapter exercises the same state-machine contract without claiming production authority.
 
-## Closed envelope
+## Closed observed envelope
 
-The public constructor accepts exactly this shape and rejects missing, extra, inherited,
-accessor, symbol, non-enumerable, or non-canonical values without evaluating accessors:
+No dispatcher constructs this envelope. The public `enqueueDraft` seam accepts only the closed
+selector `{ repository: { owner, name }, workItem: { kind: 'ISSUE', number } }`. A hosted source
+collector resolves the selector against GitHub, constructs the observed envelope below, and passes
+it directly to the internal sealer. The sealer accepts exactly this shape and rejects missing,
+extra, inherited, accessor, symbol, non-enumerable, or non-canonical values without evaluating
+accessors:
 
 ```js
 {
@@ -73,11 +77,12 @@ accessor, symbol, non-enumerable, or non-canonical values without evaluating acc
 }
 ```
 
-All strings are non-empty canonical text with no control characters. Revisions are exact lowercase
-SHA-256 values, `headRevision` is an exact lowercase Git object id, `number` and `ordinal` are safe
-positive integers, and every vocabulary is closed. Canonicalization never silently trims, folds,
-or coerces caller data. Capacity and admission are deliberately absent: an untrusted dispatcher
-cannot mint effect authority by writing `AVAILABLE` into its envelope.
+All strings are non-empty canonical text with no control characters. Content revisions are exact
+64-lowercase-hex SHA-256 values; `headRevision` and `policyRevision` are exact
+40-lowercase-hex GitHub Git object ids. `number` and `ordinal` are safe positive integers, and every
+vocabulary is closed. Canonicalization never silently trims, folds, or coerces caller data.
+Capacity and admission are deliberately absent: an untrusted dispatcher cannot mint effect
+authority by writing `AVAILABLE` into its envelope.
 
 The module recomputes `readyItem.id` as the SHA-256 of canonical JSON containing `workKey`,
 `queueReceiptRevision`, `occurrence`, and `observedSourceRevision`; a mismatch is refused. A queue
@@ -86,6 +91,41 @@ No label, title, prompt, agent, or clock participates.
 
 The constructor returns an internal null-prototype copy whose nested records are frozen. No raw
 caller reference crosses validation. The module reads only that sealed copy after construction.
+
+Before sealing, the hosted collector must obtain all authority-bearing values from GitHub APIs:
+
+- the issue must be open and currently carry `ready-for-agent`;
+- `queueReceiptRevision` is SHA-256 over the canonical issue node id, latest matching label-event
+  node id, event instant, and actor node id; the actor must currently have `triage` or stronger
+  repository permission;
+- `occurrence` is the one-based ordinal of that matching label event in the issue timeline;
+- `baseRef` is the repository default branch, while `headRef` is the unique repository branch whose
+  evidence commit carries exact `Gaia-Issue` and `Gaia-Ready-Receipt` trailers;
+- `headRevision` is read back from that Git ref, and `policyRevision` is the exact Git object id of
+  `.github/gaia/pump-policy.json` used from the base revision; and
+- `observedSourceRevision` is SHA-256 over the canonical issue node/update ids, ready-label event,
+  base/head refs and object ids, and policy revision observed in that same collection pass.
+
+The two collector digests use the canonical function defined below and these exact preimages:
+
+```text
+queueReceiptRevision = sha256(canonical({
+  schema: 'GaiaQueueReceiptRevisionV0', issueNodeId,
+  readyLabelEventNodeId, readyLabelEventAt, readyLabelActorNodeId
+}))
+observedSourceRevision = sha256(canonical({
+  schema: 'GaiaObservedSourceRevisionV0', issueNodeId, issueUpdatedAt,
+  readyLabelEventNodeId, baseRef, baseRevision, headRef, headRevision,
+  policyRevision
+}))
+```
+
+`Gaia-Issue` is the decimal issue number and `Gaia-Ready-Receipt` is the exact
+`queueReceiptRevision`; both trailers must occur exactly once in the evidence commit.
+
+Zero or multiple matching events or branches, insufficient label-actor permission, a moving ref
+during the two read-backs, missing policy, or any API ambiguity refuses before `ENQUEUED`. Tests
+provide a fake hosted collector; they never accept caller-authored receipt or source revisions.
 
 ## Two identities, one lookup rule
 
@@ -96,6 +136,32 @@ The abstraction preserves the distinction PR #58 erased:
 - `generationKey` binds `readyItem.id` and the complete `generation` record.
 - `operationId` binds `workKey + generationKey`.
 
+"Binds" is byte-exact. Canonical JSON supports only the closed values in this document: object keys
+are sorted by Unicode code point, arrays preserve order, strings use RFC 8259 JSON escaping with no
+optional escapes, safe integers use shortest base-10 notation, and there is no whitespace. UTF-8
+bytes are hashed with SHA-256 and rendered as 64 lowercase hex characters. The preimages are:
+
+```text
+workKey = sha256(canonical({
+  schema: 'GaiaDraftWorkKeyV0', repository, workItem,
+  requestedEffect: 'CREATE_DRAFT'
+}))
+generationKey = sha256(canonical({
+  schema: 'GaiaDraftGenerationKeyV0', readyItemId: readyItem.id, generation
+}))
+operationId = sha256(canonical({
+  schema: 'GaiaDraftOperationIdV0', workKey, generationKey
+}))
+readyItem.id = sha256(canonical({
+  schema: 'GaiaReadyItemIdV0', workKey, queueReceiptRevision,
+  occurrence, observedSourceRevision
+}))
+```
+
+These functions are shared product code, not adapter hooks. A result outside exact 64-hex is
+impossible. Consequently `<workKey>` is a fixed, ref-safe 64-character path component and the
+memory store, Git refs, Actions group, provider marker, and tests cannot choose different identities.
+
 The durable store indexes the latest intent by `workKey`, never by `operationId` alone. Therefore a
 new ready-item, policy, or head generation still finds an older intent for the same logical work.
 An exact generation may reconcile it. A different generation returns a typed
@@ -104,41 +170,57 @@ because a queue revision changed.
 
 ## Concrete GitHub ledger and adapter contract
 
-The hosted ledger is the ref family
+The hosted ledger uses a registry ref `refs/heads/gaia-ledger/registry-v0` plus the ref family
 `refs/heads/gaia-ledger/draft-operations-v0/<workKey>`, one append-only branch per logical work.
 Workflow triggers must exclude `gaia-ledger/**`; moving these refs is storage, not a source change.
-Each ref's head commit is that work's only authoritative revision. Each commit has exactly one parent
-(except the bootstrap root), one
-canonical JSON `receipt.json` blob, and no caller-authored commit metadata used by replay. The
-receipt is a closed null-prototype record containing schema, prior head, record kind, work key,
-generation key when known, operation id when known, executor epoch when known, and the minimum
-closed payload for that kind. Raw prompts, provider prose, credentials, paths, and account data are
-forbidden. `ENQUEUED` alone carries the complete sealed envelope; executors reload that copy and
-never accept an envelope from workflow inputs.
+The registry records each work branch's reservation and bootstrap root; a missing work ref that is
+already registered is corruption, never a new bootstrap. A required GitHub ruleset forbids deletion
+and non-fast-forward updates for `gaia-ledger/**` and restricts updates to the Gaia pump GitHub App.
+The adapter verifies that ruleset before every write and fails closed when it is absent or changed;
+the pump has no authority to create, loosen, or bypass it.
+
+Each ref head is a hidden `ledgerHeadOid`, the exact 40-lowercase-hex Git object id used only for
+Git CAS. It is not a source or content revision. Each commit has exactly one parent (except a
+registered bootstrap root), one canonical JSON `receipt.json` blob, and no caller-authored commit
+metadata used by replay. The blob is `{ body, committedRevision }`, where `body` is a closed
+null-prototype record containing schema, `priorHeadOid`, `priorCommittedRevision`, record kind,
+work key, generation key when known, operation id when known, executor epoch when known, and the
+minimum closed payload for that kind. `committedRevision` is the SHA-256 of the canonical UTF-8
+bytes of `body` and is therefore exact 64-lowercase-hex. Raw prompts, provider prose, credentials,
+paths, and account data are forbidden. `ENQUEUED` alone carries the complete sealed envelope;
+executors reload that copy and never accept an envelope from workflow inputs.
 
 The closed record kinds are `ENQUEUED`, `CLAIMED`, `INTENT`, `EFFECT_STARTED`,
-`EFFECT_AMBIGUOUS`, `CREATED`, `SATISFIED`, `REFUSED`, and `CANCELLED`. The first five are
+`EFFECT_AMBIGUOUS`, `CREATED`, `REUSED`, `REFUSED`, and `CANCELLED`. The first five are
 nonterminal. `EFFECT_AMBIGUOUS` means a create request may already have reached GitHub and only
 exact observation can settle it; it is never projected as refusal or completion.
 
 The Git Data adapter exposes only:
 
 ```text
-readHead(workKey) -> { revision, records }
-append(workKey, expectedRevision, closedRecord) -> { committedRevision }
+readHead(workKey) -> { ledgerHeadOid, committedRevision, records }
+append(workKey, { ledgerHeadOid, committedRevision }, closedRecord)
+  -> { ledgerHeadOid, committedRevision }
 listUnsettled(refPrefix) -> closed operation identities
 ```
 
-`append` creates a blob, tree, and single-parent commit whose parent is `expectedRevision`, then
+Every expected revision must contain both values. The registry has the same two-revision protocol
+and adds `reserveWork(workKey)` and
+`confirmWork(workKey, bootstrapHeadOid)`. A crash after reservation but before confirmation may
+resume only that exact deterministic bootstrap. Once confirmed, absence can never bootstrap again.
+
+`append` validates `priorCommittedRevision`, creates a blob, tree, and single-parent commit whose
+parent is `expectedRevision.ledgerHeadOid`, then
 updates the ref with `force: false`. Two candidates from the same parent are siblings: after one
 fast-forward succeeds, the other update is non-fast-forward and must fail as `StaleRevision` before
 any Draft effect. The adapter rereads but never silently rebases an effect-bearing record. Bootstrap
 creates one root record; concurrent bootstrap losers reread the winning ref. Missing, deleted,
 force-rewritten, multi-parent, non-canonical, discontinuous, or corrupt history fails closed and
-alerts. The branches and their commit chains are retained append-only: the pump never force-updates,
-deletes, squashes, truncates, or garbage-collects them.
+alerts. The registry, ruleset, branches, and their commit chains are retained append-only: the pump
+never force-updates, deletes, squashes, truncates, or garbage-collects them.
 
-`enqueueDraft(envelope, expectedRevision, ledger)` seals the envelope, derives `workKey`, refuses a
+`enqueueDraft(selector, expectedRevision, ports)` uses the hosted collector to build and seal the
+observed envelope, derives `workKey`, refuses a
 different generation while that work has a nonterminal generation, then CAS-appends `ENQUEUED`.
 Only after that accepted append may a dispatcher request a workflow. A failed,
 cancelled, replaced, or queue-overflowed dispatch therefore leaves durable unsettled work. A
@@ -155,7 +237,7 @@ that exact run/attempt `in_progress`, its concurrency group matches `workKey`, a
 names its current `CLAIMED` epoch. Otherwise it returns `ZERO`; no `INTENT`, `EFFECT_STARTED`, or
 provider create call is legal. The memory
 adapter supplies the same trusted `reserveEffect` seam for deterministic `AVAILABLE` and `ZERO`
-tests. Thus capacity is an executor fact, not caller data. Exact-Draft lookup and `SATISFIED`
+tests. Thus capacity is an executor fact, not caller data. Exact-Draft lookup and `REUSED`
 adoption happen before `reserveEffect`, so adoption remains legal at zero effect capacity.
 
 The shared black-box contract runs against the memory adapter and a fake Git Data API implementing
@@ -182,17 +264,26 @@ after `enqueueDraft` has returned the accepted operation id and committed revisi
    and `EFFECT_STARTED` under that same current epoch;
 9. perform at most one provider effect while the executor still owns that epoch;
 10. reconcile ambiguous responses by exact operation marker; and
-11. append one coherent terminal record derived only from the sealed envelope and provider result.
+11. append one coherent terminal record only for an exact Draft or definitive refusal; otherwise
+    append `EFFECT_AMBIGUOUS` and return `Pending` with no terminal claim.
 
 Every path which appends state, including effect-free adoption, is revision-gated. A stale caller
 returns `StaleRevision` and writes nothing. A stale or cross-generation owner performs no effect.
+
+The public reconciliation result is exactly one of `Terminal(CREATED|REUSED|REFUSED|CANCELLED)`,
+`Pending(EFFECT_AMBIGUOUS)`, `StaleRevision`, or `CrossGenerationIntent`. `Pending` is neither
+success nor refusal and carries no completion percentage. Provider error categories appear only
+inside the compatible terminal or pending variant defined below.
 
 `cancelDraft(operationId, expectedRevision, store)` is the only cancellation seam. It reloads the
 sealed envelope from `ENQUEUED` and uses the same `workKey` executor and durable revision as
 reconciliation. If cancellation commits before
 `EFFECT_STARTED`, reconciliation returns `Cancelled` with zero effect. If reconciliation already
-owns the executor, cancellation observes its terminal result and cannot publish a false cancelled
-state. Cancellation carries no provider or merge authority.
+owns the executor but has not started the effect, the same ordering decides one winner. At or after
+`EFFECT_STARTED`, cancellation cannot append `CANCELLED`: it returns `CancellationDeferred` with
+the current terminal record or nonterminal `EFFECT_AMBIGUOUS`. Later exact reconciliation may
+become `CREATED` or `REUSED`; cancellation can never turn possible remote success into false
+absence. Cancellation carries no provider or merge authority.
 
 The production adapter uses the GitHub Actions group and ledger protocol above. Its receipt chain
 records executor run id and attempt. A successor replays GitHub-persisted receipts and fences every
@@ -231,8 +322,9 @@ failure cannot change or conceal a durable reconciliation result.
 The terminal vocabulary is closed:
 
 - `CREATED`: effect `CREATE_DRAFT`, exact pull request, no refusal;
-- `SATISFIED`: effect `NONE`, exact pull request, no refusal; or
-- `REFUSED`: effect `NONE`, no pull request, one closed refusal category.
+- `REUSED`: effect `NONE`, exact pull request, no refusal; or
+- `REFUSED`: effect `NONE`, no pull request, one closed refusal category; or
+- `CANCELLED`: effect `NONE`, no pull request, cancellation committed before `EFFECT_STARTED`.
 
 `EFFECT_AMBIGUOUS` is explicitly nonterminal and projects effect `UNKNOWN`, no pull request, and
 `ProviderAmbiguous`. It is excluded from completion, throughput-success, and refusal counts. A
@@ -258,12 +350,21 @@ counterexamples RED against the new public seam:
 4. lookup and create transport failures return typed redacted results with no raw diagnostic.
 
 The suite must also retain the original eleven-row fault matrix, including cancellation/completion
-ordering and exact-Draft adoption when trusted `reserveEffect` returns `ZERO`. It runs one black-box lifecycle contract
-against the memory adapter and the GitHub-hosted executor/receipt adapter. Behavioral
+ordering and exact-Draft adoption when trusted `reserveEffect` returns `ZERO`. It runs one
+black-box lifecycle contract against the memory adapter and the GitHub-hosted executor/receipt
+adapter. Behavioral
 mechanism-revert mutants cover stable work lookup, ready-item derivation, envelope sealing,
 revision gating, non-force ledger CAS, durable ingress, executor epochs, trusted capacity,
 cancellation ordering, intent-before-effect, ambiguous nonterminal reconciliation, error closure,
 and terminal binding.
+
+Additional RED gates require both adapters to produce byte-identical identities and 64-hex content
+revisions, distinguish those revisions from 40-hex Git CAS OIDs, ignore or refuse forged caller
+receipt/source values, fail closed when a registered work ref is missing, retain `ENQUEUED` after a
+cancelled dispatch, and return `CancellationDeferred + EFFECT_AMBIGUOUS` for cancellation after a
+possibly successful lost response. The hosted collector fake must prove that changing any
+authoritative issue event, ref OID, or policy OID changes the observed envelope while changing an
+untrusted caller field cannot.
 
 ## Success and rejection criteria
 
