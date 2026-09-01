@@ -532,6 +532,7 @@ export function planManagedRoundUpdate(input) {
     idempotencyKey: advanceKey,
     advanceKey,
     roundKey: round.roundKey,
+    effectOwner: receipt.responsibility.effectOwner,
     expected: Object.freeze({
       number: observed.number, headRevision: observed.headRevision,
       bodyRevision: observed.bodyRevision,
@@ -550,8 +551,9 @@ function adapterPort(value) {
 }
 
 export async function executeManagedRoundUpdate(input) {
-  keys(input, ['workKey', 'number', 'receipt', 'adapter'], 'InvalidInput');
+  keys(input, ['workKey', 'number', 'receipt', 'effectActor', 'adapter'], 'InvalidInput');
   if (!Number.isSafeInteger(input.number) || input.number <= 0) fail('InvalidInput');
+  if (typeof input.effectActor !== 'string') fail('InvalidInput');
   const adapter = adapterPort(input.adapter);
   let observed;
   let mismatch = null;
@@ -561,6 +563,8 @@ export async function executeManagedRoundUpdate(input) {
       workKey: input.workKey, observation: observed, receipt: input.receipt,
     });
     if (plan.kind !== 'PROPOSED') return plan;
+    if (plan.effectOwner === 'NONE') return refusal('EffectAuthorityAbsent');
+    if (input.effectActor !== plan.effectOwner) return refusal('EffectOwnerMismatch');
     const effect = Object.freeze({
       operationId: plan.operationId,
       idempotencyKey: plan.idempotencyKey,
@@ -569,6 +573,8 @@ export async function executeManagedRoundUpdate(input) {
       expectedBodyRevision: plan.expected.bodyRevision,
       proposedBody: plan.proposedBody,
       proposedBodyRevision: plan.proposedBodyRevision,
+      effectOwner: plan.effectOwner,
+      effectActor: input.effectActor,
     });
     const acknowledgement = await adapter.compareAndSet(effect);
     if (acknowledgement?.kind !== 'ACKNOWLEDGED'
