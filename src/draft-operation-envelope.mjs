@@ -328,10 +328,18 @@ const WORK_REF_PREFIX = 'refs/heads/gaia-ledger/draft-operations-v0/';
 
 function validateGitDataRecord(record, priorCommittedRevision) {
   const code = 'LedgerCorrupt';
-  requireExactKeys(record, ['oid', 'body', 'committedRevision'], code);
+  ownDataKeys(record, code);
+  const hasTransportMetadata = record?.body?.kind === 'CONFIRMED';
+  requireExactKeys(record, hasTransportMetadata
+    ? ['oid', 'body', 'committedRevision', 'transportMetadata']
+    : ['oid', 'body', 'committedRevision'], code);
   requireGitOid(record.oid, code);
   requireRevision(record.committedRevision, code);
   ownDataKeys(record.body, code);
+  if (hasTransportMetadata) {
+    requireExactKeys(record.transportMetadata, ['workRootOid'], code);
+    requireGitOid(record.transportMetadata.workRootOid, code);
+  }
   if (record.body.priorCommittedRevision !== priorCommittedRevision
     || contentRevision(record.body) !== record.committedRevision) throw new DraftOperationError(code);
   return record;
@@ -362,7 +370,7 @@ function validateLedgerTransition(previous, next) {
   const allowed = {
     ENQUEUED: new Set(['CLAIMED', 'REUSED', 'REFUSED', 'CANCELLED']),
     CLAIMED: new Set(['CLAIMED', 'INTENT', 'REUSED', 'REFUSED', 'CANCELLED']),
-    INTENT: new Set(['INTENT', 'EFFECT_STARTED', 'REUSED', 'REFUSED', 'CANCELLED']),
+    INTENT: new Set(['CLAIMED', 'INTENT', 'EFFECT_STARTED', 'REUSED', 'REFUSED', 'CANCELLED']),
     EFFECT_STARTED: new Set(['EFFECT_AMBIGUOUS', 'CREATED', 'REUSED']),
     EFFECT_AMBIGUOUS: new Set(['REUSED']),
   };
@@ -501,18 +509,17 @@ class GitDataDraftOperationStore {
       } else if (record.body.kind === 'CONFIRMED') {
         requireExactKeys(record.body, [
           'schema', 'priorCommittedRevision', 'kind', 'workKey',
-          'bootstrapCommittedRevision', 'bootstrapOid',
+          'bootstrapCommittedRevision',
         ], 'LedgerCorrupt');
         requireRevision(record.body.workKey, 'LedgerCorrupt');
         requireRevision(record.body.bootstrapCommittedRevision, 'LedgerCorrupt');
-        requireGitOid(record.body.bootstrapOid, 'LedgerCorrupt');
         if (entries.get(record.body.workKey)?.state !== 'RESERVED') {
           throw new DraftOperationError('LedgerCorrupt');
         }
         entries.set(record.body.workKey, {
           state: 'CONFIRMED',
           bootstrapCommittedRevision: record.body.bootstrapCommittedRevision,
-          bootstrapOid: record.body.bootstrapOid,
+          bootstrapOid: record.transportMetadata.workRootOid,
         });
       } else {
         throw new DraftOperationError('LedgerCorrupt');
@@ -563,7 +570,9 @@ class GitDataDraftOperationStore {
         if (EPOCH_STATES.has(state)) {
           const validEpoch = state === record.body.kind
             ? isSuccessorLedgerEpoch(record.body.executorEpoch, executorEpoch)
-            : sameLedgerEpoch(record.body.executorEpoch, executorEpoch);
+            : state === 'INTENT' && record.body.kind === 'CLAIMED'
+              ? isSuccessorLedgerEpoch(record.body.executorEpoch, executorEpoch)
+              : sameLedgerEpoch(record.body.executorEpoch, executorEpoch);
           if (!validEpoch) throw new DraftOperationError('LedgerCorrupt');
         }
         executorEpoch = record.body.executorEpoch;
@@ -686,20 +695,30 @@ class GitDataDraftOperationStore {
     return this.#validateRegisteredWork(await this.#registry(), work);
   }
 
-  async #append(ref, expectedHeadOid, body) {
+  async #append(ref, expectedHeadOid, body, transportMetadata) {
     const protectedRefs = await this.#gitData.verifyProtection({
       prefix: 'refs/heads/gaia-ledger/',
       registryRootOid: this.#config.ledgerRegistryRootOid,
     });
     if (protectedRefs !== true) throw new DraftOperationError('LedgerProtectionMissing');
-    const result = await this.#gitData.compareAndAppend(ref, expectedHeadOid, body);
+    const result = await this.#gitData.compareAndAppend(
+      ref, expectedHeadOid, body, transportMetadata,
+    );
     if (result?.kind === 'STALE') return { stale: true };
-    requireExactKeys(result, ['kind', 'oid', 'body', 'committedRevision'], 'LedgerCorrupt');
+    requireExactKeys(result, transportMetadata === undefined
+      ? ['kind', 'oid', 'body', 'committedRevision']
+      : ['kind', 'oid', 'body', 'committedRevision', 'transportMetadata'], 'LedgerCorrupt');
     if (result.kind !== 'APPENDED'
       || result.committedRevision !== contentRevision(body)) throw new DraftOperationError('LedgerCorrupt');
-    validateGitDataRecord({
+    if (transportMetadata !== undefined
+      && result.transportMetadata?.workRootOid !== transportMetadata.workRootOid) {
+      throw new DraftOperationError('LedgerCorrupt');
+    }
+    const record = {
       oid: result.oid, body: result.body, committedRevision: result.committedRevision,
-    }, body.priorCommittedRevision);
+    };
+    if (transportMetadata !== undefined) record.transportMetadata = result.transportMetadata;
+    validateGitDataRecord(record, body.priorCommittedRevision);
     return { stale: false, ...result };
   }
 
@@ -773,9 +792,11 @@ class GitDataDraftOperationStore {
           ['kind', 'CONFIRMED'],
           ['workKey', identity.workKey],
           ['bootstrapCommittedRevision', root.committedRevision],
-          ['bootstrapOid', root.oid],
         ]);
-        const confirmed = await this.#append(REGISTRY_REF, registry.headOid, confirmedBody);
+        const confirmed = await this.#append(
+          REGISTRY_REF, registry.headOid, confirmedBody,
+          closedObject([['workRootOid', root.oid]]),
+        );
         if (confirmed.stale) {
           return { stale: true, currentCommittedRevision: root.committedRevision };
         }
@@ -1100,6 +1121,19 @@ export async function reconcileDraft(operationId, expectedCommittedRevision, por
       snapshot = claimed.snapshot;
     }
 
+    if (snapshot.state === 'INTENT'
+      && !sameLedgerEpoch(snapshot.executorEpoch, ports.executorEpoch)) {
+      if (!isSuccessorLedgerEpoch(ports.executorEpoch, snapshot.executorEpoch)) {
+        return stale(snapshot);
+      }
+      const claimed = await appendOrCurrent(
+        ports, operationId, snapshot.committedRevision, 'CLAIMED',
+        { executorEpoch: ports.executorEpoch },
+      );
+      if (!claimed.ok) return claimed.result;
+      snapshot = claimed.snapshot;
+    }
+
     if (snapshot.state === 'CLAIMED') {
       let capacity;
       try {
@@ -1114,18 +1148,6 @@ export async function reconcileDraft(operationId, expectedCommittedRevision, por
       }
       if (capacity === 'ZERO') return refuse(ports, snapshot, 'NoEffectCapacity');
       if (capacity !== 'AVAILABLE') throw new DraftOperationError('InvalidAdmission');
-      const intent = await appendOrCurrent(
-        ports, operationId, snapshot.committedRevision, 'INTENT',
-        { executorEpoch: ports.executorEpoch },
-      );
-      if (!intent.ok) return intent.result;
-      snapshot = intent.snapshot;
-    }
-    if (snapshot.state === 'INTENT'
-      && !sameLedgerEpoch(snapshot.executorEpoch, ports.executorEpoch)) {
-      if (!isSuccessorLedgerEpoch(ports.executorEpoch, snapshot.executorEpoch)) {
-        return stale(snapshot);
-      }
       const intent = await appendOrCurrent(
         ports, operationId, snapshot.committedRevision, 'INTENT',
         { executorEpoch: ports.executorEpoch },
