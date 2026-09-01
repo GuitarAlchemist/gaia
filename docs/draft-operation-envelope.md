@@ -191,8 +191,8 @@ Each ref head is a hidden `ledgerHeadOid`, the exact 40-lowercase-hex Git object
 Git CAS. It is not a source or content revision. Each commit has exactly one parent (except a
 registered bootstrap root), one canonical JSON `receipt.json` blob, and no caller-authored commit
 metadata used by replay. The blob is `{ body, committedRevision }`, where `body` is a closed
-null-prototype record containing schema, `priorHeadOid`, `priorCommittedRevision`, record kind,
-work key, generation key when known, operation id when known, executor epoch when known, and the
+null-prototype record containing schema, `priorCommittedRevision`, record kind, work key,
+generation key when known, operation id when known, executor epoch when known, and the
 minimum closed payload for that kind. `committedRevision` is the SHA-256 of the canonical UTF-8
 bytes of `body` and is therefore exact 64-lowercase-hex. Raw prompts, provider prose, credentials,
 paths, and account data are forbidden. `ENQUEUED` alone carries the complete sealed envelope;
@@ -221,15 +221,17 @@ non-force update. The registry has the same private two-revision protocol and ad
 resume only that exact deterministic bootstrap. Once confirmed, absence can never bootstrap again.
 
 `append` validates `priorCommittedRevision`, creates a blob, tree, and single-parent commit whose
-parent is `expectedRevision.ledgerHeadOid`, then
+private Git parent is `expectedRevision.ledgerHeadOid`, then
 updates the ref with `force: false`. Two candidates from the same parent are siblings: after one
 fast-forward succeeds, the other update is non-fast-forward and must fail as `StaleRevision` before
 any Draft effect. The adapter rereads but never silently rebases an effect-bearing record. Work-ref
 bootstrap creates one root record after registry reservation; concurrent bootstrap losers reread
 the winning ref. Missing, deleted,
 force-rewritten, multi-parent, non-canonical, discontinuous, or corrupt history fails closed and
-alerts. The registry, ruleset, branches, and their commit chains are retained append-only: the pump
-never force-updates, deletes, squashes, truncates, or garbage-collects them.
+alerts. The adapter validates the private Git parent chain separately; Git OIDs never enter the
+canonical body or `committedRevision`. The registry, ruleset, branches, and their commit chains are
+retained append-only: the pump never force-updates, deletes, squashes, truncates, or
+garbage-collects them.
 
 `enqueueDraft(selector, expectedCommittedRevision, ports)` uses the hosted collector to build and
 seal the observed envelope, derives `workKey`, refuses a
