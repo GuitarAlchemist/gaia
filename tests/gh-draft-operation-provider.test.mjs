@@ -319,7 +319,8 @@ test('createDraft refuses a moved remote head and redacts provider failures', as
       },
     ]);
     const provider = createGhDraftOperationProvider({
-      expectedRepository: REPOSITORY, presentation: PRESENTATION, run: fake.run,
+      expectedRepository: REPOSITORY, presentation: PRESENTATION,
+      managedRound: managedRound(), run: fake.run,
     });
     await assert.rejects(
       provider.createDraft(request()),
