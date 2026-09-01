@@ -270,13 +270,14 @@ it runs the registry reservation/`WORK_ROOT`/confirmation protocol internally an
 `ENQUEUED` from the returned bootstrap content revision. A racing first caller loses registry CAS
 and returns `StaleRevision`; no caller supplies or observes a Git OID. On a present work ref,
 `NONE` is stale and cannot rebootstrap. Only then does it CAS-append `ENQUEUED`.
-Only after that accepted append may a dispatcher request a workflow. A failed,
-cancelled, replaced, or queue-overflowed dispatch therefore leaves durable unsettled work. A
-scheduled supervisor reads `listUnsettled` and redispatches it; duplicate dispatch is harmless
+Only after that accepted append may an explicit dispatcher request a workflow. A failed,
+cancelled, or replaced dispatch therefore leaves durable unsettled work. The implemented
+`listUnsettled` projection and pure supervisor make a future hosted redispatcher possible, but no
+scheduled redispatch is implemented or claimed in this revision. Duplicate dispatch remains safe
 because every executor begins by loading the accepted `ENQUEUED` envelope and performing the same
-ledger CAS and exact provider reconciliation. GitHub
-Actions uses `concurrency.group = gaia-draft-<workKey>`, `cancel-in-progress: false`, and
-`queue: max`. The queue bound improves throughput but is not a delivery guarantee; the ledger is.
+ledger CAS and exact provider reconciliation. The effect workflow uses
+`concurrency.group = gaia-draft-<workKey>` with `cancel-in-progress: false`; GitHub queue behavior
+is not a delivery guarantee, so the ledger remains authoritative.
 
 An executor epoch is the closed pair `{ runId, runAttempt }` taken from the running GitHub Actions
 context, never from the caller envelope. A job CAS-appends `CLAIMED` before it can append `INTENT`.
