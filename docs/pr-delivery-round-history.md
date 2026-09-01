@@ -361,6 +361,52 @@ reconciled, never blindly repeated. Evidence append ambiguity is also read back 
 5. Removing durable intent, atomic CAS, read-after-write, or evidence reconciliation leaves the
    contract green.
 
+## R2 real-provider and create-claim correction
+
+Fresh Standards review reproduced two remaining P1 gaps. The shipped `gh` Draft provider still
+rendered its legacy body directly, so the managed creation executor had no production caller. Also,
+two same-operation callers could reuse one INTENT, both observe no Draft, and both invoke create.
+R2 closes only those gaps; it does not add another delivery round or another provider effect.
+
+### Real Draft-provider composition
+
+`createGhDraftOperationProvider` receives the exact managed-round input as data: `workKey`, the
+validated R0 receipt, the receipt-bound effect actor, a bounded effect-claim receipt, and the GitHub
+evidence port. Its public `createDraft` calls `executeManagedDraftCreation`. The provider's legacy
+presentation is only the human-authored base body; the executor appends canonical R0 before the
+provider command, and the raw `gh pr create --body` receives that proposed body byte-for-byte. The
+exact `gh pr view` readback must carry the same body before either the managed executor or the outer
+Draft operation may report success. Missing managed input refuses before `gh` creation; the
+provider may not synthesize an owner, deadline, receipt, command path, or evidence origin.
+
+### Durable create claim
+
+INTENT records desire, not exclusive ownership. Before create, the executor appends a closed CLAIM
+record bound to `workKey`, R0 `roundKey`, INTENT revision, a unique executor claim id, exact claim
+receipt revision, `observedAt`, and a bounded `leaseExpiresAt`. Git Data `compareAndAppend` against
+the observed evidence head is the claim linearization point. Only the caller whose exact CLAIM is
+confirmed after that append may call the provider.
+
+A contender that loses claim CAS reads the winner and returns `EffectClaimHeld`; it performs no
+provider create. A claim cannot be inferred from process liveness, prose, GitHub assignment, or a
+prior observation. An unexpired claim cannot be replaced. After expiry, a new revision-bound claim
+may be appended by CAS, after reconciling GitHub first. A lost claim-append response is reconciled
+by exact claim id and revision before proceeding. A crash after CLAIM and before create leaves a
+bounded lease, not permanent ownership; recovery uses a fresh claim only after that boundary.
+
+The bounded actors are independent executor epochs, each with a unique claim id. Reusing one claim
+id concurrently is an invalid actor identity, not a second grant of effect authority. Stable work
+identity remains `workKey`; stable operation/idempotency identity remains R0 `roundKey`. CLAIM does
+not grant merge, close, ready, force, approval, or any new GitHub authority.
+
+### Added R2 falsifiers
+
+1. The real `gh pr create --body` lacks exactly one canonical R0 section.
+2. Removing the provider-to-executor composition restores the legacy body while tests stay green.
+3. A barrier lets two distinct claims observe no Draft and both invoke provider create.
+4. Removing CLAIM CAS or treating INTENT reuse as ownership leaves the concurrency test green.
+5. A stale claimant, unexpired contender, or ambiguous claim response performs a blind create.
+
 ## Authority and reversibility
 
 The slice adds exactly one GitHub effect — updating one managed PR body — behind the same closed,
