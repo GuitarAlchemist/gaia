@@ -106,6 +106,12 @@ tests and recorded in the receipt. Note that `listUnsettledDrafts` sorts by `wor
 `runHostedDraftSupervisor` re-sorts by `operationId` — two different deterministic orders over the
 same list. Intake picks one and states it.
 
+The action selector and the observation denominator are deliberately separate. An issue-triggered
+run filters the records it may reconcile, but its receipt counts the full validated unsettled list
+observed at the start, adjusted only for the matching operation this run settled or the new operation
+it admitted. This preserves the existing global `unsettledCount` contract and prevents an isolated
+lane from falsely rendering the repository healthy while unrelated work remains.
+
 The orchestration itself belongs in `src/hosted-draft-pump.mjs` as a third pure, dependency-injected
 export, `runHostedDraftIntake`, alongside the existing two. The CLI calls it. Reconciliation reuses
 the existing runtime method unchanged, including its refusal of a mismatched operation-to-work-key

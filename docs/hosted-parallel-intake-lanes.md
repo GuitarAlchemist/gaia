@@ -61,6 +61,10 @@ runs have no issue and collapse into the single recovery group. `cancel-in-progr
 - Lane alignment: an issue-triggered run may resume only an unsettled operation whose selector is
   that same issue. Unrelated unsettled work belongs to its own issue lane or to scheduled recovery;
   it cannot consume this lane and starve the triggering issue.
+- Global observation: action selection is issue-scoped, but `unsettledCount` remains a projection of
+  every validated unsettled operation the run observed. Settling one matching operation subtracts
+  one from that global count; admitting a still-pending operation adds one. Unrelated residual work
+  can never disappear from the receipt or its Control Room observation.
 
 The workflow group is not the correctness mechanism. Removing it must increase redundant runner
 activity but cannot permit a duplicate Draft effect; removing the CAS must fail existing mutation
