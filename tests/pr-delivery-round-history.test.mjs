@@ -725,9 +725,11 @@ test('GitHub evidence persists INTENT and read-back-proven APPLIED before byte-i
   } = await api();
   const records = [];
   const calls = [];
+  const trace = [];
   const gitData = {
     async read(ref) {
       calls.push({ method: 'read', ref });
+      trace.push('evidence:read');
       return records.length === 0 ? { state: 'UNSEEN' } : {
         state: 'PRESENT',
         records: records.map((record) => structuredClone(record)),
@@ -735,6 +737,7 @@ test('GitHub evidence persists INTENT and read-back-proven APPLIED before byte-i
     },
     async compareAndAppend(ref, expectedHeadOid, body) {
       calls.push({ method: 'compareAndAppend', ref, expectedHeadOid, body: structuredClone(body) });
+      trace.push(`evidence:${body.kind}`);
       const current = records.at(-1)?.oid ?? 'NONE';
       if (current !== expectedHeadOid) return { kind: 'STALE', currentHeadOid: current };
       const oid = String(records.length + 1).repeat(40);
@@ -744,7 +747,16 @@ test('GitHub evidence persists INTENT and read-back-proven APPLIED before byte-i
     },
   };
   const evidencePort = createGitHubManagedRoundEvidencePort({ gitData });
-  const adapter = createMemoryManagedRoundAdapter();
+  const memoryAdapter = createMemoryManagedRoundAdapter();
+  const adapter = {
+    observe: (...args) => memoryAdapter.observe(...args),
+    observeByOperation: (...args) => memoryAdapter.observeByOperation(...args),
+    compareAndSet: (...args) => memoryAdapter.compareAndSet(...args),
+    async createDraft(...args) {
+      trace.push('provider:createDraft');
+      return memoryAdapter.createDraft(...args);
+    },
+  };
   const input = {
     workKey: WORK_KEY, headRevision: HEAD, baseBody: 'human', receipt: openReceipt(),
     effectActor: EFFECT, adapter, evidencePort,
@@ -755,6 +767,11 @@ test('GitHub evidence persists INTENT and read-back-proven APPLIED before byte-i
   assert.deepEqual(records.map((record) => record.body.kind), ['INTENT', 'APPLIED']);
   assert.ok(calls.filter((call) => call.method === 'read').length >= 4,
     'each durable append is reconciled through read-after-write');
+  assert.ok(trace.indexOf('evidence:INTENT') < trace.indexOf('provider:createDraft'));
+  assert.ok(trace.indexOf('provider:createDraft') < trace.indexOf('evidence:APPLIED'));
+  const intentAppend = trace.indexOf('evidence:INTENT');
+  assert.equal(trace[intentAppend + 1], 'evidence:read',
+    'durable intent is read back before the provider effect');
   assert.deepEqual(records[1].body.providerReceipt, {
     schema: 'GaiaGitHubRoundEffectReceiptV0',
     operationId: first.operationId,
@@ -765,7 +782,7 @@ test('GitHub evidence persists INTENT and read-back-proven APPLIED before byte-i
 
   const replay = await executeManagedDraftCreation(input);
   assert.equal(JSON.stringify(replay), JSON.stringify(first));
-  assert.equal(adapter.calls.filter((call) => call.method === 'createDraft').length, 1);
+  assert.equal(memoryAdapter.calls.filter((call) => call.method === 'createDraft').length, 1);
 });
 
 test('durable intent CAS makes a competing advance a stale loser with no provider effect', async () => {
