@@ -5,9 +5,14 @@ import {
   GhDraftOperationProviderError,
   createGhDraftOperationProvider,
 } from '../src/gh-draft-operation-provider.mjs';
+import {
+  createInitialManagedRound,
+  createMemoryManagedRoundEvidencePort,
+} from '../src/pr-delivery-round-history.mjs';
 
 const OPERATION_MARKER = 'a'.repeat(64);
 const HEAD_REVISION = 'b'.repeat(40);
+const WORK_KEY = 'd'.repeat(64);
 const REPOSITORY = Object.freeze({
   nodeId: 'R_kgDOGaia',
   owner: 'GuitarAlchemist',
@@ -47,6 +52,60 @@ function exactBody(marker = OPERATION_MARKER) {
     '- [ ] Bind the exact issue and generation',
     '- [ ] Publish provider evidence',
   ].join('\n');
+}
+
+function roundReceipt() {
+  const supervisor = `gaia:operation:${OPERATION_MARKER}`;
+  const executionOwner = `gaia:lane:${'e'.repeat(64)}:${HEAD_REVISION}`;
+  return {
+    schema: 'GaiaRoundReceiptV0', kind: 'OPEN', revision: 'f'.repeat(64), ordinal: 0,
+    predecessorRoundKey: 'NONE', trigger: 'DRAFT_CREATED', roundBudget: 2,
+    responsibility: {
+      ownershipRevision: '1'.repeat(64), accountableOwner: 'github:user:gaia-operator',
+      supervisor, executionOwner, reportsTo: supervisor,
+      reviewOwners: {
+        standards: 'github:user:standards-reviewer', spec: 'github:user:spec-reviewer',
+      },
+      effectOwner: 'github:app:gaia-draft-pump', escalatesTo: 'github:user:gaia-operator',
+    },
+    command: {
+      commandRevision: '2'.repeat(64), commandOwner: supervisor,
+      commandPath: [supervisor, executionOwner], generation: HEAD_REVISION,
+      capabilities: ['ASSIGN', 'REVOKE', 'STOP', 'RETRY', 'ESCALATE'],
+    },
+    evidence: {
+      designCommit: '3'.repeat(40), redCommit: '4'.repeat(40),
+      greenCommit: 'UNKNOWN(NOT_REACHED)', testEvidenceReceipt: 'UNKNOWN(NOT_REACHED)',
+      reviewVerdicts: ['CHANGES_REQUESTED'], result: 'IN_PROGRESS',
+      nextStep: 'Prove the production Draft composition',
+      estimate: {
+        range: 'UNKNOWN(INSUFFICIENT_HISTORY)', confidence: 'UNKNOWN(INSUFFICIENT_HISTORY)',
+        origin: 'standards-review:issue-51-r2',
+      },
+      blocker: {
+        class: 'REPRODUCED_FAILURE', reason: 'PRODUCTION_COMPOSITION_MISSING',
+        owner: 'github:user:gaia-operator', phaseDeadline: '2026-09-01T23:30:00.000Z',
+        nextTransition: 'R0_CREATE_PROVEN', escalationAction: 'REQUEST_ARCHITECTURE_REASSESSMENT',
+        origin: 'standards-review:issue-51-r2',
+      },
+      origin: 'standards-review:issue-51-r2',
+    },
+  };
+}
+
+function effectClaim(id = '5'.repeat(64), observedAt = '2026-09-01T22:40:00.000Z') {
+  return {
+    schema: 'GaiaManagedRoundEffectClaimV0', revision: '6'.repeat(64), claimId: id,
+    observedAt, leaseExpiresAt: '2026-09-01T22:45:00.000Z',
+  };
+}
+
+function managedRound(overrides = {}) {
+  return {
+    workKey: WORK_KEY, receipt: roundReceipt(), effectActor: 'github:app:gaia-draft-pump',
+    effectClaim: effectClaim(), evidencePort: createMemoryManagedRoundEvidencePort(),
+    ...overrides,
+  };
 }
 
 function exactPullRequest(overrides = {}) {
@@ -185,9 +244,13 @@ test('lookupExact fails closed on a conflicting marker, duplicate candidate, or 
   }
 });
 
-test('createDraft creates with --draft and deterministic presentation, then verifies exact read-back', async () => {
+test('real provider creates the Draft through canonical managed R0 composition', async () => {
   const createdUrl = 'https://github.com/GuitarAlchemist/gaia/pull/61';
   const encodedHead = 'codex%2Fhosted-draft-pump-r0';
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD_REVISION, receipt: roundReceipt(),
+  });
+  const managedBody = `${exactBody()}\n\n${initial.managedSection}`;
   const fake = fakeRun([
     {
       args: REPO_VIEW_ARGS,
@@ -206,7 +269,7 @@ test('createDraft creates with --draft and deterministic presentation, then veri
         'pr', 'create', '--repo', 'GuitarAlchemist/gaia', '--draft', '--base', 'main',
         '--head', 'GuitarAlchemist:codex/hosted-draft-pump-r0',
         '--title', 'draft: deliver issue #60',
-        '--body', exactBody(),
+        '--body', managedBody,
       ],
       stdout: `${createdUrl}\n`,
     },
@@ -214,11 +277,12 @@ test('createDraft creates with --draft and deterministic presentation, then veri
       args: [
         'pr', 'view', '61', '--repo', 'GuitarAlchemist/gaia', '--json', PR_FIELDS,
       ],
-      stdout: JSON.stringify(exactPullRequest()),
+      stdout: JSON.stringify(exactPullRequest({ body: managedBody })),
     },
   ]);
   const provider = createGhDraftOperationProvider({
-    expectedRepository: REPOSITORY, presentation: PRESENTATION, run: fake.run,
+    expectedRepository: REPOSITORY, presentation: PRESENTATION,
+    managedRound: managedRound(), run: fake.run,
   });
 
   const created = await provider.createDraft(request());
@@ -234,6 +298,8 @@ test('createDraft creates with --draft and deterministic presentation, then veri
     headRef: 'codex/hosted-draft-pump-r0',
     headRevision: HEAD_REVISION,
   });
+  assert.equal((managedBody.match(/<!-- gaia-rounds:begin:/gu) ?? []).length, 1);
+  assert.equal((managedBody.match(/#### R0/gu) ?? []).length, 1);
   assert.equal(fake.calls.length, 5);
 });
 
