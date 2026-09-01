@@ -195,8 +195,11 @@ the pump has no authority to create, loosen, or bypass it.
 Each ref head is a hidden `ledgerHeadOid`, the exact 40-lowercase-hex Git object id used only for
 Git CAS. It is not a source or content revision. Each commit has exactly one parent (except a
 registered bootstrap root), one canonical JSON `receipt.json` blob, and no caller-authored commit
-metadata used by replay. The blob is `{ body, committedRevision }`, where `body` is a closed
-null-prototype record containing schema, `priorCommittedRevision`, record kind, work key,
+metadata used by replay. The blob is `{ body, committedRevision }`, except that the registry's
+`CONFIRMED` blob is `{ body, committedRevision, transportMetadata: { workRootOid } }`. That closed
+transport metadata anchors the observed work-root Git object privately; it is excluded from `body`
+and from the `committedRevision` preimage. `body` is a closed null-prototype record containing
+schema, `priorCommittedRevision`, record kind, work key,
 generation key when known, operation id when known, executor epoch when known, and the
 minimum closed payload for that kind. `committedRevision` is the SHA-256 of the canonical UTF-8
 bytes of `body` and is therefore exact 64-lowercase-hex. Raw prompts, provider prose, credentials,
