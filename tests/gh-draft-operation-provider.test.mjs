@@ -84,7 +84,7 @@ const REPO_VIEW_ARGS = [
 ];
 const PR_LIST_ARGS = [
   'pr', 'list', '--repo', 'GuitarAlchemist/gaia', '--state', 'open',
-  '--head', 'GuitarAlchemist:codex/hosted-draft-pump-r0', '--limit', '100',
+  '--head', 'codex/hosted-draft-pump-r0', '--limit', '100',
   '--json',
   'number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body',
 ];
