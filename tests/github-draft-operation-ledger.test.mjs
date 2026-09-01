@@ -6,6 +6,7 @@ import {
   createDraftOperationPorts,
   createGitDataDraftOperationStore,
   enqueueDraft,
+  reconcileDraft,
 } from '../src/draft-operation-envelope.mjs';
 
 const REGISTRY_REF = 'refs/heads/gaia-ledger/registry-v0';
@@ -81,11 +82,12 @@ function fakeGitData() {
   };
 }
 
-function ports(store, collector) {
+function ports(store, collector, overrides = {}) {
   return createDraftOperationPorts({
     collector: { async collect() { return structuredClone(collector); } },
-    provider: { async lookupExact() { return null; }, async createDraft() { return null; } },
-    admission: { async reserveEffect() { return 'ZERO'; } },
+    provider: overrides.provider
+      ?? { async lookupExact() { return null; }, async createDraft() { return null; } },
+    admission: overrides.admission ?? { async reserveEffect() { return 'ZERO'; } },
     executorEpoch: { runId: 6001, runAttempt: 1 },
     telemetry: { async append() {} },
     store,
@@ -119,5 +121,61 @@ test('R2 durable enqueue survives restart and NONE cannot bootstrap it twice', a
   assert.deepEqual(
     git.kinds(`refs/heads/gaia-ledger/draft-operations-v0/${accepted.workKey}`),
     ['WORK_ROOT', 'ENQUEUED'],
+  );
+});
+
+test('R3 hosted reconciliation persists one CREATED effect and replays it after restart', async () => {
+  const git = fakeGitData();
+  const config = {
+    ledgerRegistryRootOid: OID_A,
+    ledgerRegistryRootRevision: git.registryRootRevision,
+  };
+  const envelope = observedEnvelope();
+  const selector = {
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    workItem: { kind: 'ISSUE', number: 60 },
+  };
+  const store = createGitDataDraftOperationStore({ gitData: git.port, config });
+  const accepted = await enqueueDraft(selector, 'NONE', ports(store, envelope));
+  let lookups = 0;
+  let creates = 0;
+  const provider = {
+    async lookupExact() { lookups += 1; return null; },
+    async createDraft(request) {
+      creates += 1;
+      return {
+        number: 61, url: 'https://github.com/GuitarAlchemist/gaia/pull/61',
+        isDraft: true, state: 'OPEN', operationMarker: request.operationMarker,
+        repository: structuredClone(request.repository),
+        baseRef: request.baseRef, headRef: request.headRef, headRevision: request.headRevision,
+      };
+    },
+  };
+  const created = await reconcileDraft(
+    accepted.operationId, accepted.committedRevision,
+    ports(store, envelope, {
+      provider, admission: { async reserveEffect() { return 'AVAILABLE'; } },
+    }),
+  );
+  assert.equal(created.kind, 'Terminal');
+  assert.equal(created.outcome, 'CREATED');
+  assert.equal(lookups, 1);
+  assert.equal(creates, 1);
+
+  const restarted = createGitDataDraftOperationStore({ gitData: git.port, config });
+  const replayed = await reconcileDraft(
+    accepted.operationId, created.committedRevision,
+    ports(restarted, envelope, {
+      provider: {
+        async lookupExact() { assert.fail('terminal replay must not contact the provider'); },
+        async createDraft() { assert.fail('terminal replay must not create'); },
+      },
+      admission: { async reserveEffect() { assert.fail('terminal replay needs no capacity'); } },
+    }),
+  );
+  assert.deepEqual(replayed, created);
+  assert.deepEqual(
+    git.kinds(`refs/heads/gaia-ledger/draft-operations-v0/${accepted.workKey}`),
+    ['WORK_ROOT', 'ENQUEUED', 'CLAIMED', 'INTENT', 'EFFECT_STARTED', 'CREATED'],
   );
 });
