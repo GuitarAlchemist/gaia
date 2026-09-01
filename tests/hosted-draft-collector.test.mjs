@@ -271,7 +271,7 @@ test('R1 concrete gh observations feed the same collector seam', async () => {
   assert.equal(responses.length, 0);
 });
 
-test('R1 concrete gh timestamps require exact canonical instants', async (context) => {
+test('R1 concrete gh timestamps normalize provider precision without widening parsing', async (context) => {
   const { createGhDraftCollectorApi, HostedDraftCollectorError } = await api();
   const issue = (updatedAt) => ({
     node_id: 'I_test60', number: 60, state: 'open', updated_at: updatedAt,
@@ -283,9 +283,9 @@ test('R1 concrete gh timestamps require exact canonical instants', async (contex
     label: { name: 'ready-for-agent' },
   }]];
 
-  await context.test('parseable non-canonical instant is refused', async () => {
+  await context.test('parseable forged instant is refused', async () => {
     const responses = [
-      issue('2026-08-31T19:05:00Z'),
+      issue('2026-08-31T19:05:00Z (forged)'),
       events('2026-08-31T19:00:00.000Z'),
     ];
     const github = createGhDraftCollectorApi({
@@ -298,6 +298,21 @@ test('R1 concrete gh timestamps require exact canonical instants', async (contex
       (error) => error instanceof HostedDraftCollectorError
         && error.code === 'IssueObservationInvalid',
     );
+  });
+
+  await context.test('GitHub second precision is normalized to the canonical instant', async () => {
+    const responses = [
+      issue('2026-08-31T19:05:00Z'),
+      events('2026-08-31T19:00:00Z'),
+    ];
+    const github = createGhDraftCollectorApi({
+      async run() { return structuredClone(responses.shift()); },
+    });
+    const observed = await github.readIssue({
+      repository: { owner: 'GuitarAlchemist', name: 'gaia' }, number: 60,
+    });
+    assert.equal(observed.updatedAt, '2026-08-31T19:05:00.000Z');
+    assert.equal(observed.labelEvents[0].createdAt, '2026-08-31T19:00:00.000Z');
   });
 
   await context.test('exact instant is preserved byte for byte', async () => {
