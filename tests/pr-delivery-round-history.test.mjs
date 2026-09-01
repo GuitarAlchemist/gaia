@@ -457,7 +457,7 @@ test('effect boundary linearizes at exact CAS and reconciles an ambiguous acknow
 
   const result = await executeManagedRoundUpdate({
     workKey: WORK_KEY, number: 69,
-    receipt: advanceReceipt(initial.roundKey), adapter: fixture.adapter,
+    receipt: advanceReceipt(initial.roundKey), effectActor: EFFECT, adapter: fixture.adapter,
   });
 
   assert.equal(result.kind, 'APPLIED');
@@ -481,7 +481,7 @@ test('forced CAS mutation preserves human edits and stale losers perform no effe
 
   const result = await executeManagedRoundUpdate({
     workKey: WORK_KEY, number: 69,
-    receipt: advanceReceipt(initial.roundKey), adapter: fixture.adapter,
+    receipt: advanceReceipt(initial.roundKey), effectActor: EFFECT, adapter: fixture.adapter,
   });
   assert.equal(result.kind, 'APPLIED');
   assert.equal(result.attempts, 2);
@@ -491,7 +491,7 @@ test('forced CAS mutation preserves human edits and stale losers perform no effe
   const loser = await executeManagedRoundUpdate({
     workKey: WORK_KEY, number: 69,
     receipt: advanceReceipt(initial.roundKey, { revision: 'f'.repeat(64) }),
-    adapter: fixture.adapter,
+    effectActor: EFFECT, adapter: fixture.adapter,
   });
   assert.deepEqual({ kind: loser.kind, code: loser.code }, {
     kind: 'REFUSED', code: 'RoundLineageConflict',
@@ -509,7 +509,7 @@ test('five unproved postconditions end in typed POSTCONDITION_UNPROVEN', async (
 
   const result = await executeManagedRoundUpdate({
     workKey: WORK_KEY, number: 69,
-    receipt: advanceReceipt(initial.roundKey), adapter: fixture.adapter,
+    receipt: advanceReceipt(initial.roundKey), effectActor: EFFECT, adapter: fixture.adapter,
   });
 
   assert.equal(result.kind, 'BLOCKED');
@@ -517,4 +517,40 @@ test('five unproved postconditions end in typed POSTCONDITION_UNPROVEN', async (
   assert.equal(result.attempts, 5);
   assert.equal(result.observed.bodyRevision, digest(initial.managedSection));
   assert.equal(fixture.calls.filter((call) => call.method === 'compareAndSet').length, 5);
+});
+
+test('only the single receipt-bound effect owner reaches CAS and handoffs are read-back proven', async () => {
+  const { createInitialManagedRound, executeManagedRoundUpdate } = await api();
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
+  const nextExecution = `gaia:lane:${'9'.repeat(64)}:${HEAD}`;
+  const receipt = advanceReceipt(initial.roundKey, {
+    responsibility: responsibility({
+      ownershipRevision: '9'.repeat(64), executionOwner: nextExecution,
+    }),
+    command: command({
+      commandRevision: 'e'.repeat(64), commandPath: [SUPERVISOR, nextExecution],
+    }),
+  });
+
+  for (const effectActor of ['github:app:wrong-owner', 'NONE']) {
+    const denied = scriptedAdapter(observation(initial.managedSection), []);
+    const result = await executeManagedRoundUpdate({
+      workKey: WORK_KEY, number: 69, receipt, effectActor, adapter: denied.adapter,
+    });
+    assert.deepEqual({ kind: result.kind, code: result.code }, {
+      kind: 'REFUSED', code: 'EffectOwnerMismatch',
+    });
+    assert.equal(denied.calls.filter((call) => call.method === 'compareAndSet').length, 0);
+  }
+
+  const allowed = scriptedAdapter(observation(initial.managedSection), ['APPLY']);
+  const applied = await executeManagedRoundUpdate({
+    workKey: WORK_KEY, number: 69, receipt, effectActor: EFFECT, adapter: allowed.adapter,
+  });
+  assert.equal(applied.kind, 'APPLIED');
+  assert.equal(applied.attempts, 1);
+  assert.ok(applied.observed.body.includes(nextExecution));
+  assert.equal(allowed.calls.filter((call) => call.method === 'compareAndSet').length, 1);
 });
