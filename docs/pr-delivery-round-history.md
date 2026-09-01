@@ -445,6 +445,39 @@ future-skewed contender, process liveness, elapsed wall time, or prose cannot st
 5. Removing positive absence proof, authoritative lease-state validation, or hosted R1 composition
    leaves its public black-box test green.
 
+## R4 repository binding and current-main intake correction
+
+R4 validates the PR against the current `origin/main` merge tree. That tree adds the scheduled and
+issues-labelled intake command; its real reconcile path previously dereferenced an absent
+`configuration.managedRound`, so the intake could enqueue but could not create a managed Draft.
+R4 requires both event paths to carry the same exact operator-authored managed-round contract used
+by manual reconcile. Intake may select and transport that data but cannot synthesize owners,
+command authority, deadlines, evidence, claims, or an R1 receipt. An absent contract is a closed
+argument refusal before enqueue or provider work. An explicit R1 remains optional and receipt-bound.
+
+The production body adapter binds repository identity before every observation and mutation. It
+first reads `gh repo view <owner>/<name> --json id,nameWithOwner` and requires both the durable node
+id and canonical owner/name to equal `expectedRepository`. A mismatch refuses before the pull
+request GET or PATCH. Owner/name alone is never authority, and a prior successful check is not
+reused as proof for a later mutation.
+
+The public `createGhManagedRoundApi` seam is exercised as a real black box with scripted `gh`
+responses. The contract proves repository binding, GET plus ETag capture, PATCH with the exact
+`If-Match`, exact readback, lost-response reconciliation by the outer executor, one PATCH only,
+and redacted failures. Durable mechanism-revert tests import behaviorally mutated modules: removing
+the node-id comparison, `If-Match`, or the hosted managed-round intake propagation must make a
+public assertion fail.
+
+### Added R4 falsifiers
+
+1. A repository with the same owner/name but another node id reaches a pull-request GET or PATCH.
+2. A body update omits the ETag `If-Match`, performs more than one PATCH, or treats a lost response
+   as permission to repeat the mutation.
+3. Provider diagnostics or secrets escape a typed adapter refusal.
+4. Either the scheduled or issues-labelled intake path reaches reconcile without the exact
+   managed-round contract.
+5. Any repository-binding, provider-CAS, or intake-propagation mechanism revert remains green.
+
 ## Authority and reversibility
 
 The slice adds exactly one GitHub effect — updating one managed PR body — behind the same closed,
