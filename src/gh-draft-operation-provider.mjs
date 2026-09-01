@@ -393,7 +393,7 @@ export function createGhManagedRoundApi({ expectedRepository, run = defaultRun }
         'api', '-i', '-X', 'PATCH', `repos/${repositoryName}/pulls/${effect.number}`,
         '-H', `If-Match: ${cached.etag}`, '-f', `body=${effect.proposedBody}`,
       ], true);
-      if (response === null) return { kind: 'STALE' };
+      if (response === null) return { kind: 'AMBIGUOUS' };
       const included = parseIncludedResponse(response.stdout);
       if (included.body?.head?.sha !== effect.expectedHeadRevision
         || included.body?.body !== effect.proposedBody) return { kind: 'AMBIGUOUS' };
