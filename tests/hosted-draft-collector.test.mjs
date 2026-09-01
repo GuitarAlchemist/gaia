@@ -102,6 +102,43 @@ test('R1 real enqueue seam accepts the sealed selector and reaches hosted observ
   assert.equal(repositoryReads, 1, 'the real collector was reached through the sealed selector');
 });
 
+test('R1 moved base read-back is a typed refusal before ENQUEUED', async () => {
+  const { createHostedDraftCollector, HostedDraftCollectorError } = await api();
+  const stable = githubBoundary();
+  let repositoryReads = 0;
+  const collector = createHostedDraftCollector({
+    github: {
+      ...stable,
+      async resolveRepository() {
+        repositoryReads += 1;
+        const observed = await stable.resolveRepository();
+        return repositoryReads === 1
+          ? observed
+          : { ...observed, defaultBranchRevision: 'd'.repeat(40) };
+      },
+    },
+  });
+  const { createMemoryDraftOperationStore, enqueueDraft } = await import(
+    '../src/draft-operation-envelope.mjs'
+  );
+  const store = createMemoryDraftOperationStore();
+
+  await assert.rejects(
+    enqueueDraft(SELECTOR, 'NONE', {
+      collector, store, telemetry: { async append() {} },
+    }),
+    (error) => error instanceof HostedDraftCollectorError
+      && error.code === 'SourceRevisionMoved'
+      && error.message === 'source revisions moved during collection',
+  );
+  assert.equal(repositoryReads, 2, 'base is read once for observation and once as a bound');
+  assert.deepEqual(
+    await store.readHead('422cc18399e518789008735065aab635516df14956ba0e53e45697de56760ccc'),
+    { state: 'UNSEEN' },
+    'moved evidence cannot create WORK_ROOT or ENQUEUED',
+  );
+});
+
 test('R1 hosted GitHub facts become one canonical Operation Envelope', async () => {
   const { createHostedDraftCollector } = await api();
   const collector = createHostedDraftCollector({ github: githubBoundary() });
