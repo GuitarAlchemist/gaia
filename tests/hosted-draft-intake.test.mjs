@@ -189,3 +189,120 @@ test('probing is bounded and stops without admitting when every candidate is ter
   assert.equal(receipt.phase, 'EXPECTED_NONE');
   assert.equal(receipt.skipped.length, 5);
 });
+
+test('the intake receipt binds the issue the transition belongs to, on every acting phase', async () => {
+  const run = await intake();
+  const resumed = await run({ repository: REPOSITORY, candidates: [61] }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() {
+      return [{
+        operationId: SHA_A, workKey: SHA_B, committedRevision: SHA_C, selector: selectorFor(51),
+      }];
+    },
+    async enqueueDraft() { assert.fail('a resuming run admits no new work'); },
+    async reconcileDraft(operationId) {
+      return {
+        kind: 'Terminal', outcome: 'REUSED', effect: 'NONE',
+        operationId, committedRevision: SHA_D,
+      };
+    },
+  });
+  assert.deepEqual(
+    resumed.workItem, { kind: 'ISSUE', number: 51 },
+    'a resumed operation must publish the issue it belongs to, not the candidates it ignored',
+  );
+
+  const admitted = await run({ repository: REPOSITORY, candidates: [63] }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return []; },
+    async enqueueDraft() {
+      return { kind: 'Enqueued', operationId: SHA_A, workKey: SHA_B,
+        generationKey: SHA_C, committedRevision: SHA_C };
+    },
+    async reconcileDraft(operationId) {
+      return {
+        kind: 'Terminal', outcome: 'CREATED', effect: 'CREATE_DRAFT',
+        operationId, committedRevision: SHA_D,
+      };
+    },
+  });
+  assert.deepEqual(admitted.workItem, { kind: 'ISSUE', number: 63 });
+
+  const none = await run({ repository: REPOSITORY, candidates: [] }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return []; },
+    async enqueueDraft() { assert.fail('no candidate means no admission'); },
+    async reconcileDraft() { assert.fail('no candidate means no effect'); },
+  });
+  assert.equal(none.workItem, null);
+});
+
+test('the receipt counts what stayed unsettled after the run, not what it found before it', async () => {
+  const run = await intake();
+  const ports = {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async enqueueDraft() { assert.fail('a resuming run admits no new work'); },
+  };
+  const unsettled = () => [
+    { operationId: SHA_A, workKey: SHA_B, committedRevision: SHA_C, selector: selectorFor(51) },
+    { operationId: SHA_B, workKey: SHA_C, committedRevision: SHA_D, selector: selectorFor(52) },
+  ];
+
+  const settled = await run({ repository: REPOSITORY, candidates: [61] }, {
+    ...ports,
+    async listUnsettledDrafts() { return unsettled(); },
+    async reconcileDraft(operationId) {
+      return {
+        kind: 'Terminal', outcome: 'CREATED', effect: 'CREATE_DRAFT',
+        operationId, committedRevision: SHA_D,
+      };
+    },
+  });
+  assert.equal(settled.phase, 'RESUME');
+  assert.equal(
+    settled.unsettledCount, 1,
+    'a recovery that reached a terminal outcome leaves one behind, not two',
+  );
+
+  const stillPending = await run({ repository: REPOSITORY, candidates: [61] }, {
+    ...ports,
+    async listUnsettledDrafts() { return unsettled(); },
+    async reconcileDraft(operationId) {
+      return { kind: 'Pending', operationId, committedRevision: SHA_D };
+    },
+  });
+  assert.equal(stillPending.unsettledCount, 2);
+
+  const admitted = await run({ repository: REPOSITORY, candidates: [63] }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return []; },
+    async enqueueDraft() {
+      return { kind: 'Enqueued', operationId: SHA_A, workKey: SHA_B,
+        generationKey: SHA_C, committedRevision: SHA_C };
+    },
+    async reconcileDraft(operationId) {
+      return { kind: 'Pending', operationId, committedRevision: SHA_D };
+    },
+  });
+  assert.equal(admitted.unsettledCount, 1, 'an admission that did not settle is still unsettled');
+
+  const none = await run({ repository: REPOSITORY, candidates: [] }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return []; },
+    async enqueueDraft() { assert.fail('no candidate means no admission'); },
+    async reconcileDraft() { assert.fail('no candidate means no effect'); },
+  });
+  assert.equal(none.unsettledCount, 0);
+});
