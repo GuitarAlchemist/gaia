@@ -245,6 +245,7 @@ test('R1 concrete gh observations feed the same collector seam', async () => {
       default_branch: 'main',
     },
     { sha: 'a'.repeat(40) },
+    [[{ ref: 'refs/heads/codex/hosted-draft-pump-r0', object: { sha: 'b'.repeat(40) } }]],
   ];
   const run = async () => {
     assert.ok(responses.length > 0, 'gh adapter made only the bounded expected reads');

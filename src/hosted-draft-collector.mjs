@@ -299,6 +299,21 @@ async function selectHead(github, repository, issueNumber, queueReceiptRevision)
   return matching[0];
 }
 
+async function requireStableHeadReadBack(github, repository, expectedHead) {
+  const rows = await github.listHeadRefs({ repository });
+  if (!Array.isArray(rows)) fail('HeadObservationInvalid', 'head refs must be an array');
+  const revisions = [];
+  for (const row of rows) {
+    ownDataObject(row, ['name', 'revision'], 'HeadObservationInvalid');
+    const name = text(row.name, 'HeadObservationInvalid');
+    const revision = oid(row.revision, 'HeadObservationInvalid');
+    if (name === expectedHead.name) revisions.push(revision);
+  }
+  if (revisions.length !== 1 || revisions[0] !== expectedHead.revision) {
+    fail('SourceRevisionMoved', 'source revisions moved during collection');
+  }
+}
+
 export function createHostedDraftCollector({ github }) {
   ownDataObject({ github }, ['github'], 'InvalidCollectorPorts');
   if (github === null || typeof github !== 'object'
@@ -347,6 +362,7 @@ export function createHostedDraftCollector({ github }) {
           || baseReadBack.defaultBranchRevision !== repository.defaultBranchRevision) {
         fail('SourceRevisionMoved', 'source revisions moved during collection');
       }
+      await requireStableHeadReadBack(github, repository, head);
       const observedSourceRevision = sha256({
         schema: 'GaiaObservedSourceRevisionV0',
         repositoryNodeId: repository.nodeId,
