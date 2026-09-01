@@ -12,6 +12,16 @@ const WORK_KEY = 'b'.repeat(64);
 const REVISION = 'c'.repeat(64);
 const ROOT_OID = 'd'.repeat(40);
 const ROOT_REVISION = 'e'.repeat(64);
+const MANAGED_CREATE = Object.freeze({
+  receipt: { schema: 'GaiaRoundReceiptV0', kind: 'OPEN' },
+  effectActor: 'github:app:gaia-draft-pump',
+  effectClaim: { schema: 'GaiaManagedRoundEffectClaimV0', claimId: '1'.repeat(64) },
+});
+const MANAGED_ADVANCE = Object.freeze({
+  number: 69,
+  receipt: { schema: 'GaiaRoundReceiptV0', kind: 'ADVANCE' },
+  effectActor: 'github:app:gaia-draft-pump',
+});
 
 function sink() {
   let value = '';
@@ -231,6 +241,7 @@ test('the production runtime composition wires existing collector, Git Data, pro
       checklist: ['Bind the exact generation'],
       eta: { minimumMinutes: 60, maximumMinutes: 120 },
     },
+    managedRound: { create: MANAGED_CREATE, advance: MANAGED_ADVANCE },
   };
   const gitData = { name: 'git-data' };
   const store = {
@@ -246,12 +257,23 @@ test('the production runtime composition wires existing collector, Git Data, pro
   const collector = { collect() {} };
   const provider = { lookupExact() {}, createDraft() {} };
   const admission = { executorEpoch: { runId: 9001, runAttempt: 2 }, reserveEffect() {} };
+  const evidencePort = { read() {}, compareAndAppend() {}, leaseState() {} };
+  const managedApi = { createDraft() {}, observe() {}, observeByOperation() {},
+    compareAndSetBody() {}, proveCreateAbsent() {} };
+  const managedAdapter = { observe() {}, compareAndSet() {} };
   const dependencies = {
     createGhGitDataApi(options) { calls.push(['git-data', options]); return gitData; },
     createGitDataDraftOperationStore(options) { calls.push(['store', options]); return store; },
     createGhDraftCollectorApi() { calls.push(['collector-api']); return collectorApi; },
     createHostedDraftCollector(options) { calls.push(['collector', options]); return collector; },
     createGhDraftOperationProvider(options) { calls.push(['provider', options]); return provider; },
+    createGitHubManagedRoundEvidencePort(options) {
+      calls.push(['managed-evidence', options]); return evidencePort;
+    },
+    createGhManagedRoundApi(options) { calls.push(['managed-api', options]); return managedApi; },
+    createGitHubManagedRoundAdapter(options) {
+      calls.push(['managed-adapter', options]); return managedAdapter;
+    },
     createGitHubActionsDraftAdmission(options) { calls.push(['admission', options]); return admission; },
     createDraftOperationPorts(options) { calls.push(['ports', options]); return options; },
     async enqueueDraft(selector, expected, ports) {
@@ -260,7 +282,12 @@ test('the production runtime composition wires existing collector, Git Data, pro
     },
     async reconcileDraft(operationId, expected, ports) {
       calls.push(['reconcile-core', operationId, expected, ports]);
-      return { kind: 'Terminal', operationId };
+      return { kind: 'Terminal', outcome: 'CREATED', operationId,
+        pullRequest: { number: 69 } };
+    },
+    async executeManagedRoundUpdate(input) {
+      calls.push(['managed-update', input]);
+      return { kind: 'APPLIED', operationId: '9'.repeat(64) };
     },
     async listUnsettledDrafts(ports) {
       calls.push(['list-core', ports]);
@@ -284,6 +311,15 @@ test('the production runtime composition wires existing collector, Git Data, pro
     'R_kgDOGaia');
   assert.deepEqual(calls.find(([kind]) => kind === 'provider')[1].presentation,
     configuration.presentation);
+  assert.deepEqual(calls.find(([kind]) => kind === 'provider')[1].managedRound, {
+    workKey: WORK_KEY, ...MANAGED_CREATE, evidencePort,
+  });
+  assert.equal(calls.find(([kind]) => kind === 'managed-evidence')[1].gitData, gitData);
+  assert.equal(calls.find(([kind]) => kind === 'managed-adapter')[1].api, managedApi);
+  assert.deepEqual(calls.find(([kind]) => kind === 'managed-update')[1], {
+    workKey: WORK_KEY, number: 69, receipt: MANAGED_ADVANCE.receipt,
+    effectActor: MANAGED_ADVANCE.effectActor, adapter: managedAdapter, evidencePort,
+  });
   assert.equal(calls.find(([kind]) => kind === 'admission')[1].expectedWorkKey, WORK_KEY);
   assert.equal(calls.find(([kind]) => kind === 'admission')[1].expectedWorkflowPath,
     '.github/workflows/hosted-draft-pump-effect.yml');
@@ -306,6 +342,7 @@ test('reconcile rejects a mismatched work key before provider, admission, or dur
       checklist: ['Persist one terminal receipt'],
       eta: { minimumMinutes: 60, maximumMinutes: 120 },
     },
+    managedRound: { create: MANAGED_CREATE, advance: null },
   };
   const dependencies = {
     createGhGitDataApi() { return {}; },

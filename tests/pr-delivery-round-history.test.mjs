@@ -876,15 +876,18 @@ test('two same-operation creators linearize on one durable claim before provider
   ).length, 1);
 });
 
-test('a crashed create claim is held until its exact lease boundary, then replaced once', async () => {
+test('create recovery needs store-clock expiry and positive absence, never contender time or null', async () => {
   const {
     executeManagedDraftCreation, createMemoryManagedRoundEvidencePort,
   } = await api();
   let current = null;
   let creates = 0;
+  let absence = 'UNKNOWN';
+  let authoritativeNow = '2026-09-01T22:44:59.999Z';
   const adapter = {
     async observe() { return current === null ? null : structuredClone(current); },
     async observeByOperation() { return current === null ? null : structuredClone(current); },
+    async proveCreateAbsent() { return absence; },
     async createDraft(effect) {
       creates += 1;
       if (creates === 1) return { kind: 'AMBIGUOUS' };
@@ -893,7 +896,9 @@ test('a crashed create claim is held until its exact lease boundary, then replac
     },
     async compareAndSet() { return { kind: 'STALE' }; },
   };
-  const evidencePort = createMemoryManagedRoundEvidencePort();
+  const evidencePort = createMemoryManagedRoundEvidencePort({
+    authoritativeNow: () => authoritativeNow,
+  });
   const input = {
     workKey: WORK_KEY, headRevision: HEAD, baseBody: 'human', receipt: openReceipt(),
     effectActor: EFFECT, adapter, evidencePort,
@@ -906,22 +911,36 @@ test('a crashed create claim is held until its exact lease boundary, then replac
     kind: 'BLOCKED', code: 'POSTCONDITION_UNPROVEN',
   });
 
-  const early = await executeManagedDraftCreation({
+  const futureSkew = await executeManagedDraftCreation({
     ...input,
     effectClaim: effectClaim('d'.repeat(64), {
-      revision: '6'.repeat(64), observedAt: '2026-09-01T22:44:59.999Z',
-      leaseExpiresAt: '2026-09-01T22:49:59.999Z',
+      revision: '6'.repeat(64), observedAt: '2099-09-01T22:44:59.999Z',
+      leaseExpiresAt: '2099-09-01T22:49:59.999Z',
     }),
   });
-  assert.deepEqual({ kind: early.kind, code: early.code }, {
+  assert.deepEqual({ kind: futureSkew.kind, code: futureSkew.code }, {
     kind: 'REFUSED', code: 'EffectClaimHeld',
   });
   assert.equal(creates, 1);
 
-  const recovered = await executeManagedDraftCreation({
+  authoritativeNow = '2026-09-01T22:45:00.000Z';
+  const ambiguousAbsence = await executeManagedDraftCreation({
     ...input,
     effectClaim: effectClaim('e'.repeat(64), {
       revision: '7'.repeat(64), observedAt: '2026-09-01T22:45:00.000Z',
+      leaseExpiresAt: '2026-09-01T22:50:00.000Z',
+    }),
+  });
+  assert.deepEqual({ kind: ambiguousAbsence.kind, code: ambiguousAbsence.code }, {
+    kind: 'BLOCKED', code: 'CREATE_OUTCOME_AMBIGUOUS',
+  });
+  assert.equal(creates, 1, 'an eventually-consistent null is not positive absence proof');
+
+  absence = 'PROVEN_ABSENT';
+  const recovered = await executeManagedDraftCreation({
+    ...input,
+    effectClaim: effectClaim('f'.repeat(64), {
+      revision: 'a'.repeat(64), observedAt: '2026-09-01T22:45:00.000Z',
       leaseExpiresAt: '2026-09-01T22:50:00.000Z',
     }),
   });
