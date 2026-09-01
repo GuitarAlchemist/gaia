@@ -8,8 +8,11 @@ const PUMP_ACTOR = Object.freeze({ actorId: 9173, actorType: 'Integration' });
 function ledgerRuleset(overrides = {}) {
   return {
     id: 42,
+    target: 'branch',
     enforcement: 'active',
-    conditions: { ref_name: { include: ['refs/heads/gaia-ledger/**'] } },
+    conditions: { ref_name: {
+      include: ['refs/heads/gaia-ledger/**'], exclude: [],
+    } },
     rules: [{ type: 'deletion' }, { type: 'non_fast_forward' }, { type: 'update' }],
     bypass_actors: [{ actor_id: PUMP_ACTOR.actorId, actor_type: PUMP_ACTOR.actorType,
       bypass_mode: 'always' }],
@@ -58,7 +61,7 @@ test('R2 gh Git Data adapter verifies protection, reads receipts, and appends by
     [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: rootOid } }],
     { sha: rootOid, tree: { sha: '3'.repeat(40) }, parents: [] },
     { truncated: false,
-      tree: [{ path: 'receipt.json', type: 'blob', sha: '4'.repeat(40) }] },
+      tree: [{ path: 'receipt.json', mode: '100644', type: 'blob', sha: '4'.repeat(40) }] },
     { encoding: 'base64', content: Buffer.from(canonical({
       body: root, committedRevision: revision(root),
     }), 'utf8').toString('base64') },
@@ -190,6 +193,17 @@ test('R3 gh Git Data adapter reports an absent operation without leaking refs', 
 test('R3 protection is restricted to exactly the configured Gaia pump App actor', async () => {
   const { createGhGitDataApi } = await import(MODULE_URL);
   const cases = {
+    'a tag-targeting ruleset': ledgerRuleset({ target: 'tag' }),
+    'the ledger family is excluded directly': ledgerRuleset({
+      conditions: { ref_name: {
+        include: ['refs/heads/gaia-ledger/**'], exclude: ['refs/heads/gaia-ledger/**'],
+      } },
+    }),
+    'a broad exclusion can hide ledger refs': ledgerRuleset({
+      conditions: { ref_name: {
+        include: ['refs/heads/gaia-ledger/**'], exclude: ['refs/heads/**'],
+      } },
+    }),
     'missing update restriction': ledgerRuleset({
       rules: [{ type: 'deletion' }, { type: 'non_fast_forward' }],
     }),
@@ -280,20 +294,30 @@ test('R3 reads only a one-entry tree whose blob is byte-canonical', async () => 
   const cases = {
     'an extra tree entry': {
       tree: [
-        { path: 'receipt.json', type: 'blob', sha: blobOid },
-        { path: 'hidden.txt', type: 'blob', sha: '4'.repeat(40) },
+        { path: 'receipt.json', mode: '100644', type: 'blob', sha: blobOid },
+        { path: 'hidden.txt', mode: '100644', type: 'blob', sha: '4'.repeat(40) },
       ],
       truncated: false,
       bytes: JSON.stringify(wrapper),
     },
     'noncanonical receipt bytes': {
-      tree: [{ path: 'receipt.json', type: 'blob', sha: blobOid }],
+      tree: [{ path: 'receipt.json', mode: '100644', type: 'blob', sha: blobOid }],
       truncated: false,
       bytes: JSON.stringify(wrapper, null, 2),
     },
     'a truncated tree that can hide entries': {
-      tree: [{ path: 'receipt.json', type: 'blob', sha: blobOid }],
+      tree: [{ path: 'receipt.json', mode: '100644', type: 'blob', sha: blobOid }],
       truncated: true,
+      bytes: canonical(wrapper),
+    },
+    'a symlink receipt mode': {
+      tree: [{ path: 'receipt.json', mode: '120000', type: 'blob', sha: blobOid }],
+      truncated: false,
+      bytes: canonical(wrapper),
+    },
+    'an executable receipt mode': {
+      tree: [{ path: 'receipt.json', mode: '100755', type: 'blob', sha: blobOid }],
+      truncated: false,
       bytes: canonical(wrapper),
     },
   };
@@ -312,4 +336,66 @@ test('R3 reads only a one-entry tree whose blob is byte-canonical', async () => 
     await assert.rejects(api.read('refs/heads/gaia-ledger/registry-v0'),
       (error) => error?.code === 'GitDataProtocolViolation', why);
   }
+});
+
+test('R3 CONFIRMED carries its work-root OID only as private transport metadata', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const body = {
+    schema: 'GaiaDraftRegistryReceiptV0', priorCommittedRevision: 'a'.repeat(64),
+    kind: 'CONFIRMED', workKey: 'b'.repeat(64), generationKey: 'c'.repeat(64),
+  };
+  const transportMetadata = { workRootOid: '9'.repeat(40) };
+  const priorOid = '1'.repeat(40);
+  const commitOid = '2'.repeat(40);
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    run: scriptedRun([
+      ...protectionResponses(),
+      [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: priorOid } }],
+      ...protectionResponses(),
+      { sha: '3'.repeat(40) },
+      ...protectionResponses(),
+      { sha: '4'.repeat(40) },
+      ...protectionResponses(),
+      { sha: commitOid },
+      ...protectionResponses(),
+      { object: { sha: commitOid } },
+    ], calls),
+  });
+
+  assert.deepEqual(await api.compareAndAppend(
+    'refs/heads/gaia-ledger/registry-v0', priorOid, body, transportMetadata,
+  ), {
+    kind: 'APPENDED', oid: commitOid, body,
+    committedRevision: revision(body), transportMetadata,
+  });
+  const writtenWrapper = JSON.parse(Buffer.from(
+    calls.find((call) => call.input?.encoding === 'base64').input.content, 'base64',
+  ).toString('utf8'));
+  assert.deepEqual(writtenWrapper, {
+    body, committedRevision: revision(body), transportMetadata,
+  });
+  assert.equal(revision(body), createHash('sha256').update(canonical(body), 'utf8').digest('hex'),
+    'the private OID never enters the body content revision');
+
+  const reader = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    run: scriptedRun([
+      [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: commitOid } }],
+      { sha: commitOid, tree: { sha: '4'.repeat(40) }, parents: [] },
+      { truncated: false, tree: [{
+        path: 'receipt.json', mode: '100644', type: 'blob', sha: '3'.repeat(40),
+      }] },
+      { encoding: 'base64', content: Buffer.from(canonical(writtenWrapper), 'utf8')
+        .toString('base64') },
+    ], []),
+  });
+  assert.deepEqual(await reader.read('refs/heads/gaia-ledger/registry-v0'), {
+    state: 'PRESENT', records: [{
+      oid: commitOid, body, committedRevision: revision(body), transportMetadata,
+    }],
+  });
 });
