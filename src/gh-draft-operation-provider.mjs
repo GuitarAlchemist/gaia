@@ -123,6 +123,19 @@ function markerLine(marker) {
   return `<!-- gaia-operation:${marker} -->`;
 }
 
+function renderBody(display, marker) {
+  return [
+    markerLine(marker),
+    `Issue: ${display.issueUrl}`,
+    `Owner: ${display.owner}`,
+    `Gate: ${display.gate}`,
+    `ETA: ${display.eta.minimumMinutes}-${display.eta.maximumMinutes} minutes`,
+    '',
+    'Checklist:',
+    ...display.checklist.map((item) => `- [ ] ${item}`),
+  ].join('\n');
+}
+
 function hasExactMarker(body, marker) {
   if (typeof body !== 'string') return false;
   return body.split(/\r?\n/u).filter((line) => line === markerLine(marker)).length === 1;
@@ -219,9 +232,35 @@ export function createGhDraftOperationProvider({
       return lookup(validateRequest(requestInput, expected));
     },
 
-    async createDraft() {
-      void display;
-      fail('ProviderUnavailable');
+    async createDraft(requestInput) {
+      const request = validateRequest(requestInput, expected);
+      const existing = await lookup(request);
+      if (existing !== null) fail('ProviderConflict');
+      const encodedHead = encodeURIComponent(request.headRef);
+      const observedHead = (await invoke(
+        'api', `repos/${repositoryName}/git/ref/heads/${encodedHead}`,
+        '--jq', '.object.sha',
+      )).trim();
+      if (!GIT_OID.test(observedHead)) fail('ProviderProtocolViolation');
+      if (observedHead !== request.headRevision) fail('RequestBindingMismatch');
+      const body = renderBody(display, request.operationMarker);
+      const createdUrl = (await invoke(
+        'pr', 'create', '--repo', repositoryName, '--draft', '--base', request.baseRef,
+        '--head', `${expected.owner}:${request.headRef}`, '--title', display.title,
+        '--body', body,
+      )).trim();
+      const match = PULL_REQUEST_URL.exec(createdUrl);
+      if (match === null || match[1] !== expected.owner || match[2] !== expected.name
+        || !Number.isSafeInteger(Number(match[3])) || Number(match[3]) <= 0) {
+        fail('ProviderProtocolViolation');
+      }
+      const created = parseJson(await invoke(
+        'pr', 'view', match[3], '--repo', repositoryName, '--json',
+        'number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body',
+      ));
+      const validated = validateCandidate(created, request);
+      if (validated.url !== createdUrl) fail('ProviderProtocolViolation');
+      return validated;
     },
   });
 }
