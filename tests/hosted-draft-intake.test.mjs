@@ -124,8 +124,37 @@ test('concurrent issue lanes cannot be consumed by unrelated unsettled recovery 
   assert.deepEqual(reconciled.sort(), [SHA_A, SHA_B]);
   assert.equal(issue61.phase, 'ADMIT');
   assert.equal(issue61.workItem.number, 61);
+  assert.equal(issue61.unsettledCount, 1, 'unrelated issue 51 remains globally unsettled');
   assert.equal(issue62.phase, 'ADMIT');
   assert.equal(issue62.workItem.number, 62);
+  assert.equal(issue62.unsettledCount, 1, 'unrelated issue 51 remains globally unsettled');
+});
+
+test('issue-scoped RESUME keeps unrelated residual work in the global count', async () => {
+  const run = await intake();
+  const receipt = await run({ repository: REPOSITORY, candidates: [61] }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() {
+      return [
+        { operationId: SHA_A, workKey: SHA_B, committedRevision: SHA_C,
+          selector: selectorFor(52) },
+        { operationId: SHA_B, workKey: SHA_C, committedRevision: SHA_D,
+          selector: selectorFor(61) },
+      ];
+    },
+    async enqueueDraft() { assert.fail('the matching unsettled operation must resume'); },
+    async reconcileDraft(operationId) {
+      assert.equal(operationId, SHA_B, 'the lane may act only on issue 61');
+      return { kind: 'Terminal', outcome: 'CREATED', effect: 'CREATE_DRAFT',
+        operationId, committedRevision: SHA_A };
+    },
+  });
+
+  assert.equal(receipt.phase, 'RESUME');
+  assert.equal(receipt.workItem.number, 61);
+  assert.equal(receipt.unsettledCount, 1, 'issue 52 remains globally unsettled');
 });
 
 test('candidates are probed in ascending order, terminal keys skipped, at most one admitted', async () => {
