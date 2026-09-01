@@ -23,6 +23,11 @@ function occurrences(text, fragment) {
   return text.split(fragment).length - 1;
 }
 
+function flagOccurrences(text, flag) {
+  const escaped = flag.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  return [...text.matchAll(new RegExp(`${escaped}(?=\\s)`, 'gu'))].length;
+}
+
 test('the effect executor exposes only closed manual and reusable workflow inputs', () => {
   assert.match(workflow, /^on:\s*$/mu);
   assert.match(workflow, /^  workflow_dispatch:\s*$/mu);
@@ -83,7 +88,8 @@ test('the executor reconciles once and uploads its closed receipt', () => {
     '--ledger-root-oid',
     '--ledger-root-revision',
   ]) {
-    assert.equal(occurrences(workflow, argument), 1, `${argument} must be supplied exactly once`);
+    assert.equal(flagOccurrences(workflow, argument), 1,
+      `${argument} must be supplied exactly once`);
   }
   assert.doesNotMatch(workflow, /--(?:issue-number|committed-revision|receipt-path)/u);
   assert.match(workflow, /GAIA_DRAFT_TITLE: \$\{\{ format\('draft: deliver issue #\{0\}', inputs\['issue-number'\]\) \}\}/u);

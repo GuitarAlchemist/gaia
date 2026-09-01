@@ -116,22 +116,35 @@ jobs:
           GAIA_PUMP_ACTOR_ID: ${{ vars.GAIA_PUMP_ACTOR_ID }}
           GAIA_REPOSITORY_NODE_ID: ${{ vars.GAIA_REPOSITORY_NODE_ID }}
           GAIA_VERIFIED_CONCURRENCY_GROUP: ${{ format('gaia-draft-{0}', inputs['work-key']) }}
-          GAIA_ISSUE_NUMBER: ${{ inputs['issue-number'] }}
           GAIA_WORK_KEY: ${{ inputs['work-key'] }}
           GAIA_OPERATION_ID: ${{ inputs['operation-id'] }}
-          GAIA_COMMITTED_REVISION: ${{ inputs['committed-revision'] }}
+          GAIA_EXPECTED_REVISION: ${{ inputs['committed-revision'] }}
           GAIA_LEDGER_ROOT_OID: ${{ inputs['ledger-root-oid'] }}
           GAIA_LEDGER_ROOT_REVISION: ${{ inputs['ledger-root-revision'] }}
+          GAIA_DRAFT_TITLE: ${{ format('draft: deliver issue #{0}', inputs['issue-number']) }}
+          GAIA_ISSUE_URL: ${{ format('{0}/{1}/issues/{2}', github.server_url, github.repository, inputs['issue-number']) }}
+          GAIA_DRAFT_OWNER: Gaia hosted Draft pump
+          GAIA_DRAFT_GATE: DELIVERY
+          GAIA_CHECKLIST_JSON: '["Create or reuse one exact Draft pull request","Persist one terminal receipt"]'
+          GAIA_ETA_MINUTES: '60:120'
           GAIA_RECEIPT_PATH: ${{ runner.temp }}/gaia-hosted-draft-pump-receipt.json
+          GAIA_ERROR_PATH: ${{ runner.temp }}/gaia-hosted-draft-pump-error.json
         run: |
-          node scripts/hosted-draft-pump.mjs reconcile `
-            --issue-number $env:GAIA_ISSUE_NUMBER `
+          & node scripts/hosted-draft-pump.mjs reconcile `
+            --repository $env:GITHUB_REPOSITORY `
+            --pump-actor-id $env:GAIA_PUMP_ACTOR_ID `
+            --repository-node-id $env:GAIA_REPOSITORY_NODE_ID `
             --work-key $env:GAIA_WORK_KEY `
             --operation-id $env:GAIA_OPERATION_ID `
-            --committed-revision $env:GAIA_COMMITTED_REVISION `
+            --expected-revision $env:GAIA_EXPECTED_REVISION `
             --ledger-root-oid $env:GAIA_LEDGER_ROOT_OID `
             --ledger-root-revision $env:GAIA_LEDGER_ROOT_REVISION `
-            --receipt-path $env:GAIA_RECEIPT_PATH
+            1> $env:GAIA_RECEIPT_PATH 2> $env:GAIA_ERROR_PATH
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+            Move-Item -LiteralPath $env:GAIA_ERROR_PATH -Destination $env:GAIA_RECEIPT_PATH -Force
+            exit $exitCode
+          }
 
       - name: Upload the closed reconciliation receipt
         if: always()
