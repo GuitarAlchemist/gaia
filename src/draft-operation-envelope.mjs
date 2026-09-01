@@ -203,6 +203,8 @@ class MemoryDraftOperationStore {
       bootstrapAndEnqueue: this.#bootstrapAndEnqueue.bind(this),
       append: this.#append.bind(this),
       withExecutor: this.#withExecutor.bind(this),
+      inspectByWork: this.#inspectByWork.bind(this),
+      inspectByOperation: this.#inspectByOperation.bind(this),
     }));
   }
 
@@ -260,14 +262,22 @@ class MemoryDraftOperationStore {
     });
   }
 
-  async inspectByWork(workKey) {
+  async #inspectByWork(workKey) {
     return this.#exclusive(this.#locks, workKey, async () => this.#snapshot(this.#work.get(workKey)));
   }
 
-  async inspectByOperation(operationId) {
+  async #inspectByOperation(operationId) {
     const workKey = this.#operations.get(operationId);
     if (!workKey) return null;
-    return this.inspectByWork(workKey);
+    return this.#inspectByWork(workKey);
+  }
+
+  async inspectByWork(workKey) {
+    return this.#inspectByWork(workKey);
+  }
+
+  async inspectByOperation(operationId) {
+    return this.#inspectByOperation(operationId);
   }
 
   async #append(operationId, expectedCommittedRevision, kind, payload = {}) {
@@ -289,7 +299,7 @@ class MemoryDraftOperationStore {
   }
 
   async readHead(workKey) {
-    const snapshot = await this.inspectByWork(workKey);
+    const snapshot = await this.#inspectByWork(workKey);
     if (!snapshot) return Object.freeze({ state: 'UNSEEN' });
     return Object.freeze({
       state: 'PRESENT', committedRevision: snapshot.committedRevision,
@@ -370,7 +380,7 @@ export async function enqueueDraft(selectorInput, expectedCommittedRevision, por
   validateExpectedRevision(expectedCommittedRevision);
   const observed = await ports.collector.collect(selector);
   const identity = validateEnvelope(observed, selector);
-  const current = await ports.store.inspectByWork(identity.workKey);
+  const current = await memoryCapabilities(ports.store).inspectByWork(identity.workKey);
   if (current) {
     if (expectedCommittedRevision === 'NONE'
       || expectedCommittedRevision !== current.committedRevision) return stale(current);
@@ -535,10 +545,11 @@ async function adopt(ports, snapshot, pullRequest, outcome) {
 export async function reconcileDraft(operationId, expectedCommittedRevision, ports) {
   requireRevision(operationId, 'InvalidOperationId');
   requireRevision(expectedCommittedRevision);
-  const initial = await ports.store.inspectByOperation(operationId);
+  const capabilities = memoryCapabilities(ports.store);
+  const initial = await capabilities.inspectByOperation(operationId);
   if (!initial) throw new DraftOperationError('UnknownOperation');
-  return memoryCapabilities(ports.store).withExecutor(initial.identity.workKey, async () => {
-    let snapshot = await ports.store.inspectByOperation(operationId);
+  return capabilities.withExecutor(initial.identity.workKey, async () => {
+    let snapshot = await capabilities.inspectByOperation(operationId);
     if (snapshot.committedRevision !== expectedCommittedRevision) return stale(snapshot);
     if (snapshot.terminal) return terminalResult(snapshot);
 
@@ -627,7 +638,7 @@ async function pendingAfterAmbiguity(ports, snapshot) {
 export async function cancelDraft(operationId, expectedCommittedRevision, ports) {
   requireRevision(operationId, 'InvalidOperationId');
   requireRevision(expectedCommittedRevision);
-  const snapshot = await ports.store.inspectByOperation(operationId);
+  const snapshot = await memoryCapabilities(ports.store).inspectByOperation(operationId);
   if (!snapshot) throw new DraftOperationError('UnknownOperation');
   if (snapshot.committedRevision !== expectedCommittedRevision) return stale(snapshot);
   if (snapshot.terminal) return terminalResult(snapshot);
