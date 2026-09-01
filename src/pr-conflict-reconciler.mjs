@@ -26,8 +26,8 @@
  *    or from a declared fixture. Every reading therefore republishes the source of its paths, and
  *    a reading with no named source may not carry paths at all.
  * 3. **A mergeability nobody bound to these two commits is about some other pair of commits.**
- *    Providers compute mergeability asynchronously against whatever the base was at the time,
- *    while the OIDs are read separately. Unbound evidence decides `UNKNOWN`.
+ *    `EXACT_OIDS` carries the independently observed base and head OIDs and they must equal this
+ *    observation. `UNBOUND` carries neither OID, decides `UNKNOWN`, and carries no conflict paths.
  * 4. **The strategy registry is closed and versioned, and refuses by default.** An entry is
  *    admitted only by a registered strategy's own predicate. Anything unregistered — arbitrary
  *    source overlap, modify/delete, rename ambiguity, binaries, protected paths, permission
@@ -38,21 +38,19 @@
  *    it. Generations compare by equality only; an OID has no order, and comparing two of them
  *    with `<` is how a stale replay comes to look newer than a live one.
  *
- * THREE CORRECTIONS THIS MODULE MAKES TO ITS OWN DESIGN
- * ----------------------------------------------------
- * `docs/pr-conflict-reconciler.md` was written before the tooling was read. Three of its claims
+ * FOUR CORRECTIONS THIS MODULE MAKES TO ITS OWN DESIGN
+ * ---------------------------------------------------
+ * `docs/pr-conflict-reconciler.md` was written before the tooling was read. Four of its claims
  * did not survive that read, and the corrections are structural here rather than advisory:
  *
  * - "Capture the conflicting paths" is unsatisfiable from a provider mergeability read. Rule 2.
- * - "Byte-identical add/add content" is named as an automatic strategy, but the `ort` merge driver
- *   resolves an add/add whose two blobs *and* file modes agree without ever reporting it. Evidence
- *   from a merge that carries one did not come from a merge, and is refused. The add/add a merge
- *   does report is identical content under a differing mode — a permission change, which issue #82
- *   says always escalates. The strategy stays registered because a fixture source can produce the
- *   admissible shape, so `AUTO_RESOLVABLE` is live, exercised code rather than a promise no test
- *   can hold; what it may not be is reachable from a real merge.
+ * - "Byte-identical add/add content" is not reachable from `MERGE_TREE`: `ort` resolves it without
+ *   reporting a conflict. A fixture can test refusal logic, but cannot authorize production
+ *   automation. Slice 1 therefore reserves `AUTO_RESOLVABLE` while registering no strategy.
  * - One idempotency key cannot both name the work and name the generation, so it cannot detect two
- *   live generations of the same pull request. Rule 5 splits them.
+ *   live generations of the same pull request. Rule 5 splits them, then parses every claimed
+ *   generation back to the same normalized repository and pull request before superseding it.
+ * - A bare `EXACT_OIDS` assertion proves nothing. Rule 3 makes its base/head binding explicit.
  *
  * It imports a digest and the one shared exact-instant predicate. Re-spelling that predicate here
  * would give this product two definitions of what a valid instant is, which is the defect rather
@@ -63,11 +61,11 @@ import { createHash } from 'node:crypto';
 
 import { isExactInstant } from './local-lane-observation.mjs';
 
-export const PR_CONFLICT_OBSERVATION_SCHEMA = 'gaia-pr-conflict-observation/1';
+export const PR_CONFLICT_OBSERVATION_SCHEMA = 'gaia-pr-conflict-observation/2';
 export const PR_CONFLICT_CLASSIFICATION_SCHEMA = 'gaia-pr-conflict-classification/1';
 
 /** The registry version every reading is decided under, so two readings are comparable. */
-export const PR_CONFLICT_STRATEGY_REGISTRY_VERSION = 'gaia-pr-conflict-strategies/1';
+export const PR_CONFLICT_STRATEGY_REGISTRY_VERSION = 'gaia-pr-conflict-strategies/2';
 
 /**
  * The three readings of mergeability, already normalised by the producer.
@@ -78,7 +76,7 @@ export const PR_CONFLICT_STRATEGY_REGISTRY_VERSION = 'gaia-pr-conflict-strategie
  */
 export const PR_CONFLICT_MERGEABILITIES = Object.freeze(['UNKNOWN', 'CLEAN', 'CONFLICTING']);
 
-/** Whether the mergeability reading was tied to the exact base and head this reading names. */
+/** Whether independently observed binding OIDs are absent or tied to this exact base and head. */
 export const PR_CONFLICT_MERGEABILITY_BINDINGS = Object.freeze(['UNBOUND', 'EXACT_OIDS']);
 
 /**
@@ -127,18 +125,22 @@ export const PR_CONFLICT_FILE_MODES = Object.freeze([
 /**
  * Paths no automatic strategy may touch, whatever their content proves.
  *
- * Prefixes rather than patterns, because a prefix is decidable by reading and a pattern invites a
- * near-miss. Workflow files, code owners, and everything else under the provider directory decide
- * who may change what; repairing one unattended widens Gaia's own authority.
+ * Exact paths and prefixes rather than patterns: the safety envelope is an explicit closed policy,
+ * not a guess based on a filename fragment. Credentials, security policy, architecture policy,
+ * contract schemas, workflow files, and code-owner policy remain human-owned.
  */
+export const PR_CONFLICT_PROTECTED_PATHS = Object.freeze([
+  '.env', 'ARCHITECTURE.md', 'SECURITY.md',
+]);
+
 export const PR_CONFLICT_PROTECTED_PATH_PREFIXES = Object.freeze([
-  '.git/', '.github/',
+  '.git/', '.github/', 'docs/contracts/',
 ]);
 
 export const PR_CONFLICT_OBSERVATION_FIELDS = Object.freeze([
-  'baseOid', 'baseRef', 'conflictEvidence', 'conflicts', 'conflictsComplete', 'headOid',
-  'headRef', 'mergeBaseOid', 'mergeability', 'mergeabilityBinding', 'observedAt', 'pullRequest',
-  'repository', 'schema',
+  'baseOid', 'baseRef', 'bindingBaseOid', 'bindingHeadOid', 'conflictEvidence', 'conflicts',
+  'conflictsComplete', 'headOid', 'headRef', 'mergeBaseOid', 'mergeability',
+  'mergeabilityBinding', 'observedAt', 'pullRequest', 'repository', 'schema',
 ]);
 
 export const PR_CONFLICT_ENTRY_FIELDS = Object.freeze([
@@ -157,6 +159,7 @@ export const PR_CONFLICT_CLASSIFICATION_FIELDS = Object.freeze([
 const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const DIGEST = /^[0-9a-f]{64}$/u;
 const REPOSITORY_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+const CLAIM_GENERATION = /^([A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63})#([1-9][0-9]*):([0-9a-f]{40}|[0-9a-f]{64}):([0-9a-f]{40}|[0-9a-f]{64})$/u;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/u;
 const PATH = /^[A-Za-z0-9._][A-Za-z0-9._/-]{0,254}$/u;
 
@@ -237,7 +240,7 @@ function requirePullRequestNumber(value) {
 }
 
 /**
- * Total verification of one `gaia-pr-conflict-observation/1` value.
+ * Total verification of one `gaia-pr-conflict-observation/2` value.
  *
  * Every refusal is a refusal to *use the evidence*, never a repair. Nothing is clamped, defaulted
  * or dropped: an unknown field is not ignored, an unrecognised mergeability is not bucketed as
@@ -258,7 +261,7 @@ export function requirePrConflictObservation(value) {
     if (!Object.hasOwn(value, field)) refuse(`the observation is missing ${field}`);
   }
   if (value.schema !== PR_CONFLICT_OBSERVATION_SCHEMA) {
-    refuse('a gaia-pr-conflict-observation/1 value is required');
+    refuse('a gaia-pr-conflict-observation/2 value is required');
   }
   if (!isExactInstant(value.observedAt)) {
     refuse('the observation instant must be an exact ISO timestamp');
@@ -288,6 +291,20 @@ export function requirePrConflictObservation(value) {
   }
   if (!PR_CONFLICT_MERGEABILITY_BINDINGS.includes(value.mergeabilityBinding)) {
     refuse('the mergeability binding must be one of the closed bindings');
+  }
+  if (value.mergeabilityBinding === 'UNBOUND') {
+    if (value.bindingBaseOid !== null || value.bindingHeadOid !== null) {
+      refuse('an unbound mergeability reading must carry null binding OIDs');
+    }
+  } else {
+    for (const field of ['bindingBaseOid', 'bindingHeadOid']) {
+      if (typeof value[field] !== 'string' || !OID.test(value[field])) {
+        refuse(`${field} must be a lowercase git object name for an exact binding`);
+      }
+    }
+    if (value.bindingBaseOid !== value.baseOid || value.bindingHeadOid !== value.headOid) {
+      refuse('the exact mergeability binding OIDs must equal the observation OIDs');
+    }
   }
   if (!PR_CONFLICT_EVIDENCE_SOURCES.includes(value.conflictEvidence)) {
     refuse('the conflict evidence source must be one of the closed sources');
@@ -381,43 +398,34 @@ const isSilentlyResolvedAddAdd = (entry) => entry.kind === 'ADD_ADD' && !entry.b
   && entry.baseDigest !== null && entry.baseDigest === entry.headDigest
   && entry.baseMode !== null && entry.baseMode === entry.headMode;
 
-const isProtectedPath = (path) => PR_CONFLICT_PROTECTED_PATH_PREFIXES.some(
-  (prefix) => path.startsWith(prefix),
-);
+const isProtectedPath = (path) => PR_CONFLICT_PROTECTED_PATHS.includes(path)
+  || PR_CONFLICT_PROTECTED_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
 
 /**
- * The one registered automatic strategy, and the only shape it admits.
+ * The bounded refusal policy for one conflict entry.
  *
  * Its checks run in a fixed order so that two readings of the same entry name the same refusal:
  * where the file lives, then what kind of file it is, then what kind of conflict it is, then
  * whether the content and the permission were actually proven identical.
  *
- * The design lists two further candidates — regenerated authoritative output, and a lockfile
- * rebuilt from conflict-free manifests. Both require running a generator, which is an effect, so
- * neither can be registered by a read-only slice. They belong to the version of this registry that
- * ships with the executor.
+ * A null return would mean a registered strategy admitted the entry. Slice 1 has no authoritative
+ * production strategy, so the formerly fixture-only shape receives an explicit unregistered
+ * refusal after the safety-specific checks have named any stronger reason.
  */
-const IDENTICAL_ADD_ADD = Object.freeze({
-  id: 'IDENTICAL_ADD_ADD/1',
-  admits(entry) {
-    if (isProtectedPath(entry.path)) return 'PROTECTED_PATH';
-    if (entry.binary) return 'BINARY_CONTENT';
-    if (entry.kind === 'MODIFY_MODIFY') return 'SEMANTIC_SOURCE_OVERLAP';
-    if (entry.kind !== 'ADD_ADD') return 'UNREGISTERED_CONFLICT_KIND';
-    if (entry.baseDigest === null || entry.headDigest === null) return 'EVIDENCE_INCOMPLETE';
-    if (entry.baseDigest !== entry.headDigest) return 'CONTENT_NOT_IDENTICAL';
-    if (entry.baseMode === null || entry.headMode === null) return 'EVIDENCE_INCOMPLETE';
-    // Identical bytes under a changed permission is a permission change, and issue #82 says a
-    // permission change always escalates. It is also the only add/add a real merge reports.
-    if (entry.baseMode !== entry.headMode) return 'MODE_CHANGE';
-    return null;
-  },
-});
+function conflictEntryRefusal(entry) {
+  if (isProtectedPath(entry.path)) return 'PROTECTED_PATH';
+  if (entry.binary) return 'BINARY_CONTENT';
+  if (entry.kind === 'MODIFY_MODIFY') return 'SEMANTIC_SOURCE_OVERLAP';
+  if (entry.kind !== 'ADD_ADD') return 'UNREGISTERED_CONFLICT_KIND';
+  if (entry.baseDigest === null || entry.headDigest === null) return 'EVIDENCE_INCOMPLETE';
+  if (entry.baseDigest !== entry.headDigest) return 'CONTENT_NOT_IDENTICAL';
+  if (entry.baseMode === null || entry.headMode === null) return 'EVIDENCE_INCOMPLETE';
+  if (entry.baseMode !== entry.headMode) return 'MODE_CHANGE';
+  return 'UNREGISTERED_CONFLICT_KIND'; // no authoritative slice-1 strategy admits this entry
+}
 
 /** The closed, versioned registry. Membership is the whole of what may be automated. */
-export const PR_CONFLICT_STRATEGY_REGISTRY = Object.freeze({
-  [IDENTICAL_ADD_ADD.id]: IDENTICAL_ADD_ADD,
-});
+export const PR_CONFLICT_STRATEGY_REGISTRY = Object.freeze({});
 
 export const PR_CONFLICT_STRATEGIES = Object.freeze(
   Object.keys(PR_CONFLICT_STRATEGY_REGISTRY).sort(ordinal),
@@ -481,7 +489,7 @@ const supersededReading = (observation, identity) => reading(observation, identi
   classification: 'SUPERSEDED', conflictEvidence: 'NONE',
 });
 
-function requireClaim(claim, workKey) {
+function requireClaim(claim, observation, workKey) {
   if (claim === null) return null;
   if (!claim || typeof claim !== 'object' || Array.isArray(claim)) {
     refuse('a claim must be a generation-bearing object or null');
@@ -497,9 +505,19 @@ function requireClaim(claim, workKey) {
   if (typeof claim.workKey !== 'string' || !DIGEST.test(claim.workKey)) {
     refuse('the claim work key must be a SHA-256 work identity');
   }
-  if (typeof claim.generation !== 'string'
-      || !/^[^#]+#[1-9][0-9]*:[0-9a-f]{40,64}:[0-9a-f]{40,64}$/u.test(claim.generation)) {
+  if (typeof claim.generation !== 'string') {
     refuse('the claim generation must be a repo#pr:baseOid:headOid key');
+  }
+  const parsed = CLAIM_GENERATION.exec(claim.generation);
+  if (parsed === null) {
+    refuse('the claim generation must carry exact lowercase SHA-1 or SHA-256 object names');
+  }
+  const [, repository, pullRequestText] = parsed;
+  const pullRequest = Number(pullRequestText);
+  requirePullRequestNumber(pullRequest);
+  if (repository.toLowerCase() !== observation.repository.toLowerCase()
+      || pullRequest !== observation.pullRequest) {
+    refuse('the claim generation names a different pull request than the observation');
   }
   if (claim.workKey !== workKey) {
     // Not supersession. A claim about another pull request delivered here is a routing failure,
@@ -519,7 +537,7 @@ function requireClaim(claim, workKey) {
 export function classifyPrConflict({ observation, claim = null }) {
   const verified = requirePrConflictObservation(observation);
   const identity = identityOf(verified);
-  const claimed = requireClaim(claim, identity.workKey);
+  const claimed = requireClaim(claim, verified, identity.workKey);
 
   if (claimed !== null && claimed.generation !== identity.generation) {
     return supersededReading(verified, identity);
@@ -538,18 +556,14 @@ function decideConflicting(observation, identity) {
   // did list are still classified, so the escalation says everything that is known.
   if (!observation.conflictsComplete) refusals.add('EVIDENCE_INCOMPLETE');
   for (const entry of observation.conflicts) {
-    const refusal = IDENTICAL_ADD_ADD.admits(entry);
+    const refusal = conflictEntryRefusal(entry);
     if (refusal !== null) refusals.add(refusal);
   }
   const conflictPaths = observation.conflicts.map((entry) => entry.path).sort(ordinal);
-  if (refusals.size === 0) {
-    return reading(observation, identity, {
-      classification: 'AUTO_RESOLVABLE',
-      strategy: IDENTICAL_ADD_ADD.id,
-      conflictPaths,
-      conflictEvidence: observation.conflictEvidence,
-    });
-  }
+  return escalationReading(observation, identity, conflictPaths, refusals);
+}
+
+function escalationReading(observation, identity, conflictPaths, refusals) {
   return reading(observation, identity, {
     classification: 'ESCALATION_REQUIRED',
     conflictPaths,

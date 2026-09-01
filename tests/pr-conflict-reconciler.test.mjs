@@ -48,6 +48,7 @@ import {
   PR_CONFLICT_MERGEABILITY_BINDINGS,
   PR_CONFLICT_OBSERVATION_FIELDS,
   PR_CONFLICT_OBSERVATION_SCHEMA,
+  PR_CONFLICT_PROTECTED_PATHS,
   PR_CONFLICT_PROTECTED_PATH_PREFIXES,
   PR_CONFLICT_REFUSALS,
   PR_CONFLICT_STRATEGIES,
@@ -123,6 +124,10 @@ const overlapEntry = (overrides = {}) => identicalEntry({
 function observation(overrides = {}) {
   const mergeability = overrides.mergeability ?? 'CONFLICTING';
   const conflicting = mergeability === 'CONFLICTING';
+  const mergeabilityBinding = overrides.mergeabilityBinding ?? 'EXACT_OIDS';
+  const exactBinding = mergeabilityBinding === 'EXACT_OIDS';
+  const baseOid = overrides.baseOid ?? BASE;
+  const headOid = overrides.headOid ?? HEAD;
   return {
     schema: PR_CONFLICT_OBSERVATION_SCHEMA,
     observedAt: AT,
@@ -130,11 +135,13 @@ function observation(overrides = {}) {
     pullRequest: PULL_REQUEST,
     baseRef: 'main',
     headRef: 'codex/issue-82-conflict-reconciler-r0',
-    baseOid: BASE,
-    headOid: HEAD,
+    baseOid,
+    headOid,
     mergeBaseOid: MERGE_BASE,
     mergeability,
-    mergeabilityBinding: 'EXACT_OIDS',
+    mergeabilityBinding,
+    bindingBaseOid: exactBinding ? baseOid : null,
+    bindingHeadOid: exactBinding ? headOid : null,
     conflictEvidence: conflicting ? 'MERGE_TREE' : 'NONE',
     conflicts: conflicting ? [overlapEntry()] : [],
     conflictsComplete: conflicting,
@@ -408,6 +415,7 @@ test('C11: unproven, differing, binary and protected content each escalate by na
 });
 
 test('C11: a protected path escalates even when its two sides are byte-identical', () => {
+  assert.deepEqual([...PR_CONFLICT_PROTECTED_PATHS], ['.env', 'ARCHITECTURE.md', 'SECURITY.md']);
   assert.ok(PR_CONFLICT_PROTECTED_PATH_PREFIXES.length > 0);
   for (const prefix of PR_CONFLICT_PROTECTED_PATH_PREFIXES) {
     const reading = classifyPrConflict({
@@ -434,7 +442,9 @@ test('C11: one unsafe entry in an otherwise mechanical set escalates the whole r
   });
   assert.equal(reading.classification, 'ESCALATION_REQUIRED',
     'a partially mechanical set is not partially applied');
-  assert.deepEqual(reading.refusals, ['SEMANTIC_SOURCE_OVERLAP']);
+  assert.deepEqual(reading.refusals,
+    ['SEMANTIC_SOURCE_OVERLAP', 'UNREGISTERED_CONFLICT_KIND'],
+    'the semantic overlap and the fixture-only shape are both refused');
   assert.deepEqual(reading.conflictPaths, ['src/one.mjs', 'src/two.mjs'],
     'and the escalation names every conflicting path, not only the refused one');
 });
@@ -566,13 +576,15 @@ test('C15: the emitted vocabulary is closed on every axis', () => {
     PR_CONFLICT_ENTRY_KINDS, PR_CONFLICT_REFUSALS, PR_CONFLICT_STRATEGIES,
     PR_CONFLICT_OBSERVATION_FIELDS, PR_CONFLICT_ENTRY_FIELDS, PR_CONFLICT_CLAIM_FIELDS,
     PR_CONFLICT_EVIDENCE_SOURCES, PR_CONFLICT_MERGEABILITY_BINDINGS, PR_CONFLICT_FILE_MODES,
-    PR_CONFLICT_CLASSIFICATION_FIELDS, PR_CONFLICT_PROTECTED_PATH_PREFIXES]) {
+    PR_CONFLICT_CLASSIFICATION_FIELDS, PR_CONFLICT_PROTECTED_PATHS,
+    PR_CONFLICT_PROTECTED_PATH_PREFIXES]) {
     assert.ok(Object.isFrozen(list), 'a published vocabulary is frozen');
   }
   const reading = classify();
   assert.deepEqual(Object.keys(reading).sort(), [...PR_CONFLICT_CLASSIFICATION_FIELDS],
     'a reading carries exactly the declared fields — no extra, no missing');
   assert.equal(reading.schema, PR_CONFLICT_CLASSIFICATION_SCHEMA);
+  assert.equal(PR_CONFLICT_OBSERVATION_SCHEMA, 'gaia-pr-conflict-observation/2');
   assert.ok(PR_CONFLICT_CLASSIFICATIONS.includes(reading.classification));
 });
 
