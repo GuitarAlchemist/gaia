@@ -68,6 +68,44 @@ function assertDeepFrozen(value) {
   for (const child of Object.values(value)) assertDeepFrozen(child);
 }
 
+const SELECTOR = Object.freeze({
+  repository: Object.freeze({ owner: 'old-owner', name: 'old-name' }),
+  workItem: Object.freeze({ kind: 'ISSUE', number: 60 }),
+});
+
+test('R1 real enqueue seam accepts the sealed selector and reaches hosted observations', async () => {
+  const { createHostedDraftCollector } = await api();
+  const stable = githubBoundary();
+  let repositoryReads = 0;
+  const collector = createHostedDraftCollector({
+    github: {
+      ...stable,
+      async resolveRepository() {
+        repositoryReads += 1;
+        return stable.resolveRepository();
+      },
+    },
+  });
+  const COMMITTED = '1'.repeat(64);
+  const ports = {
+    collector,
+    store: {
+      async inspectByWork() { return null; },
+      async bootstrapAndEnqueue() {
+        return { stale: false, committedRevision: COMMITTED };
+      },
+    },
+    telemetry: { async append() {} },
+  };
+  const { enqueueDraft } = await import('../src/draft-operation-envelope.mjs');
+
+  const result = await enqueueDraft(SELECTOR, 'NONE', ports);
+
+  assert.equal(result.kind, 'Enqueued');
+  assert.equal(result.committedRevision, COMMITTED);
+  assert.equal(repositoryReads, 1, 'the real collector was reached through the sealed selector');
+});
+
 test('R1 hosted GitHub facts become one canonical Operation Envelope', async () => {
   const { createHostedDraftCollector } = await api();
   const collector = createHostedDraftCollector({ github: githubBoundary() });
