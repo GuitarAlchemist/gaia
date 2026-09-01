@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 const GIT_OID = /^[a-f0-9]{40}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const LEDGER_PREFIX = 'refs/heads/gaia-ledger/';
+const REGISTRY_REF = `${LEDGER_PREFIX}registry-v0`;
 const RECEIPT_PATH = 'receipt.json';
 
 export class GhGitDataError extends Error {
@@ -115,14 +116,29 @@ function configuredPumpActor(value) {
   return Object.freeze({ actorId: value.actorId, actorType: value.actorType });
 }
 
+function exclusionMayMatchLedger(excludes) {
+  if (!Array.isArray(excludes)) return true;
+  const ledgerStem = `${LEDGER_PREFIX}`;
+  return excludes.some((pattern) => {
+    if (typeof pattern !== 'string' || pattern === '~ALL') return true;
+    const wildcard = pattern.search(/[?*[{]/u);
+    if (wildcard === -1) return pattern.startsWith(ledgerStem);
+    const staticPrefix = pattern.slice(0, wildcard);
+    return ledgerStem.startsWith(staticPrefix) || staticPrefix.startsWith(ledgerStem);
+  });
+}
+
 function protectedLedgerRuleset(ruleset, pumpActor) {
   if (ruleset === null || typeof ruleset !== 'object' || ruleset.enforcement !== 'active') return false;
   const includes = ruleset.conditions?.ref_name?.include;
+  const excludes = ruleset.conditions?.ref_name?.exclude;
   const types = Array.isArray(ruleset.rules)
     ? new Set(ruleset.rules.map((rule) => rule?.type)) : new Set();
   const actors = ruleset.bypass_actors;
-  return Array.isArray(includes)
+  return ruleset.target === 'branch'
+    && Array.isArray(includes)
     && includes.includes('refs/heads/gaia-ledger/**')
+    && !exclusionMayMatchLedger(excludes)
     && types.has('deletion')
     && types.has('non_fast_forward')
     && types.has('update')
@@ -131,6 +147,18 @@ function protectedLedgerRuleset(ruleset, pumpActor) {
     && actors[0]?.actor_id === pumpActor.actorId
     && actors[0]?.actor_type === pumpActor.actorType
     && actors[0]?.bypass_mode === 'always';
+}
+
+function receiptTransportMetadata(body, value, registryRecord, code = 'InvalidTransportMetadata') {
+  if (body.kind !== 'CONFIRMED') {
+    if (value !== undefined) fail(code);
+    return undefined;
+  }
+  if (!registryRecord) fail(code);
+  ownData(value, code);
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== 'workRootOid') fail(code);
+  return { workRootOid: oid(value.workRootOid, code) };
 }
 
 export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run = runGh }) {
@@ -177,14 +205,15 @@ export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run 
     if (!await protectionAvailable()) fail('LedgerProtectionUnavailable');
   }
 
-  async function readRecord(commitOid) {
+  async function readRecord(commitOid, ref) {
     const commit = ownData(await call('GET', `git/commits/${oid(commitOid)}`));
     if (commit.sha !== commitOid || !Array.isArray(commit.parents)
         || commit.parents.length > 1) fail('GitDataProtocolViolation');
     const treeOid = oid(commit.tree?.sha);
     const tree = ownData(await call('GET', `git/trees/${treeOid}`));
     if (tree.truncated !== false || !Array.isArray(tree.tree) || tree.tree.length !== 1
-        || tree.tree[0]?.path !== RECEIPT_PATH || tree.tree[0]?.type !== 'blob') {
+        || tree.tree[0]?.path !== RECEIPT_PATH || tree.tree[0]?.mode !== '100644'
+        || tree.tree[0]?.type !== 'blob') {
       fail('GitDataProtocolViolation');
     }
     const blob = ownData(await call('GET', `git/blobs/${oid(tree.tree[0].sha)}`));
@@ -197,10 +226,18 @@ export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run 
       receipt = JSON.parse(bytes);
       ownData(receipt);
       const keys = Object.keys(receipt).sort();
-      if (keys.length !== 2 || keys[0] !== 'body' || keys[1] !== 'committedRevision') {
+      if ((keys.length !== 2 && keys.length !== 3)
+          || keys[0] !== 'body' || keys[1] !== 'committedRevision'
+          || (keys.length === 3 && keys[2] !== 'transportMetadata')) {
         fail('GitDataProtocolViolation');
       }
       ownData(receipt.body);
+      const transportMetadata = receiptTransportMetadata(
+        receipt.body, receipt.transportMetadata, ref === REGISTRY_REF, 'GitDataProtocolViolation',
+      );
+      if ((transportMetadata === undefined) !== (keys.length === 2)) {
+        fail('GitDataProtocolViolation');
+      }
       if (typeof receipt.committedRevision !== 'string'
         || !SHA256.test(receipt.committedRevision)
         || receipt.committedRevision !== contentRevision(receipt.body)) {
@@ -216,15 +253,19 @@ export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run 
       record: {
         oid: commitOid, body: receipt.body,
         committedRevision: receipt.committedRevision,
+        ...(receipt.transportMetadata === undefined
+          ? {} : { transportMetadata: receipt.transportMetadata }),
       },
       parent: parents[0] ?? 'NONE',
     };
   }
 
-  async function appendObjects(expectedHeadOid, body) {
-    const content = Buffer.from(canonical({
+  async function appendObjects(expectedHeadOid, body, transportMetadata) {
+    const wrapper = {
       body, committedRevision: contentRevision(body),
-    }), 'utf8').toString('base64');
+      ...(transportMetadata === undefined ? {} : { transportMetadata }),
+    };
+    const content = Buffer.from(canonical(wrapper), 'utf8').toString('base64');
     await requireProtection();
     const blob = ownData(await call('POST', 'git/blobs', { content, encoding: 'base64' }));
     await requireProtection();
@@ -249,7 +290,7 @@ export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run 
     while (cursor !== 'NONE') {
       if (visited.has(cursor)) fail('GitDataProtocolViolation');
       visited.add(cursor);
-      const { record, parent } = await readRecord(cursor);
+      const { record, parent } = await readRecord(cursor, ref);
       records.push(record);
       cursor = parent;
     }
@@ -290,15 +331,18 @@ export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run 
       return matches[0];
     },
 
-    async compareAndAppend(refInput, expectedHeadInput, bodyInput) {
+    async compareAndAppend(refInput, expectedHeadInput, bodyInput, transportMetadataInput) {
       const ref = ledgerRef(refInput);
       const expectedHeadOid = expectedHeadInput === 'NONE'
         ? 'NONE' : oid(expectedHeadInput, 'InvalidExpectedHead');
       const body = cloneJson(bodyInput);
+      const transportMetadata = receiptTransportMetadata(
+        body, transportMetadataInput, ref === REGISTRY_REF,
+      );
       await requireProtection();
       const observed = await currentHead(ref);
       if (observed !== expectedHeadOid) return { kind: 'STALE', currentHeadOid: observed };
-      const commitOid = await appendObjects(expectedHeadOid, body);
+      const commitOid = await appendObjects(expectedHeadOid, body, transportMetadata);
       try {
         await requireProtection();
         if (expectedHeadOid === 'NONE') {
@@ -315,6 +359,7 @@ export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run 
       return {
         kind: 'APPENDED', oid: commitOid, body,
         committedRevision: contentRevision(body),
+        ...(transportMetadata === undefined ? {} : { transportMetadata }),
       };
     },
   });

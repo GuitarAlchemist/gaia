@@ -233,6 +233,20 @@ test('R3 protection is restricted to exactly the configured Gaia pump App actor'
       prefix: 'refs/heads/gaia-ledger/', registryRootOid: '1'.repeat(40),
     }), false, why);
   }
+
+  const safeExclusion = ledgerRuleset({
+    conditions: { ref_name: {
+      include: ['refs/heads/gaia-ledger/**'], exclude: ['refs/heads/release/**'],
+    } },
+  });
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    run: scriptedRun(protectionResponses(safeExclusion), []),
+  });
+  assert.equal(await api.verifyProtection({
+    prefix: 'refs/heads/gaia-ledger/', registryRootOid: '1'.repeat(40),
+  }), true, 'an unrelated branch exclusion does not invalidate ledger protection');
 });
 
 test('R3 compareAndAppend fails closed before any Git write when protection changes', async () => {
