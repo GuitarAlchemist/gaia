@@ -235,11 +235,21 @@ export async function runHostedDraftIntake({
     repository, workItem: { kind: 'ISSUE', number: 1 },
   });
 
+  let explicitNumbers = null;
+  if (candidates !== null) {
+    if (!Array.isArray(candidates)) fail('InvalidHostedDraftPump');
+    explicitNumbers = candidates.map(candidateNumber);
+  }
+
   const listed = await deps.listUnsettledDrafts(deps.ledgerPorts);
   if (!Array.isArray(listed)) fail('InvalidUnsettledOperation');
-  const records = listed.map(unsettled).sort(
+  const allRecords = listed.map(unsettled).sort(
     (left, right) => left.workKey.localeCompare(right.workKey, 'en'),
   );
+  const explicitIssueNumbers = explicitNumbers === null ? null : new Set(explicitNumbers);
+  const records = explicitIssueNumbers === null
+    ? allRecords
+    : allRecords.filter((record) => explicitIssueNumbers.has(record.selector.workItem.number));
   if (records.length > 0) {
     const record = records[0];
     const ports = await boundPorts(
@@ -264,8 +274,7 @@ export async function runHostedDraftIntake({
     if (!Array.isArray(rows)) fail('InvalidHostedDraftPump');
     numbers = rows.map((row) => candidateNumber(row?.number));
   } else {
-    if (!Array.isArray(candidates)) fail('InvalidHostedDraftPump');
-    numbers = candidates.map(candidateNumber);
+    numbers = explicitNumbers;
   }
   const ordered = [...new Set(numbers)].sort((left, right) => left - right).slice(0, limit);
 

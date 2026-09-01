@@ -240,7 +240,7 @@ test('probing is bounded and stops without admitting when every candidate is ter
 
 test('the intake receipt binds the issue the transition belongs to, on every acting phase', async () => {
   const run = await intake();
-  const resumed = await run({ repository: REPOSITORY, candidates: [61] }, {
+  const resumed = await run({ repository: REPOSITORY, candidates: null }, {
     ledgerPorts: {},
     operationPortsFor() { return {}; },
     operationPortsForSelector() { return {}; },
@@ -304,7 +304,7 @@ test('the receipt counts what stayed unsettled after the run, not what it found 
     { operationId: SHA_B, workKey: SHA_C, committedRevision: SHA_D, selector: selectorFor(52) },
   ];
 
-  const settled = await run({ repository: REPOSITORY, candidates: [61] }, {
+  const settled = await run({ repository: REPOSITORY, candidates: null }, {
     ...ports,
     async listUnsettledDrafts() { return unsettled(); },
     async reconcileDraft(operationId) {
@@ -320,7 +320,7 @@ test('the receipt counts what stayed unsettled after the run, not what it found 
     'a recovery that reached a terminal outcome leaves one behind, not two',
   );
 
-  const stillPending = await run({ repository: REPOSITORY, candidates: [61] }, {
+  const stillPending = await run({ repository: REPOSITORY, candidates: null }, {
     ...ports,
     async listUnsettledDrafts() { return unsettled(); },
     async reconcileDraft(operationId) {
