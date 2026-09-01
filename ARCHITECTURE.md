@@ -165,8 +165,8 @@ auto-breaks it. A damaged log is preserved for diagnosis and is never silently t
 Hosted operations reload their sealed envelope and durable receipt chain. Reconciliation reads
 the authoritative provider again and either proves the exact terminal state or remains unsettled.
 Retries repeat a bounded request under the same identity and idempotency boundary; they do not
-skip revision checks. Repeated independently reproduced failures at one seam trip the Boundary
-Redesign Circuit Breaker and preserve immutable Failure Evidence.
+skip revision checks. Repeated independently reproduced failures at one seam trip the
+Boundary redesign circuit breaker and preserve immutable Failure Evidence.
 
 Alerts are evidence-backed projections: blockers, expired telemetry, corrupt evidence, stale
 reviews, and authority-needed states. A missing sensor yields unknown or paused state, never a
