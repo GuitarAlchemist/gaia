@@ -249,6 +249,33 @@ test('R3 protection is restricted to exactly the configured Gaia pump App actor'
   }), true, 'an unrelated branch exclusion does not invalidate ledger protection');
 });
 
+test('R5 installation-token ruleset redaction verifies only the current App bypass', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const installationView = ledgerRuleset({ current_user_can_bypass: 'always' });
+  delete installationView.bypass_actors;
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    run: scriptedRun(protectionResponses(installationView), []),
+  });
+
+  assert.equal(await api.verifyProtection({
+    prefix: 'refs/heads/gaia-ledger/', registryRootOid: '1'.repeat(40),
+  }), true, 'GitHub hides bypass_actors from a least-privilege installation token');
+
+  for (const currentUserCanBypass of [undefined, 'never', 'pull_request']) {
+    const refusedView = { ...installationView, current_user_can_bypass: currentUserCanBypass };
+    const refused = createGhGitDataApi({
+      repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+      pumpActor: PUMP_ACTOR,
+      run: scriptedRun(protectionResponses(refusedView), []),
+    });
+    assert.equal(await refused.verifyProtection({
+      prefix: 'refs/heads/gaia-ledger/', registryRootOid: '1'.repeat(40),
+    }), false, `redacted bypass actors require current_user_can_bypass=always, not ${currentUserCanBypass}`);
+  }
+});
+
 test('R3 compareAndAppend fails closed before any Git write when protection changes', async () => {
   const { createGhGitDataApi } = await import(MODULE_URL);
   const calls = [];
