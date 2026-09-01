@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { isExactInstant } from './local-lane-observation.mjs';
 
 const GIT_OID = /^[a-f0-9]{40}$/u;
+const GITHUB_SECOND_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u;
 const ALLOWED_PERMISSIONS = new Set(['TRIAGE', 'WRITE', 'MAINTAIN', 'ADMIN']);
 const REQUIRED_METHODS = Object.freeze([
   'resolveRepository', 'readIssue', 'readPermission', 'listHeadRefs', 'readCommit', 'readPolicy',
@@ -69,8 +70,11 @@ function commitMessage(value) {
 }
 
 function providerInstant(value, code) {
-  if (!isExactInstant(value)) fail(code, code);
-  return value;
+  const normalized = typeof value === 'string' && GITHUB_SECOND_INSTANT.test(value)
+    ? `${value.slice(0, -1)}.000Z`
+    : value;
+  if (!isExactInstant(normalized)) fail(code, code);
+  return normalized;
 }
 
 function oid(value, code) {
