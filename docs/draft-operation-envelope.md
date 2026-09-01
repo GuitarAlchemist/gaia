@@ -41,8 +41,9 @@ mapping. The provider receives a smaller derived request and can never observe t
 
 The production effect adapter runs only inside a GitHub-hosted serialized executor. Multiple local
 or remote dispatchers may enqueue work, but none may call the Draft provider directly. GitHub owns
-process termination and the concurrency group, while content-addressed receipts persist in GitHub.
-The memory adapter exercises the same state-machine contract without claiming production authority.
+process termination and the concurrency group. A dedicated append-only Git ref is the durable
+ingress and receipt ledger; Actions is only an executor, never the queue or ledger. The memory
+adapter exercises the same state-machine contract without claiming production authority.
 
 ## Closed envelope
 
@@ -68,15 +69,15 @@ accessor, symbol, non-enumerable, or non-canonical values without evaluating acc
     policyRevision,
     ordinal
   },
-  admission: { state: 'AVAILABLE', revision },
   requestedEffect: 'CREATE_DRAFT'
 }
 ```
 
 All strings are non-empty canonical text with no control characters. Revisions are exact lowercase
 SHA-256 values, `headRevision` is an exact lowercase Git object id, `number` and `ordinal` are safe
-positive integers, and every vocabulary is closed. `admission.state` is exactly `AVAILABLE` or
-`ZERO`. Canonicalization never silently trims, folds, or coerces caller data.
+positive integers, and every vocabulary is closed. Canonicalization never silently trims, folds,
+or coerces caller data. Capacity and admission are deliberately absent: an untrusted dispatcher
+cannot mint effect authority by writing `AVAILABLE` into its envelope.
 
 The module recomputes `readyItem.id` as the SHA-256 of canonical JSON containing `workKey`,
 `queueReceiptRevision`, `occurrence`, and `observedSourceRevision`; a mismatch is refused. A queue
@@ -101,40 +102,107 @@ An exact generation may reconcile it. A different generation returns a typed
 `CrossGenerationIntent` refusal with zero provider effect; it never becomes unrelated work merely
 because a queue revision changed.
 
+## Concrete GitHub ledger and adapter contract
+
+The hosted ledger is the ref family
+`refs/heads/gaia-ledger/draft-operations-v0/<workKey>`, one append-only branch per logical work.
+Workflow triggers must exclude `gaia-ledger/**`; moving these refs is storage, not a source change.
+Each ref's head commit is that work's only authoritative revision. Each commit has exactly one parent
+(except the bootstrap root), one
+canonical JSON `receipt.json` blob, and no caller-authored commit metadata used by replay. The
+receipt is a closed null-prototype record containing schema, prior head, record kind, work key,
+generation key when known, operation id when known, executor epoch when known, and the minimum
+closed payload for that kind. Raw prompts, provider prose, credentials, paths, and account data are
+forbidden. `ENQUEUED` alone carries the complete sealed envelope; executors reload that copy and
+never accept an envelope from workflow inputs.
+
+The closed record kinds are `ENQUEUED`, `CLAIMED`, `INTENT`, `EFFECT_STARTED`,
+`EFFECT_AMBIGUOUS`, `CREATED`, `SATISFIED`, `REFUSED`, and `CANCELLED`. The first five are
+nonterminal. `EFFECT_AMBIGUOUS` means a create request may already have reached GitHub and only
+exact observation can settle it; it is never projected as refusal or completion.
+
+The Git Data adapter exposes only:
+
+```text
+readHead(workKey) -> { revision, records }
+append(workKey, expectedRevision, closedRecord) -> { committedRevision }
+listUnsettled(refPrefix) -> closed operation identities
+```
+
+`append` creates a blob, tree, and single-parent commit whose parent is `expectedRevision`, then
+updates the ref with `force: false`. Two candidates from the same parent are siblings: after one
+fast-forward succeeds, the other update is non-fast-forward and must fail as `StaleRevision` before
+any Draft effect. The adapter rereads but never silently rebases an effect-bearing record. Bootstrap
+creates one root record; concurrent bootstrap losers reread the winning ref. Missing, deleted,
+force-rewritten, multi-parent, non-canonical, discontinuous, or corrupt history fails closed and
+alerts. The branches and their commit chains are retained append-only: the pump never force-updates,
+deletes, squashes, truncates, or garbage-collects them.
+
+`enqueueDraft(envelope, expectedRevision, ledger)` seals the envelope, derives `workKey`, refuses a
+different generation while that work has a nonterminal generation, then CAS-appends `ENQUEUED`.
+Only after that accepted append may a dispatcher request a workflow. A failed,
+cancelled, replaced, or queue-overflowed dispatch therefore leaves durable unsettled work. A
+scheduled supervisor reads `listUnsettled` and redispatches it; duplicate dispatch is harmless
+because every executor begins by loading the accepted `ENQUEUED` envelope and performing the same
+ledger CAS and exact provider reconciliation. GitHub
+Actions uses `concurrency.group = gaia-draft-<workKey>`, `cancel-in-progress: false`, and
+`queue: max`. The queue bound improves throughput but is not a delivery guarantee; the ledger is.
+
+An executor epoch is the closed pair `{ runId, runAttempt }` taken from the running GitHub Actions
+context, never from the caller envelope. A job CAS-appends `CLAIMED` before it can append `INTENT`.
+The hosted admission controller grants effect capacity only when the GitHub Actions API reports
+that exact run/attempt `in_progress`, its concurrency group matches `workKey`, and the ledger head
+names its current `CLAIMED` epoch. Otherwise it returns `ZERO`; no `INTENT`, `EFFECT_STARTED`, or
+provider create call is legal. The memory
+adapter supplies the same trusted `reserveEffect` seam for deterministic `AVAILABLE` and `ZERO`
+tests. Thus capacity is an executor fact, not caller data. Exact-Draft lookup and `SATISFIED`
+adoption happen before `reserveEffect`, so adoption remains legal at zero effect capacity.
+
+The shared black-box contract runs against the memory adapter and a fake Git Data API implementing
+the real ref/commit protocol. A separately gated live probe races two non-force ref updates from one
+head, proves one winner and one conflict, and proves an `ENQUEUED` record survives a cancelled
+workflow. No live probe grants Draft, merge, configuration, or branch-rewrite authority.
+
 ## One ordered reconciliation transaction
 
-`reconcileDraft(envelope, expectedRevision, ports)` performs these steps under one module owner:
+`reconcileDraft(operationId, expectedRevision, ports)` performs these steps under one module owner
+after `enqueueDraft` has returned the accepted operation id and committed revision:
 
-1. seal the envelope and derive its three identities;
-2. dispatch or enter the executor serialized by `workKey`;
+1. load and validate the sealed envelope from its accepted `ENQUEUED` receipt, then derive its three
+   identities again and require the same `operationId`;
+2. enter the executor serialized by `workKey`;
 3. compare `expectedRevision` with the current durable revision before lookup, adoption, capacity,
    intent, or effect;
 4. find terminal state and latest intent by `workKey`;
 5. query the provider through the closed provider request;
-6. adopt an exact Draft before reading `admission`; an exact Draft therefore succeeds even when
-   admission is `ZERO`;
-7. refuse a new effect when admission is `ZERO`, otherwise append durable intent and
-   `EFFECT_STARTED` under the current executor epoch;
-8. perform at most one provider effect while the executor still owns that epoch;
-9. reconcile ambiguous responses by exact operation marker; and
-10. append one coherent terminal record derived only from the sealed envelope and provider result.
+6. adopt an exact Draft before reserving effect capacity; an exact Draft therefore succeeds even
+   when the trusted executor admission controller returns `ZERO`;
+7. CAS-append `CLAIMED` under the current executor epoch without effect authority;
+8. ask trusted `reserveEffect`; append `REFUSED` when it returns `ZERO`, otherwise append `INTENT`
+   and `EFFECT_STARTED` under that same current epoch;
+9. perform at most one provider effect while the executor still owns that epoch;
+10. reconcile ambiguous responses by exact operation marker; and
+11. append one coherent terminal record derived only from the sealed envelope and provider result.
 
 Every path which appends state, including effect-free adoption, is revision-gated. A stale caller
 returns `StaleRevision` and writes nothing. A stale or cross-generation owner performs no effect.
 
-`cancelDraft(envelope, expectedRevision, store)` is the only cancellation seam. It uses the same
-`workKey` executor and durable revision as reconciliation. If cancellation commits before
+`cancelDraft(operationId, expectedRevision, store)` is the only cancellation seam. It reloads the
+sealed envelope from `ENQUEUED` and uses the same `workKey` executor and durable revision as
+reconciliation. If cancellation commits before
 `EFFECT_STARTED`, reconciliation returns `Cancelled` with zero effect. If reconciliation already
 owns the executor, cancellation observes its terminal result and cannot publish a false cancelled
 state. Cancellation carries no provider or merge authority.
 
-The production adapter uses one GitHub Actions concurrency group derived from `workKey`, with
-`cancel-in-progress: false`. Its receipt chain records executor run id and attempt. A successor
-starts only after the predecessor is terminal, replays GitHub-persisted receipts, and fences every
+The production adapter uses the GitHub Actions group and ledger protocol above. Its receipt chain
+records executor run id and attempt. A successor replays GitHub-persisted receipts and fences every
 command by the current executor epoch. An orphan before `EFFECT_STARTED` is safe to resume. An
 orphan after `EFFECT_STARTED` is reconciled by exact marker: an exact Draft is adopted; absence or
-ambiguity returns `ProviderAmbiguous`, emits an alert, and performs no blind retry. This sacrifices
-automatic liveness in the irreducibly ambiguous window rather than duplicate a provider effect.
+ambiguity appends `EFFECT_AMBIGUOUS`, emits an alert, and performs no blind retry. Each later
+supervisor pass performs lookup only. The operation remains durably nonterminal until an exact
+Draft is observed; neither elapsed time nor repeated absence can turn it into `REFUSED`. This
+sacrifices automatic liveness in the irreducibly ambiguous window rather than publish a false
+terminal or duplicate a provider effect.
 
 The original lease-expiry fault row is represented by executor epochs: A records intent and stalls,
 GitHub terminates A, B becomes the next serialized epoch, and any resumed A command is refused.
@@ -166,6 +234,11 @@ The terminal vocabulary is closed:
 - `SATISFIED`: effect `NONE`, exact pull request, no refusal; or
 - `REFUSED`: effect `NONE`, no pull request, one closed refusal category.
 
+`EFFECT_AMBIGUOUS` is explicitly nonterminal and projects effect `UNKNOWN`, no pull request, and
+`ProviderAmbiguous`. It is excluded from completion, throughput-success, and refusal counts. A
+definitive provider rejection before or as the create response may be `REFUSED`; a lost or
+ambiguous response after `EFFECT_STARTED` may not.
+
 Terminal generation, observed source revision, and operation identity are derived from the sealed
 envelope, not reread from caller or provider objects. The store returns one `committedRevision`
 from the terminal append. The projected `actionRevision`, `checklistRevision`, and `sourceRevision`
@@ -185,11 +258,12 @@ counterexamples RED against the new public seam:
 4. lookup and create transport failures return typed redacted results with no raw diagnostic.
 
 The suite must also retain the original eleven-row fault matrix, including cancellation/completion
-ordering and exact-Draft adoption with `admission: ZERO`. It runs one black-box lifecycle contract
+ordering and exact-Draft adoption when trusted `reserveEffect` returns `ZERO`. It runs one black-box lifecycle contract
 against the memory adapter and the GitHub-hosted executor/receipt adapter. Behavioral
 mechanism-revert mutants cover stable work lookup, ready-item derivation, envelope sealing,
-revision gating, executor epochs, cancellation ordering, intent-before-effect, reconciliation,
-error closure, and terminal binding.
+revision gating, non-force ledger CAS, durable ingress, executor epochs, trusted capacity,
+cancellation ordering, intent-before-effect, ambiguous nonterminal reconciliation, error closure,
+and terminal binding.
 
 ## Success and rejection criteria
 
