@@ -137,6 +137,10 @@ test('R2 durable enqueue survives restart and NONE cannot bootstrap it twice', a
   assert.equal(accepted.kind, 'Enqueued');
 
   const restarted = createGitDataDraftOperationStore({ gitData: git.port, config });
+  const inspected = await restarted.inspectByOperation(accepted.operationId);
+  assert.equal(inspected.identity.operationId, accepted.operationId);
+  assert.equal(inspected.identity.workKey, accepted.workKey);
+  assert.equal(inspected.committedRevision, accepted.committedRevision);
   const repeated = await enqueueDraft(selector, 'NONE', ports(restarted, observedEnvelope()));
   assert.equal(repeated.kind, 'StaleRevision');
   assert.equal(repeated.currentCommittedRevision, accepted.committedRevision);
