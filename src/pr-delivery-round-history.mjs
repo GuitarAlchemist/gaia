@@ -8,6 +8,11 @@ const BLOCKER_CLASSES = new Set([
 ]);
 const EVIDENCE_TRIGGERS = new Set(['REPRODUCED_BLOCKER', 'REVIEW_RECEIPT', 'CI_RECEIPT', 'TEST_RECEIPT']);
 const MAX_ATTEMPTS = 5;
+const GITHUB_OWNER = /^github:(?:user|team):[A-Za-z0-9][A-Za-z0-9-]{0,63}$/u;
+const GITHUB_EFFECT_OWNER = /^github:(?:user|app):[A-Za-z0-9][A-Za-z0-9-]{0,63}$/u;
+const SUPERVISOR = /^gaia:operation:[a-f0-9]{64}$/u;
+const EXECUTION_OWNER = /^gaia:lane:[a-f0-9]{64}:[a-f0-9]{40}$/u;
+const COMMAND_CAPABILITIES = Object.freeze(['ASSIGN', 'REVOKE', 'STOP', 'RETRY', 'ESCALATE']);
 
 export class DeliveryRoundError extends Error {
   constructor(code) {
@@ -106,23 +111,103 @@ function evidence(value) {
   });
 }
 
-function openReceipt(value) {
+function responsibility(value) {
+  const code = 'ResponsibilityMalformed';
+  try {
+    keys(value, [
+      'ownershipRevision', 'accountableOwner', 'supervisor', 'executionOwner', 'reportsTo',
+      'reviewOwners', 'effectOwner', 'escalatesTo',
+    ], code);
+    keys(value.reviewOwners, ['standards', 'spec'], code);
+  } catch (error) {
+    if (error instanceof DeliveryRoundError) fail(code);
+    throw error;
+  }
+  if (Array.isArray(value.effectOwner)) fail('DuplicateEffectAuthority');
+  if (!GITHUB_OWNER.test(value.accountableOwner) || !SUPERVISOR.test(value.supervisor)
+    || !EXECUTION_OWNER.test(value.executionOwner)
+    || !GITHUB_OWNER.test(value.escalatesTo)) fail(code);
+  if (value.reportsTo !== value.supervisor && value.reportsTo !== value.accountableOwner) {
+    fail('UnresolvableReportsTo');
+  }
+  const standards = value.reviewOwners.standards;
+  const spec = value.reviewOwners.spec;
+  if (!GITHUB_OWNER.test(standards) || !GITHUB_OWNER.test(spec) || standards === spec
+    || standards === value.effectOwner || spec === value.effectOwner
+    || standards === value.executionOwner || spec === value.executionOwner) {
+    fail('ReviewOwnerConflict');
+  }
+  if (value.effectOwner !== 'NONE' && !GITHUB_EFFECT_OWNER.test(value.effectOwner)) {
+    fail('DuplicateEffectAuthority');
+  }
+  return Object.freeze({
+    ownershipRevision: sha256(value.ownershipRevision, code),
+    accountableOwner: value.accountableOwner,
+    supervisor: value.supervisor,
+    executionOwner: value.executionOwner,
+    reportsTo: value.reportsTo,
+    reviewOwners: Object.freeze({ standards, spec }),
+    effectOwner: value.effectOwner,
+    escalatesTo: value.escalatesTo,
+  });
+}
+
+function command(value, assignment, expectedGeneration) {
+  const code = 'CommandMalformed';
+  try {
+    keys(value, [
+      'commandRevision', 'commandOwner', 'commandPath', 'generation', 'capabilities',
+    ], code);
+  } catch (error) {
+    if (error instanceof DeliveryRoundError) fail(code);
+    throw error;
+  }
+  if (Array.isArray(value.commandOwner)) fail('DualCommandOwner');
+  if (value.commandOwner !== assignment.supervisor
+    && value.commandOwner !== assignment.accountableOwner) fail('UnresolvableCommandOwner');
+  if (!Array.isArray(value.commandPath) || value.commandPath.length !== 2) {
+    fail('DualCommandOwner');
+  }
+  if (value.commandPath[0] === value.commandPath[1]) fail('CommandCycle');
+  if (value.commandPath[0] !== value.commandOwner) fail('DualCommandOwner');
+  if (value.commandPath[1] !== assignment.executionOwner) fail('OrphanExecutionOwner');
+  if (value.generation !== expectedGeneration) fail('StaleCommandGeneration');
+  if (!Array.isArray(value.capabilities)
+    || value.capabilities.length !== COMMAND_CAPABILITIES.length
+    || value.capabilities.some((item, index) => item !== COMMAND_CAPABILITIES[index])) {
+    fail(code);
+  }
+  return Object.freeze({
+    commandRevision: sha256(value.commandRevision, code),
+    commandOwner: value.commandOwner,
+    commandPath: Object.freeze([...value.commandPath]),
+    generation: value.generation,
+    capabilities: COMMAND_CAPABILITIES,
+  });
+}
+
+function openReceipt(value, headRevision) {
   keys(value, [
     'schema', 'kind', 'revision', 'ordinal', 'predecessorRoundKey', 'trigger', 'roundBudget',
-    'evidence',
+    'responsibility', 'command', 'evidence',
   ]);
   if (value.schema !== 'GaiaRoundReceiptV0' || value.kind !== 'OPEN' || value.ordinal !== 0
     || value.predecessorRoundKey !== 'NONE' || value.trigger !== 'DRAFT_CREATED'
     || !Number.isSafeInteger(value.roundBudget) || value.roundBudget < 1 || value.roundBudget > 8) {
     fail('InvalidReceipt');
   }
-  return Object.freeze({ ...value, revision: sha256(value.revision), evidence: evidence(value.evidence) });
+  const assignment = responsibility(value.responsibility);
+  return Object.freeze({
+    ...value, revision: sha256(value.revision), responsibility: assignment,
+    command: command(value.command, assignment, headRevision), evidence: evidence(value.evidence),
+  });
 }
 
-function advanceReceipt(value) {
+function advanceReceipt(value, headRevision) {
   if (value?.schema !== 'GaiaRoundReceiptV0' || value?.kind !== 'ADVANCE') fail('InvalidReceipt');
   keys(value, [
-    'schema', 'kind', 'revision', 'ordinal', 'predecessorRoundKey', 'trigger', 'evidence',
+    'schema', 'kind', 'revision', 'ordinal', 'predecessorRoundKey', 'trigger',
+    'responsibility', 'command', 'evidence',
   ]);
   if (value.ordinal !== 1 || typeof value.predecessorRoundKey !== 'string'
     || !SHA256.test(value.predecessorRoundKey)) fail('InvalidReceipt');
@@ -132,7 +217,11 @@ function advanceReceipt(value) {
   if (!EVIDENCE_TRIGGERS.has(value.trigger)) {
     return Object.freeze({ kind: 'REFUSED', code: 'NonEvidenceEvent' });
   }
-  return Object.freeze({ ...value, evidence: evidence(value.evidence) });
+  const assignment = responsibility(value.responsibility);
+  return Object.freeze({
+    ...value, responsibility: assignment,
+    command: command(value.command, assignment, headRevision), evidence: evidence(value.evidence),
+  });
 }
 
 function lineageKey(workKey) {
@@ -167,6 +256,20 @@ function renderRound(round) {
   if (round.ordinal === 0) lines.push(`- Round budget: ${round.roundBudget}`);
   else lines.push(`- Advance key: \`${round.advanceKey}\``);
   lines.push(
+    `- Ownership revision: \`${round.responsibility.ownershipRevision}\``,
+    `- Accountable owner: \`${round.responsibility.accountableOwner}\``,
+    `- Supervisor: \`${round.responsibility.supervisor}\``,
+    `- Execution owner: \`${round.responsibility.executionOwner}\``,
+    `- Reports to: \`${round.responsibility.reportsTo}\``,
+    `- Standards review owner: \`${round.responsibility.reviewOwners.standards}\``,
+    `- Spec review owner: \`${round.responsibility.reviewOwners.spec}\``,
+    `- Effect owner: \`${round.responsibility.effectOwner}\``,
+    `- Escalates to: \`${round.responsibility.escalatesTo}\``,
+    `- Command revision: \`${round.command.commandRevision}\``,
+    `- Command owner: \`${round.command.commandOwner}\``,
+    `- Command path: \`${round.command.commandPath.join(' -> ')}\``,
+    `- Command generation: \`${round.command.generation}\``,
+    `- Command capabilities: \`${round.command.capabilities.join(',')}\``,
     `- Design commit: \`${round.evidence.designCommit}\``,
     `- RED commit: \`${round.evidence.redCommit}\``,
     `- GREEN commit: \`${round.evidence.greenCommit}\``,
@@ -178,7 +281,7 @@ function renderRound(round) {
     `- Estimate confidence: \`${round.evidence.estimate.confidence}\``,
     `- Estimate origin: ${round.evidence.estimate.origin}`,
     `- Blocker: \`${blockerLabel(round.evidence.blocker)}\``,
-    `- Accountable owner: ${round.evidence.blocker.owner}`,
+    `- Blocker owner: ${round.evidence.blocker.owner}`,
     `- Phase deadline (intervention boundary): ${round.evidence.blocker.phaseDeadline}`,
     `- Next transition: \`${round.evidence.blocker.nextTransition}\``,
     `- Escalation action: \`${round.evidence.blocker.escalationAction}\``,
@@ -206,14 +309,17 @@ function initialRound(workKey, receipt) {
     receiptRevision: receipt.revision,
     trigger: receipt.trigger,
     roundBudget: receipt.roundBudget,
+    responsibility: receipt.responsibility,
+    command: receipt.command,
     evidence: receipt.evidence,
   });
 }
 
 export function createInitialManagedRound(input) {
-  keys(input, ['workKey', 'receipt'], 'InvalidInput');
+  keys(input, ['workKey', 'headRevision', 'receipt'], 'InvalidInput');
   const workKey = sha256(input.workKey, 'InvalidInput');
-  const receipt = openReceipt(input.receipt);
+  if (!GIT_OID.test(input.headRevision)) fail('InvalidInput');
+  const receipt = openReceipt(input.receipt, input.headRevision);
   const lineage = lineageKey(workKey);
   const round = initialRound(workKey, receipt);
   return Object.freeze({
@@ -240,7 +346,7 @@ function parseField(block, label) {
   return value.startsWith('`') && value.endsWith('`') ? value.slice(1, -1) : value;
 }
 
-function parseManaged(body, workKey) {
+function parseManaged(body, workKey, headRevision) {
   if (typeof body !== 'string') return { error: 'ManagedSectionMalformed' };
   const begin = marker(workKey, 'begin');
   const end = marker(workKey, 'end');
@@ -265,15 +371,37 @@ function parseManaged(body, workKey) {
       const blocker = parseField(block, 'Blocker');
       const match = /^(NONE|CI|REVIEW|TEST|REPRODUCED_FAILURE|DEPENDENCY|AUTHORITY|UNKNOWN)(?:\(([^)]+)\))?$/u.exec(blocker);
       if (!match) fail('ManagedSectionMalformed');
+      const assignment = responsibility({
+        ownershipRevision: parseField(block, 'Ownership revision'),
+        accountableOwner: parseField(block, 'Accountable owner'),
+        supervisor: parseField(block, 'Supervisor'),
+        executionOwner: parseField(block, 'Execution owner'),
+        reportsTo: parseField(block, 'Reports to'),
+        reviewOwners: {
+          standards: parseField(block, 'Standards review owner'),
+          spec: parseField(block, 'Spec review owner'),
+        },
+        effectOwner: parseField(block, 'Effect owner'),
+        escalatesTo: parseField(block, 'Escalates to'),
+      });
+      const commandContract = command({
+        commandRevision: parseField(block, 'Command revision'),
+        commandOwner: parseField(block, 'Command owner'),
+        commandPath: parseField(block, 'Command path').split(' -> '),
+        generation: parseField(block, 'Command generation'),
+        capabilities: parseField(block, 'Command capabilities').split(','),
+      }, assignment, headRevision);
       return Object.freeze({
         ordinal: index,
         roundKey: sha256(parseField(block, 'Round key'), 'ManagedSectionMalformed'),
         receiptRevision: sha256(parseField(block, 'Receipt revision'), 'ManagedSectionMalformed'),
         advanceKey: index === 0 ? null : sha256(parseField(block, 'Advance key'), 'ManagedSectionMalformed'),
         roundBudget: index === 0 ? Number(parseField(block, 'Round budget')) : null,
+        responsibility: assignment,
+        command: commandContract,
         blocker: Object.freeze({
           class: match[1], reason: match[2] ?? 'NONE',
-          owner: parseField(block, 'Accountable owner'),
+          owner: parseField(block, 'Blocker owner'),
           phaseDeadline: parseField(block, 'Phase deadline (intervention boundary)'),
           nextTransition: parseField(block, 'Next transition'),
           escalationAction: parseField(block, 'Escalation action'),
@@ -325,7 +453,7 @@ function deadlinePlan(workKey, parsed, receipt) {
     kind: 'ESCALATE',
     intent: Object.freeze({
       schema: 'GaiaRoundEscalationIntentV0', workKey, roundKey: current.roundKey,
-      owner: current.blocker.owner, action: current.blocker.escalationAction,
+      owner: current.responsibility.escalatesTo, action: current.blocker.escalationAction,
       deadline: current.blocker.phaseDeadline, observedAt: receipt.observedAt,
       origin: current.blocker.origin, authority: 'NONE',
     }),
@@ -345,13 +473,13 @@ export function planManagedRoundUpdate(input) {
   }
   const observed = validateObservation(input.observation);
   if (observed.error) return refusal(observed.error);
-  const parsed = parseManaged(observed.body, workKey);
+  const parsed = parseManaged(observed.body, workKey, observed.headRevision);
   if (parsed.error) return refusal(parsed.error);
   if (input.receipt?.schema === 'GaiaRoundDeadlineReceiptV0') {
     return deadlinePlan(workKey, parsed, input.receipt);
   }
   let receipt;
-  try { receipt = advanceReceipt(input.receipt); } catch (error) {
+  try { receipt = advanceReceipt(input.receipt, observed.headRevision); } catch (error) {
     return refusal(error instanceof DeliveryRoundError ? error.code : 'InvalidReceipt');
   }
   if (receipt.kind === 'REFUSED') return receipt;
@@ -369,12 +497,30 @@ export function planManagedRoundUpdate(input) {
   }
   if (receipt.predecessorRoundKey !== current.roundKey) return refusal('RoundLineageConflict');
   if (parsed.rounds[0].roundBudget <= 1) return refusal('BUDGET_EXHAUSTED');
+  const priorResponsibility = { ...current.responsibility };
+  delete priorResponsibility.ownershipRevision;
+  const nextResponsibility = { ...receipt.responsibility };
+  delete nextResponsibility.ownershipRevision;
+  if (canonical(priorResponsibility) !== canonical(nextResponsibility)
+    && current.responsibility.ownershipRevision === receipt.responsibility.ownershipRevision) {
+    return refusal('OwnershipRevisionRequired');
+  }
+  const priorCommand = { ...current.command };
+  delete priorCommand.commandRevision;
+  const nextCommand = { ...receipt.command };
+  delete nextCommand.commandRevision;
+  if (canonical(priorCommand) !== canonical(nextCommand)
+    && current.command.commandRevision === receipt.command.commandRevision) {
+    return refusal('CommandRevisionRequired');
+  }
   const round = Object.freeze({
     ordinal: 1,
     roundKey: keyForRound(lineage, 1),
     receiptRevision: receipt.revision,
     trigger: receipt.trigger,
     advanceKey,
+    responsibility: receipt.responsibility,
+    command: receipt.command,
     evidence: receipt.evidence,
   });
   const proposedSection = `${parsed.section.slice(0, -marker(workKey, 'end').length).trimEnd()}\n\n${renderRound(round)}\n${marker(workKey, 'end')}`;
@@ -451,4 +597,3 @@ export async function executeManagedRoundUpdate(input) {
     observed, mismatch,
   });
 }
-

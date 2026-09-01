@@ -43,7 +43,7 @@ function evidence(overrides = {}) {
     blocker: {
       class: 'UNKNOWN',
       reason: 'AWAITING_FIRST_EVIDENCE',
-      owner: 'Gaia delivery pump',
+      owner: ACCOUNTABLE,
       phaseDeadline: '2026-09-01T22:30:00.000Z',
       nextTransition: 'RED_EVIDENCE_RECORDED',
       escalationAction: 'REQUEST_ARCHITECTURE_REASSESSMENT',
@@ -153,7 +153,7 @@ test('R0 is byte deterministic and every non-movement field is present', async (
   assert.match(left.managedSection, /<!-- gaia-rounds:begin:a{64} -->/u);
   assert.match(left.managedSection, /#### R0/u);
   assert.match(left.managedSection, /Blocker: `UNKNOWN\(AWAITING_FIRST_EVIDENCE\)`/u);
-  assert.match(left.managedSection, /Accountable owner: Gaia delivery pump/u);
+  assert.match(left.managedSection, /Blocker owner: github:user:gaia-operator/u);
   assert.match(left.managedSection, /Phase deadline \(intervention boundary\): 2026-09-01T22:30:00\.000Z/u);
   assert.match(left.managedSection, /Next transition: `RED_EVIDENCE_RECORDED`/u);
   assert.match(left.managedSection, /Escalation action: `REQUEST_ARCHITECTURE_REASSESSMENT`/u);
@@ -319,7 +319,7 @@ test('deadline is an intervention boundary and emits only a pure escalation inte
       schema: 'GaiaRoundEscalationIntentV0',
       workKey: WORK_KEY,
       roundKey: initial.roundKey,
-      owner: 'Gaia delivery pump',
+      owner: ACCOUNTABLE,
       action: 'REQUEST_ARCHITECTURE_REASSESSMENT',
       deadline: '2026-09-01T22:30:00.000Z',
       observedAt: '2026-09-01T22:30:00.000Z',
