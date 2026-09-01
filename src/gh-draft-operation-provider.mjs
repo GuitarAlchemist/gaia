@@ -214,7 +214,7 @@ export function createGhDraftOperationProvider({
     await assertRepositoryIdentity();
     const candidates = parseJson(await invoke(
       'pr', 'list', '--repo', repositoryName, '--state', 'open',
-      '--head', `${expected.owner}:${request.headRef}`, '--limit', '100', '--json',
+      '--head', request.headRef, '--limit', '100', '--json',
       'number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body',
     ));
     if (!Array.isArray(candidates)) fail('ProviderProtocolViolation');
