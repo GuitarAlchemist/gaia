@@ -29,13 +29,13 @@ test('the effect executor exposes only closed manual and reusable workflow input
 
   for (const input of INPUTS) {
     assert.equal(
-      occurrences(workflow, `        ${input}:`),
+      occurrences(workflow, `      ${input}:`),
       2,
       `${input} must be declared once for dispatch and once for workflow_call`,
     );
   }
-  assert.equal(occurrences(workflow, '        concurrency-group:'), 0);
-  assert.equal(occurrences(workflow, '        pump-actor-id:'), 0);
+  assert.equal(occurrences(workflow, '      concurrency-group:'), 0);
+  assert.equal(occurrences(workflow, '      pump-actor-id:'), 0);
 });
 
 test('one work key owns the exact non-cancelling Actions concurrency group', () => {
