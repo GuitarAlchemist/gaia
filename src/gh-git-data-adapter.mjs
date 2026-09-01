@@ -135,6 +135,13 @@ function protectedLedgerRuleset(ruleset, pumpActor) {
   const types = Array.isArray(ruleset.rules)
     ? new Set(ruleset.rules.map((rule) => rule?.type)) : new Set();
   const actors = ruleset.bypass_actors;
+  const exactConfiguredActor = Array.isArray(actors)
+    && actors.length === 1
+    && actors[0]?.actor_id === pumpActor.actorId
+    && actors[0]?.actor_type === pumpActor.actorType
+    && actors[0]?.bypass_mode === 'always';
+  const currentAppBypassWhenRedacted = actors === undefined
+    && ruleset.current_user_can_bypass === 'always';
   return ruleset.target === 'branch'
     && Array.isArray(includes)
     && includes.includes('refs/heads/gaia-ledger/**')
@@ -142,11 +149,7 @@ function protectedLedgerRuleset(ruleset, pumpActor) {
     && types.has('deletion')
     && types.has('non_fast_forward')
     && types.has('update')
-    && Array.isArray(actors)
-    && actors.length === 1
-    && actors[0]?.actor_id === pumpActor.actorId
-    && actors[0]?.actor_type === pumpActor.actorType
-    && actors[0]?.bypass_mode === 'always';
+    && (exactConfiguredActor || currentAppBypassWhenRedacted);
 }
 
 function receiptTransportMetadata(body, value, registryRecord, code = 'InvalidTransportMetadata') {
