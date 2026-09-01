@@ -121,6 +121,15 @@ range with confidence, origin, and — on `R0` only — the declared bounded rou
 is either a bound value or the literal `UNKNOWN(reason)`. No field is omitted, and no field is
 inferred from prose.
 
+The operator-facing non-movement explanation is also closed and mandatory on every round. It
+records one blocker class (`NONE`, `CI`, `REVIEW`, `TEST`, `REPRODUCED_FAILURE`, `DEPENDENCY`,
+`AUTHORITY`, or `UNKNOWN(reason)`), one accountable owner, one bounded phase deadline, one next
+transition, one escalation action, and one origin. Missing values render as `UNKNOWN(reason)`;
+absence is malformed. The phase deadline is an intervention boundary, not a delivery estimate.
+When a durable deadline-observation receipt proves that boundary has expired, the pure planner
+emits an `ESCALATE` intent naming the recorded action and owner. That intent grants no effect:
+the adapter cannot merge, close, force, approve, or otherwise act on it.
+
 Published rounds are append-only within the section: `R1` is added after `R0`, and the text
 recorded for `R0` is never rewritten. A correction is a new round, not an edit of an old one.
 
@@ -179,6 +188,10 @@ advanceKey      = sha256(canonical({ schema: 'GaiaRoundAdvanceKeyV0',
 - **INV-10 — durable evidence.** The round transition and the GitHub update receipt are appended to
   the existing durable GitHub ledger. Local artifacts are observations, not authority. A failed
   attempt is retained as immutable Failure Evidence and is never rewritten by a later success.
+- **INV-11 — deadline means intervene.** Deadline evaluation consumes an explicit durable
+  observation time. Before expiry it is a non-event; at or after expiry it produces a pure
+  escalation intent and no GitHub mutation. It never predicts completion or grants the escalation
+  action it names.
 
 ## Failure modes
 
@@ -241,6 +254,9 @@ falsifier or a Done-when item in issue #51:
     as a string does not discharge a control.
 13. **Markdown validity.** The rendered section parses as valid Markdown and stays concise under the
     declared field set.
+14. **Non-movement and deadline.** Every round renders the closed blocker explanation. A deadline
+    observation before expiry is a typed non-event; one at expiry emits the recorded escalation
+    intent with no provider write, merge, close, force, or approval capability.
 
 Tests bind to a deterministic in-memory provider adapter and to the production-shaped `gh` adapter
 through the same black-box contract, per ENG-03.
