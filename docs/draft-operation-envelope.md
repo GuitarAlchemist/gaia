@@ -181,7 +181,8 @@ requires the configured root to be an ancestor of the current registry head. Mis
 a missing registry ref, or a non-descendant head always fails closed; it can never mean first use.
 Provisioning and policy mutation are outside pump authority.
 
-The registry records each work branch's reservation and bootstrap root; a missing work ref that is
+The registry records each work branch's reservation and adapter-neutral bootstrap content identity;
+a missing work ref that is
 already registered is corruption, never a new bootstrap. A required GitHub ruleset forbids deletion
 and non-fast-forward updates for `gaia-ledger/**` and restricts updates to the Gaia pump GitHub App.
 The adapter verifies that ruleset before every write and fails closed when it is absent or changed;
@@ -217,8 +218,11 @@ an expected 64-hex `committedRevision`; the adapter atomically reads the current
 validated receipt to carry that content revision, and uses the corresponding hidden OID for the
 non-force update. The registry has the same private two-revision protocol and adds
 `reserveWork(workKey)` and
-`confirmWork(workKey, bootstrapHeadOid)`. A crash after reservation but before confirmation may
-resume only that exact deterministic bootstrap. Once confirmed, absence can never bootstrap again.
+`confirmWork(workKey, bootstrapCommittedRevision)`. Its canonical receipt body records only the
+adapter-neutral 64-hex bootstrap content revision. The hosted adapter privately maps that revision
+to the work ref's bootstrap OID and validates both; neither OID enters registry content. A crash
+after reservation but before confirmation may resume only that exact deterministic bootstrap.
+Once confirmed, absence can never bootstrap again.
 
 `append` validates `priorCommittedRevision`, creates a blob, tree, and single-parent commit whose
 private Git parent is `expectedRevision.ledgerHeadOid`, then
