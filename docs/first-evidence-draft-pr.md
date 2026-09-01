@@ -2,6 +2,11 @@
 
 Status: R0 design decision for Gaia issue #35.
 
+Boundary correction: issue #56 and `docs/draft-operation-envelope.md` supersede this document's
+input-boundary details after PR #58 demonstrated that stable work identity, mutable generation
+evidence, provider projection, and terminal projection require one canonical envelope owner. The
+delivery-loop outcome and authority limits below remain unchanged.
+
 ## Operator problem
 
 Useful agent work can remain invisible on GitHub until coding, testing, and review finish. Local lane liveness does not prove repository movement, so the control room cannot distinguish productive work from a stalled wrapper.
