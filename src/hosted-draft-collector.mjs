@@ -6,6 +6,7 @@ import { isExactInstant } from './local-lane-observation.mjs';
 
 const GIT_OID = /^[a-f0-9]{40}$/u;
 const GITHUB_SECOND_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u;
+const READY_LABEL = 'ready-for-agent';
 const ALLOWED_PERMISSIONS = new Set(['TRIAGE', 'WRITE', 'MAINTAIN', 'ADMIN']);
 const REQUIRED_METHODS = Object.freeze([
   'resolveRepository', 'readIssue', 'readPermission', 'listHeadRefs', 'readCommit', 'readPolicy',
@@ -228,6 +229,19 @@ export function createGhDraftCollectorApi({ run = runGh } = {}) {
       return { message: commitMessage(raw.message) };
     },
 
+    async listReadyIssues({ repository }) {
+      const pages = flattenPages(await call([
+        'api', `repos/${repositoryPath(repository)}/issues`
+          + `?state=open&labels=${encodeURIComponent(READY_LABEL)}&per_page=100`,
+        '--paginate', '--slurp',
+      ]), 'IssueObservationInvalid');
+      return pages
+        .filter((row) => row !== null && typeof row === 'object'
+          && !Object.hasOwn(row, 'pull_request'))
+        .map((row) => ({ number: positiveInteger(row.number, 'IssueObservationInvalid') }))
+        .sort((left, right) => left.number - right.number);
+    },
+
     async readPolicy({ repository, baseRevision }) {
       const raw = requireRawObject(await call([
         'api', `repos/${repositoryPath(repository)}/contents/.github/gaia/pump-policy.json`
@@ -264,14 +278,14 @@ function requireIssue(value, number) {
   if (value.number !== number || value.state !== 'OPEN' || !isExactInstant(value.updatedAt)
       || !Array.isArray(value.labels) || !Array.isArray(value.labelEvents)
       || value.labels.some((label) => typeof label !== 'string')) fail(code, code);
-  if (!value.labels.includes('ready-for-agent')) fail('IssueNotReady', 'issue is not ready');
+  if (!value.labels.includes(READY_LABEL)) fail('IssueNotReady', 'issue is not ready');
   const labelEvents = value.labelEvents.map(requireLabelEvent);
   for (let index = 1; index < labelEvents.length; index += 1) {
     if (labelEvents[index - 1].createdAt > labelEvents[index].createdAt) {
       fail(code, 'label events are not chronological');
     }
   }
-  const readyEvents = labelEvents.filter((event) => event.label === 'ready-for-agent');
+  const readyEvents = labelEvents.filter((event) => event.label === READY_LABEL);
   if (readyEvents.length === 0) fail('ReadyReceiptMissing', 'ready label event is absent');
   return {
     nodeId: text(value.nodeId, code),

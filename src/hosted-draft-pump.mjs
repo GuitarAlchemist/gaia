@@ -162,3 +162,131 @@ export async function runHostedDraftSupervisor({ limit = 1 } = {}, {
     results,
   });
 }
+
+function candidateNumber(value) {
+  if (!Number.isSafeInteger(value) || value < 1) fail('InvalidHostedDraftPump');
+  return value;
+}
+
+function skipReason(error) {
+  const code = error?.code;
+  return typeof code === 'string' && code.length > 0 ? code : 'OperationFailed';
+}
+
+async function boundPorts(create, argument) {
+  const ports = await create(argument);
+  if (ports === null || typeof ports !== 'object') fail('InvalidHostedDraftPump');
+  return ports;
+}
+
+function intakeReceipt(phase, binding, value, skipped) {
+  return freeze({
+    schema: 'GaiaHostedDraftIntakeReceiptV0',
+    phase,
+    operationId: binding.operationId,
+    workKey: binding.workKey,
+    committedRevision: binding.committedRevision,
+    result: value,
+    skipped,
+  });
+}
+
+function settledRevision(value, fallback) {
+  if (typeof value.committedRevision === 'string') return value.committedRevision;
+  if (typeof value.currentCommittedRevision === 'string') return value.currentCommittedRevision;
+  return fallback;
+}
+
+export async function runHostedDraftIntake({
+  repository, candidates = null, limit = 5,
+} = {}, {
+  ledgerPorts,
+  operationPortsFor,
+  operationPortsForSelector,
+  listReadyIssues = null,
+  listUnsettledDrafts = listUnsettledDraftsCore,
+  enqueueDraft = enqueueDraftCore,
+  reconcileDraft = reconcileDraftCore,
+} = {}) {
+  if (!Number.isSafeInteger(limit) || limit < 1) fail('InvalidHostedDraftPump');
+  const deps = dependencies({
+    ledgerPorts, operationPortsFor, operationPortsForSelector,
+    listUnsettledDrafts, enqueueDraft, reconcileDraft,
+  }, [
+    'ledgerPorts', 'operationPortsFor', 'operationPortsForSelector',
+    'listUnsettledDrafts', 'enqueueDraft', 'reconcileDraft',
+  ]);
+  const { repository: canonicalRepository } = selector({
+    repository, workItem: { kind: 'ISSUE', number: 1 },
+  });
+
+  const listed = await deps.listUnsettledDrafts(deps.ledgerPorts);
+  if (!Array.isArray(listed)) fail('InvalidUnsettledOperation');
+  const records = listed.map(unsettled).sort(
+    (left, right) => left.workKey.localeCompare(right.workKey, 'en'),
+  );
+  if (records.length > 0) {
+    const record = records[0];
+    const ports = await boundPorts(
+      deps.operationPortsFor, freeze(ownedClone(record, 'InvalidUnsettledOperation')),
+    );
+    const reconciled = result(await deps.reconcileDraft(
+      record.operationId, record.committedRevision, ports,
+    ));
+    return intakeReceipt('RESUME', {
+      operationId: record.operationId,
+      workKey: record.workKey,
+      committedRevision: settledRevision(reconciled, record.committedRevision),
+    }, reconciled, []);
+  }
+
+  let numbers;
+  if (candidates === null) {
+    if (typeof listReadyIssues !== 'function') fail('InvalidHostedDraftPump');
+    const rows = await listReadyIssues({ repository: canonicalRepository });
+    if (!Array.isArray(rows)) fail('InvalidHostedDraftPump');
+    numbers = rows.map((row) => candidateNumber(row?.number));
+  } else {
+    if (!Array.isArray(candidates)) fail('InvalidHostedDraftPump');
+    numbers = candidates.map(candidateNumber);
+  }
+  const ordered = [...new Set(numbers)].sort((left, right) => left - right).slice(0, limit);
+
+  const skipped = [];
+  for (const number of ordered) {
+    const canonicalSelector = selector({
+      repository: canonicalRepository, workItem: { kind: 'ISSUE', number },
+    });
+    let enqueued;
+    try {
+      const enqueuePorts = await boundPorts(
+        deps.operationPortsForSelector, freeze(ownedClone(canonicalSelector, 'InvalidHostedDraftPump')),
+      );
+      enqueued = result(await deps.enqueueDraft(canonicalSelector, 'NONE', enqueuePorts));
+    } catch (error) {
+      skipped.push({ number, reason: skipReason(error) });
+      continue;
+    }
+    if (enqueued.kind !== 'Enqueued') {
+      skipped.push({ number, reason: enqueued.kind });
+      continue;
+    }
+    const operationId = revision(enqueued.operationId, 'InvalidHostedDraftResult');
+    const workKey = revision(enqueued.workKey, 'InvalidHostedDraftResult');
+    const committedRevision = revision(enqueued.committedRevision, 'InvalidHostedDraftResult');
+    const ports = await boundPorts(deps.operationPortsFor, freeze({
+      operationId, workKey, committedRevision, selector: canonicalSelector,
+    }));
+    const reconciled = result(await deps.reconcileDraft(operationId, committedRevision, ports));
+    return intakeReceipt('ADMIT', {
+      operationId, workKey, committedRevision: settledRevision(reconciled, committedRevision),
+    }, reconciled, skipped);
+  }
+
+  return intakeReceipt(
+    'EXPECTED_NONE',
+    { operationId: null, workKey: null, committedRevision: null },
+    null,
+    skipped,
+  );
+}

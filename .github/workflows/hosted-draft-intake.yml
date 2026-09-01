@@ -1,0 +1,102 @@
+name: Hosted Draft intake
+
+on:
+  issues:
+    types: [labeled]
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: gaia-draft-intake
+  cancel-in-progress: false
+
+jobs:
+  intake:
+    name: Admit or resume one hosted Draft operation
+    if: github.event_name != 'issues' || github.event.label.name == 'ready-for-agent'
+    runs-on: windows-latest
+    steps:
+      - name: Require the dedicated pump identity
+        shell: pwsh
+        env:
+          GAIA_PUMP_APP_ID: ${{ vars.GAIA_PUMP_APP_ID }}
+          GAIA_PUMP_APP_PRIVATE_KEY: ${{ secrets.GAIA_PUMP_APP_PRIVATE_KEY }}
+          GAIA_PUMP_ACTOR_ID: ${{ vars.GAIA_PUMP_ACTOR_ID }}
+          GAIA_REPOSITORY_NODE_ID: ${{ vars.GAIA_REPOSITORY_NODE_ID }}
+        run: |
+          $required = @(
+            $env:GAIA_PUMP_APP_ID,
+            $env:GAIA_PUMP_APP_PRIVATE_KEY,
+            $env:GAIA_PUMP_ACTOR_ID,
+            $env:GAIA_REPOSITORY_NODE_ID
+          )
+          if ($required.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
+            throw 'Dedicated Gaia pump identity is not configured.'
+          }
+
+      - name: Mint a bounded pump App token
+        id: pump-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.GAIA_PUMP_APP_ID }}
+          private-key: ${{ secrets.GAIA_PUMP_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Check out the sealed intake revision
+        uses: actions/checkout@v7
+        with:
+          token: ${{ steps.pump-token.outputs.token }}
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Read the trusted ledger registry root
+        id: policy
+        shell: pwsh
+        run: |
+          $policy = Get-Content -LiteralPath '.github/gaia/pump-policy.json' -Raw | ConvertFrom-Json
+          "oid=$($policy.ledgerRegistryRootOid)" | Out-File $env:GITHUB_OUTPUT -Append
+          "revision=$($policy.ledgerRegistryRootRevision)" | Out-File $env:GITHUB_OUTPUT -Append
+
+      - name: Resume or admit exactly one Draft operation
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ steps.pump-token.outputs.token }}
+          GAIA_PUMP_ACTOR_ID: ${{ vars.GAIA_PUMP_ACTOR_ID }}
+          GAIA_REPOSITORY_NODE_ID: ${{ vars.GAIA_REPOSITORY_NODE_ID }}
+          GAIA_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GAIA_LEDGER_ROOT_OID: ${{ steps.policy.outputs.oid }}
+          GAIA_LEDGER_ROOT_REVISION: ${{ steps.policy.outputs.revision }}
+          GAIA_RECEIPT_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-receipt.json
+          GAIA_ERROR_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-error.json
+        run: |
+          & node scripts/hosted-draft-pump.mjs intake `
+            --repository $env:GITHUB_REPOSITORY `
+            --pump-actor-id $env:GAIA_PUMP_ACTOR_ID `
+            --repository-node-id $env:GAIA_REPOSITORY_NODE_ID `
+            --ledger-root-oid $env:GAIA_LEDGER_ROOT_OID `
+            --ledger-root-revision $env:GAIA_LEDGER_ROOT_REVISION `
+            1> $env:GAIA_RECEIPT_PATH 2> $env:GAIA_ERROR_PATH
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+            Move-Item -LiteralPath $env:GAIA_ERROR_PATH -Destination $env:GAIA_RECEIPT_PATH -Force
+            exit $exitCode
+          }
+
+      - name: Upload the closed intake receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gaia-hosted-draft-intake-receipt
+          path: ${{ runner.temp }}/gaia-hosted-draft-intake-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: false
