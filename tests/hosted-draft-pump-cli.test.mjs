@@ -337,3 +337,108 @@ test('reconcile rejects a mismatched work key before provider, admission, or dur
   );
   assert.deepEqual(calls, ['ports']);
 });
+
+test('intake is an accepted command and reaches the runtime as such', async () => {
+  const output = sink();
+  const errors = sink();
+  const seen = [];
+  const exitCode = await main({
+    argv: [...commonArgs('intake'), '--repository-node-id', 'R_node', '--owner', 'GuitarAlchemist'],
+    env: { GAIA_ISSUE_NUMBER: '70' },
+    stdout: output.stream,
+    stderr: errors.stream,
+    runtimeFactory(configuration) {
+      seen.push(configuration.command);
+      return Object.freeze({
+        async listUnsettled() { return []; },
+        async enqueue() { return { kind: 'StaleRevision', currentCommittedRevision: REVISION }; },
+        async reconcile() { assert.fail('nothing was admitted'); },
+      });
+    },
+  });
+
+  assert.equal(errors.text(), '');
+  assert.equal(exitCode, 0);
+  assert.deepEqual(seen, ['intake']);
+  assert.equal(output.json().command, 'intake');
+});
+
+test('intake admission is sealed to the intake workflow path, with no CLI or env override', async () => {
+  const paths = [];
+  function dependenciesCapturing() {
+    return {
+      createGhGitDataApi() { return {}; },
+      createGitDataDraftOperationStore() {
+        return {
+          async inspectByOperation() {
+            return {
+              identity: { workKey: WORK_KEY },
+              envelope: { workItem: { kind: 'ISSUE', number: 70 } },
+            };
+          },
+        };
+      },
+      createGhDraftCollectorApi() { return {}; },
+      createHostedDraftCollector() { return {}; },
+      createGhDraftOperationProvider() { return {}; },
+      createGitHubActionsDraftAdmission({ expectedWorkflowPath }) {
+        paths.push(expectedWorkflowPath);
+        return {};
+      },
+      createDraftOperationPorts() { return {}; },
+      async enqueueDraft() {
+        return {
+          kind: 'Enqueued', operationId: OPERATION_ID, workKey: WORK_KEY,
+          generationKey: 'f'.repeat(64), committedRevision: REVISION,
+        };
+      },
+      async reconcileDraft() {
+        return { kind: 'Pending', operationId: OPERATION_ID, committedRevision: REVISION };
+      },
+      async listUnsettledDrafts() { return []; },
+      async readWorkflowAdmission() { return {}; },
+    };
+  }
+
+  const base = Object.freeze({
+    repository: Object.freeze({ owner: 'GuitarAlchemist', name: 'gaia' }),
+    repositoryNodeId: 'R_node',
+    pumpActorId: 1234,
+    ledgerRootOid: ROOT_OID,
+    ledgerRootRevision: ROOT_REVISION,
+    presentation: undefined,
+  });
+
+  const intake = createHostedDraftPumpRuntime(
+    { ...base,
+      command: 'intake',
+      environment: {
+        GAIA_ADMISSION_WORKFLOW_PATH: '.github/workflows/attacker.yml',
+        EFFECT_WORKFLOW_PATH: '.github/workflows/attacker.yml',
+      } },
+    { async append() {} },
+    dependenciesCapturing(),
+  );
+  await intake.enqueue({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    workItem: { kind: 'ISSUE', number: 70 },
+  });
+  await intake.reconcile({
+    operationId: OPERATION_ID, workKey: WORK_KEY, expectedRevision: REVISION,
+  });
+
+  const reconcile = createHostedDraftPumpRuntime(
+    { ...base, command: 'reconcile', environment: {} },
+    { async append() {} },
+    dependenciesCapturing(),
+  );
+  await reconcile.reconcile({
+    operationId: OPERATION_ID, workKey: WORK_KEY, expectedRevision: REVISION,
+  });
+
+  assert.ok(paths.length >= 1, 'admission must be constructed for an intake effect');
+  for (const path of paths.slice(0, -1)) {
+    assert.equal(path, '.github/workflows/hosted-draft-intake.yml');
+  }
+  assert.equal(paths.at(-1), '.github/workflows/hosted-draft-pump-effect.yml');
+});
