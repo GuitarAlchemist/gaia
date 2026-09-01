@@ -1,1 +1,1 @@
-{"body":{"kind":"REGISTRY_ROOT","priorCommittedRevision":"NONE","schema":"GaiaDraftRegistryRootV0"},"committedRevision":"f5b3e91be5b11d5ab8c0714d7f56db8319b089eb1c95fdeacb05587604343150"}
+{"body":{"kind":"RESERVED","priorCommittedRevision":"f5b3e91be5b11d5ab8c0714d7f56db8319b089eb1c95fdeacb05587604343150","schema":"GaiaDraftRegistryReceiptV0","workKey":"6ed0743acf895df59f9fd0e32aa1ca914e6d8b8f93ac94b61238a97f159088bf"},"committedRevision":"1dbc51111d72ee64dfa8a886dacd2b60c33d71de9be3d71a38b956685cb1f3b2"}
