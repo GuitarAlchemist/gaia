@@ -44,7 +44,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 1409 gates
+node --test                                   # 1410 gates
 ```
 
 ### Functional factory tracer
@@ -627,6 +627,7 @@ authoritative for their named contracts.
 | `src/control-room.mjs` | Pure, content-addressed operator read model plus dependency-free HTML renderer; fresh real heartbeats are the only animated signal, and open-ended progress or ETA remains explicitly unknown. |
 | `src/git-gh-publication-effects.mjs` | Concrete local Git and `gh` publication effects with repeated identity checks, explicit remote-branch leases, and exact pull-request reuse. |
 | `src/github-read-adapter.mjs` | Read-only `gh` ingestion adapter with fail-closed query-cap detection. |
+| `src/hosted-draft-collector.mjs` | Closed GitHub observation boundary that derives one canonical Draft Operation Envelope from repository, issue, readiness, branch, permission, and policy facts. |
 | `src/factory-telemetry-phase.mjs` | The generic file-backed phase sensor: accepts one closed lifecycle fact and returns, so a run stays open on disk and a separately invoked reader observes it moving, expiring and settling. Binds the subject once, at start. |
 | `src/wmux-claude-telemetry-bridge.mjs` | Thin wrapper binding one bounded, caller-supplied wmux/Claude task to the phase seam. Launches nothing, reads no screen or prompt, accepts one closed outcome, and re-throws infrastructure failures rather than recording them as blocked runs. |
 | `scripts/gaia-interagent.mjs` | **The supported control script.** Lifecycle + messaging. |
@@ -651,7 +652,7 @@ authoritative for their named contracts.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 1409 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 1410 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
