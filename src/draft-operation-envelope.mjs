@@ -843,6 +843,12 @@ class GitDataDraftOperationStore {
     });
   }
 
+  async inspectByOperation(operationId) {
+    requireRevision(operationId, 'InvalidOperationId');
+    const work = await this.#stateByOperation(operationId);
+    return work ? this.#snapshot(work) : null;
+  }
+
   async readHead(workKey) {
     requireRevision(workKey, 'InvalidWorkKey');
     const work = await this.#inspectByWork(workKey);
