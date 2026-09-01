@@ -77,12 +77,17 @@ test('R1 real enqueue seam accepts the sealed selector and reaches hosted observ
   const { createHostedDraftCollector } = await api();
   const stable = githubBoundary();
   let repositoryReads = 0;
+  let headReads = 0;
   const collector = createHostedDraftCollector({
     github: {
       ...stable,
       async resolveRepository() {
         repositoryReads += 1;
         return stable.resolveRepository();
+      },
+      async listHeadRefs() {
+        headReads += 1;
+        return stable.listHeadRefs();
       },
     },
   });
@@ -100,6 +105,7 @@ test('R1 real enqueue seam accepts the sealed selector and reaches hosted observ
   assert.equal(result.kind, 'Enqueued');
   assert.match(result.committedRevision, /^[a-f0-9]{64}$/u);
   assert.equal(repositoryReads, 2, 'the real collector observed and bounded the sealed selector');
+  assert.equal(headReads, 2, 'stable initial and read-back head revisions permit ENQUEUED');
 });
 
 test('R1 moved base read-back is a typed refusal before ENQUEUED', async () => {
