@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -26,13 +27,30 @@ import {
   createHostedDraftCollector,
 } from '../src/hosted-draft-collector.mjs';
 import { createGitHubActionsDraftAdmission } from '../src/github-actions-draft-admission.mjs';
+import { runHostedDraftIntake } from '../src/hosted-draft-pump.mjs';
+import { produceHostedDraftPumpObservation } from '../src/hosted-draft-pump-producer.mjs';
 
 const execFileAsync = promisify(execFile);
 const SHA256 = /^[a-f0-9]{64}$/u;
 const GIT_OID = /^[a-f0-9]{40}$/u;
 const REPOSITORY = /^([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)$/u;
-const COMMANDS = new Set(['enqueue', 'reconcile', 'list-unsettled']);
-const EFFECT_WORKFLOW_PATH = '.github/workflows/hosted-draft-pump-effect.yml';
+const COMMANDS = new Set(['enqueue', 'reconcile', 'list-unsettled', 'intake']);
+// Sealed per command. Never a flag and never environment-derived: a caller that could name its
+// own workflow here would mint effect authority for a run it controls.
+const ADMISSION_WORKFLOW_PATH = Object.freeze({
+  reconcile: '.github/workflows/hosted-draft-pump-effect.yml',
+  intake: '.github/workflows/hosted-draft-intake.yml',
+});
+const INTAKE_PROBE_LIMIT = 5;
+const INTAKE_PRESENTATION = Object.freeze({
+  owner: 'Gaia hosted Draft pump',
+  gate: 'DELIVERY',
+  checklist: Object.freeze([
+    'Create or reuse one exact Draft pull request',
+    'Persist one terminal receipt',
+  ]),
+  eta: Object.freeze({ minimumMinutes: 60, maximumMinutes: 120 }),
+});
 const COMMON_FLAGS = new Set([
   'repository', 'pump-actor-id', 'ledger-root-oid', 'ledger-root-revision',
 ]);
@@ -43,6 +61,10 @@ const COMMAND_FLAGS = Object.freeze({
     'owner', 'gate', 'check', 'eta-minutes', 'managed-round',
   ]),
   'list-unsettled': COMMON_FLAGS,
+  intake: new Set([
+    ...COMMON_FLAGS, 'issue', 'repository-node-id', 'owner', 'gate', 'check', 'eta-minutes',
+    'observation-out', 'run-id',
+  ]),
 });
 
 export class HostedDraftPumpCliError extends Error {
@@ -74,10 +96,24 @@ function parseFlags(argv) {
   return { command, flags };
 }
 
+/**
+ * One environment read, where present-and-empty means absent.
+ *
+ * GitHub Actions interpolates a null event field to the empty string, so on a `schedule` event the
+ * intake workflow's `GAIA_ISSUE_NUMBER` binding arrives present and empty. An environment carrying
+ * `''` carries no value, and reading it as a malformed argument killed every scheduled recovery
+ * tick at argument parsing, before the ledger was ever read.
+ *
+ * The rule is about environments only. A flag typed as an empty value is a caller who got an
+ * argument wrong, and `configuredText` still refuses it — which is why this lives here and not
+ * there. Nothing required changes behaviour: an empty required value failed before through
+ * `configuredText('')` and fails after through `configuredText(undefined)`.
+ */
 function envValue(env, name) {
   const descriptor = env !== null && typeof env === 'object'
     ? Object.getOwnPropertyDescriptor(env, name) : null;
-  return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  if (!descriptor || !Object.hasOwn(descriptor, 'value')) return undefined;
+  return descriptor.value === '' ? undefined : descriptor.value;
 }
 
 function configuredText(value, maximum = 512) {
@@ -88,6 +124,11 @@ function configuredText(value, maximum = 512) {
 
 function flagOrEnv(flags, flag, env, name) {
   return configuredText(flags.get(flag) ?? envValue(env, name));
+}
+
+function optionalFlagOrEnv(flags, flag, env, name) {
+  const value = flags.get(flag) ?? envValue(env, name);
+  return value === undefined ? undefined : configuredText(value);
 }
 
 function positiveInteger(value) {
@@ -199,7 +240,41 @@ function parseConfiguration(argv, env) {
       flags, 'managed-round', env, 'GAIA_MANAGED_ROUND_JSON',
     ));
   }
+  if (command === 'intake') {
+    const issue = optionalFlagOrEnv(flags, 'issue', env, 'GAIA_ISSUE_NUMBER');
+    if (issue !== undefined) configuration.issue = positiveInteger(issue);
+    configuration.repositoryNodeId = configuredText(flagOrEnv(
+      flags, 'repository-node-id', env, 'GAIA_REPOSITORY_NODE_ID',
+    ));
+    const suppliedEta = optionalFlagOrEnv(flags, 'eta-minutes', env, 'GAIA_ETA_MINUTES');
+    const suppliedChecklist = flags.get('check') !== undefined
+      || envValue(env, 'GAIA_CHECKLIST_JSON') !== undefined;
+    configuration.presentation = {
+      owner: optionalFlagOrEnv(flags, 'owner', env, 'GAIA_DRAFT_OWNER')
+        ?? INTAKE_PRESENTATION.owner,
+      gate: optionalFlagOrEnv(flags, 'gate', env, 'GAIA_DRAFT_GATE') ?? INTAKE_PRESENTATION.gate,
+      checklist: suppliedChecklist ? checklist(flags, env) : INTAKE_PRESENTATION.checklist,
+      eta: suppliedEta === undefined ? INTAKE_PRESENTATION.eta : eta(suppliedEta),
+    };
+    const observationOut = optionalFlagOrEnv(
+      flags, 'observation-out', env, 'GAIA_OBSERVATION_PATH',
+    );
+    const runId = optionalFlagOrEnv(flags, 'run-id', env, 'GITHUB_RUN_ID');
+    if (observationOut !== undefined) {
+      // An observation is sequenced by the run that produced it. Without the run identity the
+      // reading could not be ordered against the one already published, and an unorderable
+      // reading is how a stale replay reads as current.
+      if (runId === undefined) fail();
+      configuration.observationOut = observationOut;
+      configuration.sequence = positiveInteger(runId);
+    }
+  }
   return Object.freeze(configuration);
+}
+
+function admissionWorkflowPath(command) {
+  if (typeof command !== 'string' || !Object.hasOwn(ADMISSION_WORKFLOW_PATH, command)) fail();
+  return ADMISSION_WORKFLOW_PATH[command];
 }
 
 function createTelemetry() {
@@ -261,9 +336,8 @@ export function createHostedDraftPumpRuntime(
       ledgerRegistryRootRevision: configuration.ledgerRootRevision,
     },
   });
-  const collector = dependencies.createHostedDraftCollector({
-    github: dependencies.createGhDraftCollectorApi(),
-  });
+  const github = dependencies.createGhDraftCollectorApi();
+  const collector = dependencies.createHostedDraftCollector({ github });
   const inertProvider = Object.freeze({
     async lookupExact() { return null; },
     async createDraft() { throw new HostedDraftPumpCliError('OperationFailed'); },
@@ -305,7 +379,7 @@ export function createHostedDraftPumpRuntime(
       const admission = dependencies.createGitHubActionsDraftAdmission({
         expectedRepository: `${configuration.repository.owner}/${configuration.repository.name}`,
         expectedWorkKey: workKey,
-        expectedWorkflowPath: EFFECT_WORKFLOW_PATH,
+        expectedWorkflowPath: admissionWorkflowPath(configuration.command),
         environment: configuration.environment,
         readWorkflowAdmission: (identity) => dependencies.readWorkflowAdmission(
           configuration, identity,
@@ -338,6 +412,9 @@ export function createHostedDraftPumpRuntime(
     async listUnsettled() {
       return dependencies.listUnsettledDrafts({ store });
     },
+    async listReadyIssues() {
+      return github.listReadyIssues({ repository: configuration.repository });
+    },
   });
 }
 
@@ -353,12 +430,51 @@ function writeJson(stream, value) {
   stream.write(`${JSON.stringify(value)}\n`);
 }
 
+/**
+ * The refusal codes an observation attempt may report, closed.
+ *
+ * A refusal is named rather than swallowed, and no diagnostic text escapes with it: the receipt is
+ * an uploaded artifact, and the existing error paths already redact provider and transport detail.
+ */
+const OBSERVATION_REFUSALS = new Set([
+  'InvalidHostedDraftPumpReceipt', 'UnobservableHostedDraftPumpReceipt',
+  'InvalidHostedDraftPump', 'IncoherentHostedDraftPump',
+]);
+
+/**
+ * The receipt this run just produced, to one sealed observation the Control Room can verify.
+ *
+ * A refusal here does not fail the run: the intake itself succeeded, and a run that cannot honestly
+ * say what the pump did must publish nothing rather than a guess. The absent observation ages into
+ * STALE, which is the true reading. A write failure is not a refusal and is left to propagate.
+ */
+function observeTransition(configuration, receipt, instants) {
+  try {
+    return {
+      artifact: produceHostedDraftPumpObservation({
+        receipt,
+        repository: `${configuration.repository.owner}/${configuration.repository.name}`,
+        repositoryNodeId: configuration.repositoryNodeId,
+        ledgerRootOid: configuration.ledgerRootOid,
+        ledgerRootRevision: configuration.ledgerRootRevision,
+        sequence: configuration.sequence,
+        ...instants,
+      }),
+    };
+  } catch (error) {
+    const code = error?.code;
+    return { refusal: OBSERVATION_REFUSALS.has(code) ? code : 'ObservationFailed' };
+  }
+}
+
 export async function main({
   argv = process.argv.slice(2),
   env = process.env,
   stdout = process.stdout,
   stderr = process.stderr,
   runtimeFactory = createHostedDraftPumpRuntime,
+  now = () => new Date().toISOString(),
+  writeFile = (path, text) => writeFileSync(path, text, 'utf8'),
 } = {}) {
   let configuration;
   try {
@@ -397,6 +513,51 @@ export async function main({
         result,
         telemetry: cloneJson(telemetry.events),
       };
+    } else if (configuration.command === 'intake') {
+      const windowStartedAt = now();
+      const intake = cloneJson(await runHostedDraftIntake({
+        repository: configuration.repository,
+        candidates: configuration.issue === undefined ? null : [configuration.issue],
+        limit: INTAKE_PROBE_LIMIT,
+      }, {
+        ledgerPorts: { runtime },
+        operationPortsFor(record) { return { workKey: record.workKey }; },
+        operationPortsForSelector() { return { workKey: null }; },
+        async listUnsettledDrafts() { return runtime.listUnsettled(); },
+        async listReadyIssues(request) { return runtime.listReadyIssues(request); },
+        async enqueueDraft(canonicalSelector) { return runtime.enqueue(canonicalSelector); },
+        async reconcileDraft(operationId, expectedRevision, ports) {
+          return runtime.reconcile({ operationId, workKey: ports.workKey, expectedRevision });
+        },
+      }));
+      const tickAt = now();
+      receipt = {
+        schema: 'GaiaHostedDraftPumpCliReceiptV0', command: 'intake',
+        trigger: configuration.issue === undefined ? 'SCHEDULE' : 'ISSUES_LABELED',
+        phase: intake.phase,
+        operationId: intake.operationId,
+        workKey: intake.workKey,
+        committedRevision: intake.committedRevision,
+        workItem: intake.workItem,
+        unsettledCount: intake.unsettledCount,
+        result: intake.result,
+        skipped: intake.skipped,
+        telemetry: cloneJson(telemetry.events),
+      };
+      if (configuration.observationOut !== undefined) {
+        const observed = observeTransition(configuration, receipt, {
+          windowStartedAt, tickAt, observedAt: now(),
+        });
+        if (observed.artifact === undefined) {
+          receipt = { ...receipt, observation: { state: 'REFUSED', reason: observed.refusal } };
+        } else {
+          writeFile(configuration.observationOut, `${JSON.stringify(observed.artifact)}\n`);
+          receipt = {
+            ...receipt,
+            observation: { state: 'PRODUCED', revision: observed.artifact.revision },
+          };
+        }
+      }
     } else {
       receipt = {
         schema: 'GaiaHostedDraftPumpCliReceiptV0', command: 'list-unsettled',

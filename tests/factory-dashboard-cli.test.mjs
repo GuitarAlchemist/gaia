@@ -964,3 +964,97 @@ test('the GitHub refresh adapter publishes the activity beside the snapshot it b
     'the two flags stay paired through the refresh adapter too',
   );
 });
+
+// -----------------------------------------------------------------------------------------------
+// Hosted Draft pump observation — the `--hosted-draft-pump` adapter seam (issue #70, bullet 7).
+// -----------------------------------------------------------------------------------------------
+
+function hostedDraftPumpArtifact(overrides = {}) {
+  const body = {
+    schema: 'gaia-hosted-draft-pump/1',
+    effect: 'NONE',
+    authority: 'NONE',
+    observedAt: '2026-09-01T14:50:55.000Z',
+    windowStartedAt: '2026-09-01T13:50:55.000Z',
+    sequence: 41,
+    repository: 'GuitarAlchemist/gaia',
+    repositoryNodeId: 'R_kgDOT3lpUg',
+    ledgerRootOid: '1'.repeat(40),
+    ledgerRootRevision: '2'.repeat(64),
+    transition: {
+      tickAt: '2026-09-01T14:49:02.000Z',
+      trigger: 'READY_LABEL',
+      outcome: 'CREATED',
+      effect: 'CREATE_DRAFT',
+      operationId: 'b'.repeat(64),
+      workKey: 'c'.repeat(64),
+      generationKey: 'd'.repeat(64),
+      committedRevision: 'e'.repeat(64),
+      observedSourceRevision: 'f'.repeat(64),
+      workItem: { kind: 'ISSUE', number: 70 },
+      pullRequest: { number: 71, isDraft: true, state: 'OPEN' },
+      blocker: 'NONE',
+    },
+    unsettledCount: 0,
+    ...overrides,
+  };
+  return { ...body, revision: createHash('sha256').update(canonicalJson(body)).digest('hex') };
+}
+
+test('the dashboard CLI publishes a hosted Draft pump observation supplied as caller-owned transport', () => {
+  const projectionPath = join(scratch, 'hdp-projection.json');
+  const pumpPath = join(scratch, 'hdp-observation.json');
+  const snapshotPath = join(scratch, 'hdp-control-room.json');
+  const htmlPath = join(scratch, 'hdp-control-room.html');
+  writeFileSync(projectionPath, JSON.stringify(projection({
+    schema: 'gaia-portfolio-drain-projection/1',
+    portfolioRevision: 'a'.repeat(64),
+    effect: 'NONE', authority: 'NONE', capacity: 4,
+    counts: { occupied: 0, available: 4 }, items: [], decisions: [],
+  })), 'utf8');
+  writeFileSync(pumpPath, JSON.stringify(hostedDraftPumpArtifact()), 'utf8');
+
+  const snapshot = runFactoryDashboardCli([
+    '--projection', projectionPath,
+    '--snapshot-out', snapshotPath,
+    '--html-out', htmlPath,
+    '--hosted-draft-pump', pumpPath,
+    '--now', '2026-09-01T14:50:55.000Z',
+  ]);
+
+  assert.notEqual(snapshot.hostedDraftPump, undefined,
+    '--hosted-draft-pump must reach buildControlRoomSnapshot on the factory-dashboard path');
+  assert.equal(snapshot.hostedDraftPump.source, 'GAIA_HOSTED_DRAFT_PUMP');
+  assert.equal(snapshot.hostedDraftPump.state, 'ADVANCED');
+  assert.equal(snapshot.hostedDraftPump.operationId, 'b'.repeat(64));
+  assert.equal(snapshot.hostedDraftPump.committedRevision, 'e'.repeat(64));
+  // The file is transport. The artifact's own revision is what makes it verifiable.
+  assert.match(readFileSync(htmlPath, 'utf8'), /hosted-draft-pump/u);
+});
+
+test('the dashboard CLI carries the prior hosted pump observation from the published snapshot', () => {
+  const projectionPath = join(scratch, 'hdp-prior-projection.json');
+  const pumpPath = join(scratch, 'hdp-prior-observation.json');
+  const snapshotPath = join(scratch, 'hdp-prior-control-room.json');
+  const htmlPath = join(scratch, 'hdp-prior-control-room.html');
+  writeFileSync(projectionPath, JSON.stringify(projection({
+    schema: 'gaia-portfolio-drain-projection/1',
+    portfolioRevision: 'a'.repeat(64),
+    effect: 'NONE', authority: 'NONE', capacity: 4,
+    counts: { occupied: 0, available: 4 }, items: [], decisions: [],
+  })), 'utf8');
+
+  writeFileSync(pumpPath, JSON.stringify(hostedDraftPumpArtifact({ sequence: 41 })), 'utf8');
+  runFactoryDashboardCli([
+    '--projection', projectionPath, '--snapshot-out', snapshotPath, '--html-out', htmlPath,
+    '--hosted-draft-pump', pumpPath, '--now', '2026-09-01T14:50:55.000Z',
+  ]);
+
+  // A producer that went backwards is refused against the previously published snapshot — the
+  // carrier is the published artifact and nothing else, so no private state store is introduced.
+  writeFileSync(pumpPath, JSON.stringify(hostedDraftPumpArtifact({ sequence: 7 })), 'utf8');
+  assert.throws(() => runFactoryDashboardCli([
+    '--projection', projectionPath, '--snapshot-out', snapshotPath, '--html-out', htmlPath,
+    '--hosted-draft-pump', pumpPath, '--now', '2026-09-01T14:51:55.000Z',
+  ]), /IncoherentHostedDraftPump|backwards/u);
+});
