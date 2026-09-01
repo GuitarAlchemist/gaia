@@ -195,25 +195,45 @@ async function readWorkflowAdmission(configuration, { repository, runId, runAtte
   };
 }
 
-function defaultRuntimeFactory(configuration, telemetry) {
-  const gitData = createGhGitDataApi({
+const DEFAULT_DEPENDENCIES = Object.freeze({
+  createGhGitDataApi,
+  createGitDataDraftOperationStore,
+  createGhDraftCollectorApi,
+  createHostedDraftCollector,
+  createGhDraftOperationProvider,
+  createGitHubActionsDraftAdmission,
+  createDraftOperationPorts,
+  enqueueDraft,
+  reconcileDraft,
+  listUnsettledDrafts,
+  readWorkflowAdmission,
+});
+
+export function createHostedDraftPumpRuntime(
+  configuration,
+  telemetry,
+  dependencies = DEFAULT_DEPENDENCIES,
+) {
+  const gitData = dependencies.createGhGitDataApi({
     repository: configuration.repository,
     pumpActor: { actorId: configuration.pumpActorId, actorType: 'Integration' },
   });
-  const store = createGitDataDraftOperationStore({
+  const store = dependencies.createGitDataDraftOperationStore({
     gitData,
     config: {
       ledgerRegistryRootOid: configuration.ledgerRootOid,
       ledgerRegistryRootRevision: configuration.ledgerRootRevision,
     },
   });
-  const collector = createHostedDraftCollector({ github: createGhDraftCollectorApi() });
+  const collector = dependencies.createHostedDraftCollector({
+    github: dependencies.createGhDraftCollectorApi(),
+  });
   const inertProvider = Object.freeze({
     async lookupExact() { return null; },
     async createDraft() { throw new HostedDraftPumpCliError('OperationFailed'); },
   });
   const inertAdmission = Object.freeze({ async reserveEffect() { return 'ZERO'; } });
-  const enqueuePorts = createDraftOperationPorts({
+  const enqueuePorts = dependencies.createDraftOperationPorts({
     collector,
     provider: inertProvider,
     admission: inertAdmission,
@@ -223,7 +243,7 @@ function defaultRuntimeFactory(configuration, telemetry) {
   });
   return Object.freeze({
     async enqueue(selector) {
-      return enqueueDraft(selector, 'NONE', enqueuePorts);
+      return dependencies.enqueueDraft(selector, 'NONE', enqueuePorts);
     },
     async reconcile({ operationId, workKey, expectedRevision }) {
       const expectedRepository = Object.freeze({
@@ -231,17 +251,19 @@ function defaultRuntimeFactory(configuration, telemetry) {
         owner: configuration.repository.owner,
         name: configuration.repository.name,
       });
-      const provider = createGhDraftOperationProvider({
+      const provider = dependencies.createGhDraftOperationProvider({
         expectedRepository,
         presentation: configuration.presentation,
       });
-      const admission = createGitHubActionsDraftAdmission({
+      const admission = dependencies.createGitHubActionsDraftAdmission({
         expectedRepository: `${configuration.repository.owner}/${configuration.repository.name}`,
         expectedWorkKey: workKey,
         environment: configuration.environment,
-        readWorkflowAdmission: (identity) => readWorkflowAdmission(configuration, identity),
+        readWorkflowAdmission: (identity) => dependencies.readWorkflowAdmission(
+          configuration, identity,
+        ),
       });
-      const operationPorts = createDraftOperationPorts({
+      const operationPorts = dependencies.createDraftOperationPorts({
         collector,
         provider,
         admission,
@@ -249,10 +271,10 @@ function defaultRuntimeFactory(configuration, telemetry) {
         telemetry,
         store,
       });
-      return reconcileDraft(operationId, expectedRevision, operationPorts);
+      return dependencies.reconcileDraft(operationId, expectedRevision, operationPorts);
     },
     async listUnsettled() {
-      return listUnsettledDrafts({ store });
+      return dependencies.listUnsettledDrafts({ store });
     },
   });
 }
@@ -274,7 +296,7 @@ export async function main({
   env = process.env,
   stdout = process.stdout,
   stderr = process.stderr,
-  runtimeFactory = defaultRuntimeFactory,
+  runtimeFactory = createHostedDraftPumpRuntime,
 } = {}) {
   let configuration;
   try {
