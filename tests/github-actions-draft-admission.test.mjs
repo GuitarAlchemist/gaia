@@ -10,6 +10,8 @@ const WORK_KEY = 'a'.repeat(64);
 const OPERATION_ID = 'b'.repeat(64);
 const CLAIMED_REVISION = 'c'.repeat(64);
 const EPOCH = Object.freeze({ runId: 73001, runAttempt: 2 });
+const WORKFLOW_PATH = '.github/workflows/hosted-draft-pump-effect.yml';
+const WORKFLOW_SHA = 'd'.repeat(40);
 
 function context(overrides = {}) {
   return {
@@ -27,6 +29,8 @@ function observation(overrides = {}) {
     id: EPOCH.runId,
     run_attempt: EPOCH.runAttempt,
     status: 'in_progress',
+    path: WORKFLOW_PATH,
+    head_sha: WORKFLOW_SHA,
     ...overrides,
   };
 }
@@ -39,9 +43,12 @@ function adapter(readWorkflowAdmission, environment = {}) {
       GITHUB_REPOSITORY: REPOSITORY,
       GITHUB_RUN_ID: String(EPOCH.runId),
       GITHUB_RUN_ATTEMPT: String(EPOCH.runAttempt),
+      GITHUB_WORKFLOW_REF: `${REPOSITORY}/${WORKFLOW_PATH}@refs/heads/main`,
+      GITHUB_WORKFLOW_SHA: WORKFLOW_SHA,
       ...environment,
     },
     readWorkflowAdmission,
+    expectedWorkflowPath: WORKFLOW_PATH,
   });
 }
 
@@ -88,6 +95,8 @@ test('unavailable or mismatched workflow evidence never grants capacity', async 
     observation({ run_attempt: EPOCH.runAttempt + 1 }),
     observation({ status: 'queued' }),
     observation({ status: 'completed' }),
+    observation({ path: '.github/workflows/unrelated.yml' }),
+    observation({ head_sha: 'e'.repeat(40) }),
     null,
   ];
 
@@ -114,6 +123,8 @@ test('configuration is bound to canonical Actions identity values', () => {
     { GITHUB_RUN_ID: '73001.0' },
     { GITHUB_RUN_ATTEMPT: '0' },
     { GITHUB_RUN_ATTEMPT: '02' },
+    { GITHUB_WORKFLOW_REF: `${REPOSITORY}/.github/workflows/unrelated.yml@refs/heads/main` },
+    { GITHUB_WORKFLOW_SHA: 'not-a-sha' },
   ]) {
     assert.throws(
       () => adapter(async () => observation(), environment),
@@ -128,12 +139,15 @@ test('the Actions epoch can be read from the exotic process.env-style object', a
     GITHUB_REPOSITORY: REPOSITORY,
     GITHUB_RUN_ID: String(EPOCH.runId),
     GITHUB_RUN_ATTEMPT: String(EPOCH.runAttempt),
+    GITHUB_WORKFLOW_REF: `${REPOSITORY}/${WORKFLOW_PATH}@refs/heads/main`,
+    GITHUB_WORKFLOW_SHA: WORKFLOW_SHA,
   });
   const admission = createGitHubActionsDraftAdmission({
     expectedRepository: REPOSITORY,
     expectedWorkKey: WORK_KEY,
     environment,
     readWorkflowAdmission: async () => observation(),
+    expectedWorkflowPath: WORKFLOW_PATH,
   });
 
   assert.equal(await admission.reserveEffect(context()), 'AVAILABLE');

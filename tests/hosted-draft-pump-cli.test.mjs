@@ -285,6 +285,8 @@ test('the production runtime composition wires existing collector, Git Data, pro
   assert.deepEqual(calls.find(([kind]) => kind === 'provider')[1].presentation,
     configuration.presentation);
   assert.equal(calls.find(([kind]) => kind === 'admission')[1].expectedWorkKey, WORK_KEY);
+  assert.equal(calls.find(([kind]) => kind === 'admission')[1].expectedWorkflowPath,
+    '.github/workflows/hosted-draft-pump-effect.yml');
   assert.equal(calls.find(([kind]) => kind === 'reconcile-core')[3].executorEpoch.runId, 9001);
 });
 
