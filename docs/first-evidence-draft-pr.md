@@ -2,6 +2,14 @@
 
 Status: R0 design decision for Gaia issue #35.
 
+Boundary correction: issue #56 and `docs/draft-operation-envelope.md` supersede this document's
+input-boundary and crash-recovery details after PR #58 demonstrated that stable work identity,
+mutable generation evidence, provider projection, and terminal projection require one canonical
+envelope owner. The delivery-loop outcome and authority limits below remain unchanged. In the
+irreducibly ambiguous window after `EFFECT_STARTED`, safety wins: Gaia records a durable
+nonterminal `EFFECT_AMBIGUOUS`, alerts, and refuses a blind retry rather than claiming a false
+terminal or that every provider crash can recover automatically.
+
 ## Operator problem
 
 Useful agent work can remain invisible on GitHub until coding, testing, and review finish. Local lane liveness does not prove repository movement, so the control room cannot distinguish productive work from a stalled wrapper.
@@ -18,17 +26,23 @@ Nested pumps may use the same protocol, but may not invent new authority, state 
 
 ## Identity and concurrency
 
-The operation identity binds canonical repository identity, task identity, base branch, head branch generation, and evidence-bearing head SHA. Agent names, labels, clocks, prompts, and delivery order are not identity.
+`docs/draft-operation-envelope.md` is authoritative for identity, provenance, ledger storage,
+serialization, hosted execution, cancellation, and crash recovery. In summary, stable `workKey` is
+separate from generation identity; exact canonical SHA-256 functions are shared product code; and
+agent names, clocks, prompts, and delivery order are never identity.
 
-One existing GitHub-effect executor owns the effect. It acquires a compare-and-swap claim over the expected durable ledger head, records `INTENT` before the request, and records one terminal `CREATED`, `REUSED`, or `REFUSED` receipt after exact reconciliation.
+A hosted collector derives the sealed envelope from authoritative GitHub issue events, refs, and
+policy. Durable `ENQUEUED` ingress precedes Actions dispatch. Per-work Git refs use non-force
+fast-forward CAS and separate hidden Git OIDs from public content revisions. One hosted executor
+epoch may append `INTENT` then `EFFECT_STARTED` before calling the provider. A stale loser performs
+no effect.
 
-The compare-and-swap append of `INTENT` is the single durable linearization point, and it orders callers in separate operating-system processes, not merely coroutines in one. Each caller seals its own closed ownership token into its claim, so two claims for one operation are two different records rather than one replay, and the second is refused as a lost update. Replaying an identical transition stays a no-op only from the head the replaying caller observed when it wrote that record.
-
-Two callers from the same prior revision cannot both win. A stale loser performs no GitHub effect and writes no receipt of its own. After a timeout, disconnect, crash, or lost response, the executor queries GitHub by exact repository, base, head, and embedded operation identity before deciding; it never blindly retries creation.
-
-Ownership is bounded. A live caller and a process killed mid-delivery leave the same record — an `INTENT` with no terminal — so each claim carries a bounded lease. An unexpired lease is a live owner and a second caller fails closed rather than racing it. An expired lease is an orphan: the operation is reconciled against GitHub and then decided, never wedged permanently on a claim nobody holds and never re-created blind.
-
-A matching open Draft PR is reused. Multiple matches, conflicting identity, changed branch generation, stale/future/corrupt evidence, or insufficient authority fail closed.
+An exact matching Draft yields terminal `REUSED`; a confirmed create yields `CREATED`; a definitive
+pre-effect or provider refusal yields `REFUSED`; and a pre-effect cancellation yields `CANCELLED`.
+A lost response after `EFFECT_STARTED` yields
+nonterminal `EFFECT_AMBIGUOUS` and lookup-only reconciliation, never a blind retry or false
+terminal. Multiple matches, conflicting identity, changed generation, stale/future/corrupt
+evidence, or insufficient authority fail closed.
 
 ## Authority
 
