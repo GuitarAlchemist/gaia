@@ -33,6 +33,9 @@ hard-real-time scheduling, or safety-controller authority.
 
 ## Install status
 
+The authoritative system boundary map is [`ARCHITECTURE.md`](ARCHITECTURE.md). Detailed
+documents remain authoritative for their named subsystem mechanics.
+
 **This is an installation candidate, not an installed plugin.** It has no marketplace
 entry and has not been installed. Fresh, independent Standards and Spec/adversarial
 reviews gate installation — the lane that wrote this cannot review it.

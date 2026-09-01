@@ -11,6 +11,7 @@
     "test": "node --test",
     "doctor": "node scripts/gaia-interagent.mjs doctor",
     "verify": "node scripts/gaia-interagent.mjs verify",
+    "architecture:verify": "node scripts/architecture-drift.mjs",
     "handshake": "node src/mcp-client.mjs",
     "factory:smoke": "node scripts/factory-smoke.mjs",
     "factory:agent": "node scripts/factory-agent.mjs",

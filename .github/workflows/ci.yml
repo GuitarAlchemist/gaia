@@ -14,6 +14,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  architecture:
+    name: architecture drift
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - run: node scripts/architecture-drift.mjs
+        env:
+          GAIA_ARCHITECTURE_BASE: ${{ github.event.pull_request.base.sha }}
+
   supported:
     name: supported (windows-latest, node ${{ matrix.node }})
     runs-on: windows-latest
