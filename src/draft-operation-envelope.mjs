@@ -190,7 +190,7 @@ function makeRecord(kind, priorCommittedRevision, identity, payload = {}) {
   return closedObject(entries);
 }
 
-const memoryStoreCapabilities = new WeakMap();
+const draftStoreCapabilities = new WeakMap();
 
 class MemoryDraftOperationStore {
   #work = new Map();
@@ -199,7 +199,7 @@ class MemoryDraftOperationStore {
   #executors = new Map();
 
   constructor() {
-    memoryStoreCapabilities.set(this, Object.freeze({
+    draftStoreCapabilities.set(this, Object.freeze({
       bootstrapAndEnqueue: this.#bootstrapAndEnqueue.bind(this),
       append: this.#append.bind(this),
       withExecutor: this.#withExecutor.bind(this),
@@ -319,8 +319,254 @@ class MemoryDraftOperationStore {
   }
 }
 
-function memoryCapabilities(store) {
-  const capabilities = memoryStoreCapabilities.get(store);
+const REGISTRY_REF = 'refs/heads/gaia-ledger/registry-v0';
+const WORK_REF_PREFIX = 'refs/heads/gaia-ledger/draft-operations-v0/';
+
+function validateGitDataRecord(record, priorCommittedRevision) {
+  const code = 'LedgerCorrupt';
+  requireExactKeys(record, ['oid', 'body', 'committedRevision'], code);
+  requireGitOid(record.oid, code);
+  requireRevision(record.committedRevision, code);
+  ownDataKeys(record.body, code);
+  if (record.body.priorCommittedRevision !== priorCommittedRevision
+    || contentRevision(record.body) !== record.committedRevision) throw new DraftOperationError(code);
+  return record;
+}
+
+function validateGitDataSnapshot(snapshot) {
+  const code = 'LedgerCorrupt';
+  if (snapshot?.state === 'UNSEEN') {
+    requireExactKeys(snapshot, ['state'], code);
+    return { state: 'UNSEEN' };
+  }
+  requireExactKeys(snapshot, ['state', 'records'], code);
+  if (snapshot.state !== 'PRESENT' || !Array.isArray(snapshot.records)
+    || snapshot.records.length === 0) throw new DraftOperationError(code);
+  let prior = 'NONE';
+  const records = snapshot.records.map((record) => {
+    const validated = validateGitDataRecord(record, prior);
+    prior = validated.committedRevision;
+    return validated;
+  });
+  return {
+    state: 'PRESENT', records,
+    headOid: records.at(-1).oid, committedRevision: records.at(-1).committedRevision,
+  };
+}
+
+class GitDataDraftOperationStore {
+  #gitData;
+  #config;
+  #locks = new Map();
+
+  constructor({ gitData, config }) {
+    const code = 'InvalidLedgerPorts';
+    requireExactKeys({ gitData, config }, ['gitData', 'config'], code);
+    requireExactKeys(config, ['ledgerRegistryRootOid', 'ledgerRegistryRootRevision'], code);
+    if (typeof gitData?.verifyProtection !== 'function'
+      || typeof gitData?.read !== 'function'
+      || typeof gitData?.compareAndAppend !== 'function') throw new DraftOperationError(code);
+    this.#gitData = gitData;
+    this.#config = Object.freeze({
+      ledgerRegistryRootOid: requireGitOid(config.ledgerRegistryRootOid, code),
+      ledgerRegistryRootRevision: requireRevision(config.ledgerRegistryRootRevision, code),
+    });
+    draftStoreCapabilities.set(this, Object.freeze({
+      bootstrapAndEnqueue: this.#bootstrapAndEnqueue.bind(this),
+      inspectByWork: this.#inspectByWork.bind(this),
+      append: async () => { throw new DraftOperationError('HostedReconciliationUnavailable'); },
+      withExecutor: async () => { throw new DraftOperationError('HostedReconciliationUnavailable'); },
+      inspectByOperation: async () => {
+        throw new DraftOperationError('HostedReconciliationUnavailable');
+      },
+    }));
+  }
+
+  async #exclusive(key, action) {
+    const prior = this.#locks.get(key) ?? Promise.resolve();
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const tail = prior.then(() => gate);
+    this.#locks.set(key, tail);
+    await prior;
+    try {
+      return await action();
+    } finally {
+      release();
+      if (this.#locks.get(key) === tail) this.#locks.delete(key);
+    }
+  }
+
+  async #registry() {
+    const snapshot = validateGitDataSnapshot(await this.#gitData.read(REGISTRY_REF));
+    if (snapshot.state !== 'PRESENT') throw new DraftOperationError('LedgerRegistryMissing');
+    const root = snapshot.records[0];
+    requireExactKeys(root.body, ['schema', 'priorCommittedRevision', 'kind'], 'LedgerCorrupt');
+    if (root.oid !== this.#config.ledgerRegistryRootOid
+      || root.committedRevision !== this.#config.ledgerRegistryRootRevision
+      || root.body.schema !== 'GaiaDraftRegistryRootV0'
+      || root.body.kind !== 'REGISTRY_ROOT') throw new DraftOperationError('LedgerRegistryMismatch');
+    const entries = new Map();
+    for (const record of snapshot.records.slice(1)) {
+      if (record.body.kind === 'RESERVED') {
+        requireExactKeys(record.body, [
+          'schema', 'priorCommittedRevision', 'kind', 'workKey',
+        ], 'LedgerCorrupt');
+        requireRevision(record.body.workKey, 'LedgerCorrupt');
+        if (entries.has(record.body.workKey)) throw new DraftOperationError('LedgerCorrupt');
+        entries.set(record.body.workKey, { state: 'RESERVED' });
+      } else if (record.body.kind === 'CONFIRMED') {
+        requireExactKeys(record.body, [
+          'schema', 'priorCommittedRevision', 'kind', 'workKey',
+          'bootstrapCommittedRevision',
+        ], 'LedgerCorrupt');
+        requireRevision(record.body.workKey, 'LedgerCorrupt');
+        requireRevision(record.body.bootstrapCommittedRevision, 'LedgerCorrupt');
+        if (entries.get(record.body.workKey)?.state !== 'RESERVED') {
+          throw new DraftOperationError('LedgerCorrupt');
+        }
+        entries.set(record.body.workKey, {
+          state: 'CONFIRMED',
+          bootstrapCommittedRevision: record.body.bootstrapCommittedRevision,
+        });
+      } else {
+        throw new DraftOperationError('LedgerCorrupt');
+      }
+    }
+    return { ...snapshot, entries };
+  }
+
+  async #work(workKey) {
+    const snapshot = validateGitDataSnapshot(await this.#gitData.read(`${WORK_REF_PREFIX}${workKey}`));
+    if (snapshot.state === 'UNSEEN') return null;
+    const root = snapshot.records[0];
+    requireExactKeys(root.body, [
+      'schema', 'priorCommittedRevision', 'kind', 'workKey',
+    ], 'LedgerCorrupt');
+    if (root.body.schema !== 'GaiaDraftWorkRootV0' || root.body.kind !== 'WORK_ROOT'
+      || root.body.workKey !== workKey) throw new DraftOperationError('LedgerCorrupt');
+    const enqueued = snapshot.records.find((record) => record.body.kind === 'ENQUEUED');
+    if (!enqueued) throw new DraftOperationError('LedgerCorrupt');
+    requireExactKeys(enqueued.body, [
+      'schema', 'priorCommittedRevision', 'kind', 'workKey',
+      'generationKey', 'operationId', 'envelope',
+    ], 'LedgerCorrupt');
+    const selector = {
+      repository: {
+        owner: enqueued.body.envelope.repository.owner,
+        name: enqueued.body.envelope.repository.name,
+      },
+      workItem: {
+        kind: enqueued.body.envelope.workItem.kind,
+        number: enqueued.body.envelope.workItem.number,
+      },
+    };
+    const identity = validateEnvelope(enqueued.body.envelope, validateSelector(selector));
+    if (identity.workKey !== workKey
+      || identity.generationKey !== enqueued.body.generationKey
+      || identity.operationId !== enqueued.body.operationId) throw new DraftOperationError('LedgerCorrupt');
+    return deepOwnedFrozen({
+      identity: {
+        workKey: identity.workKey,
+        generationKey: identity.generationKey,
+        operationId: identity.operationId,
+      },
+      envelope: identity.envelope,
+      bootstrapCommittedRevision: root.committedRevision,
+      committedRevision: snapshot.committedRevision,
+      state: snapshot.records.at(-1).body.kind,
+      terminal: null,
+    });
+  }
+
+  async #inspectByWork(workKey) {
+    const [registry, work] = await Promise.all([this.#registry(), this.#work(workKey)]);
+    const entry = registry.entries.get(workKey);
+    if (!work && entry) throw new DraftOperationError('LedgerWorkMissing');
+    if (work && entry?.state !== 'CONFIRMED') throw new DraftOperationError('LedgerCorrupt');
+    if (work && entry.bootstrapCommittedRevision !== work.bootstrapCommittedRevision) {
+      throw new DraftOperationError('LedgerCorrupt');
+    }
+    return work;
+  }
+
+  async #append(ref, expectedHeadOid, body) {
+    const result = await this.#gitData.compareAndAppend(ref, expectedHeadOid, body);
+    if (result?.kind === 'STALE') return { stale: true };
+    requireExactKeys(result, ['kind', 'oid', 'body', 'committedRevision'], 'LedgerCorrupt');
+    if (result.kind !== 'APPENDED'
+      || result.committedRevision !== contentRevision(body)) throw new DraftOperationError('LedgerCorrupt');
+    validateGitDataRecord({
+      oid: result.oid, body: result.body, committedRevision: result.committedRevision,
+    }, body.priorCommittedRevision);
+    return { stale: false, ...result };
+  }
+
+  async #bootstrapAndEnqueue(identity, envelope, expectedCommittedRevision) {
+    return this.#exclusive(identity.workKey, async () => {
+      const protectedRefs = await this.#gitData.verifyProtection({
+        prefix: 'refs/heads/gaia-ledger/',
+        registryRootOid: this.#config.ledgerRegistryRootOid,
+      });
+      if (protectedRefs !== true) throw new DraftOperationError('LedgerProtectionMissing');
+      const current = await this.#inspectByWork(identity.workKey);
+      if (current || expectedCommittedRevision !== 'NONE') {
+        return { stale: true, currentCommittedRevision: current?.committedRevision ?? 'NONE' };
+      }
+      const registry = await this.#registry();
+      if (registry.entries.has(identity.workKey)) throw new DraftOperationError('LedgerCorrupt');
+      const reservedBody = closedObject([
+        ['schema', 'GaiaDraftRegistryReceiptV0'],
+        ['priorCommittedRevision', registry.committedRevision],
+        ['kind', 'RESERVED'],
+        ['workKey', identity.workKey],
+      ]);
+      const reserved = await this.#append(REGISTRY_REF, registry.headOid, reservedBody);
+      if (reserved.stale) return { stale: true, currentCommittedRevision: 'NONE' };
+
+      const rootBody = closedObject([
+        ['schema', 'GaiaDraftWorkRootV0'],
+        ['priorCommittedRevision', 'NONE'],
+        ['kind', 'WORK_ROOT'],
+        ['workKey', identity.workKey],
+      ]);
+      const workRef = `${WORK_REF_PREFIX}${identity.workKey}`;
+      const root = await this.#append(workRef, 'NONE', rootBody);
+      if (root.stale) return { stale: true, currentCommittedRevision: 'NONE' };
+
+      const confirmedBody = closedObject([
+        ['schema', 'GaiaDraftRegistryReceiptV0'],
+        ['priorCommittedRevision', reserved.committedRevision],
+        ['kind', 'CONFIRMED'],
+        ['workKey', identity.workKey],
+        ['bootstrapCommittedRevision', root.committedRevision],
+      ]);
+      const confirmed = await this.#append(REGISTRY_REF, reserved.oid, confirmedBody);
+      if (confirmed.stale) return { stale: true, currentCommittedRevision: root.committedRevision };
+
+      const enqueuedBody = makeRecord('ENQUEUED', root.committedRevision, identity, { envelope });
+      const enqueued = await this.#append(workRef, root.oid, enqueuedBody);
+      if (enqueued.stale) return { stale: true, currentCommittedRevision: root.committedRevision };
+      return { stale: false, committedRevision: enqueued.committedRevision };
+    });
+  }
+
+  async readHead(workKey) {
+    requireRevision(workKey, 'InvalidWorkKey');
+    const work = await this.#inspectByWork(workKey);
+    if (!work) return Object.freeze({ state: 'UNSEEN' });
+    return Object.freeze({
+      state: 'PRESENT', committedRevision: work.committedRevision, recordKind: work.state,
+    });
+  }
+}
+
+export function createGitDataDraftOperationStore(options) {
+  return new GitDataDraftOperationStore(options);
+}
+
+function storeCapabilities(store) {
+  const capabilities = draftStoreCapabilities.get(store);
   if (!capabilities) throw new DraftOperationError('InvalidPorts');
   return capabilities;
 }
@@ -329,7 +575,7 @@ export function createMemoryDraftOperationStore() {
   return new MemoryDraftOperationStore();
 }
 
-export function createMemoryDraftOperationPorts(options) {
+function createOperationPorts(options, memoryOnly) {
   const code = 'InvalidPorts';
   const keys = ownDataKeys(options, code).sort();
   const withoutStore = ['admission', 'collector', 'executorEpoch', 'provider', 'telemetry'];
@@ -345,7 +591,10 @@ export function createMemoryDraftOperationPorts(options) {
     || typeof options.provider?.createDraft !== 'function'
     || typeof options.admission?.reserveEffect !== 'function'
     || typeof options.telemetry?.append !== 'function'
-    || !(store instanceof MemoryDraftOperationStore)) throw new DraftOperationError(code);
+    || !draftStoreCapabilities.has(store)
+    || memoryOnly && !(store instanceof MemoryDraftOperationStore)) {
+    throw new DraftOperationError(code);
+  }
   requireExactKeys(options.executorEpoch, ['runId', 'runAttempt'], code);
   if (!Number.isSafeInteger(options.executorEpoch.runId) || options.executorEpoch.runId <= 0
     || !Number.isSafeInteger(options.executorEpoch.runAttempt) || options.executorEpoch.runAttempt <= 0) {
@@ -361,6 +610,14 @@ export function createMemoryDraftOperationPorts(options) {
     telemetry: options.telemetry,
     store,
   });
+}
+
+export function createMemoryDraftOperationPorts(options) {
+  return createOperationPorts(options, true);
+}
+
+export function createDraftOperationPorts(options) {
+  return createOperationPorts(options, false);
 }
 
 function stale(current) {
@@ -380,7 +637,7 @@ export async function enqueueDraft(selectorInput, expectedCommittedRevision, por
   validateExpectedRevision(expectedCommittedRevision);
   const observed = await ports.collector.collect(selector);
   const identity = validateEnvelope(observed, selector);
-  const current = await memoryCapabilities(ports.store).inspectByWork(identity.workKey);
+  const current = await storeCapabilities(ports.store).inspectByWork(identity.workKey);
   if (current) {
     if (expectedCommittedRevision === 'NONE'
       || expectedCommittedRevision !== current.committedRevision) return stale(current);
@@ -393,7 +650,7 @@ export async function enqueueDraft(selectorInput, expectedCommittedRevision, por
     }
     return stale(current);
   }
-  const committed = await memoryCapabilities(ports.store).bootstrapAndEnqueue(
+  const committed = await storeCapabilities(ports.store).bootstrapAndEnqueue(
     identity, identity.envelope, expectedCommittedRevision,
   );
   if (committed.stale) return stale({ committedRevision: committed.currentCommittedRevision });
@@ -517,7 +774,7 @@ function currentResult(snapshot) {
 }
 
 async function appendOrCurrent(ports, operationId, expected, kind, payload = {}) {
-  const appended = await memoryCapabilities(ports.store).append(
+  const appended = await storeCapabilities(ports.store).append(
     operationId, expected, kind, payload,
   );
   return appended.stale ? { ok: false, result: currentResult(appended.current) }
@@ -545,7 +802,7 @@ async function adopt(ports, snapshot, pullRequest, outcome) {
 export async function reconcileDraft(operationId, expectedCommittedRevision, ports) {
   requireRevision(operationId, 'InvalidOperationId');
   requireRevision(expectedCommittedRevision);
-  const capabilities = memoryCapabilities(ports.store);
+  const capabilities = storeCapabilities(ports.store);
   const initial = await capabilities.inspectByOperation(operationId);
   if (!initial) throw new DraftOperationError('UnknownOperation');
   return capabilities.withExecutor(initial.identity.workKey, async () => {
@@ -638,7 +895,7 @@ async function pendingAfterAmbiguity(ports, snapshot) {
 export async function cancelDraft(operationId, expectedCommittedRevision, ports) {
   requireRevision(operationId, 'InvalidOperationId');
   requireRevision(expectedCommittedRevision);
-  const snapshot = await memoryCapabilities(ports.store).inspectByOperation(operationId);
+  const snapshot = await storeCapabilities(ports.store).inspectByOperation(operationId);
   if (!snapshot) throw new DraftOperationError('UnknownOperation');
   if (snapshot.committedRevision !== expectedCommittedRevision) return stale(snapshot);
   if (snapshot.terminal) return terminalResult(snapshot);
