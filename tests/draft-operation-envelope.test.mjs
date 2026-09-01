@@ -540,3 +540,64 @@ test('R14 inspection snapshots are deep owned and frozen and cannot poison recon
   assert.equal(replay.generation.headRevision, OID_B);
   assert.equal(replay.pullRequest.number, 58);
 });
+
+test('R15 authority decisions ignore monkeypatched public inspection snapshots', async () => {
+  const mod = await api('R15 inspection authority isolation');
+  const provider = fakeProvider();
+  const fixture = await harness(mod, { provider });
+  const accepted = assertEnqueued(await enqueue(mod, fixture));
+  const trueSnapshot = await fixture.store.inspectByOperation(accepted.operationId);
+
+  const forged = Object.freeze({
+    ...trueSnapshot,
+    identity: Object.freeze({ ...trueSnapshot.identity }),
+    envelope: Object.freeze({
+      ...trueSnapshot.envelope,
+      repository: Object.freeze({ ...trueSnapshot.envelope.repository }),
+      workItem: Object.freeze({ ...trueSnapshot.envelope.workItem }),
+      readyItem: Object.freeze({ ...trueSnapshot.envelope.readyItem }),
+      observedSourceRevision: SHA_C,
+      generation: Object.freeze({
+        ...trueSnapshot.envelope.generation,
+        headRevision: OID_C,
+        policyRevision: OID_C,
+      }),
+    }),
+    terminal: null,
+  });
+  assertDeepFrozen(forged, 'forged snapshot fixture');
+
+  let operationInspections = 0;
+  let workInspections = 0;
+  fixture.store.inspectByOperation = async () => {
+    operationInspections += 1;
+    return forged;
+  };
+  fixture.store.inspectByWork = async () => {
+    workInspections += 1;
+    return forged;
+  };
+
+  const created = assertTerminal(await mod.reconcileDraft(
+    accepted.operationId, accepted.committedRevision, fixture.ports,
+  ), 'CREATED');
+  const providerRequest = provider.calls.find(({ method }) => method === 'createDraft')?.request;
+  assert.equal(providerRequest.headRevision, OID_B, 'provider receives the sealed head revision');
+  assert.equal(created.generation.headRevision, OID_B);
+  assert.equal(created.generation.policyRevision, OID_A);
+  assert.equal(created.observedSourceRevision, SHA_B);
+  assert.equal(created.pullRequest.headRevision, OID_B);
+
+  const cancellation = await mod.cancelDraft(
+    accepted.operationId, created.committedRevision, fixture.ports,
+  );
+  assertTerminal(cancellation, 'CREATED');
+  const duplicateEnqueue = await enqueue(
+    mod, fixture, SELECTOR, created.committedRevision,
+  );
+  assert.equal(duplicateEnqueue.kind, 'StaleRevision');
+  assert.equal(duplicateEnqueue.currentCommittedRevision, created.committedRevision);
+
+  assert.equal(operationInspections, 0, 'reconcile/cancel must use private inspection authority');
+  assert.equal(workInspections, 0, 'enqueue must use private inspection authority');
+});
