@@ -189,7 +189,7 @@ test('LICENSE, NOTICE, and the engineering doctrine ship', () => {
 
   const doctrine = readFileSync(doctrinePath, 'utf8');
   const requiredPrinciples = [
-    'ENG-01', 'ENG-02', 'ENG-03', 'ENG-04', 'ENG-05', 'ENG-06', 'ENG-07', 'ENG-08',
+    'ENG-01', 'ENG-02', 'ENG-03', 'ENG-04', 'ENG-05', 'ENG-06', 'ENG-07', 'ENG-08', 'ENG-09',
     'SCI-01', 'SCI-02', 'SCI-03', 'SCI-04', 'SCI-05', 'SCI-06', 'SCI-07',
   ];
   for (const id of requiredPrinciples) {
@@ -205,6 +205,37 @@ test('LICENSE, NOTICE, and the engineering doctrine ship', () => {
   ]) {
     assert.ok(doctrine.includes(requiredPhrase), `doctrine retains: ${requiredPhrase}`);
   }
+});
+
+test('the architecture and domain language preserve the redesign lesson', () => {
+  const architecturePath = join(ROOT, 'ARCHITECTURE.md');
+  const contextPath = join(ROOT, 'CONTEXT.md');
+  const adrPath = join(ROOT, 'docs', 'adr', '0001-canonical-operation-envelope.md');
+
+  for (const path of [architecturePath, contextPath, adrPath]) {
+    assert.ok(existsSync(path), `${path} ships`);
+  }
+
+  const architecture = readFileSync(architecturePath, 'utf8');
+  assert.ok(architecture.includes('Boundary redesign circuit breaker'));
+  assert.ok(architecture.includes('docs/draft-operation-envelope.md'));
+  assert.ok(architecture.includes('docs/engineering-and-research-principles.md'));
+
+  const context = readFileSync(contextPath, 'utf8');
+  for (const term of [
+    '**Operation Envelope**:',
+    '**Work Identity**:',
+    '**Generation Identity**:',
+    '**Redesign Circuit Breaker**:',
+    '**Failure Evidence**:',
+  ]) {
+    assert.ok(context.includes(term), `domain language retains ${term}`);
+  }
+
+  const doctrine = readFileSync(join(ROOT, 'docs', 'engineering-and-research-principles.md'), 'utf8');
+  assert.match(doctrine, /^### ENG-09 — Trip a circuit breaker on repeated seam failure$/m);
+  assert.ok(doctrine.includes('A new revision number is not evidence of a new design.'));
+  assert.ok(doctrine.includes('Failed attempts remain immutable Failure Evidence.'));
 });
 
 test('the shipped skill links holdout-safe reporting doctrine, and the doctrine states its two load-bearing rules', () => {

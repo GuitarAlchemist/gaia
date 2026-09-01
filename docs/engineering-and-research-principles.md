@@ -72,6 +72,12 @@ Classify changes as freely reversible, compensatable, migratable, or one-way. St
 
 The author of a change cannot approve it. Verification binds to exact inputs, digests, tests, controls, and scope. A marker is evidence that work stopped, not evidence that its claims are true.
 
+### ENG-09 — Trip a circuit breaker on repeated seam failure
+
+When independent review reproduces an invariant-bearing counterexample after a repair, stop local patching and classify the boundary `BLOCKED_REDESIGN`. A new revision number is not evidence of a new design. More conditions, lanes, retries, or tests do not reset the breaker when callers, adapters, storage, or providers still share ownership of identity, authority, ordering, freshness, or terminal truth.
+
+Failed attempts remain immutable Failure Evidence. Resume only after naming the repeated failure family, comparing genuinely different seams, assigning one boundary owner, converting every reproduced counterexample into RED contract behavior and a mechanism-revert control, and obtaining fresh independent review of the exact replacement snapshot. A failed Draft may contribute evidence and code, but it never silently becomes the replacement design.
+
 ## Scientific principles
 
 ### SCI-01 — State a question, hypotheses, and falsifiers first
