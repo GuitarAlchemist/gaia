@@ -3,9 +3,11 @@
 Status: R0 design decision for Gaia issue #35.
 
 Boundary correction: issue #56 and `docs/draft-operation-envelope.md` supersede this document's
-input-boundary details after PR #58 demonstrated that stable work identity, mutable generation
-evidence, provider projection, and terminal projection require one canonical envelope owner. The
-delivery-loop outcome and authority limits below remain unchanged.
+input-boundary and crash-recovery details after PR #58 demonstrated that stable work identity,
+mutable generation evidence, provider projection, and terminal projection require one canonical
+envelope owner. The delivery-loop outcome and authority limits below remain unchanged. In the
+irreducibly ambiguous window after `EFFECT_STARTED`, safety wins: Gaia alerts and refuses a blind
+retry rather than claiming that every provider crash can recover automatically.
 
 ## Operator problem
 
