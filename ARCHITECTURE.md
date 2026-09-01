@@ -67,15 +67,17 @@ only in the final column and must not escape in a result or refusal.
 | Coordination kernel | `decide(state, command) -> events`; `apply(state, event) -> state` | Six coordination verbs and replay | stdio MCP edge; deterministic tests |
 | Durable event log | `load() -> events`; `commit(expected revision, events) -> receipt or refusal` | Single-writer append and compare-and-set | local append-only JSONL; in-memory test fixtures |
 | Draft operation | `enqueue(selector)`; `reconcile(identity, expected revision) -> projection or refusal` | One canonical Operation Envelope | protected GitHub Git Data ledger and effect adapter; memory ledger |
+| Hosted Draft intake | `runHostedDraftIntake(trigger, observations) -> receipt or refusal`; `produceHostedDraftPumpObservation(receipt) -> observation or refusal` | Resume one unsettled operation before admitting at most one candidate; authority-free sealed observation | serialized GitHub Actions intake; existing Draft ledger/admission/effect adapters; deterministic fixtures |
 | Portfolio survey and drain | `survey(observations) -> revision`; `advance(revision) -> intent or refusal` | Read-only inventory to one bounded next transition | GitHub read adapter; deterministic fixtures; append-only drain ledger |
+| Pull-request conflict classification | `classifyPrConflict(observation, claim) -> reading or refusal` | Exact-generation, read-only classification under a closed empty strategy registry | normalized GitHub observation; deterministic fixtures |
 | Publication and operator | `prepare(intent)`; `authorize(grant)`; `execute(intent) -> receipt` | Human-mediated privileged effect | GitHub publication/operator adapters; owned in-memory broker tests |
 | Factory telemetry | `record(phase)`; `replay(events) -> lifecycle or refusal` | Closed evidence events and freshness projection | local evidence log; wmux/Claude sensor; deterministic fixtures |
 | Control room | `render(snapshot, observed instant) -> read model` | Authority-free operator projection | static HTML/dashboard; in-memory snapshots |
 | Hybrid search | `index(corpus)`; `query(request) -> matches or refusal` | Advisory retrieval with provenance | local JavaScript engine; optional IX embedding input |
 | Architecture drift | `checkArchitectureDrift(inventory) -> report or refusal` | Normalized repository inventory | filesystem inventory; deterministic in-memory inventory |
 
-The architecture-drift seam is the only new seam introduced by this map. One black-box
-contract suite runs against both adapters and includes broken-link, missing-section, stale
+The architecture-drift verification seam is the only seam introduced by this map itself. One
+black-box contract suite runs against both adapters and includes broken-link, missing-section, stale
 revision, interface-leak, change-impact, malformed-input, ordering, deletion-depth, and
 mechanism-revert controls. Backtick code spans in the Interface column are the structurally
 declared machine contract. Provider identifiers, configuration, transport errors, storage
@@ -83,10 +85,11 @@ layout, payload, retry, path, ref, and object-identifier terms in those spans fa
 unstructured prose is not treated as proof of either a leak or a clean boundary.
 Removing this module would force the workflow, local verifier, and tests to reimplement link
 resolution, required-section policy, revision freshness, path sensitivity, closed reporting,
-and interface-boundary checks. A black-box deletion control executes the CLI with the checker
-absent and requires a module-load refusal with no report, rather than inferring depth from source
-wiring. The other module contracts and deletion rationale are maintained
-in their linked subsystem designs and tests.
+and interface-boundary checks. A black-box deletion control substitutes a shallow pass-through at
+the same public seam and demonstrates that broken-link, missing-section, stale-revision,
+interface-leak, and undeclared-impact mutants escape unless the caller reimplements those policies;
+the unmodified caller also refuses when the seam is absent. The other module contracts and deletion
+rationale are maintained in their linked subsystem designs and tests.
 
 ## Work lifecycle: pumps, funnels, and lanes
 
@@ -107,6 +110,14 @@ reconciliation -> terminal receipt. Draft operations preserve `ENQUEUED`, `CLAIM
 `EFFECT_STARTED`, and `EFFECT_AMBIGUOUS` as nonterminal distinctions. `CREATED`, `REUSED`,
 `REFUSED`, and `CANCELLED` are terminal only when exact evidence supports them. Ambiguous remote
 effects remain nonterminal until reconciled; elapsed time and retries cannot manufacture truth.
+The scheduled Hosted Draft intake is one concrete pump: a serialized run resumes the first
+deterministically ordered unsettled operation before it may admit one eligible issue. Its sealed
+observation is a read model with no authority and cannot replace the durable Draft receipt chain.
+
+Pull-request conflict classification is read-only at this revision. It binds the observed base and
+head generation and can report clean, unknown, superseded, or escalation-required. Its automation
+strategy registry is empty, so automatic resolution, durable conflict claims, patching, pushing,
+and reconciliation remain explicitly planned rather than implied by the reserved lifecycle words.
 
 ## Authority and state transitions
 
@@ -170,6 +181,9 @@ auto-breaks it. A damaged log is preserved for diagnosis and is never silently t
 
 Hosted operations reload their sealed envelope and durable receipt chain. Reconciliation reads
 the authoritative provider again and either proves the exact terminal state or remains unsettled.
+Each scheduled Hosted Draft intake first lists and resumes one unsettled operation; a resuming run
+does not admit new work. A crash after enqueue therefore leaves durable work for the next intake,
+while a lost compare-and-set performs no effect and is reported as a typed stale-revision refusal.
 Retries repeat a bounded request under the same identity and idempotency boundary; they do not
 skip revision checks. Repeated independently reproduced failures at one seam trip the
 Boundary redesign circuit breaker and preserve immutable Failure Evidence.
@@ -224,16 +238,17 @@ accepted transitions and receipts, not tokens, lane activity, or prose completio
   Ubuntu remains portability discovery.
 - **Local factory/operator:** bounded Claude/Codex/wmux processes, offline artifacts, explicit
   worktrees, read-only dashboards, and an interactive authority boundary for privileged effects.
-- **Hosted pump:** GitHub Actions is a serialized executor. Protected Git refs are the durable
-  ingress/receipt ledger; Actions is not the queue or authority source.
+- **Hosted pump:** GitHub Actions runs the serialized scheduled/issue-triggered Draft intake and
+  the separately sealed effect path. Protected Git refs are the durable ingress/receipt ledger;
+  Actions is not the queue or authority source.
 - **Read-only/offline analysis:** portfolio survey, hybrid search, telemetry replay, architecture
   verification, and control-room rendering run with `effect: NONE`.
 
-This repository is an installation candidate, not an installed plugin. Hosted scheduled Draft
-redispatch remains unimplemented, remote operator authority beyond the shipped interactive path is
-prototype/design work, six-lane validation remains planned, and production tenant/quota services
-are out of scope. Planned work stays non-normative until code, evidence, and a fresh verification
-revision are linked here.
+This repository is an installation candidate, not an installed plugin. Automatic pull-request
+conflict resolution and its effect lifecycle, remote operator authority beyond the shipped
+interactive path, and six-lane validation remain planned; production tenant/quota services are out
+of scope. Planned work stays non-normative until code, evidence, and a fresh verification revision
+are linked here.
 
 ## Detailed architecture references
 
@@ -242,6 +257,9 @@ revision are linked here.
 - [Canonical Draft operation envelope](docs/draft-operation-envelope.md) and
   [ADR 0001](docs/adr/0001-canonical-operation-envelope.md) — identity, ledger, CAS, effect, and
   reconciliation ownership.
+- [Hosted Draft intake](docs/hosted-draft-intake.md) and
+  [Hosted Draft observation producer](docs/hosted-draft-pump-producer.md) — scheduled admission,
+  resume-first recovery, receipt-derived observation, and authority boundaries.
 - [Portfolio factory](docs/github-portfolio-factory.md),
   [portfolio drain pump](docs/portfolio-drain-pump.md), and
   [hosted operator](docs/github-portfolio-operator.md) — observation, funnel, intent, and approval.
@@ -251,6 +269,8 @@ revision are linked here.
   [local wmux lanes](docs/local-wmux-lanes.md) — measured concurrency and lane semantics.
 - [Ecosystem adapters](docs/ecosystem-adapters.md) and
   [hybrid semantic search](docs/hybrid-semantic-search.md) — bounded external and offline inputs.
+- [Pull-request conflict classifier](docs/pr-conflict-reconciler.md) — exact-generation read-only
+  classification and the deliberately empty automation registry.
 - [Crash recovery](docs/crash-recovery.md),
   [artifact completion signals](docs/artifact-completion-signals.md), and
   [holdout-safe reporting](docs/holdout-safe-reporting.md) — recovery, terminal evidence, and
@@ -273,4 +293,6 @@ witness from raw `git show --end-of-options <commit>:ARCHITECTURE.md` bytes; cal
 revision evidence. An explicit base is limited to a full commit identifier or canonical
 `refs/heads/`, `refs/tags/`, or `refs/remotes/` name and is passed after Git's
 `--end-of-options` delimiter. Detailed subsystem claims remain owned by the linked documents and
-their black-box tests.
+their black-box tests. The CI architecture-impact gate is intentionally pull-request-only because
+its declaration and evidence are PR-body facts. Main-push CI still runs the supported test matrix;
+it does not reconstruct or invent impact evidence after merge.
