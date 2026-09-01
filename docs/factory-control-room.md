@@ -1011,3 +1011,65 @@ Both are ruled out by name in the upstream contract.
 
 R0 emits the state. It closes no pane and ends no provider; a reaper is a later slice, and it will
 be written against a transition rather than against a guess.
+
+## R3 — The hosted Draft pump transition, as one read-only section
+
+Issue #70 names the defect: the control room "cannot distinguish a healthy empty queue from a pump
+that was never triggered". A drain with no eligible work and a pump dead for three days read
+identically, because `NO_ELIGIBLE_WORK` is published beside both.
+
+Three of the five distinctions that would close it are derivable from nothing this page already
+carries. `ciFlow` can say the pump's workflow concluded `SUCCESS`, which is the same conclusion for
+a Draft created, a Draft replayed, an empty tick and a typed refusal — and the CI block is
+contractually forbidden from speaking about delivery anyway. `engineeringFlow` eventually counts one
+`PULL_REQUEST/OPENED` with no operation binding. Terminal replay, `EXPECTED_NONE`, and a typed
+blocker bound to one operation have no existing carrier at all. So: one more block, and a narrow one.
+
+**The seam is the one that already exists.** `buildControlRoomSnapshot` takes one more optional,
+explicit, caller-supplied artifact — `hostedDraftPump`, with `priorHostedDraftPump` as its
+monotonicity carrier. This module never discovers it, never fetches GitHub, and never learns that a
+producer exists. Absent means the key is **omitted**, never a present `null`, for the digest-
+stability reason every optional block above states.
+
+**Authority is the Git Data ledger, and only that.** The producer
+(`src/hosted-draft-pump-producer.mjs`) seals into `gaia-hosted-draft-pump/1`, content-addressed over
+its canonical body, the transition the hosted intake run just settled through the ledger's own
+compare-and-swap. It acquires no view of its own: it is a pure function over the receipt that run
+produced, and it refuses rather than publishes whenever that receipt is not a verified terminal or
+reconciled outcome. The JSON file an adapter reads is transport: its path, its mtime and its
+existence take no part in verification, and the artifact's own `revision` is what makes it
+verifiable regardless of which file it arrived in. A workflow receipt is retention-bounded and is a
+*report of* a transition rather than the transition; provenance is `committedRevision` and
+`ledgerRootRevision`. An analytical projection store is a rebuildable aggregation surface and is
+never lock, compare-and-swap, schedule, or effect authority — it is not in this path at all.
+
+**Six published states, derived rather than copied.** `ADVANCED`, `REPLAYED`, `EXPECTED_NONE`,
+`BLOCKED`, `UNSETTLED`, `STALE`. `ADVANCED` and `REPLAYED` are separate because collapsing them
+would let a recovery tick that performed no effect read as intake progress. `STALE` displaces every
+other reading past `HOSTED_DRAFT_PUMP_FRESH_MS` — twice the declared intake cron interval, fixed and
+exported rather than configurable, so the token cannot mean different things in different documents.
+A stale block still names the transition it has; it withholds only the present-tense reading, because
+the transition it describes may have been superseded by one this reader never saw.
+
+**Incoherent evidence is a typed refusal; old evidence is a displayed state.** A transition dated
+after the read, an observation dated after the page instant, a sequence or `observedAt` behind the
+last published one, or a `committedRevision` that went backwards for a work key the ledger already
+reported higher — each refused, never clamped. The last is specific to this block: the ledger is
+compare-and-swap append-only, so a lower revision on the same work key is a producer reading a stale
+ref, and a stale loser performs no effect. Unknown top-level or nested keys, unknown state, blocker
+or trigger tokens, malformed identities, and a digest that does not match its content are refused by
+name, because silently dropping a field would let a producer believe it was being honoured.
+
+**What the section refuses to touch.** It publishes `binding: 'NONE'` and `readiness: 'NOT_CLAIMED'`
+as named cells rather than by omission. It reaches no count, no obstruction, no next action, no pace
+and no forecast, and it contributes **no** headline sentence: flipping every field of the transition
+changes this block and nothing else in the snapshot body. It renders no URL, no free-text refusal,
+and no animation — a pump transition is a standing fact, and a spinner would suggest something is
+happening about it. `observationAgeMs` and `transitionAgeMs` are two separate published facts, so a
+reading taken two seconds ago about a three-day-old transition cannot read as recent.
+
+The producer that writes the artifact shipped in the following slice and is specified by
+docs/hosted-draft-pump-producer.md: the hosted intake run seals its own transition and uploads it,
+so the section is reachable without a human hand-authoring JSON. Closing the obstruction reading is
+still out of scope: `NO_ELIGIBLE_WORK` can be published beside a stale pump. That is a later slice,
+and it will be written against this transition rather than against a guess.

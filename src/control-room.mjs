@@ -55,6 +55,9 @@ import {
   MERGE_QUEUE_CAPABILITY_STATES, deriveMergeQueueCapabilityBlock,
   mergeQueueCapabilityRevision, requireMergeQueueCapabilityArtifact,
 } from './merge-queue-capability.mjs';
+import {
+  requireHostedDraftPumpBlock, summarizeHostedDraftPump,
+} from './hosted-draft-pump-observation.mjs';
 
 export const CONTROL_ROOM_SCHEMA = 'gaia-control-room/1';
 
@@ -504,9 +507,27 @@ export function requireControlRoomSnapshot(value) {
   const localLanes = requireLocalLanes(value);
   requireEngineeringFlow(value);
   requireCiFlow(value);
+  requireHostedDraftPump(value);
   requirePrReviewThreadGate(value.prReviewThreadGate ?? null);
   requireDerivedCounts(value, localLanes);
   return value;
+}
+
+/**
+ * Re-derived from its own carried transition, not merely digest-checked, so a resealed snapshot
+ * whose published state was edited is refused rather than believed.
+ */
+function requireHostedDraftPump(value) {
+  const block = value.hostedDraftPump ?? null;
+  if (block === null) return null;
+  try {
+    return requireHostedDraftPumpBlock({ block, observedAt: value.observedAt });
+  } catch (error) {
+    throw new ControlRoomError(
+      'InvalidSnapshot',
+      error?.message ?? 'the hosted Draft pump block is not what its own evidence derives',
+    );
+  }
 }
 
 function requirePrReviewThreadGate(value) {
@@ -1110,6 +1131,25 @@ function projectCiFlow(candidate, observedAt, priorObservation) {
 }
 
 /**
+ * One hosted Draft pump transition, verified and re-derived at the snapshot seam.
+ *
+ * A typed refusal, never softened into a warning block: incoherent evidence is refused and old
+ * evidence is displayed as STALE, which is the distinction that lets a dead pump be told apart
+ * from a healthy empty queue.
+ */
+function projectHostedDraftPump(candidate, observedAt, priorObservation) {
+  if (candidate === null || candidate === undefined) return null;
+  try {
+    return summarizeHostedDraftPump({ artifact: candidate, observedAt, priorObservation });
+  } catch (error) {
+    throw new ControlRoomError(
+      error?.code === 'IncoherentHostedDraftPump' ? 'IncoherentEvidence' : 'InvalidHostedDraftPump',
+      error?.message ?? 'the hosted Draft pump observation could not be read',
+    );
+  }
+}
+
+/**
  * The headline state, in one place, because the verify seam re-derives it.
  *
  * A fresh local lane is a live process on this machine. It is not a moving portfolio run, and the
@@ -1203,6 +1243,7 @@ export function buildControlRoomSnapshot({
   ciFlow = null, priorCiFlow = null,
   mergeQueueCapability = null,
   prReviewThreadGate = null,
+  hostedDraftPump = null, priorHostedDraftPump = null,
 }) {
   const projection = requireProjection(drainProjection);
   const at = requireTimestamp(observedAt);
@@ -1240,6 +1281,9 @@ export function buildControlRoomSnapshot({
       artifact: requireMergeQueueCapabilityArtifact(mergeQueueCapability), observedAt: at,
     });
   const reviewThreadGateBlock = requirePrReviewThreadGate(prReviewThreadGate);
+  // Derived here and read only by its own section. It contributes to no count, no headline
+  // sentence and no reading below it: a pump tick is not a unit of delivery.
+  const hostedDraftPumpBlock = projectHostedDraftPump(hostedDraftPump, at, priorHostedDraftPump);
   const reviewThreadsBlockMerge = reviewThreadGateBlock?.blocksMerge === true;
   const localLiveCount = localLaneBlock === null ? 0 : localLaneBlock.liveCount;
   const activeCount = items.filter(({ activity }) => activity.state === 'ACTIVE').length;
@@ -1415,6 +1459,9 @@ export function buildControlRoomSnapshot({
     // digest-stability reason the flow block gives.
     ...(capabilityBlock === null ? {} : { mergeQueueCapability: capabilityBlock }),
     ...(reviewThreadGateBlock === null ? {} : { prReviewThreadGate: reviewThreadGateBlock }),
+    // Omitted entirely when there is no artifact, for the same digest-stability reason as every
+    // optional block above.
+    ...(hostedDraftPumpBlock === null ? {} : { hostedDraftPump: hostedDraftPumpBlock }),
   };
   return deepFreeze({
     ...body,
@@ -1433,6 +1480,20 @@ function escapeHtml(value) {
 
 const RENDER_COPY = Object.freeze({
   en: Object.freeze({
+    pumpTitle: 'Hosted Draft pump', pumpTransitionAge: 'Transition age', pumpTrigger: 'Trigger',
+    pumpBlocker: 'Blocker', pumpIssue: 'Issue', pumpPull: 'Draft pull request',
+    pumpOperation: 'Operation', pumpCommitted: 'Committed revision',
+    pumpLedgerRoot: 'Ledger root revision', pumpUnsettled: 'Unsettled operations',
+    pumpUnbound: 'none', pumpPullNotProven: 'not proven',
+    pumpCaveat: 'One verified ledger transition. This section binds no portfolio work and claims no authority.',
+    pumpState: Object.freeze({
+      ADVANCED: 'The pump performed one Draft effect on this tick.',
+      REPLAYED: 'Reconciliation re-observed a settled operation and performed no effect.',
+      EXPECTED_NONE: 'The pump ran and correctly admitted no work.',
+      BLOCKED: 'The pump recorded a typed refusal against one operation.',
+      UNSETTLED: 'One operation is awaiting exact reconciliation.',
+      STALE: 'No verified transition inside the freshness window; the reading below is withheld.',
+    }),
     title: 'Gaia — real status', now: 'Now', next: 'Next action', progress: 'Verifiable progress',
     paceEta: 'Pace and ETA', evidence: 'Evidence', snapshot: 'Snapshot', source: 'Source projection',
     checked: 'Checked', changed: 'source changed', age: 'age', moving: 'Moving', stale: 'Stale',
@@ -1617,6 +1678,21 @@ const RENDER_COPY = Object.freeze({
     freshnessCaveat: 'Un heartbeat prouve que le capteur est vivant, pas que le travail a avancé.',
     nextCheckpoint: 'Prochaine preuve attendue ou blocage',
     noCurrentRun: 'Aucune exécution réclamée ni observée actuellement.',
+    pumpTitle: 'Pompe de brouillon hébergée', pumpTransitionAge: 'Âge de la transition',
+    pumpTrigger: 'Déclencheur', pumpBlocker: 'Blocage', pumpIssue: 'Ticket',
+    pumpPull: 'Pull request brouillon', pumpOperation: 'Opération',
+    pumpCommitted: 'Révision engagée', pumpLedgerRoot: 'Révision racine du registre',
+    pumpUnsettled: 'Opérations non réglées', pumpUnbound: 'aucune',
+    pumpPullNotProven: 'non prouvée',
+    pumpCaveat: 'Une transition vérifiée du registre. Cette section ne lie aucun travail du portfolio et ne revendique aucune autorité.',
+    pumpState: Object.freeze({
+      ADVANCED: 'La pompe a réalisé un effet brouillon lors de ce passage.',
+      REPLAYED: 'La réconciliation a réobservé une opération réglée sans réaliser d’effet.',
+      EXPECTED_NONE: 'La pompe a tourné et n’a admis aucun travail, ce qui est correct.',
+      BLOCKED: 'La pompe a enregistré un refus typé sur une opération.',
+      UNSETTLED: 'Une opération attend une réconciliation exacte.',
+      STALE: 'Aucune transition vérifiée dans la fenêtre de fraîcheur ; la lecture est retenue.',
+    }),
     noneRecorded: 'Rien d’enregistré', runSignals: 'Signaux d’exécution observés', ago: 'plus tôt',
     noBoundInstant: 'aucun instant lié', verified: 'vérifié', unverified: 'non vérifié',
     asOf: 'au', of: 'sur', share: 'part du portfolio',
@@ -2442,6 +2518,47 @@ function renderEngineeringFlow(snapshot, copy) {
  * The slowest check and the critical path are rendered as two separate cells, adjacent and
  * differently labelled, so that the easy number cannot be read as the important one.
  */
+/**
+ * One compact section: the latest verified pump transition, and nothing derived from it.
+ *
+ * Every cell is a word plus a machine-readable attribute, so colour is never the thing carrying
+ * the reading and a test can assert what is published without parsing prose. There is no forecast,
+ * no share, no rate and no animation here: a pump transition is a standing fact.
+ */
+function renderHostedDraftPump(snapshot, copy) {
+  const block = snapshot.hostedDraftPump;
+  if (!block) return '';
+  const symbol = { healthy: '●', warning: '▲', blocked: '■', neutral: '○' };
+  const mark = (severity) => '<span class="semantic-symbol" aria-hidden="true">'
+    + `${symbol[severity] ?? symbol.neutral}</span>`;
+  const cell = (label, value) => `<li class="pump-cell"><span class="pump-cell-label">${label}</span>`
+    + `<span class="pump-cell-value">${escapeHtml(value)}</span></li>`;
+  const unbound = copy.pumpUnbound;
+  return `<section class="section-panel hosted-draft-pump" aria-label="${copy.pumpTitle}"
+    data-state="${escapeHtml(block.state)}" data-severity="${escapeHtml(block.severity)}"
+    data-blocker="${escapeHtml(block.blocker)}" data-trigger="${escapeHtml(block.trigger)}">
+    <div class="section-heading"><h2>${copy.pumpTitle}</h2><span class="as-of">${
+  escapeHtml(formatDuration(block.observationAgeMs))} ${copy.ago}</span></div>
+    <div class="pump-state" data-severity="${escapeHtml(block.severity)}">
+      <strong class="pump-state-value">${mark(block.severity)}${escapeHtml(block.state)}</strong>
+      <span class="pump-state-reading">${escapeHtml(copy.pumpState[block.state])}</span>
+    </div>
+    <ul class="pump-cell-list">
+      ${cell(copy.pumpTransitionAge, `${formatDuration(block.transitionAgeMs)} ${copy.ago}`)}
+      ${cell(copy.pumpTrigger, block.trigger)}
+      ${cell(copy.pumpBlocker, block.blocker)}
+      ${cell(copy.pumpIssue, block.workItem === null ? unbound : `#${block.workItem.number}`)}
+      ${cell(copy.pumpPull, block.pullRequest === null
+    ? copy.pumpPullNotProven : `#${block.pullRequest.number}`)}
+      ${cell(copy.pumpOperation, block.operationId ?? unbound)}
+      ${cell(copy.pumpCommitted, block.committedRevision ?? unbound)}
+      ${cell(copy.pumpLedgerRoot, block.ledgerRootRevision)}
+      ${cell(copy.pumpUnsettled, String(block.unsettledCount))}
+    </ul>
+    <p class="evidence-line">${copy.pumpCaveat}</p>
+  </section>`;
+}
+
 function renderCiFlow(snapshot, copy) {
   const block = snapshot.ciFlow;
   if (!block) return '';
@@ -2800,6 +2917,23 @@ export function renderControlRoomHtml(candidate, {
   // published without the artifact carries no residue of this feature at all.
   const capabilityCss = snapshot.mergeQueueCapability ? `
     .merge-queue-capability-note { color: var(--muted); font-size: 12px; }` : '';
+  // Emitted only when the section is, so a document published without the artifact carries no
+  // residue of this feature. Every child declares `min-width: 0` and the identifiers inherit
+  // `overflow-wrap: anywhere` from `body`, because this block carries more 64-character tokens
+  // than any other section and one of them is three viewport widths on a phone.
+  const pumpCss = snapshot.hostedDraftPump ? `
+    .hosted-draft-pump .section-heading { align-items: baseline; }
+    .pump-state { background: var(--panel-2); border: 1px solid var(--line); display: grid; gap: 4px; margin: 14px 0 0; min-width: 0; padding: 14px; }
+    .pump-state-value { font-size: 24px; line-height: 1.2; }
+    .pump-state-reading { color: var(--muted); font-size: 12px; }
+    .pump-cell-list { display: grid; gap: 8px; list-style: none; margin: 12px 0 0; padding: 0; }
+    .pump-cell { border-left: 3px solid var(--semantic, var(--line)); display: grid; gap: 4px; min-width: 0; padding: 8px 0 8px 10px; }
+    .pump-cell-label { color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+    .pump-cell-value { font-size: 13px; line-height: 1.4; min-width: 0; overflow-wrap: anywhere; }` : '';
+  const pumpCss768 = snapshot.hostedDraftPump ? `
+      .pump-cell-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }` : '';
+  const pumpCss1024 = snapshot.hostedDraftPump ? `
+      .pump-cell-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }` : '';
   const headline = headlinePresentation(snapshot.headline.state);
   // Taken from the obstruction it came from rather than from a second severity table. An
   // obstruction the drain cannot pass is not a warning and is certainly not healthy, and the hero
@@ -2902,7 +3036,7 @@ export function renderControlRoomHtml(candidate, {
     .backlog-total { margin: 12px 0 4px; }
     .evidence { align-items: start; display: grid; gap: 14px; }
     .wide-scroll { overflow-x: auto; }
-    code { color: #bdd2f2; overflow-wrap: anywhere; } .empty { color: var(--muted); }${flowCss}${ciCss}
+    code { color: #bdd2f2; overflow-wrap: anywhere; } .empty { color: var(--muted); }${flowCss}${ciCss}${pumpCss}
     @media (min-width: 768px) {
       main { max-width: 880px; padding: 22px; }
       header { align-items: end; display: flex; justify-content: space-between; }
@@ -2913,14 +3047,14 @@ export function renderControlRoomHtml(candidate, {
       .evidence { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .fog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .fog-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .local-lane-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }${flowCss768}${ciCss768}
+      .local-lane-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }${flowCss768}${ciCss768}${pumpCss768}
     }
     @media (min-width: 1024px) {
       main { max-width: 1240px; padding: 26px 32px; }
       .hero { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
       .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
       .work-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .local-lane-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }${flowCss1024}${ciCss1024}
+      .local-lane-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }${flowCss1024}${ciCss1024}${pumpCss1024}
     }
     @media (min-width: 1440px) {
       main { max-width: 1600px; padding: 30px 44px; }
@@ -2961,6 +3095,7 @@ export function renderControlRoomHtml(candidate, {
   </section>
   ${renderObstruction(snapshot, copy, language)}
   ${renderMergeQueueCapability(snapshot, copy, language)}
+  ${renderHostedDraftPump(snapshot, copy)}
   ${renderLocalLanes(snapshot, copy)}
   ${renderEngineeringFlow(snapshot, copy)}
   ${renderCiFlow(snapshot, copy)}
