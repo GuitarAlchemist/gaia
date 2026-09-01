@@ -385,6 +385,9 @@ test('R3 CONFIRMED carries its work-root OID only as private transport metadata'
     schema: 'GaiaDraftRegistryReceiptV0', priorCommittedRevision: 'a'.repeat(64),
     kind: 'CONFIRMED', workKey: 'b'.repeat(64), generationKey: 'c'.repeat(64),
   };
+  const transportMetadataInput = Object.assign(Object.create(null), {
+    workRootOid: '9'.repeat(40),
+  });
   const transportMetadata = { workRootOid: '9'.repeat(40) };
   const priorOid = '1'.repeat(40);
   const commitOid = '2'.repeat(40);
@@ -407,7 +410,7 @@ test('R3 CONFIRMED carries its work-root OID only as private transport metadata'
   });
 
   assert.deepEqual(await api.compareAndAppend(
-    'refs/heads/gaia-ledger/registry-v0', priorOid, body, transportMetadata,
+    'refs/heads/gaia-ledger/registry-v0', priorOid, body, transportMetadataInput,
   ), {
     kind: 'APPENDED', oid: commitOid, body,
     committedRevision: revision(body), transportMetadata,
