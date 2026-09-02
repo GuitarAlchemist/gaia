@@ -74,7 +74,11 @@ test('scheduled recovery resumes unsettled work before any candidate is listed o
 
   assert.deepEqual(calls[0], 'listUnsettled');
   assert.deepEqual(calls[1], ['reconcile', SHA_A, SHA_C]);
-  assert.equal(calls.length, 2);
+  assert.deepEqual(
+    calls[2], 'listUnsettled',
+    'the count is read again after the run acted, not projected from the snapshot it started with',
+  );
+  assert.equal(calls.length, 3);
   assert.equal(receipt.phase, 'RESUME');
   assert.equal(receipt.operationId, SHA_A);
   assert.deepEqual(receipt.skipped, []);
@@ -382,4 +386,233 @@ test('the receipt counts what stayed unsettled after the run, not what it found 
     async reconcileDraft() { assert.fail('no candidate means no effect'); },
   });
   assert.equal(none.unsettledCount, 0);
+});
+
+// --- Spec R1 blocker S1: the observation denominator ------------------------------------------
+//
+// Every test below drives the real shipped chain and nothing else: `runHostedDraftIntake` produces
+// the receipt, `produceHostedDraftPumpObservation` seals it, and `summarizeHostedDraftPump`
+// renders what the Control Room renders. A durable fake ledger stands in for the Git Data ledger,
+// and — unlike the static fakes above — it records the writes a run performs and the writes a
+// concurrent lane performs, because the defect is invisible to a ledger that cannot change.
+
+const ROOT_OID = 'd'.repeat(40);
+const ROOT_REVISION = 'e'.repeat(64);
+const WINDOW_STARTED_AT = '2026-09-01T12:00:00.000Z';
+const TICK_AT = '2026-09-01T12:00:30.000Z';
+const OBSERVED_AT = '2026-09-01T12:00:31.000Z';
+const PAGE_AT = '2026-09-01T12:05:00.000Z';
+
+const IDENTITY = Object.freeze({
+  repository: 'GuitarAlchemist/gaia',
+  repositoryNodeId: 'R_kgDOGaia',
+  ledgerRootOid: ROOT_OID,
+  ledgerRootRevision: ROOT_REVISION,
+  sequence: 9001,
+  windowStartedAt: WINDOW_STARTED_AT,
+  tickAt: TICK_AT,
+  observedAt: OBSERVED_AT,
+});
+
+const hex = (seed, width) => seed.toString(16).padStart(width, '0');
+
+/** One durable, mutable unsettled set. Records carry exactly the four fields intake validates. */
+function ledger(initial = []) {
+  const rows = new Map();
+  const add = (number) => {
+    rows.set(number, {
+      operationId: hex(number * 7, 64),
+      workKey: hex(number * 13, 64),
+      committedRevision: hex(number * 17, 64),
+      selector: selectorFor(number),
+    });
+    return rows.get(number);
+  };
+  for (const number of initial) add(number);
+  return {
+    add,
+    settle(number) { rows.delete(number); },
+    list() { return [...rows.values()].map((row) => ({ ...row })); },
+  };
+}
+
+async function renderThrough(receipt, trigger) {
+  const { produceHostedDraftPumpObservation } = await import(
+    new URL('../src/hosted-draft-pump-producer.mjs', import.meta.url)
+  );
+  const { summarizeHostedDraftPump } = await import(
+    new URL('../src/hosted-draft-pump-observation.mjs', import.meta.url)
+  );
+  const artifact = produceHostedDraftPumpObservation({
+    ...IDENTITY,
+    receipt: {
+      schema: 'GaiaHostedDraftPumpCliReceiptV0',
+      command: 'intake',
+      trigger,
+      phase: receipt.phase,
+      operationId: receipt.operationId,
+      workKey: receipt.workKey,
+      committedRevision: receipt.committedRevision,
+      workItem: receipt.workItem,
+      unsettledCount: receipt.unsettledCount,
+      result: receipt.result,
+      skipped: receipt.skipped,
+      telemetry: [],
+    },
+  });
+  return summarizeHostedDraftPump({ artifact, observedAt: PAGE_AT });
+}
+
+// Positive control. This is the reading the seam exists to publish, and it must survive the repair
+// untouched: a genuinely empty ledger with no candidate is the healthiest reading there is, and a
+// fix that reached `healthy` by never rendering it would be a worse defect than the one repaired.
+test('positive control: a genuinely empty ledger still publishes EXPECTED_NONE as healthy', async () => {
+  const run = await intake();
+  const durable = ledger();
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return durable.list(); },
+    async listReadyIssues() { return []; },
+    async enqueueDraft() { assert.fail('no candidate means no admission'); },
+    async reconcileDraft() { assert.fail('no candidate means no effect'); },
+  });
+
+  assert.equal(receipt.phase, 'EXPECTED_NONE');
+  assert.equal(receipt.unsettledCount, 0);
+
+  const block = await renderThrough(receipt, 'SCHEDULE');
+  assert.equal(block.state, 'EXPECTED_NONE');
+  assert.equal(block.severity, 'healthy');
+  assert.equal(block.unsettledCount, 0, 'an empty ledger is genuinely zero');
+});
+
+// S1, first interleaving: the recovery lane snapshots an empty unsettled set, a labeled lane for
+// issue 62 durably enqueues while the recovery lane is still selecting, and the recovery lane
+// publishes the pre-action zero. Since R1 the recovery lane is the only lane with an observation
+// path, so this false `healthy` stands until the next six-hourly tick.
+test('a lane that enqueues during a recovery run is not published as a healthy repository', async () => {
+  const run = await intake();
+  const durable = ledger();
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return durable.list(); },
+    async listReadyIssues() {
+      // The concurrent labeled lane for issue 62 wins its own queue and commits durably here.
+      durable.add(62);
+      return [];
+    },
+    async enqueueDraft() { assert.fail('this run has no candidate of its own'); },
+    async reconcileDraft() { assert.fail('this run performs no effect'); },
+  });
+
+  assert.equal(receipt.phase, 'EXPECTED_NONE');
+  assert.equal(
+    durable.list().length, 1,
+    'fixture control: one operation really is unsettled when this run publishes',
+  );
+  assert.equal(
+    receipt.unsettledCount, 1,
+    'the receipt must count the concurrent durable write, not the pre-action snapshot',
+  );
+
+  const block = await renderThrough(receipt, 'SCHEDULE');
+  assert.equal(block.unsettledCount, 1);
+  assert.equal(block.state, 'UNSETTLED');
+  assert.notEqual(
+    block.severity, 'healthy',
+    'the Control Room must never render healthy over durably unsettled work',
+  );
+});
+
+// S1, second interleaving, and the one that is guaranteed rather than merely likely: this run does
+// list issue 62 and does attempt it, but loses the compare-and-set. Losing proves the winner's
+// write was already durable before this run read the ledger again, so no correct post-action read
+// can miss it. The receipt is still `EXPECTED_NONE` — a `StaleRevision` skip is benign to the
+// producer — and today it still carries zero.
+test('a recovery run that loses the enqueue race publishes the winner as unsettled, not healthy', async () => {
+  const run = await intake();
+  const durable = ledger();
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return durable.list(); },
+    async listReadyIssues() { return [{ number: 62 }]; },
+    async enqueueDraft(candidate) {
+      assert.equal(candidate.workItem.number, 62);
+      // The labeled lane's enqueue is already committed; this one is the CAS loser.
+      const winner = durable.add(62);
+      return { kind: 'StaleRevision', currentCommittedRevision: winner.committedRevision };
+    },
+    async reconcileDraft() { assert.fail('a lost enqueue performs no effect'); },
+  });
+
+  assert.equal(receipt.phase, 'EXPECTED_NONE');
+  assert.deepEqual(receipt.skipped, [{ number: 62, reason: 'StaleRevision' }]);
+  assert.equal(
+    receipt.unsettledCount, 1,
+    'the compare-and-set winner is durably unsettled and must be counted',
+  );
+
+  const block = await renderThrough(receipt, 'SCHEDULE');
+  assert.equal(block.unsettledCount, 1);
+  assert.equal(block.state, 'UNSETTLED');
+  assert.notEqual(block.severity, 'healthy');
+});
+
+// The correction is one-directional by construction. A post-action read that returns fewer
+// operations than this run projected — a lagging or partial read — must not be able to talk the
+// published count down toward `healthy`, because a bug in the read would then manufacture exactly
+// the false clear this repair exists to remove.
+test('a post-action read that returns less than the run projected cannot lower the count', async () => {
+  const run = await intake();
+  const receipt = await run({ repository: REPOSITORY, candidates: [63] }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    // Both reads answer empty, while this run admits an operation that never settles.
+    async listUnsettledDrafts() { return []; },
+    async enqueueDraft() {
+      return { kind: 'Enqueued', operationId: SHA_A, workKey: SHA_B,
+        generationKey: SHA_C, committedRevision: SHA_C };
+    },
+    async reconcileDraft(operationId) {
+      return { kind: 'Pending', operationId, committedRevision: SHA_D };
+    },
+  });
+
+  assert.equal(receipt.phase, 'ADMIT');
+  assert.equal(
+    receipt.unsettledCount, 1,
+    'the operation this run left open is still counted when the ledger read does not show it',
+  );
+});
+
+// The other half of the same rule: the operation this run admitted is already in the projection, so
+// finding it again in the post-action read must not add a second one.
+test('the operation this run admitted is counted once, not twice', async () => {
+  const run = await intake();
+  const durable = ledger();
+  const receipt = await run({ repository: REPOSITORY, candidates: [63] }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return durable.list(); },
+    async enqueueDraft(candidate) {
+      const row = durable.add(candidate.workItem.number);
+      return { kind: 'Enqueued', operationId: row.operationId, workKey: row.workKey,
+        generationKey: SHA_C, committedRevision: row.committedRevision };
+    },
+    async reconcileDraft(operationId) {
+      return { kind: 'Pending', operationId, committedRevision: SHA_D };
+    },
+  });
+
+  assert.equal(receipt.phase, 'ADMIT');
+  assert.equal(durable.list().length, 1, 'fixture control: exactly one operation is open');
+  assert.equal(receipt.unsettledCount, 1, 'the admitted operation is one operation, not two');
 });
