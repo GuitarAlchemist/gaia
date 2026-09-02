@@ -131,7 +131,11 @@ authority are `NONE` on every path, including the successful one. Its admission 
 never grants: writing and merge-approval capabilities are representable exactly so that every
 execution surface is refused them by one shared mechanism rather than by omission, and a surface
 whose security gates have not passed carries an empty row rather than a missing one. Registration
-labels are derived from the runner identity, never supplied. Runner bootstrap, registration,
+labels are derived from the runner identity, never supplied. Every published receipt names whether
+its reading came from a synthetic fixture or from a live provider, taken from the adapter's own
+declaration rather than from the answer it returned, so evidence stays distinguishable by origin at
+rest. The one operator-supplied identifier a receipt may carry is bounded to a short lowercase
+label, so credential-shaped material has no admitted representation to travel in. Runner bootstrap, registration,
 mandate execution, drain, removal, durable receipts, and the rebuildable throughput projection
 remain design only; the reserved vocabulary implies none of them. See
 [the self-hosted runner capability probe](docs/self-hosted-runner-provider-probe.md).
