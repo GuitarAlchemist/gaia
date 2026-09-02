@@ -281,6 +281,28 @@ test('duplicate receipt converges and a competing R1 receipt is a typed stale lo
   });
 });
 
+test('a well-formed predecessor outside the current round never advances the lineage', async () => {
+  const { createInitialManagedRound, planManagedRoundUpdate } = await api();
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
+  const foreign = createInitialManagedRound({
+    workKey: 'e'.repeat(64), headRevision: HEAD, receipt: openReceipt(),
+  });
+  assert.notEqual(foreign.roundKey, initial.roundKey);
+
+  const refused = planManagedRoundUpdate({
+    workKey: WORK_KEY,
+    observation: observation(`human prefix\r\n${initial.managedSection}`),
+    receipt: advanceReceipt(foreign.roundKey),
+  });
+
+  assert.deepEqual({ kind: refused.kind, code: refused.code }, {
+    kind: 'REFUSED', code: 'RoundLineageConflict',
+  });
+  assert.equal(refused.proposedBody, undefined, 'a broken successor is never rendered');
+});
+
 test('retry, restart, heartbeat, formatting and missing evidence never advance', async (context) => {
   const { createInitialManagedRound, planManagedRoundUpdate } = await api();
   const initial = createInitialManagedRound({
@@ -723,6 +745,35 @@ test('every managed Draft is created with canonical R0 through both public adapt
     }),
     (error) => error instanceof DeliveryRoundError && error.code === 'AtomicCasUnavailable',
   );
+});
+
+test('a create refuses a base body that already carries a managed section', async () => {
+  const {
+    createInitialManagedRound, executeManagedDraftCreation, createGitHubManagedRoundAdapter,
+    createMemoryManagedRoundEvidencePort,
+  } = await api();
+  const initial = createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+  });
+  const github = githubApiFixture();
+  const evidencePort = createMemoryManagedRoundEvidencePort();
+
+  const refused = await executeManagedDraftCreation({
+    workKey: WORK_KEY,
+    headRevision: HEAD,
+    baseBody: `human-authored prefix\r\n${initial.managedSection}`,
+    receipt: openReceipt(),
+    effectActor: EFFECT,
+    effectClaim: effectClaim(),
+    adapter: createGitHubManagedRoundAdapter({ api: github.api }),
+    evidencePort,
+  });
+
+  assert.deepEqual({ kind: refused.kind, code: refused.code }, {
+    kind: 'REFUSED', code: 'ManagedSectionConflict',
+  });
+  assert.equal(github.calls.length, 0, 'a second managed section is never created');
+  assert.deepEqual(await evidencePort.read(WORK_KEY), { state: 'UNSEEN' });
 });
 
 test('one black-box R0-to-R1 effect contract agrees across memory and GitHub adapters', async (context) => {
