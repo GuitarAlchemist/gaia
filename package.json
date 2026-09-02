@@ -7,10 +7,17 @@
   "engines": {
     "node": ">=20.0.0"
   },
+  "gaiaArchitectureVerification": {
+    "schema": "gaia-architecture-verification/1",
+    "commit": "6faa3487c58ed797f25f87f9bd9ede03bfe886a8",
+    "date": "2026-09-01",
+    "contentRevision": "sha256:4968851384ba7b1ebae734a0ef3c47664361d3b23ac80af23e8096f66efd7d99"
+  },
   "scripts": {
     "test": "node --test",
     "doctor": "node scripts/gaia-interagent.mjs doctor",
     "verify": "node scripts/gaia-interagent.mjs verify",
+    "architecture:verify": "node scripts/architecture-drift.mjs",
     "handshake": "node src/mcp-client.mjs",
     "factory:smoke": "node scripts/factory-smoke.mjs",
     "factory:agent": "node scripts/factory-agent.mjs",

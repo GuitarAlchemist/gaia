@@ -33,6 +33,9 @@ hard-real-time scheduling, or safety-controller authority.
 
 ## Install status
 
+The authoritative system boundary map is [`ARCHITECTURE.md`](ARCHITECTURE.md). Detailed
+documents remain authoritative for their named subsystem mechanics.
+
 **This is an installation candidate, not an installed plugin.** It has no marketplace
 entry and has not been installed. Fresh, independent Standards and Spec/adversarial
 reviews gate installation — the lane that wrote this cannot review it.
@@ -44,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 1611 gates
+node --test                                   # 1627 gates
 ```
 
 ### Functional factory tracer
@@ -653,7 +656,7 @@ authoritative for their named contracts.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 1611 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 1627 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
