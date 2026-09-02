@@ -467,6 +467,11 @@ RED before GREEN, all at public seams; no private state is reached.
 | T14 | `tests/hosted-draft-pump-workflow.test.mjs`, unchanged | regression | the sealed effect workflow still passes byte for byte |
 | T15 | `listReadyIssues` | fake transport returns a PR row and an issue row | PR dropped; issues ascending by number |
 | T16 | `listUnsettledDrafts` on a corrupt chain | — | `LedgerCorrupt`; nothing admitted |
+| T17 | `runHostedDraftIntake` -> producer -> read model | a lane commits durably while a recovery run selects | receipt and block count 1; state `UNSETTLED`; severity is not `healthy` |
+| T18 | `runHostedDraftIntake` -> producer -> read model | the recovery run lists the same issue and loses the compare-and-set | receipt and block count 1 alongside the `StaleRevision` skip; not `healthy` |
+| T19 | `runHostedDraftIntake` -> producer -> read model | genuinely empty ledger, no candidate | `EXPECTED_NONE` / `healthy` / 0 — the positive control the repair must not break |
+| T20 | `runHostedDraftIntake` | post-action read returns less than the run projected | the count is not lowered; the operation left open is still counted |
+| T21 | `runHostedDraftIntake` | post-action read contains the operation this run admitted | counted once, not twice |
 
 Beyond the suite: focused tests twice, full suite twice, `npm run verify`, deterministic replay, and
 a live proof that one labelled issue and one recovery replay create no duplicate Draft.
@@ -491,3 +496,9 @@ a live proof that one labelled issue and one recovery replay create no duplicate
 5. **The cross-workflow concurrency invariant is weakened**, as stated above. Duplicate-freedom now
    rests on the ledger CAS alone. Any future change that adds a re-enqueue path, or that lets
    `EFFECT_AMBIGUOUS` reach `createDraft`, breaks it.
+6. **The observation denominator is narrowed, not exact.** The post-action read closes the window in
+   which a concurrent lane commits while a run is selecting or admitting, but not the window between
+   that read and receipt emission. A lane committing there is unobserved until the next tick. The
+   correction is one-directional, so the error can only be an over-count rendering `UNSETTLED`, never
+   an under-count rendering `healthy`. Closing the remainder requires a denominator the lane can
+   serialize against, which the per-issue groups deliberately gave up.

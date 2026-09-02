@@ -116,7 +116,13 @@ body and neither derivable afterwards:
   *"operation/issue/PR binding"* would publish nothing on every scheduled recovery.
 - `unsettledCount` — operations known unsettled **at the end of this run**, not at its start. A
   `RESUME` that reconciled its record to a terminal outcome leaves zero, and publishing the
-  starting count would read a completed recovery as a stuck queue.
+  starting count would read a completed recovery as a stuck queue. Intake builds it from two ledger
+  reads, not one: the projection over the pre-action snapshot carries what this run did to its own
+  operation, and a second read taken after the run acted contributes the unsettled operations a
+  concurrent lane committed meanwhile. The second term is only ever added, so this count can be
+  raised toward `UNSETTLED` and never lowered toward a healthy reading. It is still an observation:
+  a lane committing after that read is not reflected, and `observedAt` is what says how old the
+  reading is.
 
 ### The transition map — closed, and refusing rather than guessing
 
