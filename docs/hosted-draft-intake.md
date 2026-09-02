@@ -44,6 +44,72 @@ parameter; only the pinned constant at `scripts/hosted-draft-pump.mjs:27` curren
 to one workflow file. Unpinning that constant into a sealed per-command map is the whole unlock.
 **No `actions: write`, no new repository variable, and no new secret are required.**
 
+### R2 — the observation denominator, designed twice
+
+Alternative C shipped its concurrency group split in R1: labeled intake now runs under
+`gaia-draft-intake-issue-<N>` and scheduled recovery under `gaia-draft-intake-recovery`. Those are
+different group strings and therefore independent queues, so a labeled lane and the recovery lane
+overlap freely. That is the point of issue #84 — and it invalidated an assumption the receipt was
+still built on.
+
+**The defect.** `unsettledCount` was never read after the run acted. It was *projected*: the
+unsettled list snapshotted before selection, plus or minus one for the operation this run itself
+settled or admitted. Under the single repository-wide group that projection was exactly right,
+because nothing else could write to the ledger while the run held the queue. With the groups split,
+a concurrent labeled lane can durably enqueue work during the recovery lane's own run, and the
+projection then corresponds to no ledger state that ever existed at publication time. The recovery
+lane publishes phase `EXPECTED_NONE` with `unsettledCount: 0`; `deriveState` reads a zero
+denominator and renders `EXPECTED_NONE`, whose severity is `healthy`, while durable truth is one
+unsettled operation. Since R1 the recovery lane is the *only* lane given an observation path, so
+nothing publishes the contradicting reading any more.
+
+Three shipped normative statements already describe the count this repair implements — the receipt
+comment at `src/hosted-draft-pump.mjs`, `docs/hosted-draft-pump-producer.md`'s "at the end of this
+run, not at its start", and the receipt section below. The code delivered a before-picture. This is
+a correction of the code to the contract, not a change of contract.
+
+**Option (a) — a post-action authoritative recount.** Re-read the unsettled list after the run has
+acted and publish what that read returned. This replaces arithmetic with a measurement, and it
+closes both interleavings that reproduce the defect: the one where a concurrent lane enqueues while
+this run works, and the one where this run's own enqueue loses the compare-and-set — in the second
+case the winner's write is provably durable before this run's read, so the correction is not merely
+likely but guaranteed. Its cost is one extra ledger read per run. Its honest limit is a residual
+window: a lane that enqueues *after* this run's final read is still not reflected. That window
+shrinks from the whole run — selection, admission, and a provider round trip — to the gap between
+the last read and receipt emission, in which this run performs no effect. It does not reach zero,
+because no observer can verify the absence of a write that happens after its last read.
+
+**Option (b) — an explicit fail-closed scope rule.** Carry the provenance of the denominator on the
+receipt — whether the run can vouch that its count is repository-global — and refuse to render
+`healthy` from a count it cannot vouch for. Two objections, one of substance and one of size. Of
+substance: after the group split no lane can ever vouch, so the rule would refuse `healthy` on every
+reading, deleting issue #70's tracer item 7 — distinguishing a healthy empty queue from a pump that
+never ticked — in the name of protecting it. A rule about a number cannot make the number
+trustworthy; only reading it can. Of size: the flag would have to cross the receipt, the producer's
+evidence fields, and the sealed observation body, touching three modules and the CLI, where (a)
+touches one function. Note also that `deriveState` already fails closed on the denominator it is
+given: `unsettledCount > 0` pre-empts `EXPECTED_NONE`, `ADVANCED` and `REPLAYED` alike. The rule is
+not missing. Its input was wrong.
+
+**Selected: (a), applied in (b)'s direction.** The post-action read is authoritative, and it is
+combined with the published count in one direction only — it may raise the count, never lower it.
+Concretely, the run publishes its projection plus the unsettled operations that appear in the
+post-action read, were absent from the pre-action snapshot, and are not the operation this run
+itself admitted. Those are exactly the durable writes of a concurrent lane.
+
+Two properties follow, and both are asserted. First, the correction is monotone upward, so it can
+only move a reading from `healthy` toward `UNSETTLED`/`warning` and never the reverse: a bug in the
+delta cannot manufacture a false clear, which is the one direction this seam must never fail.
+Second, with no concurrent lane the delta is empty and the published count is unchanged, so the
+serial contract — a completed recovery reads as one fewer, an admission that did not settle reads as
+one more — is preserved exactly rather than restated.
+
+**What this does not claim.** The residual window above is real and is not closed by this repair. A
+published reading is a past-tense fact about the last ledger state its run read; the seam's existing
+freshness machinery, not the denominator, is what carries how old that fact is. What is fixed here
+is narrower and worse than staleness: a run publishing a number contradicted by durable truth it
+could have read and did not, while it was still executing.
+
 ## The intake workflow
 
 `.github/workflows/hosted-draft-intake.yml`, new, structurally mirroring the effect workflow:
@@ -107,10 +173,24 @@ tests and recorded in the receipt. Note that `listUnsettledDrafts` sorts by `wor
 same list. Intake picks one and states it.
 
 The action selector and the observation denominator are deliberately separate. An issue-triggered
-run filters the records it may reconcile, but its receipt counts the full validated unsettled list
-observed at the start, adjusted only for the matching operation this run settled or the new operation
-it admitted. This preserves the existing global `unsettledCount` contract and prevents an isolated
-lane from falsely rendering the repository healthy while unrelated work remains.
+run filters the records it may reconcile, but its receipt counts the full validated unsettled list,
+not the filtered one. That count is the projection over the pre-action snapshot — adjusted for the
+matching operation this run settled or the new operation it admitted — **raised by** the unsettled
+operations a second, post-action read of the ledger returns that were absent from the pre-action
+snapshot and were not admitted by this run. Those are the durable writes of a concurrent lane.
+
+The two reads are both required, and the combination is deliberately one-directional. The
+projection carries what this run did to its own operation, which a bare recount cannot attribute;
+the post-action read carries what other lanes did, which no projection can see. Because the second
+term is only ever added, the published count can be raised toward `UNSETTLED` and never lowered
+toward `healthy` — the direction this seam must never fail in.
+
+This does not make the count instantaneously true, and no mechanism available here would. A lane
+that enqueues after this run's final read is not reflected; that residual window spans receipt
+emission only, during which this run performs no effect, and it is the ordinary staleness of any
+read model rather than a contradiction of durable truth the run had already observed. What it does
+close is the case where a lane rendered the repository healthy while work it could have read was
+durably unsettled. See *R2 — the observation denominator, designed twice* above.
 
 The orchestration itself belongs in `src/hosted-draft-pump.mjs` as a third pure, dependency-injected
 export, `runHostedDraftIntake`, alongside the existing two. The CLI calls it. Reconciliation reuses
@@ -383,7 +463,7 @@ RED before GREEN, all at public seams; no private state is reached.
 | T10 | `createGitHubActionsDraftAdmission` | effect-workflow environment, intake expected path | `reserveEffect` returns `ZERO` |
 | T11 | `createGitHubActionsDraftAdmission` | intake environment, intake path, run `in_progress` | `AVAILABLE` |
 | T12 | CLI `main` with injected argv, env, streams, runtime factory | intake argv with issues-shaped environment | parses; factory receives command `intake` and the policy-sourced ledger root |
-| T13 | `tests/hosted-draft-intake-workflow.test.mjs` | the new YAML | `issues: [labeled]` and `schedule`; group `gaia-draft-intake`; `cancel-in-progress: false`; permissions exactly `actions: read` and `contents: read`; App token; `persist-credentials: false`; `ref: github.workflow_sha`; no `GITHUB_TOKEN` reference; no `actions: write`; no `docker` |
+| T13 | `tests/hosted-draft-intake-workflow.test.mjs` | the new YAML | `issues: [labeled]` and `schedule`; one `concurrency.group`, the per-event expression selecting `gaia-draft-intake-issue-<number>` for `issues` and `gaia-draft-intake-recovery` otherwise, with the flat `gaia-draft-intake` group asserted **absent**; `cancel-in-progress: false`; permissions exactly `actions: read` and `contents: read`; App token; `persist-credentials: false`; `ref: github.workflow_sha`; no `GITHUB_TOKEN` reference; no `actions: write`; no `docker` |
 | T14 | `tests/hosted-draft-pump-workflow.test.mjs`, unchanged | regression | the sealed effect workflow still passes byte for byte |
 | T15 | `listReadyIssues` | fake transport returns a PR row and an issue row | PR dropped; issues ascending by number |
 | T16 | `listUnsettledDrafts` on a corrupt chain | — | `LedgerCorrupt`; nothing admitted |
