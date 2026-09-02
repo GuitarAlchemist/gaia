@@ -74,6 +74,15 @@ worktree, credential, or prompt body anywhere in the mandate, so a probe has not
 `declaredMcpServers` is the whole MCP surface. It may be empty; nothing outside it may appear in the
 observation.
 
+An MCP server name is the one operator-supplied string this module ever republishes, so its
+*accepted representation* is bounded rather than merely inspected. A name is a lowercase label
+path: at most four segments separated by a single `-`, `.` or `_`; each segment a letter followed by
+at most eleven lowercase alphanumerics; at most forty characters in total; and no segment that is an
+unbroken run of eight or more hexadecimal characters. `filesystem`, `claude-code`, `context7` and
+`github.mcp` are names. `glpat-abcdefghijklmnop`, `hf_abcdefghijklmnopqrst`,
+`npm_abcdefghijklmnopqrst`, a bare forty-character hex value, and every mixed-case token form are
+not names at this revision, whichever prefix they carry.
+
 ### Runner lease
 
 `leaseId`, `holder`, `workKey`, `generation`, `provider`, `capability`, `target`, `expiresAt`.
@@ -88,8 +97,17 @@ to authorize two writers.
 `outcome` is `CAPABILITY_OBSERVED` or `BLOCKED`; `blocker` is `null` or one closed code. The receipt
 republishes the idempotency key, the mandate digest, the runner work key and generation, the
 provider, the capability, the observed instant, the availability, quota, usage, MCP servers,
-provider-reported blockers, `effect: NONE`, `authority: NONE`, and a `revision` that is the SHA-256
-of exactly the receipt it is published on.
+provider-reported blockers, `effect: NONE`, `authority: NONE`, an `observationSource`, and a
+`revision` that is the SHA-256 of exactly the receipt it is published on.
+
+`observationSource` is the closed discriminator that makes synthetic evidence distinguishable at
+rest. It is taken from the *adapter's own declared source*, never from the fixture and never from
+the observation body, and the observation must claim the same source or the probe refuses. Its
+vocabulary is `SYNTHETIC_FIXTURE` and `LIVE_PROVIDER`; the only adapter this slice ships declares
+`SYNTHETIC_FIXTURE`, and `LIVE_PROVIDER` exists for the same reason `CODE_WRITE` does — a token that
+is representable can be refused by a mechanism, and a single-valued discriminator discriminates
+nothing. On a `BLOCKED` receipt `observationSource` is `null`, because a blocked receipt publishes
+no observation.
 
 The idempotency key is derived from the work key, the generation, the provider, the capability and
 the mandate id. It binds a receipt to one generation, so a receipt minted by an older generation can
@@ -121,19 +139,22 @@ earlier gate refuses.
    fails, the probe refuses rather than minting a second, differing receipt for one key.
 8. `PROVIDER_ADAPTER_FAILED` — the adapter threw, returned a non-object, or returned nothing.
 9. `OBSERVATION_INVALID`, `OBSERVATION_MISBOUND`, `OBSERVATION_INCOHERENT` — the observation is
-   closed-parsed, must carry this mandate digest and this provider and capability, and must agree
-   with itself: `AVAILABLE` with reported blockers, or a non-`AVAILABLE` reading with none, is
-   incoherent and is refused rather than resolved in the provider's favour.
-10. `CREDENTIAL_MATERIAL_PRESENT` — a free-form name in the observation is shaped like a well-known
-    credential.
+   closed-parsed, must carry this mandate digest, this provider, this capability and this adapter's
+   declared observation source, and must agree with itself: `AVAILABLE` with reported blockers, or a
+   non-`AVAILABLE` reading with none, is incoherent and is refused rather than resolved in the
+   provider's favour. An observation claiming a source the adapter did not declare is misbound.
+10. `CREDENTIAL_MATERIAL_PRESENT` — a name in the observation is not an admitted MCP server label,
+    or carries a well-known credential prefix. A name that is not a label is refused here rather
+    than parsed as one, because Gaia cannot tell an unusual name from session material and must not
+    republish either.
 11. `UNDECLARED_MCP_SERVER` — the observation reported an MCP server the mandate did not declare.
 12. `AUTHORITY_WIDENING` — the observation claimed any effect, any authority, that source was
     exposed, or that a credential was read.
 13. `BUDGET_EXCEEDED` — reported token, context, or wall-clock usage exceeds the mandate budget.
 
-## Two corrections this design did not survive
+## Three corrections this design did not survive
 
-The order above was decided before the gates ran. Two steps of the original order did not survive
+The order above was decided before the gates ran. Three steps of the original design did not survive
 them, and `src/runner-provider-probe.mjs` implements the corrections structurally rather than as
 advice.
 
@@ -148,16 +169,30 @@ undeclared-MCP-server check originally ran before the credential-shape check, so
 `ghp_...` would have been refused for being undeclared, after being read as a server name. The
 credential shape now decides first, and such a name reaches no other gate.
 
+**A prefix list is a sample, not a bound; the accepted representation is the bound.** The first
+implementation bounded MCP server names only by charset and length and then compared them against a
+sample of published credential prefixes. That is a denylist wearing a schema's clothes: an
+independently reproduced probe showed `glpat-abcdefghijklmnop`, `hf_abcdefghijklmnopqrst`,
+`npm_abcdefghijklmnopqrst` and a bare forty-character hex value passing both boundaries and being
+echoed verbatim into a successful, content-addressed receipt — the durable artifact this design
+calls evidence. Lengthening the sample would have repeated the mistake at the next unlisted prefix.
+The correction narrows what a name *is*, so that a credential-shaped value has no admitted
+representation to arrive in. The prefix list is retained unchanged, and unextended, as a second
+check on names that are otherwise well-formed labels.
+
 ## What the fail-closed gates honestly prove
 
 - **Budget.** A pure function cannot interrupt a provider mid-call. What it can do is refuse to
   publish an over-budget observation as a capability reading, and leave a typed blocker as the
   durable evidence that the budget was breached. The enforcement that stops the spend belongs to the
   execution adapter of a later slice, not to this receipt.
-- **Credential material.** Every observation field is a closed token, a bounded identifier, or a
-  bounded non-negative integer, so provider session material is *structurally unrepresentable*
-  rather than merely scanned for. The one prefix check covers the only free-form names — MCP server
-  names — and is a bounded structural check against known credential prefixes, not a secret scanner.
+- **Credential material.** Every observation field is a closed token, a bounded identifier, a
+  bounded lowercase label path, or a bounded non-negative integer. The claim this bullet is allowed
+  to make is about *representation*, not detection: a value that is not one of those four things
+  cannot be carried at all, and the label bound admits no published credential format. What it is
+  not is a secret scanner. A short lowercase label is still an operator-supplied string, and a name
+  such as `cafe` is admitted because it is a name; the honest guarantee is that the receipt's MCP
+  field carries at most four short lowercase labels, not that nothing memorable fits in them.
 - **Authority.** The refusal is on what the adapter *claims*, not on what it did. This slice cannot
   observe a provider's real behaviour; it can refuse to record a claim of effect as a capability.
 - **Crash and replay.** There is no durable store here. Reconciliation is against a prior receipt the
@@ -179,9 +214,23 @@ capability is not the one it was built for; that refusal reaches the caller as
 `PROVIDER_ADAPTER_FAILED`, because a probe that answers a question it was not asked is worse than a
 probe that fails.
 
+It declares `observationSource: 'SYNTHETIC_FIXTURE'` on the adapter itself. The fixture contract has
+no such field, so a fixture cannot claim to be a live provider, and the kernel reads the declaration
+from the adapter rather than from the answer the adapter returns.
+
 The request handed to an adapter is deliberately minimal: provider, capability, corpus id, prompt
 count, budget, declared MCP servers, and the mandate digest. There is no repository, ref, path,
 token, prompt body, or environment in it.
+
+## The module is text
+
+The digest domain separator is the NUL character, and it is written in the source as the
+two-character escape `\0`. Embedding the raw byte made every `grep -r` and `rg` sweep over `src/`
+skip the file as binary — including a reviewer's manual sweep for authority or credential handling —
+and made a receipt's content address depend on a byte an editor or a `.gitattributes` normalization
+can silently drop. The escape is byte-identical at runtime, so no work key, idempotency key or
+receipt revision changes; one gate pins those digests and one gate asserts the source file contains
+no NUL byte.
 
 ## Not in this slice
 
@@ -200,7 +249,11 @@ adapter; and any Linux host adapter. None of these is implied by the vocabulary 
   unregistered-provider, or unadmitted-capability probe returns a typed `BLOCKED` receipt.
 - An unmodified prior receipt replays byte-identically without consulting the adapter; a prior
   receipt for another mandate or a tampered revision is a `RECEIPT_CONFLICT`.
-- A truthful `UNAVAILABLE` reading is reported as an observation, not as a Gaia failure.
+- A truthful `UNAVAILABLE` reading is reported as an observation, not as a Gaia failure, and every
+  successful receipt names the source of the reading, so synthetic evidence is distinguishable at
+  rest from a reading a later slice takes from a live provider.
+- Credential-shaped MCP identifiers have no admitted representation at either boundary, a safe
+  identifier is still admitted and still published, and the module source is text.
 - Every receipt carries `effect: NONE` and `authority: NONE`, and the emitted vocabulary is closed.
 - Repeated probes are byte-identical, and neither key order nor label order changes the revision.
 - Mechanism reverts show each gate is a mechanism rather than a coincidence of the fixtures.
