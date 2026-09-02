@@ -69,7 +69,7 @@ const FORBIDDEN_INTERFACE_CANONICAL_TOKENS = new Set([
 const FORBIDDEN_INTERFACE_TOKEN_FORMS = new Map(
   [...FORBIDDEN_INTERFACE_CANONICAL_TOKENS].flatMap((token) => [
     [token, token],
-    [/(?:s|x|z|ch|sh)$/.test(token) ? `${token}es` : `${token}s`, token],
+    [pluralInterfaceToken(token), token],
   ]),
 );
 const COMMIT = /^[0-9a-f]{40}$/;
@@ -264,14 +264,39 @@ function declaredInterfaceFragments(cell) {
   return [...cell.matchAll(/`([^`\r\n]+)`/g)].map((match) => match[1]);
 }
 
+function pluralInterfaceToken(token) {
+  if (/[^aeiou]y$/.test(token)) return `${token.slice(0, -1)}ies`;
+  return /(?:s|x|z|ch|sh)$/.test(token) ? `${token}es` : `${token}s`;
+}
+
+function canonicalInterfaceTokenFragments(tokens) {
+  const canonical = [];
+  for (let start = 0; start < tokens.length;) {
+    let end = tokens.length;
+    while (end > start
+      && !FORBIDDEN_INTERFACE_TOKEN_FORMS.has(tokens.slice(start, end).join(''))) end -= 1;
+    if (end === start) {
+      canonical.push(tokens[start]);
+      start += 1;
+    } else {
+      canonical.push(FORBIDDEN_INTERFACE_TOKEN_FORMS.get(tokens.slice(start, end).join('')));
+      start = end;
+    }
+  }
+  return canonical;
+}
+
 function interfaceTokens(fragment) {
   return fragment
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .split(/[^A-Za-z0-9]+/)
-    .filter((token) => token.length > 0)
-    .map((token) => token.toLowerCase())
-    .map((token) => FORBIDDEN_INTERFACE_TOKEN_FORMS.get(token) ?? token);
+    .filter((segment) => segment.length > 0)
+    .flatMap((segment) => canonicalInterfaceTokenFragments(
+      segment
+        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+        .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+        .split(' ')
+        .map((token) => token.toLowerCase()),
+    ));
 }
 
 function declaredInterfaceLeaks(fragment) {

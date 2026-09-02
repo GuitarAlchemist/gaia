@@ -310,6 +310,14 @@ test('both adapters structurally reject adapter and object-identifier terms in a
     'read(objectIdentifiers)',
     'read(commitHashes)',
     'read(objectOids)',
+    'checkArchitectureDrift(commitSHAs)',
+    'read(objectIDs)',
+    'read(objectOIDs)',
+    'checkArchitectureDrift(commit_SHAs)',
+    'read(object_IDs)',
+    'read(object_OIDs)',
+    'query(duckDBs)',
+    'retries(intent) -> result',
   ]) {
     const input = snapshot({ architecture: architecture({ moduleInterface: leakedInterface }) });
     forEachAdapter(input, (adapter, name) => {
@@ -332,6 +340,10 @@ test('both adapters preserve domain identifiers that only contain forbidden char
     'compare(commits) -> result',
     'read(objects) -> result',
     'classify(objectives) -> reading',
+    'compare(commitShares) -> result',
+    'classify(objectIdeals) -> reading',
+    'read(entries) -> result',
+    'cluster(DBSCANPoints) -> result',
   ]) {
     const input = snapshot({ architecture: architecture({ moduleInterface: domainInterface }) });
     forEachAdapter(input, (adapter, name) => {
@@ -561,6 +573,14 @@ test('MECHANISM REVERT: removing token policy or plural canonicalization restore
     'read(objectIdentifiers)',
     'read(commitHashes)',
     'read(objectOids)',
+    'checkArchitectureDrift(commitSHAs)',
+    'read(objectIDs)',
+    'read(objectOIDs)',
+    'checkArchitectureDrift(commit_SHAs)',
+    'read(object_IDs)',
+    'read(object_OIDs)',
+    'query(duckDBs)',
+    'retries(intent) -> result',
   ];
   for (const moduleInterface of leakedInterfaces) {
     const input = snapshot({ architecture: architecture({ moduleInterface }) });
@@ -572,8 +592,11 @@ test('MECHANISM REVERT: removing token policy or plural canonicalization restore
   }
 
   const pluralSource = readFileSync(new URL('../src/architecture-drift.mjs', import.meta.url), 'utf8');
-  const canonicalization = '.map((token) => FORBIDDEN_INTERFACE_TOKEN_FORMS.get(token) ?? token);';
-  const pluralMutant = pluralSource.replace(canonicalization, '.map((token) => token);');
+  const canonicalization = "canonical.push(FORBIDDEN_INTERFACE_TOKEN_FORMS.get(tokens.slice(start, end).join('')));";
+  const pluralMutant = pluralSource.replace(
+    canonicalization,
+    "canonical.push(tokens.slice(start, end).join(''));",
+  );
   assert.notEqual(pluralMutant, pluralSource, 'the plural token canonicalization mutation must be applied');
   const pluralScratch = mkdtempSync(join(tmpdir(), 'gaia-architecture-plural-interface-mutant-'));
   try {
