@@ -62,6 +62,16 @@ const FORBIDDEN_INTERFACE_TOKEN_PAIRS = new Set([
   'object:id',
   'object:identifier',
 ]);
+const FORBIDDEN_INTERFACE_CANONICAL_TOKENS = new Set([
+  ...FORBIDDEN_INTERFACE_TOKENS,
+  ...[...FORBIDDEN_INTERFACE_TOKEN_PAIRS].flatMap((pair) => pair.split(':')),
+]);
+const FORBIDDEN_INTERFACE_TOKEN_FORMS = new Map(
+  [...FORBIDDEN_INTERFACE_CANONICAL_TOKENS].flatMap((token) => [
+    [token, token],
+    [/(?:s|x|z|ch|sh)$/.test(token) ? `${token}es` : `${token}s`, token],
+  ]),
+);
 const COMMIT = /^[0-9a-f]{40}$/;
 const CONTENT_REVISION = /^sha256:[0-9a-f]{64}$/;
 
@@ -260,7 +270,8 @@ function interfaceTokens(fragment) {
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .split(/[^A-Za-z0-9]+/)
     .filter((token) => token.length > 0)
-    .map((token) => token.toLowerCase());
+    .map((token) => token.toLowerCase())
+    .map((token) => FORBIDDEN_INTERFACE_TOKEN_FORMS.get(token) ?? token);
 }
 
 function declaredInterfaceLeaks(fragment) {

@@ -305,11 +305,16 @@ test('both adapters structurally reject adapter and object-identifier terms in a
     'read(objectIdentifier)',
     'read(object_id)',
     'read(gitObjectId)',
+    'checkArchitectureDrift(commitShas)',
+    'read(objectIds)',
+    'read(objectIdentifiers)',
+    'read(commitHashes)',
+    'read(objectOids)',
   ]) {
     const input = snapshot({ architecture: architecture({ moduleInterface: leakedInterface }) });
     forEachAdapter(input, (adapter, name) => {
       const report = checkArchitectureDrift(adapter);
-      assert.equal(report.verdict, 'FAIL', name);
+      assert.equal(report.verdict, 'FAIL', `${name}: ${leakedInterface}`);
       assert.deepEqual(report.violations,
         [{ code: 'MODULE_INTERFACE_LEAK', subject: 'Drift gate' }], name);
       assert.deepEqual(report.advisories, [], name);
@@ -324,6 +329,9 @@ test('both adapters preserve domain identifiers that only contain forbidden char
     'commit(expected revision, events) -> receipt',
     'resolve(referencePoint) -> result',
     'classify(objectIdentity) -> reading',
+    'compare(commits) -> result',
+    'read(objects) -> result',
+    'classify(objectives) -> reading',
   ]) {
     const input = snapshot({ architecture: architecture({ moduleInterface: domainInterface }) });
     forEachAdapter(input, (adapter, name) => {
@@ -522,7 +530,7 @@ test('MECHANISM REVERT: removing the commit-content witness makes the stale-revi
   }
 });
 
-test('MECHANISM REVERT: removing the SHA token makes an object identifier escape the public seam', async () => {
+test('MECHANISM REVERT: removing token policy or plural canonicalization restores interface leaks', async () => {
   const input = snapshot({
     architecture: architecture({ moduleInterface: 'checkArchitectureDrift(commitSha)' }),
   });
@@ -545,6 +553,42 @@ test('MECHANISM REVERT: removing the SHA token makes an object identifier escape
     assert.equal(report.verdict, 'PASS');
   } finally {
     rmSync(scratch, { recursive: true, force: true });
+  }
+
+  const leakedInterfaces = [
+    'checkArchitectureDrift(commitShas)',
+    'read(objectIds)',
+    'read(objectIdentifiers)',
+    'read(commitHashes)',
+    'read(objectOids)',
+  ];
+  for (const moduleInterface of leakedInterfaces) {
+    const input = snapshot({ architecture: architecture({ moduleInterface }) });
+    assert.deepEqual(
+      checkArchitectureDrift(createInMemoryArchitectureInventory(input)).violations,
+      [{ code: 'MODULE_INTERFACE_LEAK', subject: 'Drift gate' }],
+      moduleInterface,
+    );
+  }
+
+  const pluralSource = readFileSync(new URL('../src/architecture-drift.mjs', import.meta.url), 'utf8');
+  const canonicalization = '.map((token) => FORBIDDEN_INTERFACE_TOKEN_FORMS.get(token) ?? token);';
+  const pluralMutant = pluralSource.replace(canonicalization, '.map((token) => token);');
+  assert.notEqual(pluralMutant, pluralSource, 'the plural token canonicalization mutation must be applied');
+  const pluralScratch = mkdtempSync(join(tmpdir(), 'gaia-architecture-plural-interface-mutant-'));
+  try {
+    const mutantPath = join(pluralScratch, 'architecture-drift.mjs');
+    writeFileSync(mutantPath, pluralMutant, 'utf8');
+    const mutatedModule = await import(`${pathToFileURL(mutantPath).href}?mutation=plural-token-canonicalization`);
+    for (const moduleInterface of leakedInterfaces) {
+      const input = snapshot({ architecture: architecture({ moduleInterface }) });
+      const report = mutatedModule.checkArchitectureDrift(
+        mutatedModule.createInMemoryArchitectureInventory(input),
+      );
+      assert.equal(report.verdict, 'PASS', moduleInterface);
+    }
+  } finally {
+    rmSync(pluralScratch, { recursive: true, force: true });
   }
 });
 
