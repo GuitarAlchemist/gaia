@@ -128,6 +128,18 @@ No phase may silently inherit authority from the next phase.
 - comparison with a deterministic baseline and subscription-backed Claude/Gemini/Auggie lanes;
 - failure containment and byte-identical replay from the same input artifact.
 
+## Reusable IX decision-support seam
+
+Gaia may export a bounded, versioned objective table to IX for offline analysis; IX returns an advisory artifact and receives no runtime or GitHub authority. A DuckDB dominance query is sufficient for a Pareto front, so no LLM is required. The current provisional proof keeps deterministic GitHub Actions for closed mechanics, Claude Max for zero-marginal-cost complex work, and Copilot Business as the GitHub-native throughput option. Its quality and friction scores are ordinal hypotheses, not measurements.
+
+Reproduce from the IX checkout:
+
+```powershell
+& "$env:USERPROFILE\tools\duckdb\duckdb.exe" -box -f ..\gaia\docs\research\fixtures\provider-delivery-pareto.sql
+```
+
+Replace the inline values with DuckDB telemetry before using the result operationally. Failure or absence of IX must leave Gaia's deterministic pump unchanged.
+
 ## Decision
 
 Do not install or run a local Chinese model yet. Groom one inference-only, synthetic-fixture experiment around Qwen3-Coder-30B-A3B-Instruct under IX #293, and expose any later result to Gaia through the existing optional advisory-package boundary. For Gaia #91, treat `qwen-local` as an unavailable capability until all four security gates pass. This preserves the core pump while creating a cost-effective path that cannot access source, secrets, or effects prematurely.
