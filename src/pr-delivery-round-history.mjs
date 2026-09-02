@@ -725,7 +725,7 @@ async function persistIntent(port, intent) {
     if (terminal) return { terminal };
     const existingIntent = intentFor(before, intent.operationId);
     if (existingIntent && canonical(existingIntent) === canonical(intent)) {
-      return { intent: existingIntent, intentRevision: recordRevision(existingIntent) };
+      return { intent: existingIntent, intentRevision: recordRevision(existingIntent), created: false };
     }
     const latest = before.records.at(-1);
     if (latest?.kind === 'INTENT' && latest.operationId !== intent.operationId) {
@@ -754,7 +754,11 @@ async function persistIntent(port, intent) {
         && record.operationId === intent.operationId
         && canonical(record) === canonical(intent),
     );
-    if (stored) return { intent: stored, intentRevision: recordRevision(stored) };
+    if (stored) return {
+      intent: stored,
+      intentRevision: recordRevision(stored),
+      created: acknowledgement.kind === 'APPENDED',
+    };
     const competing = after.records.at(-1);
     if (competing?.kind === 'INTENT' && competing.operationId !== intent.operationId) {
       return { refusal: refusal('EvidenceLineageConflict') };
@@ -1149,8 +1153,29 @@ export async function executeManagedRoundUpdate(input) {
   const durable = evidencePort(input.evidencePort);
   let observed;
   let mismatch = null;
+  let pendingEffect = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     observed = await adapter.observe(input.number);
+    if (pendingEffect !== null) {
+      if (exactPostcondition(
+        observed,
+        pendingEffect.plan.expected.headRevision,
+        pendingEffect.plan.proposedBodyRevision,
+        pendingEffect.plan.proposedBody,
+      )) {
+        return persistApplied(durable, appliedRecord(
+          pendingEffect.intent, pendingEffect.intentRevision, 'NONE', attempt, observed,
+        ));
+      }
+      mismatch = Object.freeze({
+        expectedHeadRevision: pendingEffect.plan.expected.headRevision,
+        expectedBodyRevision: pendingEffect.plan.proposedBodyRevision,
+        observedHeadRevision: observed?.headRevision ?? 'UNKNOWN(MISSING)',
+        observedBodyRevision: observed?.bodyRevision ?? 'UNKNOWN(MISSING)',
+        acknowledgement: pendingEffect.acknowledgement,
+      });
+      continue;
+    }
     const plan = planManagedRoundUpdate({ workKey, observation: observed, receipt: input.receipt });
     if (plan.kind === 'ALREADY_APPLIED') {
       const reconciled = await reconcileExisting(durable, plan.idempotencyKey, {
@@ -1173,6 +1198,19 @@ export async function executeManagedRoundUpdate(input) {
     const persisted = await persistIntent(durable, intent);
     if (persisted.terminal) return Object.freeze(ownedClone(persisted.terminal.result));
     if (persisted.refusal) return persisted.refusal;
+    if (!persisted.created) {
+      pendingEffect = Object.freeze({
+        plan, intent, intentRevision: persisted.intentRevision, acknowledgement: 'AMBIGUOUS',
+      });
+      mismatch = Object.freeze({
+        expectedHeadRevision: plan.expected.headRevision,
+        expectedBodyRevision: plan.proposedBodyRevision,
+        observedHeadRevision: observed?.headRevision ?? 'UNKNOWN(MISSING)',
+        observedBodyRevision: observed?.bodyRevision ?? 'UNKNOWN(MISSING)',
+        acknowledgement: 'AMBIGUOUS',
+      });
+      continue;
+    }
     const effect = Object.freeze({
       operationId: plan.operationId, idempotencyKey: plan.idempotencyKey,
       number: plan.expected.number, expectedHeadRevision: plan.expected.headRevision,
@@ -1199,6 +1237,12 @@ export async function executeManagedRoundUpdate(input) {
       observedBodyRevision: observed?.bodyRevision ?? 'UNKNOWN(MISSING)',
       acknowledgement: acknowledgement.kind,
     });
+    if (acknowledgement.kind !== 'STALE') {
+      pendingEffect = Object.freeze({
+        plan, intent, intentRevision: persisted.intentRevision,
+        acknowledgement: acknowledgement.kind,
+      });
+    }
   }
   return Object.freeze({
     kind: 'BLOCKED', code: 'POSTCONDITION_UNPROVEN', attempts: MAX_ATTEMPTS,
