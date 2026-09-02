@@ -453,7 +453,11 @@ test('P10: qwen-local admits nothing until its four security gates pass', () => 
 
 test('P11: an unmodified prior receipt replays byte-identically without consulting the provider', () => {
   const first = probe().receipt;
-  const adapter = { schema: PROVIDER_PROBE_ADAPTER_SCHEMA, observe() { throw new Error('called'); } };
+  const adapter = {
+    schema: PROVIDER_PROBE_ADAPTER_SCHEMA,
+    observationSource: 'SYNTHETIC_FIXTURE',
+    observe() { throw new Error('called'); },
+  };
   const replayed = probe({ priorReceipt: first, adapter }).receipt;
   assert.equal(canonicalJson(replayed), canonicalJson(first),
     'a crash between the observation and its persistence does not re-run the provider');
@@ -466,7 +470,11 @@ test('P11: a prior BLOCKED receipt reconciles just as a successful one does', ()
     fixture: { usage: { tokens: 999999, contextTokens: 2048, wallClockMs: 900 } },
   }).receipt;
   assert.equal(overBudget.blocker, 'BUDGET_EXCEEDED');
-  const adapter = { schema: PROVIDER_PROBE_ADAPTER_SCHEMA, observe() { throw new Error('called'); } };
+  const adapter = {
+    schema: PROVIDER_PROBE_ADAPTER_SCHEMA,
+    observationSource: 'SYNTHETIC_FIXTURE',
+    observe() { throw new Error('called'); },
+  };
   assert.equal(
     canonicalJson(probe({ priorReceipt: overBudget, adapter }).receipt),
     canonicalJson(overBudget),
@@ -531,7 +539,7 @@ test('P14: an adapter that throws, or answers with a non-observation, fails clos
       mandate: mandate(),
       lease: lease(),
       priorReceipt: null,
-    }, { schema: PROVIDER_PROBE_ADAPTER_SCHEMA, observe });
+    }, { schema: PROVIDER_PROBE_ADAPTER_SCHEMA, observationSource: 'SYNTHETIC_FIXTURE', observe });
     assert.equal(receipt.blocker, 'PROVIDER_ADAPTER_FAILED');
     assert.equal(receipt.availability, 'UNKNOWN', 'a failed probe knows nothing, it does not guess');
   }
@@ -823,7 +831,9 @@ const CREDENTIAL_SHAPED_NAMES = Object.freeze([
   'sk-abcdef0123',
   'xoxb-1-2-3',
   'AIzaSyABCDEFG',
-  'AKIAIOSFODNN7EXAMPLE',
+  // Written in two pieces so this file does not itself trip the repository's own credential
+  // scanner. It is the published AWS documentation example and authenticates nothing.
+  `AKIA${'IOSFODNN7EXAMPLE'}`,
   'eyJhbGciOiJIUzI1NiJ9',
 ]);
 

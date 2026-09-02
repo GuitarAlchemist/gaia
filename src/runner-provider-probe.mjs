@@ -31,19 +31,20 @@
  *    the vocabulary so that asking for them is representable and refusable. No row admits either,
  *    so every provider is refused writer and merge authority by one shared mechanism. NotebookLM's
  *    research-only row and `qwen-local`'s empty row are that mechanism, not provider branches.
- * 4. **The adapter is untrusted input.** Its answer is closed-parsed, bound to this mandate, and
- *    required to agree with itself. A claim of effect or authority is refused rather than
- *    recorded, and provider session material has no field to travel in: every observation field is
- *    a closed token, a bounded identifier, or a bounded non-negative integer.
+ * 4. **The adapter is untrusted input.** Its answer is closed-parsed, bound to this mandate and to
+ *    the adapter's own declared observation source, and required to agree with itself. A claim of
+ *    effect or authority is refused rather than recorded, and provider session material has no
+ *    field to travel in: every observation field is a closed token, a bounded identifier, a
+ *    bounded lowercase label path, or a bounded non-negative integer.
  * 5. **A receipt is minted once per key, or reconciled.** A supplied prior receipt that carries
  *    this idempotency key, this mandate digest, and a revision equal to its own content is
  *    returned byte-identically without re-running the provider. Anything else is a conflict, never
  *    a second, differing receipt for one key.
  *
- * TWO CORRECTIONS THIS MODULE MAKES TO ITS OWN DESIGN
- * ---------------------------------------------------
+ * THREE CORRECTIONS THIS MODULE MAKES TO ITS OWN DESIGN
+ * -----------------------------------------------------
  * `docs/self-hosted-runner-provider-probe.md` fixed a decision order before the gates were run.
- * Two steps of that order did not survive:
+ * Three steps of that design did not survive:
  *
  * - The lease was checked before the mandate deadline. An expired mandate is not work, so there is
  *   nothing for a lease to be held against; checking the lease first reports `LEASE_EXPIRED` for a
@@ -51,6 +52,16 @@
  * - The undeclared-MCP-server check ran before the credential-shape check. That order records a
  *   credential-shaped name in a blocker in order to say it was undeclared. The credential shape
  *   now decides first, so such a name is refused before it is republished as anything.
+ * - MCP server names were bounded only by charset and length and then compared against a sample of
+ *   published credential prefixes. A sample is not a bound: `glpat-...`, `hf_...`, `npm_...` and a
+ *   bare forty-character hex value all passed and were echoed verbatim into a successful,
+ *   content-addressed receipt. The accepted representation is now the bound — a short lowercase
+ *   label path — so a credential-shaped value has nothing to arrive in. The prefix list is kept
+ *   unchanged, and deliberately unextended, as a second check on well-formed labels.
+ *
+ * The digest domain separator is the NUL character, written here as the escape `\0`. The raw byte
+ * made every `grep -r` over `src/` skip this file as binary, and made a content-addressed receipt
+ * depend on a byte a normalization pass can silently drop. The escape is byte-identical at runtime.
  *
  * It imports a digest and the one shared exact-instant predicate. Instants are additionally
  * required to be the fixed-width UTC form, because this module compares them as strings: the
@@ -109,6 +120,15 @@ export const PROVIDER_CAPABILITY_ADMISSION = Object.freeze({
 export const RUNNER_OPERATING_SYSTEMS = Object.freeze(['LINUX', 'MACOS', 'WINDOWS']);
 export const RUNNER_ARCHITECTURES = Object.freeze(['ARM64', 'X64']);
 
+/**
+ * Where a reading came from. This is the discriminator that keeps synthetic evidence distinguishable
+ * at rest, and it is read from the adapter's own declaration rather than from the answer it returns.
+ * `LIVE_PROVIDER` is here for the same reason `CODE_WRITE` is: a single-valued discriminator
+ * discriminates nothing, and a token that is representable can be refused by a mechanism. No adapter
+ * in this slice declares it.
+ */
+export const PROVIDER_OBSERVATION_SOURCES = Object.freeze(['LIVE_PROVIDER', 'SYNTHETIC_FIXTURE']);
+
 /** What a probe may conclude about a provider. `UNKNOWN` is not a soft `UNAVAILABLE`. */
 export const PROVIDER_AVAILABILITIES = Object.freeze(['AVAILABLE', 'UNAVAILABLE', 'UNKNOWN']);
 
@@ -154,13 +174,14 @@ export const PROVIDER_PROBE_INPUT_FIELDS = Object.freeze([
 
 export const PROVIDER_PROBE_OBSERVATION_FIELDS = Object.freeze([
   'authority', 'availability', 'capability', 'credentialsRead', 'effect', 'mandateDigest',
-  'mcpServers', 'provider', 'providerBlockers', 'quota', 'schema', 'sourceExposed', 'usage',
+  'mcpServers', 'observationSource', 'provider', 'providerBlockers', 'quota', 'schema',
+  'sourceExposed', 'usage',
 ]);
 
 export const PROVIDER_PROBE_RECEIPT_FIELDS = Object.freeze([
   'authority', 'availability', 'blocker', 'capability', 'effect', 'idempotencyKey',
-  'mandateDigest', 'mcpServers', 'observedAt', 'outcome', 'provider', 'providerBlockers', 'quota',
-  'revision', 'runnerGeneration', 'runnerWorkKey', 'schema', 'usage',
+  'mandateDigest', 'mcpServers', 'observationSource', 'observedAt', 'outcome', 'provider',
+  'providerBlockers', 'quota', 'revision', 'runnerGeneration', 'runnerWorkKey', 'schema', 'usage',
 ]);
 
 export const PROVIDER_PROBE_FIXTURE_FIELDS = Object.freeze([
@@ -186,8 +207,29 @@ const CREDENTIAL_PREFIXES = Object.freeze([
   'sk-', 'sk_', 'xoxa-', 'xoxb-', 'xoxp-', 'ya29.',
 ]);
 
-/** MCP server names are the one free-form field, so they are bounded and then credential-checked. */
+/** The structural parse of a name in an observation. What it *is* is decided by the bound below. */
 const MCP_SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/**
+ * An MCP server name is the one operator-supplied string this module republishes, so its accepted
+ * representation is the bound rather than a list of the shapes we happen to know. A name is a short
+ * lowercase label path: at most four segments joined by a single `-`, `.` or `_`, each a letter
+ * followed by at most eleven lowercase alphanumerics, at most forty characters in all, and with no
+ * segment that is an unbroken run of eight or more hexadecimal characters.
+ *
+ * This is a representation guarantee, not a secret scanner. It says that a published credential
+ * format — longer, mixed-case, or one unbroken high-entropy run — has no shape to arrive in. It
+ * does not say that nothing memorable fits in four short lowercase labels, and it is not asked to.
+ */
+const MCP_SERVER_LABEL_PATH = /^[a-z][a-z0-9]{0,11}(?:[-._][a-z][a-z0-9]{0,11}){0,3}$/;
+const MCP_SERVER_SEPARATOR = /[-._]/;
+const MCP_SERVER_HEX_RUN = /^[0-9a-f]{8,}$/;
+const MCP_SERVER_NAME_MAX = 40;
+
+const isMcpServerName = (value) => typeof value === 'string'
+  && value.length <= MCP_SERVER_NAME_MAX
+  && MCP_SERVER_LABEL_PATH.test(value)
+  && !value.split(MCP_SERVER_SEPARATOR).some((segment) => MCP_SERVER_HEX_RUN.test(segment));
 
 export class RunnerProbeError extends Error {
   constructor(code, message) {
@@ -292,7 +334,7 @@ export function requireRunnerIdentity(value) {
  */
 export function runnerWorkKey(identity) {
   const verified = requireRunnerIdentity(identity);
-  return digest(`${verified.runnerId} ${verified.os} ${verified.arch}`);
+  return digest(`${verified.runnerId}\0${verified.os}\0${verified.arch}`);
 }
 
 export function runnerGenerationKey(identity) {
@@ -351,8 +393,8 @@ function requireCorpus(value) {
 function requireMcpServerNames(value, what) {
   if (!Array.isArray(value)) refuse(`the ${what} must be an array`);
   for (const name of value) {
-    if (typeof name !== 'string' || !MCP_SERVER_NAME.test(name)) {
-      refuse(`${JSON.stringify(name)} is not a bounded MCP server name`);
+    if (!isMcpServerName(name)) {
+      refuse(`${JSON.stringify(name)} is not an MCP server name`);
     }
     if (isCredentialShaped(name)) refuse('an MCP server name may not be credential-shaped');
   }
@@ -453,7 +495,7 @@ export function providerProbeIdempotencyKey({ workKey, generation, provider, cap
   if (typeof mandateId !== 'string' || !IDENTIFIER.test(mandateId)) {
     refuse('an idempotency key needs a mandate id');
   }
-  return digest([workKey, generation, provider, capability, mandateId].join(' '));
+  return digest([workKey, generation, provider, capability, mandateId].join('\0'));
 }
 
 // -------------------------------------------------------------------------------------------
@@ -484,6 +526,7 @@ function receiptBody(context, extra) {
     quota: null,
     usage: null,
     mcpServers: Object.freeze([]),
+    observationSource: null,
     providerBlockers: Object.freeze([]),
     effect: 'NONE',
     authority: 'NONE',
@@ -546,6 +589,9 @@ function readObservation(value) {
     refuse('the observed capability is not registered');
   }
   if (!PROVIDER_AVAILABILITIES.includes(value.availability)) refuse('the availability is not registered');
+  if (!PROVIDER_OBSERVATION_SOURCES.includes(value.observationSource)) {
+    refuse('an observation names one registered observation source');
+  }
   requireSortedSubset(value.providerBlockers, PROVIDER_REPORTED_BLOCKERS, 'provider blocker',
     { allowEmpty: true });
   if (typeof value.effect !== 'string' || typeof value.authority !== 'string') {
@@ -572,6 +618,7 @@ function readObservation(value) {
     quota: readQuota(value.quota),
     usage: readUsage(value.usage),
     mcpServers: Object.freeze([...value.mcpServers].sort(ordinal)),
+    observationSource: value.observationSource,
     providerBlockers: Object.freeze([...value.providerBlockers]),
     effect: value.effect,
     authority: value.authority,
@@ -602,9 +649,13 @@ export function probeProvider(input, providerAdapter) {
   }
   if (!isPlainObject(providerAdapter)
       || providerAdapter.schema !== PROVIDER_PROBE_ADAPTER_SCHEMA
-      || typeof providerAdapter.observe !== 'function') {
-    refuse(`a ${PROVIDER_PROBE_ADAPTER_SCHEMA} adapter is required`);
+      || typeof providerAdapter.observe !== 'function'
+      || !PROVIDER_OBSERVATION_SOURCES.includes(providerAdapter.observationSource)) {
+    refuse(`a ${PROVIDER_PROBE_ADAPTER_SCHEMA} adapter declaring a registered source is required`);
   }
+  // Read once, from the adapter itself. A receipt that took this from the answer would let an
+  // adapter say where its own reading came from, which is the confusion the field exists to end.
+  const observationSource = providerAdapter.observationSource;
 
   const identity = requireRunnerIdentity(input.identity);
   const mandate = requireProviderProbeMandate(input.mandate);
@@ -683,16 +734,19 @@ export function probeProvider(input, providerAdapter) {
     return blocked(context, 'OBSERVATION_INVALID');
   }
   if (observation.mandateDigest !== mandateDigest || observation.provider !== mandate.provider
-      || observation.capability !== mandate.capability) {
+      || observation.capability !== mandate.capability
+      || observation.observationSource !== observationSource) {
     return blocked(context, 'OBSERVATION_MISBOUND');
   }
   const available = observation.availability === 'AVAILABLE';
   if (available !== (observation.providerBlockers.length === 0)) {
     return blocked(context, 'OBSERVATION_INCOHERENT');
   }
-  // Credential shape decides before undeclared MCP: refusing a credential-shaped name for being
-  // undeclared would be republishing it in order to complain about it.
-  if (observation.mcpServers.some(isCredentialShaped)) {
+  // Containment decides before undeclared MCP: refusing a credential-shaped name for being
+  // undeclared would be republishing it in order to complain about it. A name that is not an
+  // admitted label is refused here too, because Gaia cannot tell an unusual name from session
+  // material and must not publish either while it is unsure.
+  if (observation.mcpServers.some((name) => !isMcpServerName(name) || isCredentialShaped(name))) {
     return blocked(context, 'CREDENTIAL_MATERIAL_PRESENT');
   }
   if (observation.mcpServers.some((name) => !mandate.declaredMcpServers.includes(name))) {
@@ -714,6 +768,7 @@ export function probeProvider(input, providerAdapter) {
     quota: observation.quota,
     usage: observation.usage,
     mcpServers: observation.mcpServers,
+    observationSource,
     providerBlockers: observation.providerBlockers,
   }));
 }
@@ -727,9 +782,10 @@ export function probeProvider(input, providerAdapter) {
  * "run a probe": it opens no socket, spawns no process, reads no file, holds no clock, and carries
  * no credential.
  *
- * It writes `effect`, `authority`, `sourceExposed` and `credentialsRead` itself rather than
- * copying them, so a hostile fixture has no field to put an authority claim in — the fixture
- * contract simply has no such field, and supplying one is refused at construction.
+ * It writes `effect`, `authority`, `sourceExposed`, `credentialsRead` and `observationSource`
+ * itself rather than copying them, so a hostile fixture has no field to put an authority claim or a
+ * live-provider claim in — the fixture contract simply has no such field, and supplying one is
+ * refused at construction.
  */
 export function createSyntheticFixtureProbeAdapter(fixture) {
   requireClosedFields(fixture, PROVIDER_PROBE_FIXTURE_FIELDS, 'probe fixture');
@@ -752,6 +808,7 @@ export function createSyntheticFixtureProbeAdapter(fixture) {
 
   return Object.freeze({
     schema: PROVIDER_PROBE_ADAPTER_SCHEMA,
+    observationSource: 'SYNTHETIC_FIXTURE',
     observe(request) {
       if (!isPlainObject(request) || request.schema !== PROVIDER_PROBE_REQUEST_SCHEMA) {
         refuse('a probe request is required');
@@ -769,6 +826,7 @@ export function createSyntheticFixtureProbeAdapter(fixture) {
         quota,
         usage,
         mcpServers,
+        observationSource: 'SYNTHETIC_FIXTURE',
         providerBlockers,
         effect: 'NONE',
         authority: 'NONE',
