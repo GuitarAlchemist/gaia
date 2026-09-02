@@ -36,6 +36,7 @@ import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
+  PROVIDER_AVAILABILITIES,
   PROVIDER_CAPABILITY_ADMISSION,
   PROVIDER_CAPABILITY_KINDS,
   PROVIDER_PROBE_ADAPTER_SCHEMA,
@@ -57,7 +58,6 @@ import {
   RunnerProbeError,
   createSyntheticFixtureProbeAdapter,
   probeProvider,
-  providerAvailabilities,
   providerProbeIdempotencyKey,
   providerProbeMandateDigest,
   requireProviderProbeMandate,
@@ -717,7 +717,7 @@ test('P25: the emitted vocabulary is closed on every axis', () => {
   assert.deepEqual([...PROVIDER_CAPABILITY_KINDS], [
     'CODE_WRITE', 'MERGE_APPROVAL', 'READ_ONLY_REVIEW', 'RESEARCH_CITATION',
   ]);
-  assert.deepEqual([...providerAvailabilities()], ['AVAILABLE', 'UNAVAILABLE', 'UNKNOWN']);
+  assert.deepEqual([...PROVIDER_AVAILABILITIES], ['AVAILABLE', 'UNAVAILABLE', 'UNKNOWN']);
   assert.deepEqual([...RUNNER_OPERATING_SYSTEMS], ['LINUX', 'MACOS', 'WINDOWS']);
   assert.deepEqual([...RUNNER_ARCHITECTURES], ['ARM64', 'X64']);
   assert.deepEqual([...PROVIDER_QUOTA_UNITS], ['REQUESTS', 'SESSIONS', 'TOKENS', 'UNKNOWN']);

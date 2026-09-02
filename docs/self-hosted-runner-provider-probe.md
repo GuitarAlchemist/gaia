@@ -108,11 +108,11 @@ earlier gate refuses.
    ordering comparison is how a replayed number comes to look live.
 3. `RUNNER_DRAINING` — the runner has stopped accepting work. Drain refuses before a lease is even
    examined, so draining cannot be defeated by holding a valid lease.
-4. `LEASE_ABSENT`, `LEASE_FOREIGN`, `LEASE_EXPIRED`, `MUTABLE_TARGET_NOT_ADMITTED` — the lease must
+4. `MANDATE_EXPIRED` — the observed instant is at or after the mandate deadline. Expiry is
+   inclusive: a mandate is not still valid at the instant it expires.
+5. `LEASE_ABSENT`, `LEASE_FOREIGN`, `LEASE_EXPIRED`, `MUTABLE_TARGET_NOT_ADMITTED` — the lease must
    exist, name this work key, generation, provider, capability and corpus, be unexpired at the
    observed instant, and name an immutable target.
-5. `MANDATE_EXPIRED` — the observed instant is at or after the mandate deadline. Expiry is
-   inclusive: a mandate is not still valid at the instant it expires.
 6. `PROVIDER_UNREGISTERED`, `CAPABILITY_NOT_ADMITTED` — the closed admission table.
 7. `RECEIPT_CONFLICT` — crash reconciliation. A supplied prior receipt must carry this exact
    idempotency key, this exact mandate digest, and a `revision` equal to its own recomputed digest.
@@ -124,12 +124,29 @@ earlier gate refuses.
    closed-parsed, must carry this mandate digest and this provider and capability, and must agree
    with itself: `AVAILABLE` with reported blockers, or a non-`AVAILABLE` reading with none, is
    incoherent and is refused rather than resolved in the provider's favour.
-10. `UNDECLARED_MCP_SERVER` — the observation reported an MCP server the mandate did not declare.
-11. `CREDENTIAL_MATERIAL_PRESENT` — a free-form name in the observation is shaped like a well-known
+10. `CREDENTIAL_MATERIAL_PRESENT` — a free-form name in the observation is shaped like a well-known
     credential.
+11. `UNDECLARED_MCP_SERVER` — the observation reported an MCP server the mandate did not declare.
 12. `AUTHORITY_WIDENING` — the observation claimed any effect, any authority, that source was
     exposed, or that a credential was read.
 13. `BUDGET_EXCEEDED` — reported token, context, or wall-clock usage exceeds the mandate budget.
+
+## Two corrections this design did not survive
+
+The order above was decided before the gates ran. Two steps of the original order did not survive
+them, and `src/runner-provider-probe.mjs` implements the corrections structurally rather than as
+advice.
+
+**An expired mandate is not work, so there is nothing for a lease to be held against.** The lease
+was originally checked before the deadline. That order reports `LEASE_EXPIRED` to a runner whose
+real problem is that its mandate ran out — a true statement that names the wrong cause, and one
+that would send an operator to renew a lease instead of reissuing a mandate. The deadline now
+decides first.
+
+**A credential-shaped name must not be republished in order to complain about it.** The
+undeclared-MCP-server check originally ran before the credential-shape check, so a name like
+`ghp_...` would have been refused for being undeclared, after being read as a server name. The
+credential shape now decides first, and such a name reaches no other gate.
 
 ## What the fail-closed gates honestly prove
 
