@@ -70,6 +70,7 @@ only in the final column and must not escape in a result or refusal.
 | Hosted Draft intake | `runHostedDraftIntake(trigger, observations) -> receipt or refusal`; `produceHostedDraftPumpObservation(receipt) -> observation or refusal` | Resume one unsettled operation before admitting at most one candidate; authority-free sealed observation | serialized GitHub Actions intake; existing Draft ledger/admission/effect adapters; deterministic fixtures |
 | Portfolio survey and drain | `survey(observations) -> revision`; `advance(revision) -> intent or refusal` | Read-only inventory to one bounded next transition | GitHub read adapter; deterministic fixtures; append-only drain ledger |
 | Pull-request conflict classification | `classifyPrConflict(observation, claim) -> reading or refusal` | Exact-generation, read-only classification under a closed empty strategy registry | normalized GitHub observation; deterministic fixtures |
+| Runner capability probe | `probe(mandate, lease, adapter) -> receipt or blocker` | Read-only capability question decided by identity, generation, lease, admission and reconciliation before any adapter is consulted | synthetic-fixture probe; deterministic in-memory fixtures |
 | Publication and operator | `prepare(intent)`; `authorize(grant)`; `execute(intent) -> receipt` | Human-mediated privileged effect | GitHub publication/operator adapters; owned in-memory broker tests |
 | Factory telemetry | `record(phase)`; `replay(events) -> lifecycle or refusal` | Closed evidence events and freshness projection | local evidence log; wmux/Claude sensor; deterministic fixtures |
 | Control room | `render(snapshot, observed instant) -> read model` | Authority-free operator projection | static HTML/dashboard; in-memory snapshots |
@@ -122,6 +123,18 @@ Pull-request conflict classification is read-only at this revision. It binds the
 head generation and can report clean, unknown, superseded, or escalation-required. Its automation
 strategy registry is empty, so automatic resolution, durable conflict claims, patching, pushing,
 and reconciliation remain explicitly planned rather than implied by the reserved lifecycle words.
+
+Runner capability probing is read-only at this revision and is not a lane, a scheduler, or a grant.
+A probe answers one question — may this execution surface be asked about this capability, at this
+runner generation, under this lease — and returns one content-addressed receipt whose effect and
+authority are `NONE` on every path, including the successful one. Its admission table narrows and
+never grants: writing and merge-approval capabilities are representable exactly so that every
+execution surface is refused them by one shared mechanism rather than by omission, and a surface
+whose security gates have not passed carries an empty row rather than a missing one. Registration
+labels are derived from the runner identity, never supplied. Runner bootstrap, registration,
+mandate execution, drain, removal, durable receipts, and the rebuildable throughput projection
+remain design only; the reserved vocabulary implies none of them. See
+[the self-hosted runner capability probe](docs/self-hosted-runner-provider-probe.md).
 
 ## Authority and state transitions
 
