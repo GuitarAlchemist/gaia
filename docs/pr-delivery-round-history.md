@@ -195,10 +195,13 @@ advanceKey      = sha256(canonical({ schema: 'GaiaRoundAdvanceKeyV0',
 - **INV-7 — transport acknowledgement is not proof.** A successful `gh` invocation proves only that
   the command was accepted. The postcondition is proved by re-reading the projection and comparing
   `sha256(observedBody)` against the exact expected body revision.
-- **INV-8 — bounded reconciliation.** At most five attempts. Each attempt re-reads, re-derives the
-  merge of the rendered section onto the observed prefix and suffix, and re-writes. After the fifth
-  unproven attempt the outcome is `BLOCKED / POSTCONDITION_UNPROVEN`, carrying the observed
-  revision and the exact mismatch.
+- **INV-8 — bounded reconciliation.** At most five attempts. `STALE` is the only acknowledgement
+  that proves the provider effect was not attempted and permits a fresh plan. Once the provider
+  returns `ACKNOWLEDGED` or `AMBIGUOUS`, every remaining attempt is read-only reconciliation of the
+  exact proposed body. A replay that finds the same durable `INTENT` without a terminal receipt is
+  also read-only: absence of the postcondition is not authoritative proof that the prior PATCH did
+  not commit. After the fifth unproven attempt the outcome is
+  `BLOCKED / POSTCONDITION_UNPROVEN`, carrying the observed revision and the exact mismatch.
 - **INV-9 — human text is preserved.** Prefix and suffix are copied byte-exact from the body just
   observed. A concurrent human edit outside the section survives; a concurrent edit that changes the
   managed section under Gaia is `ManagedSectionConflict` and stops the loop immediately rather than
@@ -263,9 +266,10 @@ falsifier or a Done-when item in issue #51:
    byte-exact through a successful advance.
 7. **Concurrency.** A managed-section edit interleaved between read and write yields
    `ManagedSectionConflict`; a head move yields `StaleHead`.
-8. **Read-after-write.** A stubbed provider that acknowledges the write but returns an unchanged
-   body forces exactly five attempts and then `BLOCKED / POSTCONDITION_UNPROVEN` carrying the
-   observed revision.
+8. **Read-after-write.** A provider that acknowledges or ambiguously returns from one write but
+   delays visibility forces bounded read-only observation, never a second PATCH. Visibility within
+   the budget converges to `APPLIED`; otherwise the result is
+   `BLOCKED / POSTCONDITION_UNPROVEN` carrying the observed revision.
 9. **Budget.** Reaching the declared budget yields `BUDGET_EXHAUSTED`, not another round.
 10. **Missing evidence.** An advance without a receipt refuses; a missing ETA renders
     `UNKNOWN(INSUFFICIENT_HISTORY)`.
@@ -477,6 +481,42 @@ public assertion fail.
 4. Either the scheduled or issues-labelled intake path reaches reconcile without the exact
    managed-round contract.
 5. Any repository-binding, provider-CAS, or intake-propagation mechanism revert remains green.
+
+## R5 ambiguous-update reconciliation correction
+
+The R4 black box covered a lost PATCH response only when the very next GET exposed the committed
+body. A delayed GitHub projection instead returned the old body to the outer executor, whose next
+attempt re-planned from that stale observation and issued a second PATCH. That violates the
+one-effect invariant even if `If-Match` later prevents the duplicate from committing.
+
+R5 separates a retryable pre-effect refusal from an unresolved effect outcome. `STALE` means the
+adapter rejected the precondition before invoking the provider and may consume another mutation
+attempt. `ACKNOWLEDGED` and `AMBIGUOUS` both latch the exact intent and proposed body. The remaining
+budget may only observe and compare that exact postcondition. An observation that still shows the
+old body is evidence of delayed visibility, not proof that the PATCH did not commit.
+
+The latch is also durable across executor replay. Finding an identical non-terminal `INTENT` means
+the effect may have been attempted by an earlier executor epoch; the new epoch performs only the
+same bounded observation. This deliberately accepts a fail-closed availability cost when a crash
+occurred after `INTENT` but before PATCH. A future retry would require a provider capability that
+authoritatively proves the exact update absent; no such capability is inferred from a stale GET,
+an ETag, elapsed time, process liveness, or prose in this slice.
+
+The production black box composes the real `createGhManagedRoundApi`, the real
+`createGitHubManagedRoundAdapter`, and `executeManagedRoundUpdate`. It scripts one successful
+remote PATCH with a lost response, two delayed old-body GETs, and eventual exact visibility. The
+only valid trace contains one PATCH followed by read-only observations. A normal visible CAS still
+converges in one attempt. A behavioral mechanism-revert that removes the ambiguity latch must
+restore the second PATCH and be detected by the same public contract.
+
+### Added R5 falsifiers
+
+1. An `ACKNOWLEDGED` or `AMBIGUOUS` update outcome is followed by another PATCH without
+   authoritative proof that the first update did not occur.
+2. A delayed projection cannot converge to `APPLIED` within the five-observation budget.
+3. Replaying an identical durable non-terminal `INTENT` performs another PATCH.
+4. Treating an old-body GET as absence, or removing the read-only latch, leaves the mechanism
+   control green.
 
 ## Authority and reversibility
 
