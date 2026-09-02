@@ -581,7 +581,7 @@ test('forced CAS mutation preserves human edits and stale losers perform no effe
     'a managed-section mutation is never merged or retried');
 });
 
-test('five unproved postconditions end in typed POSTCONDITION_UNPROVEN', async () => {
+test('five read-only observations after an ambiguous effect end in POSTCONDITION_UNPROVEN', async () => {
   const {
     createInitialManagedRound, executeManagedRoundUpdate, createMemoryManagedRoundEvidencePort,
   } = await api();
@@ -600,8 +600,38 @@ test('five unproved postconditions end in typed POSTCONDITION_UNPROVEN', async (
   assert.equal(result.code, 'POSTCONDITION_UNPROVEN');
   assert.equal(result.attempts, 5);
   assert.equal(result.observed.bodyRevision, digest(initial.managedSection));
-  assert.equal(fixture.calls.filter((call) => call.method === 'compareAndSet').length, 5);
+  assert.equal(fixture.calls.filter((call) => call.method === 'compareAndSet').length, 1,
+    'an unresolved provider effect is never repeated without authoritative absence proof');
 });
+
+test('replay of a non-terminal durable intent is observation-only after an executor crash',
+  async () => {
+    const {
+      createInitialManagedRound, executeManagedRoundUpdate, createMemoryManagedRoundEvidencePort,
+    } = await api();
+    const initial = createInitialManagedRound({
+      workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(),
+    });
+    const fixture = scriptedAdapter(observation(initial.managedSection), [
+      () => { throw new Error('executor crashed after crossing the effect boundary'); },
+      'AMBIGUOUS',
+    ]);
+    const evidencePort = createMemoryManagedRoundEvidencePort();
+    const input = {
+      workKey: WORK_KEY, number: 69,
+      receipt: advanceReceipt(initial.roundKey), effectActor: EFFECT, adapter: fixture.adapter,
+      evidencePort,
+    };
+
+    await assert.rejects(executeManagedRoundUpdate(input), /executor crashed/u);
+    const replay = await executeManagedRoundUpdate(input);
+
+    assert.deepEqual({ kind: replay.kind, code: replay.code }, {
+      kind: 'BLOCKED', code: 'POSTCONDITION_UNPROVEN',
+    });
+    assert.equal(fixture.calls.filter((call) => call.method === 'compareAndSet').length, 1,
+      'an unresolved durable intent never grants a replacement executor another effect');
+  });
 
 test('only the single receipt-bound effect owner reaches CAS and handoffs are read-back proven', async () => {
   const {

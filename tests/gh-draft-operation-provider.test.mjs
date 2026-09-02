@@ -12,7 +12,9 @@ import {
 } from '../src/gh-draft-operation-provider.mjs';
 import {
   createInitialManagedRound,
+  createGitHubManagedRoundAdapter,
   createMemoryManagedRoundEvidencePort,
+  executeManagedRoundUpdate,
 } from '../src/pr-delivery-round-history.mjs';
 
 const OPERATION_MARKER = 'a'.repeat(64);
@@ -94,6 +96,25 @@ function roundReceipt() {
         origin: 'standards-review:issue-51-r2',
       },
       origin: 'standards-review:issue-51-r2',
+    },
+  };
+}
+
+function advanceRoundReceipt(predecessorRoundKey) {
+  const { roundBudget: _roundBudget, ...opened } = roundReceipt();
+  return {
+    ...opened,
+    kind: 'ADVANCE',
+    revision: '7'.repeat(64),
+    ordinal: 1,
+    predecessorRoundKey,
+    trigger: 'REPRODUCED_BLOCKER',
+    evidence: {
+      ...opened.evidence,
+      greenCommit: '8'.repeat(40),
+      testEvidenceReceipt: '9'.repeat(64),
+      result: 'REPAIR_REQUIRED',
+      nextStep: 'Reconcile the ambiguous provider update',
     },
   };
 }
@@ -180,6 +201,65 @@ async function importMutant(name, mutate) {
   const path = join(directory, 'provider.mjs');
   writeFileSync(path, mutated, 'utf8');
   return import(`${pathToFileURL(path).href}?mutant=${name}`);
+}
+
+async function importRoundHistoryMutant(name, mutate) {
+  const sourceUrl = new URL('../src/pr-delivery-round-history.mjs', import.meta.url);
+  const original = readFileSync(sourceUrl, 'utf8');
+  const mutated = mutate(original);
+  assert.notEqual(mutated, original, `${name} must alter the round-history mechanism`);
+  const directory = mkdtempSync(join(tmpdir(), `gaia-round-history-${name}-`));
+  const path = join(directory, 'pr-delivery-round-history.mjs');
+  writeFileSync(path, mutated, 'utf8');
+  return import(`${pathToFileURL(path).href}?mutant=${name}`);
+}
+
+function delayedManagedUpdateRun(initialBody) {
+  let committedBody = initialBody;
+  let gets = 0;
+  let patches = 0;
+  const calls = [];
+  const run = async (_command, args) => {
+    calls.push([...args]);
+    if (args[0] === 'repo') {
+      return { stdout: JSON.stringify({
+        id: REPOSITORY.nodeId, nameWithOwner: 'GuitarAlchemist/gaia',
+      }) };
+    }
+    if (args.includes('PATCH')) {
+      patches += 1;
+      committedBody = args.find((argument) => String(argument).startsWith('body='))
+        .slice('body='.length);
+      throw new Error('connection reset after GitHub committed');
+    }
+    gets += 1;
+    const visibleBody = patches > 0 && gets >= 4 ? committedBody : initialBody;
+    return { stdout: included(visibleBody === initialBody ? API_ETAG : '"resource-v2"',
+      apiPull(visibleBody)) };
+  };
+  return { run, calls, patchCount: () => patches };
+}
+
+async function executeDelayedManagedUpdate(roundHistory = {
+  createInitialManagedRound,
+  createGitHubManagedRoundAdapter,
+  createMemoryManagedRoundEvidencePort,
+  executeManagedRoundUpdate,
+}) {
+  const initial = roundHistory.createInitialManagedRound({
+    workKey: WORK_KEY, headRevision: HEAD_REVISION, receipt: roundReceipt(),
+  });
+  const fake = delayedManagedUpdateRun(initial.managedSection);
+  const api = createGhManagedRoundApi({ expectedRepository: REPOSITORY, run: fake.run });
+  const result = await roundHistory.executeManagedRoundUpdate({
+    workKey: WORK_KEY,
+    number: 61,
+    receipt: advanceRoundReceipt(initial.roundKey),
+    effectActor: 'github:app:gaia-draft-pump',
+    adapter: roundHistory.createGitHubManagedRoundAdapter({ api }),
+    evidencePort: roundHistory.createMemoryManagedRoundEvidencePort(),
+  });
+  return { result, fake };
 }
 
 test('lookupExact returns only the open Draft bound to the exact repository, generation, and marker', async () => {
@@ -499,6 +579,29 @@ test('managed body API reconciles a lost PATCH response without repeating the ef
   assert.equal(after.body, 'body after lost response');
   assert.equal(patches, 1);
   assert.equal(calls.filter((args) => args.includes('PATCH')).length, 1);
+});
+
+test('outer executor observes delayed visibility after a lost PATCH without a second PATCH',
+  async () => {
+    const { result, fake } = await executeDelayedManagedUpdate();
+
+    assert.equal(result.kind, 'APPLIED');
+    assert.ok(result.attempts <= 5);
+    assert.equal(fake.patchCount(), 1,
+      'an ambiguous committed PATCH makes the remaining reconciliation budget read-only');
+    assert.equal(fake.calls.filter((args) => args.includes('PATCH')).length, 1);
+  });
+
+test('MECHANISM REVERT: removing the ambiguous-effect latch restores the second PATCH', async () => {
+  const mutant = await importRoundHistoryMutant('ambiguous-effect-latch', (source) => source.replace(
+    'if (pendingEffect !== null) {',
+    'if (false && pendingEffect !== null) {',
+  ));
+  const { result, fake } = await executeDelayedManagedUpdate(mutant);
+
+  assert.equal(result.kind, 'APPLIED');
+  assert.equal(fake.patchCount(), 2,
+    'the mutant demonstrates the duplicate PATCH the public production contract detects');
 });
 
 test('MECHANISM REVERT: removing node-id binding exposes the foreign repository', async () => {
