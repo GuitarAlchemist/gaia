@@ -81,6 +81,34 @@ test('intake partitions labeled issues while scheduled recovery stays serialized
   );
 });
 
+test('the ordered pump observation is bound to the serialized recovery lane only', () => {
+  const workflow = intake();
+  const binding = workflow.match(/^ {10}GAIA_OBSERVATION_PATH: (.+)$/mu)?.[1];
+  assert.ok(binding, 'the intake step must bind the observation path through env:');
+
+  // `sequence` is the Actions run id, and run ids are executed in order only within one
+  // concurrency group. Since the group above partitions labeled runs per issue, two lanes can
+  // finish out of run-id order, and `requireMonotonic` then refuses the later lane's reading as
+  // `IncoherentHostedDraftPump` while the pump is making real forward progress. The ordered
+  // reading therefore keeps one writer: the single non-cancelling recovery group.
+  //
+  // The truthy branch is first on purpose. Actions collapses `A && '' || B` to `B` because an
+  // empty string is falsy, so an inverted binding would hand every run a path and re-arm exactly
+  // the refusal this excludes.
+  assert.equal(
+    binding,
+    "${{ github.event_name != 'issues'"
+    + " && format('{0}/gaia-hosted-draft-pump-observation.json', runner.temp) || '' }}",
+    'only a run outside every issue lane may be given a path to publish an ordered reading',
+  );
+
+  assert.doesNotMatch(
+    workflow,
+    /--observation-out/u,
+    'the binding cannot be a command-line flag: an empty value parses as a flag missing its value',
+  );
+});
+
 test('intake claims no dispatch authority and no GITHUB_TOKEN authority', () => {
   const workflow = intake();
   assert.match(workflow, /^permissions:\s*$/mu);
