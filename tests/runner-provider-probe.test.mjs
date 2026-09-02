@@ -171,18 +171,21 @@ function countingAdapter(fixtureValue = fixture()) {
   };
 }
 
+/** One probe input, overriding one part at a time. Shared with the mechanism reverts below. */
+const buildInput = (over = {}) => ({
+  schema: PROVIDER_PROBE_INPUT_SCHEMA,
+  observedAt: over.observedAt ?? AT,
+  identity: identity(over.identity),
+  mandate: mandate(over.mandate),
+  lease: over.lease === null ? null : lease(over.lease),
+  priorReceipt: over.priorReceipt ?? null,
+  ...over.input,
+});
+
 /** Probe with the shipped fixture adapter, overriding one part of the input at a time. */
 function probe(over = {}) {
   const adapter = over.adapter ?? countingAdapter(fixture(over.fixture));
-  const input = {
-    schema: PROVIDER_PROBE_INPUT_SCHEMA,
-    observedAt: over.observedAt ?? AT,
-    identity: identity(over.identity),
-    mandate: mandate(over.mandate),
-    lease: over.lease === null ? null : lease(over.lease),
-    priorReceipt: over.priorReceipt ?? null,
-    ...over.input,
-  };
+  const input = buildInput(over);
   return { receipt: probeProvider(input, adapter), adapter, input };
 }
 
@@ -791,4 +794,139 @@ test('P28: the fixture adapter refuses a hostile fixture and a question it was n
   });
   assert.equal(wrongQuestion.receipt.blocker, 'PROVIDER_ADAPTER_FAILED',
     'a probe that answers a question it was not asked is worse than a probe that fails');
+});
+
+// -------------------------------------------------------------------------------------------
+// Mechanism reverts — each shows a gate tests the mechanism rather than the fixtures.
+// -------------------------------------------------------------------------------------------
+
+test('MR1: accepting a generation that already lost is what lets a stale runner work', async () => {
+  const mutant = await importMutant('stale-generation-accepted', (source) => source.replace(
+    "if (mandate.runnerGeneration !== identity.generation) return blocked(context, 'STALE_GENERATION');",
+    "if (false) return blocked(context, 'STALE_GENERATION');",
+  ));
+  const input = buildInput({ mandate: { runnerGeneration: 6 } });
+  assert.equal(mutant.probeProvider(input, countingAdapter()).outcome, 'CAPABILITY_OBSERVED',
+    'the mutant hands a live provider observation to a generation that was replaced');
+  assert.equal(probeProvider(input, countingAdapter()).blocker, 'STALE_GENERATION');
+});
+
+test('MR2: dropping the drain gate is how a host that said stop keeps taking work', async () => {
+  const mutant = await importMutant('drain-gate-removed', (source) => source.replace(
+    "if (!identity.acceptingWork) return blocked(context, 'RUNNER_DRAINING');",
+    "if (false) return blocked(context, 'RUNNER_DRAINING');",
+  ));
+  const input = buildInput({ identity: { acceptingWork: false } });
+  assert.equal(mutant.probeProvider(input, countingAdapter()).outcome, 'CAPABILITY_OBSERVED',
+    'the mutant probes a provider on a runner that is being removed');
+  assert.equal(probeProvider(input, countingAdapter()).blocker, 'RUNNER_DRAINING');
+});
+
+test('MR3: admitting a mutable target is a single-writer claim this slice cannot make', async () => {
+  const mutant = await importMutant('mutable-target-admitted', (source) => source.replace(
+    "if (lease.target.mutable) return blocked(context, 'MUTABLE_TARGET_NOT_ADMITTED');",
+    "if (false) return blocked(context, 'MUTABLE_TARGET_NOT_ADMITTED');",
+  ));
+  const input = buildInput({
+    lease: { target: { kind: 'SYNTHETIC_CORPUS', id: CORPUS, mutable: true } },
+  });
+  assert.equal(mutant.probeProvider(input, countingAdapter()).outcome, 'CAPABILITY_OBSERVED',
+    'the mutant runs against a target another writer may be changing underneath it');
+  assert.equal(probeProvider(input, countingAdapter()).blocker, 'MUTABLE_TARGET_NOT_ADMITTED');
+});
+
+test('MR4: dropping the authority gate records no effect for a provider that claims one', async () => {
+  const mutant = await importMutant('authority-gate-removed', (source) => source.replace(
+    "if (observation.effect !== 'NONE' || observation.authority !== 'NONE'\n"
+    + '      || observation.sourceExposed || observation.credentialsRead) {',
+    'if (false) {',
+  ));
+  const claimant = sayingAdapter({ effect: 'REVIEW_POSTED', authority: 'REPO_WRITE' });
+  const mutated = mutant.probeProvider(buildInput(), claimant);
+  assert.equal(mutated.outcome, 'CAPABILITY_OBSERVED');
+  assert.equal(mutated.effect, 'NONE',
+    'and the published receipt still says NONE, so the claimed effect leaves no trace at all');
+  assert.equal(probeProvider(buildInput(), claimant).blocker, 'AUTHORITY_WIDENING');
+});
+
+test('MR5: copying the fixture authority fields gives a hostile fixture a field to fill', async () => {
+  const mutant = await importMutant('fixture-copies-authority', (source) => source
+    .replace(
+      "requireClosedFields(fixture, PROVIDER_PROBE_FIXTURE_FIELDS, 'probe fixture');",
+      "if (!isPlainObject(fixture)) refuse('a probe fixture object is required');",
+    )
+    .replace(
+      "        effect: 'NONE',\n"
+      + "        authority: 'NONE',\n"
+      + '        sourceExposed: false,\n'
+      + '        credentialsRead: false,',
+      "        effect: fixture.effect ?? 'NONE',\n"
+      + "        authority: fixture.authority ?? 'NONE',\n"
+      + '        sourceExposed: fixture.sourceExposed ?? false,\n'
+      + '        credentialsRead: fixture.credentialsRead ?? false,',
+    ));
+  const hostile = { ...fixture(), effect: 'REVIEW_POSTED', credentialsRead: true };
+  const request = {
+    schema: PROVIDER_PROBE_REQUEST_SCHEMA,
+    provider: 'claude-code',
+    capability: 'READ_ONLY_REVIEW',
+    corpusId: CORPUS,
+    promptCount: 3,
+    budget: { tokens: 4000, contextTokens: 32000, wallClockMs: 60000 },
+    declaredMcpServers: [],
+    mandateDigest: providerProbeMandateDigest(mandate()),
+  };
+  const emitted = mutant.createSyntheticFixtureProbeAdapter(hostile).observe(request);
+  assert.equal(emitted.effect, 'REVIEW_POSTED', 'the mutant lets the fixture speak for the probe');
+  assert.equal(emitted.credentialsRead, true);
+  assert.throws(() => createSyntheticFixtureProbeAdapter(hostile), RunnerProbeError,
+    'the shipped fixture contract has no such field, so the claim cannot be expressed');
+});
+
+test('MR6: dropping receipt-key equality answers this mandate with another one', async () => {
+  const mutant = await importMutant('receipt-key-equality-removed', (source) => source.replace(
+    'if (prior === null || prior.idempotencyKey !== context.idempotencyKey\n'
+    + '        || prior.mandateDigest !== mandateDigest) {',
+    'if (prior === null) {',
+  ));
+  const other = probe({ mandate: { mandateId: 'probe-0002' } }).receipt;
+  assert.equal(other.outcome, 'CAPABILITY_OBSERVED');
+  const input = buildInput({ priorReceipt: other });
+  const mutated = mutant.probeProvider(input, countingAdapter());
+  assert.notEqual(mutated.idempotencyKey, providerProbeIdempotencyKey({
+    workKey: WORK_KEY(), generation: 7, provider: 'claude-code',
+    capability: 'READ_ONLY_REVIEW', mandateId: 'probe-0001',
+  }), 'the mutant settles this mandate with a receipt minted for a different one');
+  assert.equal(probeProvider(input, countingAdapter()).blocker, 'RECEIPT_CONFLICT');
+});
+
+test('MR7: removing the admission table lets a research adapter be probed as a reviewer', async () => {
+  const mutant = await importMutant('admission-table-removed', (source) => source.replace(
+    'if (!identity.capabilities.includes(mandate.capability)\n'
+    + '      || !PROVIDER_CAPABILITY_ADMISSION[mandate.provider].includes(mandate.capability)) {',
+    'if (!identity.capabilities.includes(mandate.capability)) {',
+  ));
+  const over = {
+    identity: { providers: ['notebooklm'], capabilities: ['READ_ONLY_REVIEW'] },
+    mandate: { provider: 'notebooklm', capability: 'READ_ONLY_REVIEW' },
+    lease: { provider: 'notebooklm', capability: 'READ_ONLY_REVIEW' },
+  };
+  const adapter = countingAdapter(fixture({ provider: 'notebooklm', capability: 'READ_ONLY_REVIEW' }));
+  assert.equal(mutant.probeProvider(buildInput(over), adapter).outcome, 'CAPABILITY_OBSERVED',
+    'the mutant admits NotebookLM to a reviewing capability its row never granted');
+  assert.equal(probeProvider(buildInput(over), adapter).blocker, 'CAPABILITY_NOT_ADMITTED');
+});
+
+test('MR8: dropping the fixed-width instant makes a year-275760 mandate look unexpired', async () => {
+  const mutant = await importMutant('expanded-year-instant-admitted', (source) => source.replace(
+    "  && value.length === INSTANT_LENGTH && value.endsWith('Z');",
+    ';',
+  ));
+  const far = '+275760-09-13T00:00:00.000Z';
+  assert.equal(new Date(far).toISOString(), far, 'this is an exact instant by round-trip');
+  assert.ok(far < AT, 'and it sorts before every ordinary instant, which is the whole hazard');
+  const input = buildInput({ observedAt: far });
+  assert.equal(mutant.probeProvider(input, countingAdapter()).outcome, 'CAPABILITY_OBSERVED',
+    'the mutant reads a mandate that expired 273734 years ago as still live');
+  assert.throws(() => probeProvider(input, countingAdapter()), RunnerProbeError);
 });
