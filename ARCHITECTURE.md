@@ -72,6 +72,7 @@ only in the final column and must not escape in a result or refusal.
 | Pull-request conflict classification | `classifyPrConflict(observation, claim) -> reading or refusal` | Exact-generation, read-only classification under a closed empty strategy registry | normalized GitHub observation; deterministic fixtures |
 | Publication and operator | `prepare(intent)`; `authorize(grant)`; `execute(intent) -> receipt` | Human-mediated privileged effect | GitHub publication/operator adapters; owned in-memory broker tests |
 | Factory telemetry | `record(phase)`; `replay(events) -> lifecycle or refusal` | Closed evidence events and freshness projection | local evidence log; wmux/Claude sensor; deterministic fixtures |
+| Lane generation bootstrap | `bootstrapLaneGeneration(manifest, ports) -> receipt or refusal`; `verifyLaneLaunchReceipt(receipt) -> receipt or refusal` | Complete topology before any spawn, one compare-and-set winner, and a launch receipt published only after one fresh structured verification | deterministic in-memory generation store; deterministic lane-adapter fixture |
 | Control room | `render(snapshot, observed instant) -> read model` | Authority-free operator projection | static HTML/dashboard; in-memory snapshots |
 | Hybrid search | `index(corpus)`; `query(request) -> matches or refusal` | Advisory retrieval with provenance | local JavaScript engine; optional IX embedding input |
 | Architecture drift | `checkArchitectureDrift(inventory) -> report or refusal` | Normalized repository inventory | filesystem inventory; deterministic in-memory inventory |
@@ -108,6 +109,14 @@ observed by a read-only sensor. Four live lanes per workspace is the supported d
 future validation target and limits above four are experimental. Lane heartbeats establish only
 sensor freshness. They do not enter backlog truth, acceptance, completion, cost, percentage, or
 ETA.
+
+One declared generation of lanes is bootstrapped from an authoritative content-addressed manifest.
+Identity is derived from that document rather than from a remembered pane, the complete empty
+topology exists before any process, and a lane is never `ACTIVE` until a durable launch receipt is
+published against one fresh structured observation. A refused launch compensates only the
+resources its own operation created, and a concurrent or stale attempt performs no effect. The
+shipped adapters behind that seam are deterministic fixtures; a durable record store and a real
+terminal host remain planned.
 
 The principal operation lifecycle is observation -> eligible claim -> intent -> effect started ->
 reconciliation -> terminal receipt. Draft operations preserve `ENQUEUED`, `CLAIMED`, `INTENT`,
@@ -271,6 +280,9 @@ are linked here.
   [control room](docs/factory-control-room.md) — lifecycle evidence, freshness, and projections.
 - [Scale and lanes](docs/scale-and-lanes.md) and
   [local wmux lanes](docs/local-wmux-lanes.md) — measured concurrency and lane semantics.
+- [Lane generation bootstrap](docs/lane-generation-bootstrap.md) — manifest-derived generation
+  identity, topology-before-spawn ordering, the launch receipt as linearization point, and exact
+  compensation.
 - [Ecosystem adapters](docs/ecosystem-adapters.md) and
   [hybrid semantic search](docs/hybrid-semantic-search.md) — bounded external and offline inputs.
 - [Pull-request conflict classifier](docs/pr-conflict-reconciler.md) — exact-generation read-only
