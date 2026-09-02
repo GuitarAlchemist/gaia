@@ -170,10 +170,20 @@ re-ingesting that output against itself as the prior observation passes, because
 refuses only a strictly backwards reading. A duplicate or reordered producer output is refused at
 the snapshot seam by the already-shipped `priorHostedDraftPumpOf` carrier.
 
-`sequence` is the Actions run id. Run ids increase with queue time, and the intake workflow's
-repository-wide non-cancelling concurrency group executes the queue in order, so the sequence is
-monotonic in practice. Where it is not, `requireMonotonic` refuses the reading rather than
-publishing a reordered one — fail closed, never a fabricated advance.
+`sequence` is the Actions run id. Run ids increase with queue time, and a non-cancelling
+concurrency group executes its queue in order — but that orders one group, not the repository.
+Since issue #84 the intake workflow partitions labeled runs into a group per issue, so two lanes
+can finish in the opposite order to their run ids and a reading from the later one would carry the
+lower sequence.
+
+The ordering basis is therefore the recovery group, not the repository: only runs outside every
+issue lane are given an observation path
+(`.github/workflows/hosted-draft-intake.yml`, `GAIA_OBSERVATION_PATH`), and those all share the
+single non-cancelling `gaia-draft-intake-recovery` group. Every published sequence comes from one
+queue executed in order, so the sequence is monotonic in practice. Where it is not,
+`requireMonotonic` refuses the reading rather than publishing a reordered one — fail closed, never
+a fabricated advance. A labeled issue lane still acts and still emits its receipt; it publishes no
+ordered reading, because a lane that cannot be ordered against the others must not claim to be.
 
 ### What carries monotonic evidence, and what cannot
 

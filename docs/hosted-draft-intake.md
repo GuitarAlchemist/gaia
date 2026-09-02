@@ -325,10 +325,17 @@ to the file scope and needs its own RED pass; folding it into the intake change 
 surfaces. This section fixes its contract so that the later change cannot drift.
 
 The read model landed first and the producer landed after it, specified by
-docs/hosted-draft-pump-producer.md. The intake run seals its own transition through
-`src/hosted-draft-pump-producer.mjs` and writes it to `--observation-out`, which the workflow
-uploads as `gaia-hosted-draft-pump-observation`. No human hand-authors the document, and a run that
-cannot honestly say what the pump did publishes nothing and names the refusal in its receipt.
+docs/hosted-draft-pump-producer.md. A run that is given an observation path seals its own
+transition through `src/hosted-draft-pump-producer.mjs` and writes it there, and the workflow
+uploads it as `gaia-hosted-draft-pump-observation`. No human hand-authors the document, and a run
+that cannot honestly say what the pump did publishes nothing and names the refusal in its receipt.
+
+Since issue #84, only the serialized recovery lane is given that path. The reading is sequenced by
+the Actions run id, run ids are executed in order only within one concurrency group, and labeled
+intake is now a group per issue; a lane reading could therefore arrive with a lower sequence than
+the one already published and be refused on healthy forward progress. Keeping one writer for the
+ordered reading is what makes `requireMonotonic` true as written. See
+[Hosted parallel intake lanes R0](hosted-parallel-intake-lanes.md).
 
 ## Deliberately not built
 
