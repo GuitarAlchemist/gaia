@@ -39,6 +39,7 @@ import {
   PROVIDER_AVAILABILITIES,
   PROVIDER_CAPABILITY_ADMISSION,
   PROVIDER_CAPABILITY_KINDS,
+  PROVIDER_OBSERVATION_SOURCES,
   PROVIDER_PROBE_ADAPTER_SCHEMA,
   PROVIDER_PROBE_BLOCKERS,
   PROVIDER_PROBE_FIXTURE_SCHEMA,
@@ -163,6 +164,7 @@ function countingAdapter(fixtureValue = fixture()) {
   const calls = [];
   return {
     schema: PROVIDER_PROBE_ADAPTER_SCHEMA,
+    observationSource: inner.observationSource,
     calls,
     observe(request) {
       calls.push(request);
@@ -195,6 +197,10 @@ const blockedWith = (code, over = {}) => {
   assert.equal(receipt.blocker, code);
   assert.equal(receipt.effect, 'NONE');
   assert.equal(receipt.authority, 'NONE');
+  // Every gate this helper serves decides before the adapter, so the property is asserted here
+  // rather than remembered at each call site: a refusal that consulted the provider is a call.
+  assert.equal(adapter.calls.length, 0, `${code} consulted the provider before refusing`);
+  assert.equal(receipt.observationSource, null, 'a blocked receipt publishes no observation');
   return { receipt, adapter };
 };
 
@@ -323,10 +329,9 @@ test('P2: the probe input itself is closed, and a malformed input throws rather 
 // -------------------------------------------------------------------------------------------
 
 test('P3: a mandate addressed to another runner is a mis-delivery, not work', () => {
-  const { adapter } = blockedWith('RUNNER_MISDELIVERY', {
+  blockedWith('RUNNER_MISDELIVERY', {
     mandate: { runnerWorkKey: runnerWorkKey(identity({ runnerId: 'gaia-win-runner-02' })) },
   });
-  assert.equal(adapter.calls.length, 0, 'the provider was never consulted');
 });
 
 test('P4: a generation that is not the observed one cannot accept work, past or future', () => {
@@ -375,8 +380,8 @@ test('P6: a mutable target is refused outright while there is no single-writer p
 });
 
 test('P7: a mandate is not still valid at the instant it expires', () => {
-  assert.equal(probe({ observedAt: LATER }).receipt.blocker, 'MANDATE_EXPIRED');
-  assert.equal(probe({ observedAt: '2026-09-02T00:00:00.000Z' }).receipt.blocker, 'MANDATE_EXPIRED');
+  blockedWith('MANDATE_EXPIRED', { observedAt: LATER });
+  blockedWith('MANDATE_EXPIRED', { observedAt: '2026-09-02T00:00:00.000Z' });
   assert.equal(probe({ observedAt: AT }).receipt.outcome, 'CAPABILITY_OBSERVED');
 });
 
@@ -394,11 +399,11 @@ test('P8: a provider the runner did not declare is unregistered work', () => {
 });
 
 test('P8: a capability the runner did not declare is refused before the table is consulted', () => {
-  assert.equal(probe({
+  blockedWith('CAPABILITY_NOT_ADMITTED', {
     identity: { capabilities: ['RESEARCH_CITATION'] },
     mandate: { capability: 'READ_ONLY_REVIEW' },
     lease: { capability: 'READ_ONLY_REVIEW' },
-  }).receipt.blocker, 'CAPABILITY_NOT_ADMITTED');
+  });
 });
 
 test('P9: no provider is admitted for writer or merge authority at this revision', () => {
@@ -420,14 +425,13 @@ test('P9: no provider is admitted for writer or merge authority at this revision
 
 test('P10: NotebookLM is a cited research adapter and nothing else', () => {
   assert.deepEqual(PROVIDER_CAPABILITY_ADMISSION.notebooklm, ['RESEARCH_CITATION']);
-  const { receipt } = probe({
+  // The refusal is the shared table, not a NotebookLM branch, and it decides before the adapter.
+  blockedWith('CAPABILITY_NOT_ADMITTED', {
     identity: { providers: ['notebooklm'], capabilities: ['READ_ONLY_REVIEW'] },
     mandate: { provider: 'notebooklm', capability: 'READ_ONLY_REVIEW' },
     lease: { provider: 'notebooklm', capability: 'READ_ONLY_REVIEW' },
     fixture: { provider: 'notebooklm', capability: 'READ_ONLY_REVIEW' },
   });
-  assert.equal(receipt.blocker, 'CAPABILITY_NOT_ADMITTED',
-    'the refusal is the shared table, not a NotebookLM branch');
 });
 
 test('P10: qwen-local admits nothing until its four security gates pass', () => {
@@ -534,9 +538,10 @@ test('P14: an adapter that throws, or answers with a non-observation, fails clos
 });
 
 /** Answer with an arbitrary observation body, to test what the probe does with a hostile provider. */
-function sayingAdapter(overrides) {
+function sayingAdapter(overrides, declaredSource = 'SYNTHETIC_FIXTURE') {
   return {
     schema: PROVIDER_PROBE_ADAPTER_SCHEMA,
+    observationSource: declaredSource,
     observe(request) {
       return {
         schema: PROVIDER_PROBE_OBSERVATION_SCHEMA,
@@ -552,6 +557,7 @@ function sayingAdapter(overrides) {
         authority: 'NONE',
         sourceExposed: false,
         credentialsRead: false,
+        observationSource: declaredSource,
         ...overrides,
       };
     },
@@ -797,6 +803,153 @@ test('P28: the fixture adapter refuses a hostile fixture and a question it was n
 });
 
 // -------------------------------------------------------------------------------------------
+// P29-P32 — the R1 probe repairs: a bounded name, a module that is text, a named observation
+// source, and a refusal bound to proof that the adapter was never reached.
+// -------------------------------------------------------------------------------------------
+
+/**
+ * Ten identifiers a Gaia receipt must never carry. The first four were reproduced passing both
+ * boundaries of the shipped module and being echoed verbatim into a successful, content-addressed
+ * receipt; none of them is on any prefix list, which is the point of bounding the representation
+ * instead. The rest were already refused by prefix and are kept so either mechanism regressing is
+ * visible. All ten are synthetic non-secrets and authenticate nothing.
+ */
+const CREDENTIAL_SHAPED_NAMES = Object.freeze([
+  'glpat-abcdefghijklmnop',
+  'hf_abcdefghijklmnopqrst',
+  'npm_abcdefghijklmnopqrst',
+  'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+  'ghp_0123456789abcdef',
+  'sk-abcdef0123',
+  'xoxb-1-2-3',
+  'AIzaSyABCDEFG',
+  'AKIAIOSFODNN7EXAMPLE',
+  'eyJhbGciOiJIUzI1NiJ9',
+]);
+
+/** Five names an operator actually writes. The refusals above mean nothing without these. */
+const SAFE_MCP_NAMES = Object.freeze([
+  'claude-code', 'claude.mcp', 'context7', 'filesystem', 'qwen-local',
+]);
+
+test('P29: a credential-shaped MCP identifier has no admitted representation at any boundary', () => {
+  for (const name of CREDENTIAL_SHAPED_NAMES) {
+    assert.throws(() => requireProviderProbeMandate(mandate({ declaredMcpServers: [name] })),
+      RunnerProbeError, `a mandate cannot declare ${name}`);
+    assert.throws(() => createSyntheticFixtureProbeAdapter(fixture({ mcpServers: [name] })),
+      RunnerProbeError, `a fixture cannot be built to emit ${name}`);
+    const receipt = saying({ mcpServers: [name] });
+    assert.equal(receipt.blocker, 'CREDENTIAL_MATERIAL_PRESENT',
+      `${name} is refused before it is read as a server name`);
+    assert.deepEqual(receipt.mcpServers, [], `${name} reaches no receipt field`);
+    assert.ok(!canonicalJson(receipt).includes(name),
+      `${name} is not echoed anywhere in the receipt, not even inside a blocker`);
+  }
+});
+
+test('P29: a safe MCP identifier is still admitted, declared, observed and published', () => {
+  const declared = [...SAFE_MCP_NAMES].sort();
+  for (const name of declared) {
+    assert.deepEqual(requireProviderProbeMandate(mandate({ declaredMcpServers: [name] }))
+      .declaredMcpServers, [name], `${name} is a name an operator may declare`);
+  }
+  const receipt = probeProvider({
+    schema: PROVIDER_PROBE_INPUT_SCHEMA,
+    observedAt: AT,
+    identity: identity(),
+    mandate: mandate({ declaredMcpServers: declared }),
+    lease: lease(),
+    priorReceipt: null,
+  }, sayingAdapter({ mcpServers: declared }));
+  assert.equal(receipt.outcome, 'CAPABILITY_OBSERVED', 'so the refusal above is discriminating');
+  assert.deepEqual(receipt.mcpServers, declared, 'and a declared name is still durable evidence');
+});
+
+test('P30: the probe module is text, and its digest separator is written as an escape', () => {
+  const path = join(ROOT, 'src', 'runner-provider-probe.mjs');
+  assert.equal(readFileSync(path).indexOf(0), -1,
+    'a raw NUL byte makes every grep -r and rg sweep over src/ skip this file as binary');
+  assert.match(readFileSync(path, 'utf8'), /\\0/,
+    'and the separator is still there, written as the two-character escape');
+  // Pinned at 47c9aff, before the escape was written: a receipt is content-addressed, so these
+  // two digests are how "byte-identical at runtime" is checked rather than asserted.
+  assert.equal(runnerWorkKey(identity()),
+    '1fd090ead9f528fb3d99a5904bb017d0917db672267d3930b6b8f2105710428d');
+  assert.equal(providerProbeIdempotencyKey({
+    workKey: WORK_KEY(), generation: 7, provider: 'claude-code',
+    capability: 'READ_ONLY_REVIEW', mandateId: 'probe-0001',
+  }), '8ebc63c363b5b98041340d47b038dc529270d953d20ce18e588a6accaeae463e');
+});
+
+test('P31: every published reading names the source it came from', () => {
+  assert.deepEqual([...PROVIDER_OBSERVATION_SOURCES], ['LIVE_PROVIDER', 'SYNTHETIC_FIXTURE']);
+  assert.ok(PROVIDER_PROBE_RECEIPT_FIELDS.includes('observationSource'));
+  const { receipt } = probe();
+  assert.equal(receipt.outcome, 'CAPABILITY_OBSERVED');
+  assert.equal(receipt.observationSource, 'SYNTHETIC_FIXTURE',
+    'a fixture reading is distinguishable at rest from one a later slice takes from a provider');
+  assert.equal(createSyntheticFixtureProbeAdapter(fixture()).observationSource, 'SYNTHETIC_FIXTURE',
+    'the source is declared by the adapter, so the kernel never has to believe the answer');
+  for (const refused of [probe({ lease: null }).receipt, saying({ effect: 'REVIEW_POSTED' })]) {
+    assert.equal(refused.observationSource, null, 'a blocked receipt published no observation');
+  }
+});
+
+/** A well-shaped function that must never run, so an adapter can be malformed but callable. */
+function refuseToAnswer() {
+  throw new Error('this adapter must never be consulted');
+}
+
+test('P31: an unknown or contradictory observation source is refused, never settled', () => {
+  assert.throws(() => probeProvider(buildInput(),
+    { schema: PROVIDER_PROBE_ADAPTER_SCHEMA, observe: refuseToAnswer }), RunnerProbeError,
+  'an adapter that declares no observation source is not an adapter');
+  assert.throws(() => probeProvider(buildInput(), {
+    schema: PROVIDER_PROBE_ADAPTER_SCHEMA, observationSource: 'HEARSAY', observe: refuseToAnswer,
+  }), RunnerProbeError, 'and it cannot declare one outside the closed vocabulary');
+  assert.throws(() => createSyntheticFixtureProbeAdapter(fixture({ observationSource: 'LIVE_PROVIDER' })),
+    RunnerProbeError, 'the fixture contract has no field to claim a source in');
+  assert.equal(saying({ observationSource: 'LIVE_PROVIDER' }).blocker, 'OBSERVATION_MISBOUND',
+    'an answer claiming a source its adapter did not declare is misbound, not quietly resolved');
+  for (const bad of ['HEARSAY', null, '']) {
+    assert.equal(saying({ observationSource: bad }).blocker, 'OBSERVATION_INVALID',
+      `${canonicalJson(bad)} is not a registered observation source`);
+  }
+  const live = probeProvider(buildInput(),
+    sayingAdapter({ observationSource: 'LIVE_PROVIDER' }, 'LIVE_PROVIDER'));
+  assert.equal(live.outcome, 'CAPABILITY_OBSERVED');
+  assert.equal(live.observationSource, 'LIVE_PROVIDER',
+    'the discriminator discriminates, which is the only reason to record one');
+});
+
+test('P32: every pre-adapter refusal proves the adapter was never called', () => {
+  const other = probe({ mandate: { mandateId: 'probe-0002' } }).receipt;
+  assert.equal(other.outcome, 'CAPABILITY_OBSERVED');
+  const cases = [
+    ['RUNNER_MISDELIVERY',
+      { mandate: { runnerWorkKey: runnerWorkKey(identity({ runnerId: 'gaia-win-runner-02' })) } }],
+    ['STALE_GENERATION', { mandate: { runnerGeneration: 6 } }],
+    ['RUNNER_DRAINING', { identity: { acceptingWork: false } }],
+    ['MANDATE_EXPIRED', { observedAt: LATER }],
+    ['LEASE_ABSENT', { lease: null }],
+    ['LEASE_FOREIGN', { lease: { generation: 6 } }],
+    ['LEASE_EXPIRED', { lease: { expiresAt: AT } }],
+    ['MUTABLE_TARGET_NOT_ADMITTED',
+      { lease: { target: { kind: 'SYNTHETIC_CORPUS', id: CORPUS, mutable: true } } }],
+    ['PROVIDER_UNREGISTERED',
+      { identity: { providers: ['notebooklm'] }, mandate: { provider: 'claude-code' } }],
+    ['CAPABILITY_NOT_ADMITTED', {
+      identity: { capabilities: ['RESEARCH_CITATION'] },
+      mandate: { capability: 'READ_ONLY_REVIEW' },
+      lease: { capability: 'READ_ONLY_REVIEW' },
+    }],
+    ['RECEIPT_CONFLICT', { priorReceipt: other }],
+  ];
+  assert.equal(new Set(cases.map(([code]) => code)).size, cases.length, 'one case per blocker');
+  for (const [code, over] of cases) blockedWith(code, over);
+});
+
+// -------------------------------------------------------------------------------------------
 // Mechanism reverts — each shows a gate tests the mechanism rather than the fixtures.
 // -------------------------------------------------------------------------------------------
 
@@ -929,4 +1082,91 @@ test('MR8: dropping the fixed-width instant makes a year-275760 mandate look une
   assert.equal(mutant.probeProvider(input, countingAdapter()).outcome, 'CAPABILITY_OBSERVED',
     'the mutant reads a mandate that expired 273734 years ago as still live');
   assert.throws(() => probeProvider(input, countingAdapter()), RunnerProbeError);
+});
+
+test('MR9: bounding a name by charset alone is what publishes a token as a server', async () => {
+  const mutant = await importMutant('mcp-label-bound-widened', (source) => source.replace(
+    'const MCP_SERVER_LABEL_PATH = /^[a-z][a-z0-9]{0,11}(?:[-._][a-z][a-z0-9]{0,11}){0,3}$/;',
+    'const MCP_SERVER_LABEL_PATH = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;',
+  ));
+  const name = 'glpat-abcdefghijklmnop';
+  const mutated = mutant.probeProvider({
+    schema: PROVIDER_PROBE_INPUT_SCHEMA,
+    observedAt: AT,
+    identity: identity(),
+    mandate: mandate({ declaredMcpServers: [name] }),
+    lease: lease(),
+    priorReceipt: null,
+  }, sayingAdapter({ mcpServers: [name] }));
+  assert.equal(mutated.outcome, 'CAPABILITY_OBSERVED');
+  assert.deepEqual(mutated.mcpServers, [name],
+    'the mutant echoes a credential-shaped identifier into a durable, content-addressed receipt');
+  assert.throws(() => requireProviderProbeMandate(mandate({ declaredMcpServers: [name] })),
+    RunnerProbeError, 'the shipped bound leaves it no representation to arrive in');
+});
+
+test('MR10: copying the source from the answer launders synthetic evidence as live', async () => {
+  const mutant = await importMutant('observation-source-bind-removed', (source) => source
+    .replace(
+      '      || observation.capability !== mandate.capability\n'
+      + '      || observation.observationSource !== observationSource) {',
+      '      || observation.capability !== mandate.capability) {',
+    )
+    .replace(
+      '    observationSource,\n    providerBlockers: observation.providerBlockers,',
+      '    observationSource: observation.observationSource,\n'
+      + '    providerBlockers: observation.providerBlockers,',
+    ));
+  const claimant = sayingAdapter({ observationSource: 'LIVE_PROVIDER' });
+  const mutated = mutant.probeProvider(buildInput(), claimant);
+  assert.equal(mutated.outcome, 'CAPABILITY_OBSERVED');
+  assert.equal(mutated.observationSource, 'LIVE_PROVIDER',
+    'the mutant publishes a synthetic-fixture reading as a live provider reading');
+  assert.equal(probeProvider(buildInput(), claimant).blocker, 'OBSERVATION_MISBOUND');
+});
+
+test('MR11: the domain separator is load-bearing, which is why it is written as text', async () => {
+  const mutant = await importMutant('domain-separator-dropped',
+    (source) => source.replaceAll('\\0', ''));
+  const key = {
+    workKey: WORK_KEY(), generation: 7, provider: 'claude-code',
+    capability: 'READ_ONLY_REVIEW', mandateId: 'probe-0001',
+  };
+  assert.notEqual(mutant.runnerWorkKey(identity()), runnerWorkKey(identity()),
+    'losing the separator moves every work key, so a normalization pass that ate a raw NUL byte '
+    + 'would silently re-address work that had already been published');
+  assert.notEqual(mutant.providerProbeIdempotencyKey(key), providerProbeIdempotencyKey(key),
+    'and every idempotency key, which is how one key comes to name two different receipts');
+});
+
+test('MR12: consulting the adapter first turns a refusal into a provider call', async () => {
+  const mutant = await importMutant('adapter-consulted-first', (source) => source.replace(
+    '  // 1-4: authority. Nothing below is reachable by an actor who no longer holds the runner.',
+    '  providerAdapter.observe(Object.freeze({ schema: PROVIDER_PROBE_REQUEST_SCHEMA,'
+    + ' provider: mandate.provider, capability: mandate.capability,'
+    + ' corpusId: mandate.corpus.corpusId, promptCount: mandate.corpus.promptCount,'
+    + ' budget: mandate.budget, declaredMcpServers: mandate.declaredMcpServers, mandateDigest }));',
+  ));
+  const cases = [
+    [{ observedAt: LATER }, fixture()],
+    [{
+      identity: { capabilities: ['RESEARCH_CITATION'] },
+      mandate: { capability: 'READ_ONLY_REVIEW' },
+      lease: { capability: 'READ_ONLY_REVIEW' },
+    }, fixture()],
+    [{
+      identity: { providers: ['notebooklm'], capabilities: ['READ_ONLY_REVIEW'] },
+      mandate: { provider: 'notebooklm', capability: 'READ_ONLY_REVIEW' },
+      lease: { provider: 'notebooklm', capability: 'READ_ONLY_REVIEW' },
+    }, fixture({ provider: 'notebooklm', capability: 'READ_ONLY_REVIEW' })],
+  ];
+  for (const [over, fixtureValue] of cases) {
+    const leaky = countingAdapter(fixtureValue);
+    assert.equal(mutant.probeProvider(buildInput(over), leaky).outcome, 'BLOCKED');
+    assert.equal(leaky.calls.length, 1,
+      'the mutant asks the provider the very question it is about to refuse to have asked');
+    const shipped = countingAdapter(fixtureValue);
+    assert.equal(probeProvider(buildInput(over), shipped).outcome, 'BLOCKED');
+    assert.equal(shipped.calls.length, 0);
+  }
 });
