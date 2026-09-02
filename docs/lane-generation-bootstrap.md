@@ -278,6 +278,31 @@ acceptance lines open, and they are omissions rather than claims:
    existing planned target; this module does not widen it.
 8. **No artifact-funnel event is emitted.** Completion and failure become receipt and refusal
    here, not yet a funnel event.
+9. **A newer generation does not supersede a live one.** Tearing down a published generation so a
+   higher ordinal can replace it is a transition R0 does not perform, so the attempt is refused
+   with `ACTIVE_GENERATION_PRESENT` rather than half-performed.
+10. **Reconstruction is proven at the module seam, not from a cold host.** Every crash point in
+    the protocol is exercised by resuming a durable record, but no test starts a second operating
+    system process.
+
+## Three corrections the implementation made to this design
+
+Written before the code existed, this document made three claims the implementation did not
+sustain. They are corrected here rather than quietly diverged from.
+
+1. **"Refuse, or claim" was missing a case.** The election reads a record that may already be
+   `ACTIVE` at a *lower* ordinal. Publishing a new generation beside a live one would leave the
+   older generation's panes running with nothing owning them, so R0 adds
+   `ACTIVE_GENERATION_PRESENT` and performs no effect. Supersession is a transition, not a side
+   effect of claiming.
+2. **Adoption needs the plan, not only the marker.** A crash between creating the topology and
+   recording it leaves marked panes that no durable record maps to a lane. That mapping is
+   unknowable rather than guessable — pane ordering is an adapter detail, not a contract — so
+   those panes are compensated and the attempt refuses `TOPOLOGY_MISMATCH`.
+3. **Compensation is narrower than the plan, not wider.** Targets are the marked resources in one
+   fresh observation, so a pane this operation created but never recorded is still undone, and a
+   surface stacked onto one of our panes is reaped even though no plan entry names it. The plan is
+   the fallback used only when the observation itself fails.
 
 ## Falsifiers the tests attempt
 
