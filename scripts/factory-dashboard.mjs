@@ -17,6 +17,27 @@ import { reconcilePortfolioDrain } from '../src/portfolio-drain.mjs';
 
 class UsageError extends Error {}
 
+/**
+ * Every argv name this adapter reads. A name absent from this set is refused.
+ *
+ * This used to absorb any `--name value` pair into `flags`, which meant an argv name that
+ * controlled nothing was indistinguishable from one that controlled something: the run rendered
+ * its defaults and reported success. `--now <instant>` was accepted that way for as long as it
+ * took the calendar to disagree with the fixture behind it, and the caller believed it had set the
+ * observation instant when the only clock seam is the injected `now` below.
+ *
+ * The sibling `factory-dashboard-refresh` adapter, the telemetry step and phase CLIs, and the
+ * portfolio operator all refuse an undeclared name already. This one was the exception, so this is
+ * parity rather than a new policy.
+ */
+const DECLARED_OPTIONS = new Set([
+  'projection', 'portfolio', 'receipts', 'holds', 'dependencies', 'progress', 'history',
+  'telemetry', 'local-lanes', 'engineering-flow', 'merge-queue-capability',
+  'pr-review-thread-gate', 'hosted-draft-pump',
+  'html-out', 'snapshot-out', 'activity', 'activity-out',
+  'capacity', 'language', 'refresh-seconds', 'watch-ms',
+]);
+
 function parseArgs(argv) {
   const flags = {};
   for (let index = 0; index < argv.length; index += 2) {
@@ -25,7 +46,9 @@ function parseArgs(argv) {
     if (!name?.startsWith('--') || value === undefined) {
       throw new UsageError('expected paired --name value arguments');
     }
-    flags[name.slice(2)] = value;
+    const key = name.slice(2);
+    if (!DECLARED_OPTIONS.has(key)) throw new UsageError(`unknown option: ${name}`);
+    flags[key] = value;
   }
   for (const required of ['html-out', 'snapshot-out']) {
     if (!flags[required]) throw new UsageError(`missing --${required}`);
