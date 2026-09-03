@@ -186,6 +186,11 @@ async function boundPorts(create, argument) {
  * downstream can recover: the issue a transition belongs to is requirement 7's binding, and the
  * count is what remained unsettled AFTER this run acted, not what it found before it. Publishing
  * the starting count would read a completed recovery as a stuck queue.
+ *
+ * The count is built from two reads rather than one. The projection over the pre-action snapshot
+ * carries what this run did to its own operation, which a bare recount cannot attribute; the
+ * post-action read carries what a concurrent lane did, which no projection can see. See
+ * `concurrentlyAppeared`.
  */
 function intakeReceipt(phase, binding, value, skipped) {
   return freeze({
@@ -204,6 +209,31 @@ function intakeReceipt(phase, binding, value, skipped) {
 /** A settled operation is one that reached a terminal outcome; everything else is still open. */
 function settledByThisRun(value) {
   return value.kind === 'Terminal';
+}
+
+/**
+ * Durably unsettled work this run neither found before it acted nor admitted itself.
+ *
+ * Intake lanes no longer share one repository-wide concurrency queue: a labeled lane runs under
+ * `gaia-draft-intake-issue-<N>` and scheduled recovery under `gaia-draft-intake-recovery`, so a
+ * labeled lane can commit to the ledger while a recovery run is still selecting. The pre-action
+ * snapshot cannot see that write, and a run that published the snapshot alone would render the
+ * repository healthy over work it could have read. So the ledger is read once more, after this run
+ * has acted, and anything new that is not this run's own operation is added to the count.
+ *
+ * Only ever added. A published count may be raised toward `UNSETTLED` and never lowered toward
+ * `EXPECTED_NONE`, because a blocker read as "no blocker" is the one direction this seam must never
+ * fail — so a read that lags or returns less than the projection cannot manufacture a false clear.
+ * This narrows the window rather than closing it: a lane committing after this read is still
+ * unobserved, and that residual is the ordinary staleness the freshness window already carries.
+ */
+async function concurrentlyAppeared(deps, observedBefore, ownWorkKey) {
+  const listed = await deps.listUnsettledDrafts(deps.ledgerPorts);
+  if (!Array.isArray(listed)) fail('InvalidUnsettledOperation');
+  return listed
+    .map(unsettled)
+    .filter((record) => record.workKey !== ownWorkKey && !observedBefore.has(record.workKey))
+    .length;
 }
 
 function settledRevision(value, fallback) {
@@ -235,11 +265,22 @@ export async function runHostedDraftIntake({
     repository, workItem: { kind: 'ISSUE', number: 1 },
   });
 
+  let explicitNumbers = null;
+  if (candidates !== null) {
+    if (!Array.isArray(candidates)) fail('InvalidHostedDraftPump');
+    explicitNumbers = candidates.map(candidateNumber);
+  }
+
   const listed = await deps.listUnsettledDrafts(deps.ledgerPorts);
   if (!Array.isArray(listed)) fail('InvalidUnsettledOperation');
-  const records = listed.map(unsettled).sort(
+  const allRecords = listed.map(unsettled).sort(
     (left, right) => left.workKey.localeCompare(right.workKey, 'en'),
   );
+  const observedBefore = new Set(allRecords.map((record) => record.workKey));
+  const explicitIssueNumbers = explicitNumbers === null ? null : new Set(explicitNumbers);
+  const records = explicitIssueNumbers === null
+    ? allRecords
+    : allRecords.filter((record) => explicitIssueNumbers.has(record.selector.workItem.number));
   if (records.length > 0) {
     const record = records[0];
     const ports = await boundPorts(
@@ -248,12 +289,13 @@ export async function runHostedDraftIntake({
     const reconciled = result(await deps.reconcileDraft(
       record.operationId, record.committedRevision, ports,
     ));
+    const appeared = await concurrentlyAppeared(deps, observedBefore, record.workKey);
     return intakeReceipt('RESUME', {
       operationId: record.operationId,
       workKey: record.workKey,
       committedRevision: settledRevision(reconciled, record.committedRevision),
       workItem: record.selector.workItem,
-      unsettledCount: records.length - (settledByThisRun(reconciled) ? 1 : 0),
+      unsettledCount: allRecords.length - (settledByThisRun(reconciled) ? 1 : 0) + appeared,
     }, reconciled, []);
   }
 
@@ -264,8 +306,7 @@ export async function runHostedDraftIntake({
     if (!Array.isArray(rows)) fail('InvalidHostedDraftPump');
     numbers = rows.map((row) => candidateNumber(row?.number));
   } else {
-    if (!Array.isArray(candidates)) fail('InvalidHostedDraftPump');
-    numbers = candidates.map(candidateNumber);
+    numbers = explicitNumbers;
   }
   const ordered = [...new Set(numbers)].sort((left, right) => left - right).slice(0, limit);
 
@@ -295,10 +336,11 @@ export async function runHostedDraftIntake({
       operationId, workKey, committedRevision, selector: canonicalSelector,
     }));
     const reconciled = result(await deps.reconcileDraft(operationId, committedRevision, ports));
+    const appeared = await concurrentlyAppeared(deps, observedBefore, workKey);
     return intakeReceipt('ADMIT', {
       operationId, workKey, committedRevision: settledRevision(reconciled, committedRevision),
       workItem: canonicalSelector.workItem,
-      unsettledCount: settledByThisRun(reconciled) ? 0 : 1,
+      unsettledCount: allRecords.length + (settledByThisRun(reconciled) ? 0 : 1) + appeared,
     }, reconciled, skipped);
   }
 
@@ -306,7 +348,9 @@ export async function runHostedDraftIntake({
     'EXPECTED_NONE',
     {
       operationId: null, workKey: null, committedRevision: null,
-      workItem: null, unsettledCount: 0,
+      workItem: null,
+      unsettledCount: allRecords.length
+        + await concurrentlyAppeared(deps, observedBefore, null),
     },
     null,
     skipped,

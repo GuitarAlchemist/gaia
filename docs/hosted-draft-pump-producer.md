@@ -116,7 +116,13 @@ body and neither derivable afterwards:
   *"operation/issue/PR binding"* would publish nothing on every scheduled recovery.
 - `unsettledCount` — operations known unsettled **at the end of this run**, not at its start. A
   `RESUME` that reconciled its record to a terminal outcome leaves zero, and publishing the
-  starting count would read a completed recovery as a stuck queue.
+  starting count would read a completed recovery as a stuck queue. Intake builds it from two ledger
+  reads, not one: the projection over the pre-action snapshot carries what this run did to its own
+  operation, and a second read taken after the run acted contributes the unsettled operations a
+  concurrent lane committed meanwhile. The second term is only ever added, so this count can be
+  raised toward `UNSETTLED` and never lowered toward a healthy reading. It is still an observation:
+  a lane committing after that read is not reflected, and `observedAt` is what says how old the
+  reading is.
 
 ### The transition map — closed, and refusing rather than guessing
 
@@ -170,10 +176,20 @@ re-ingesting that output against itself as the prior observation passes, because
 refuses only a strictly backwards reading. A duplicate or reordered producer output is refused at
 the snapshot seam by the already-shipped `priorHostedDraftPumpOf` carrier.
 
-`sequence` is the Actions run id. Run ids increase with queue time, and the intake workflow's
-repository-wide non-cancelling concurrency group executes the queue in order, so the sequence is
-monotonic in practice. Where it is not, `requireMonotonic` refuses the reading rather than
-publishing a reordered one — fail closed, never a fabricated advance.
+`sequence` is the Actions run id. Run ids increase with queue time, and a non-cancelling
+concurrency group executes its queue in order — but that orders one group, not the repository.
+Since issue #84 the intake workflow partitions labeled runs into a group per issue, so two lanes
+can finish in the opposite order to their run ids and a reading from the later one would carry the
+lower sequence.
+
+The ordering basis is therefore the recovery group, not the repository: only runs outside every
+issue lane are given an observation path
+(`.github/workflows/hosted-draft-intake.yml`, `GAIA_OBSERVATION_PATH`), and those all share the
+single non-cancelling `gaia-draft-intake-recovery` group. Every published sequence comes from one
+queue executed in order, so the sequence is monotonic in practice. Where it is not,
+`requireMonotonic` refuses the reading rather than publishing a reordered one — fail closed, never
+a fabricated advance. A labeled issue lane still acts and still emits its receipt; it publishes no
+ordered reading, because a lane that cannot be ordered against the others must not claim to be.
 
 ### What carries monotonic evidence, and what cannot
 

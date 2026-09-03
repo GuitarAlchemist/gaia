@@ -55,6 +55,14 @@ function expressions(event, temp) {
     ['steps.policy.outputs.oid', ROOT_OID],
     ['steps.policy.outputs.revision', ROOT_REVISION],
     ['runner.temp', temp],
+    // The observation binding, in both of its readings. An issue lane resolves it to the empty
+    // string, which the CLI reads as an absent value, so no ordered reading is published from a
+    // lane that cannot be ordered against the others.
+    [
+      "github.event_name != 'issues'"
+      + " && format('{0}/gaia-hosted-draft-pump-observation.json', runner.temp) || ''",
+      event === 'issues' ? '' : `${temp}/gaia-hosted-draft-pump-observation.json`,
+    ],
     ['github.run_id', '9001'],
     ['github.run_attempt', '1'],
     ['github.repository', 'GuitarAlchemist/gaia'],
@@ -74,7 +82,9 @@ function runnerEnvironment() {
 }
 
 function resolveExpressions(value, table) {
-  return value.replace(/\$\{\{\s*([^}]+?)\s*\}\}/gu, (whole, expression) => {
+  // `.+?` rather than `[^}]+?`: a modelled expression may call `format`, whose placeholders carry
+  // their own single braces. The lazy match still stops at the first `}}`, which closes it.
+  return value.replace(/\$\{\{\s*(.+?)\s*\}\}/gu, (whole, expression) => {
     assert.ok(
       table.has(expression),
       `the seam gate does not model ${whole}; model it rather than letting it reach the CLI unchecked`,
@@ -255,28 +265,48 @@ test('both event paths carry the same repository, ledger root and pump identity'
   }
 });
 
-test('every event path asks the CLI for the observation the Control Room reads', async () => {
-  for (const event of ['schedule', 'issues']) {
-    const { argv, exitCode, output } = await drive(workflowText(), event);
-    assert.ok(argv.includes('--observation-out'), `${event} must request an observation`);
-    assert.ok(argv.includes('--run-id'), `${event} must carry the run identity that sequences it`);
-    assert.equal(exitCode, 0);
+test('only the serialized recovery lane publishes the ordered observation', async () => {
+  const recovery = await drive(workflowText(), 'schedule');
+  assert.equal(recovery.exitCode, 0);
+  const path = recovery.environment.GAIA_OBSERVATION_PATH;
+  assert.ok(path, 'the recovery lane must be given a path to publish an ordered reading');
+  assert.ok(
+    recovery.argv.includes('--run-id'),
+    'the recovery lane must carry the run identity that sequences its reading',
+  );
+  assert.ok(existsSync(path), 'the recovery lane must write the observation the workflow uploads');
+  const artifact = JSON.parse(readFileSync(path, 'utf8'));
+  assert.equal(requireHostedDraftPumpObservation(artifact).revision, artifact.revision);
+  assert.deepEqual(recovery.output.json().observation, {
+    state: 'PRODUCED', revision: artifact.revision,
+  });
 
-    const path = argv[argv.indexOf('--observation-out') + 1];
-    assert.ok(existsSync(path), `${event} must write the observation the workflow uploads`);
-    const artifact = JSON.parse(readFileSync(path, 'utf8'));
-    assert.equal(requireHostedDraftPumpObservation(artifact).revision, artifact.revision);
-    assert.deepEqual(output.json().observation, {
-      state: 'PRODUCED', revision: artifact.revision,
-    });
-  }
+  // An issue lane still runs, still acts, and still emits its receipt. What it does not do is
+  // claim a place in an order it is not in: its run id is executed in order only against its own
+  // issue group, so a reading from it can arrive with a lower `sequence` than the one already
+  // published and be refused as `IncoherentHostedDraftPump` on healthy forward progress.
+  const lane = await drive(workflowText(), 'issues');
+  assert.equal(lane.exitCode, 0, 'an issue lane still reaches the CLI and still acts');
+  assert.equal(lane.output.json().trigger, 'ISSUES_LABELED');
+  assert.equal(
+    lane.environment.GAIA_OBSERVATION_PATH, '',
+    'an issue lane must be given no observation path',
+  );
+  assert.ok(
+    !lane.argv.includes('--observation-out'),
+    'the binding cannot be a flag: an empty value parses as a flag missing its value',
+  );
+  assert.ok(
+    !Object.hasOwn(lane.output.json(), 'observation'),
+    'a lane that publishes no ordered reading must not report one',
+  );
 });
 
 test('the workflow uploads exactly the observation path it told the CLI to write', () => {
   const workflow = workflowText();
   const temp = mkdtempSync(join(tmpdir(), 'gaia-intake-seam-'));
-  const { argv } = invocation(workflow, 'schedule', temp);
-  const written = argv[argv.indexOf('--observation-out') + 1];
+  const { environment } = invocation(workflow, 'schedule', temp);
+  const written = environment.GAIA_OBSERVATION_PATH;
   const declared = resolveExpressions(
     /path: (\$\{\{ runner\.temp \}\}\S*observation\S*)\s*$/mu.exec(workflow)?.[1] ?? '',
     expressions('schedule', temp),
@@ -315,16 +345,38 @@ test('revert control: a flag left without its value refuses the whole invocation
   });
 });
 
-test('revert control: dropping the observation flag leaves the Control Room with nothing to read', async () => {
-  // Both the flag and its env binding go: either alone still reaches the CLI, because the CLI
-  // reads GAIA_OBSERVATION_PATH from the environment when the flag is absent.
+test('revert control: dropping the observation binding leaves the Control Room with nothing to read', async () => {
   const mutated = withoutLines(
     workflowText(), (line) => line.includes('GAIA_OBSERVATION_PATH'),
   );
-  assert.notEqual(mutated, workflowText(), 'the mutation must actually drop the flag');
+  assert.notEqual(mutated, workflowText(), 'the mutation must actually drop the binding');
 
-  const { argv, exitCode, output } = await drive(mutated, 'schedule');
+  const { environment, exitCode, output } = await drive(mutated, 'schedule');
   assert.equal(exitCode, 0);
-  assert.ok(!argv.includes('--observation-out'));
+  assert.ok(!Object.hasOwn(environment, 'GAIA_OBSERVATION_PATH'));
   assert.ok(!Object.hasOwn(output.json(), 'observation'));
+});
+
+test('revert control: an unconditional observation path re-arms the cross-lane refusal', async () => {
+  const mutated = workflowText().replace(
+    /^ {10}GAIA_OBSERVATION_PATH: .*$/mu,
+    '          GAIA_OBSERVATION_PATH: ${{ runner.temp }}/gaia-hosted-draft-pump-observation.json',
+  );
+  assert.notEqual(mutated, workflowText(), 'the mutation must actually widen the binding');
+
+  const lane = await drive(mutated, 'issues');
+  assert.equal(lane.exitCode, 0);
+  const artifact = JSON.parse(readFileSync(lane.environment.GAIA_OBSERVATION_PATH, 'utf8'));
+  assert.equal(artifact.sequence, 9001, 'the widened binding lets an issue lane publish a sequence');
+
+  // The reading a sibling lane would then have to be ordered against: a run that queued later,
+  // finished sooner, and published a higher run id. `observedAt` still moves forward, so only the
+  // run-id guard fires — the refusal is the removed ordering assumption and nothing else.
+  assert.throws(
+    () => requireHostedDraftPumpObservation(artifact, {
+      priorObservation: { observedAt: '2026-01-01T00:00:00.000Z', sequence: artifact.sequence + 1 },
+    }),
+    (error) => error.code === 'IncoherentHostedDraftPump',
+    'without the exclusion a healthy lane reading is refused; the gate above must fail',
+  );
 });
