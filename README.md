@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 1642 gates
+node --test                                   # 1656 gates
 ```
 
 ### Functional factory tracer
@@ -281,6 +281,15 @@ confirmation and grant consumption. Refusals and execution failures also end wit
 terminal outcome. Progress writer and timer failures are ignored and cannot affect grant
 consumption, execution, receipts, final stdout, or exit status.
 See [`docs/github-portfolio-operator.md`](docs/github-portfolio-operator.md).
+
+### GitHub drain agent team
+
+Three Claude Code subagents under `.claude/agents/` save the drain practice the fleet
+measured on 2026-09-03: a read-only `github-drain-coordinator` that classifies open pull
+requests and issues and writes a ledger, a read-only `github-drain-reviewer` for one head on
+one axis, and a `github-drain-publisher` that is the only role writing to GitHub, acting
+only on an explicit publication order it re-verifies. No kernel change, no bus verb, no new
+write path in `src/`. See [`docs/github-drain-agents.md`](docs/github-drain-agents.md).
 
 ### Factory control room
 
@@ -656,7 +665,7 @@ authoritative for their named contracts.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 1642 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 1656 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
