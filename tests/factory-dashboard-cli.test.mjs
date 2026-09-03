@@ -1019,8 +1019,7 @@ test('the dashboard CLI publishes a hosted Draft pump observation supplied as ca
     '--snapshot-out', snapshotPath,
     '--html-out', htmlPath,
     '--hosted-draft-pump', pumpPath,
-    '--now', '2026-09-01T14:50:55.000Z',
-  ]);
+  ], { now: () => new Date('2026-09-01T14:50:55.000Z'), writeStdout: () => {} });
 
   assert.notEqual(snapshot.hostedDraftPump, undefined,
     '--hosted-draft-pump must reach buildControlRoomSnapshot on the factory-dashboard path');
@@ -1028,6 +1027,11 @@ test('the dashboard CLI publishes a hosted Draft pump observation supplied as ca
   assert.equal(snapshot.hostedDraftPump.state, 'ADVANCED');
   assert.equal(snapshot.hostedDraftPump.operationId, 'b'.repeat(64));
   assert.equal(snapshot.hostedDraftPump.committedRevision, 'e'.repeat(64));
+  // Binds the reading to the instant the caller injected rather than to the calendar. This test
+  // read `ADVANCED` from a real wall clock that happened to agree with the fixture, and started
+  // reading `STALE` the moment the twelve-hour pump window closed on it.
+  assert.equal(snapshot.hostedDraftPump.observedAt, '2026-09-01T14:50:55.000Z');
+  assert.equal(snapshot.hostedDraftPump.observationAgeMs, 0);
   // The file is transport. The artifact's own revision is what makes it verifiable.
   assert.match(readFileSync(htmlPath, 'utf8'), /hosted-draft-pump/u);
 });
@@ -1047,14 +1051,179 @@ test('the dashboard CLI carries the prior hosted pump observation from the publi
   writeFileSync(pumpPath, JSON.stringify(hostedDraftPumpArtifact({ sequence: 41 })), 'utf8');
   runFactoryDashboardCli([
     '--projection', projectionPath, '--snapshot-out', snapshotPath, '--html-out', htmlPath,
-    '--hosted-draft-pump', pumpPath, '--now', '2026-09-01T14:50:55.000Z',
-  ]);
+    '--hosted-draft-pump', pumpPath,
+  ], { now: () => new Date('2026-09-01T14:50:55.000Z'), writeStdout: () => {} });
 
   // A producer that went backwards is refused against the previously published snapshot — the
   // carrier is the published artifact and nothing else, so no private state store is introduced.
   writeFileSync(pumpPath, JSON.stringify(hostedDraftPumpArtifact({ sequence: 7 })), 'utf8');
   assert.throws(() => runFactoryDashboardCli([
     '--projection', projectionPath, '--snapshot-out', snapshotPath, '--html-out', htmlPath,
-    '--hosted-draft-pump', pumpPath, '--now', '2026-09-01T14:51:55.000Z',
-  ]), /IncoherentHostedDraftPump|backwards/u);
+    '--hosted-draft-pump', pumpPath,
+  ], { now: () => new Date('2026-09-01T14:51:55.000Z'), writeStdout: () => {} }),
+  /IncoherentHostedDraftPump|backwards/u);
+});
+
+
+// -----------------------------------------------------------------------------------------------
+// Declared argv vocabulary — an argv name that controls nothing must not be accepted.
+//
+// `--now 2026-09-01T14:50:55.000Z` was accepted by `parseArgs`, stored in `flags`, and read by
+// nothing. The two hosted Draft pump tests above therefore ran on the real wall clock, passed for
+// as long as the calendar stayed inside the twelve-hour pump freshness window, and failed on
+// 2026-09-02 in GitHub run 33583625426 with `STALE` where they expect `ADVANCED`.
+//
+// The clock seam is `runFactoryDashboardCli(argv, { now })` and is not being widened to argv. What
+// changes is that a name this adapter does not declare is refused rather than absorbed, which is
+// what the sibling `factory-dashboard-refresh` adapter, the telemetry step and phase CLIs, and the
+// portfolio operator have always done. The file-fed dashboard was the only one failing open.
+// -----------------------------------------------------------------------------------------------
+
+/** One projection and one output set, reused by the vocabulary gates below. */
+function vocabularyFixture(label) {
+  const projectionPath = join(scratch, `vocab-${label}-projection.json`);
+  writeFileSync(projectionPath, `${JSON.stringify(projection({
+    schema: 'gaia-portfolio-drain-projection/1',
+    portfolioRevision: 'a'.repeat(64),
+    effect: 'NONE', authority: 'NONE', capacity: 4,
+    counts: { occupied: 0, available: 4 }, items: [], decisions: [],
+  }))}\n`, 'utf8');
+  return {
+    projectionPath,
+    snapshotPath: join(scratch, `vocab-${label}-control-room.json`),
+    htmlPath: join(scratch, `vocab-${label}-control-room.html`),
+  };
+}
+
+test('the dashboard CLI refuses an argv name it does not declare instead of absorbing it', () => {
+  const { projectionPath, snapshotPath, htmlPath } = vocabularyFixture('unknown');
+  const base = [
+    '--projection', projectionPath, '--snapshot-out', snapshotPath, '--html-out', htmlPath,
+  ];
+  const options = { now: () => new Date('2026-09-01T14:50:55.000Z'), writeStdout: () => {} };
+
+  // The exact flag that made the wall clock reachable. It is not a seam, so it is not silence.
+  assert.throws(
+    () => runFactoryDashboardCli([...base, '--now', '2026-09-01T14:50:55.000Z'], options),
+    /unknown option: --now/u,
+    'an argv name that dates nothing must not be accepted as though it dated the observation',
+  );
+  // A misspelling of a real flag is the same defect wearing a plausible name: absorbed, it renders
+  // the default and reads as though the operator got what they asked for.
+  assert.throws(
+    () => runFactoryDashboardCli([...base, '--langauge', 'fr'], options),
+    /unknown option: --langauge/u,
+  );
+  assert.throws(
+    () => runFactoryDashboardCli([...base, '--telementry', join(scratch, 'nowhere')], options),
+    /unknown option: --telementry/u,
+  );
+  assert.equal(
+    existsSync(snapshotPath), false,
+    'a refused invocation publishes nothing, so no artifact carries the ignored intent',
+  );
+});
+
+test('POSITIVE CONTROL: every option the dashboard CLI declares is still accepted', () => {
+  const { projectionPath, snapshotPath, htmlPath } = vocabularyFixture('declared');
+  const activityPath = join(scratch, 'vocab-declared-activity.json');
+  const pumpPath = join(scratch, 'vocab-declared-pump.json');
+  const dependenciesPath = join(scratch, 'vocab-declared-dependencies.json');
+  const historyPath = join(scratch, 'vocab-declared-history.json');
+  writeFileSync(pumpPath, JSON.stringify(hostedDraftPumpArtifact()), 'utf8');
+  writeFileSync(dependenciesPath, JSON.stringify({
+    evidenceRevision: 'b'.repeat(64), edges: [],
+  }), 'utf8');
+  writeFileSync(historyPath, JSON.stringify([]), 'utf8');
+
+  const snapshot = runFactoryDashboardCli([
+    '--projection', projectionPath,
+    '--snapshot-out', snapshotPath,
+    '--html-out', htmlPath,
+    '--activity', 'on',
+    '--activity-out', activityPath,
+    '--dependencies', dependenciesPath,
+    '--history', historyPath,
+    '--hosted-draft-pump', pumpPath,
+    '--language', 'fr',
+    '--refresh-seconds', '30',
+    '--watch-ms', '5000',
+  ], { now: () => new Date('2026-09-01T14:50:55.000Z'), writeStdout: () => {} });
+
+  // Closing the vocabulary must not narrow the adapter. Every flag `parseArgs` validates, plus the
+  // evidence flags it resolves, still reach the same publication they always did.
+  assert.equal(snapshot.hostedDraftPump.state, 'ADVANCED');
+  assert.equal(existsSync(activityPath), true);
+  assert.equal(existsSync(htmlPath), true);
+});
+
+test('the injected clock dates the pump reading, and a future or malformed instant fails closed', () => {
+  const { projectionPath, snapshotPath, htmlPath } = vocabularyFixture('instant');
+  const pumpPath = join(scratch, 'vocab-instant-pump.json');
+  const publish = (observedAt) => runFactoryDashboardCli([
+    '--projection', projectionPath, '--snapshot-out', snapshotPath, '--html-out', htmlPath,
+    '--hosted-draft-pump', pumpPath,
+  ], { now: () => new Date(observedAt), writeStdout: () => {} });
+
+  // The same bytes, read at two injected instants, produce two different states. That is the
+  // property the argv flag never had: the caller's clock, and nothing else, dates the reading.
+  writeFileSync(pumpPath, JSON.stringify(hostedDraftPumpArtifact()), 'utf8');
+  assert.equal(publish('2026-09-01T14:50:55.000Z').hostedDraftPump.state, 'ADVANCED');
+  assert.equal(publish('2026-09-02T14:50:55.000Z').hostedDraftPump.state, 'STALE');
+
+  // Fail closed, both directions. A reading dated after the instant it was observed is refused
+  // outright rather than published as a fresh negative age.
+  writeFileSync(pumpPath, JSON.stringify(hostedDraftPumpArtifact({
+    observedAt: '2026-09-03T00:00:00.000Z',
+  })), 'utf8');
+  assert.throws(() => publish('2026-09-01T14:50:55.000Z'), /dated after|Incoherent/u);
+
+  writeFileSync(pumpPath, JSON.stringify(hostedDraftPumpArtifact({
+    observedAt: 'the first of September',
+  })), 'utf8');
+  assert.throws(() => publish('2026-09-01T14:50:55.000Z'), /observedAt|Invalid/u);
+});
+
+test('MECHANISM REVERT: the declared vocabulary is what stops an inert flag standing in for a clock', async () => {
+  const source = readFileSync(DASHBOARD_PATH, 'utf8');
+  const find = '    if (!DECLARED_OPTIONS.has(key)) throw new UsageError(`unknown option: ${name}`);\n';
+  assert.equal(
+    source.includes(find), true,
+    `the mechanism-revert witness targets "${find.trim()}", which is no longer in the source`,
+  );
+  const mutated = source.replace(find, '')
+    .replaceAll("from '../src/", `from '${new URL('../scripts/', import.meta.url).href}../src/`);
+  assert.notEqual(mutated, source);
+  const mutantPath = join(mutantScratch, 'no-declared-options.mjs');
+  writeFileSync(mutantPath, mutated, 'utf8');
+  const mutant = await import(pathToFileURL(mutantPath).href);
+
+  const { projectionPath, snapshotPath, htmlPath } = vocabularyFixture('revert');
+  const pumpPath = join(scratch, 'vocab-revert-pump.json');
+  writeFileSync(pumpPath, JSON.stringify(hostedDraftPumpArtifact()), 'utf8');
+  const argv = [
+    '--projection', projectionPath, '--snapshot-out', snapshotPath, '--html-out', htmlPath,
+    '--hosted-draft-pump', pumpPath, '--now', '2026-09-01T14:50:55.000Z',
+  ];
+
+  // Without the check the mutant accepts `--now` exactly as the base commit did: no refusal, and
+  // the instant it names reaches nothing. It renders on whatever clock the machine supplies.
+  const reverted = mutant.runFactoryDashboardCli(argv, {
+    now: () => new Date('2026-09-02T14:50:55.000Z'), writeStdout: () => {},
+  });
+  assert.equal(
+    reverted.hostedDraftPump.observedAt, '2026-09-01T14:50:55.000Z',
+    'the mutant reads the artifact, not the flag; the flag was always decoration',
+  );
+  assert.equal(
+    reverted.hostedDraftPump.state, 'STALE',
+    'and reproduces run 33583625426 exactly: STALE under a clock the flag claimed to have set',
+  );
+  assert.throws(
+    () => runFactoryDashboardCli(argv, {
+      now: () => new Date('2026-09-02T14:50:55.000Z'), writeStdout: () => {},
+    }),
+    /unknown option: --now/u,
+    'the unmutated adapter refuses the same argv rather than rendering a reading nobody asked for',
+  );
 });
