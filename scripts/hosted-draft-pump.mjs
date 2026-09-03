@@ -12,8 +12,16 @@ import {
   listUnsettledDrafts,
   reconcileDraft,
 } from '../src/draft-operation-envelope.mjs';
-import { createGhDraftOperationProvider } from '../src/gh-draft-operation-provider.mjs';
+import {
+  createGhDraftOperationProvider,
+  createGhManagedRoundApi,
+} from '../src/gh-draft-operation-provider.mjs';
 import { createGhGitDataApi } from '../src/gh-git-data-adapter.mjs';
+import {
+  createGitHubManagedRoundAdapter,
+  createGitHubManagedRoundEvidencePort,
+  executeManagedRoundUpdate,
+} from '../src/pr-delivery-round-history.mjs';
 import {
   createGhDraftCollectorApi,
   createHostedDraftCollector,
@@ -50,7 +58,7 @@ const COMMAND_FLAGS = Object.freeze({
   enqueue: new Set([...COMMON_FLAGS, 'issue']),
   reconcile: new Set([
     ...COMMON_FLAGS, 'operation-id', 'work-key', 'expected-revision', 'repository-node-id',
-    'owner', 'gate', 'check', 'eta-minutes',
+    'owner', 'gate', 'check', 'eta-minutes', 'managed-round',
   ]),
   'list-unsettled': COMMON_FLAGS,
   intake: new Set([
@@ -169,6 +177,30 @@ function eta(value) {
   return Object.freeze({ minimumMinutes, maximumMinutes });
 }
 
+function exactObject(value, names) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+    || Object.keys(value).sort().join('\0') !== [...names].sort().join('\0')) fail();
+}
+
+function managedRound(value) {
+  let parsed;
+  try {
+    parsed = JSON.parse(configuredText(value, 64 * 1024));
+  } catch {
+    fail();
+  }
+  exactObject(parsed, ['create', 'advance']);
+  exactObject(parsed.create, ['receipt', 'effectActor', 'effectClaim']);
+  if (typeof parsed.create.effectActor !== 'string') fail();
+  if (parsed.advance !== null) {
+    exactObject(parsed.advance, ['number', 'receipt', 'effectActor']);
+    if (!Number.isSafeInteger(parsed.advance.number) || parsed.advance.number <= 0
+      || typeof parsed.advance.effectActor !== 'string') fail();
+  }
+  return Object.freeze(parsed);
+}
+
 function parseConfiguration(argv, env) {
   const { command, flags } = parseFlags(argv);
   const repository = parseRepository(flagOrEnv(flags, 'repository', env, 'GAIA_REPOSITORY'));
@@ -204,6 +236,9 @@ function parseConfiguration(argv, env) {
       checklist: checklist(flags, env),
       eta: eta(flagOrEnv(flags, 'eta-minutes', env, 'GAIA_ETA_MINUTES')),
     };
+    configuration.managedRound = managedRound(flagOrEnv(
+      flags, 'managed-round', env, 'GAIA_MANAGED_ROUND_JSON',
+    ));
   }
   if (command === 'intake') {
     const issue = optionalFlagOrEnv(flags, 'issue', env, 'GAIA_ISSUE_NUMBER');
@@ -221,6 +256,9 @@ function parseConfiguration(argv, env) {
       checklist: suppliedChecklist ? checklist(flags, env) : INTAKE_PRESENTATION.checklist,
       eta: suppliedEta === undefined ? INTAKE_PRESENTATION.eta : eta(suppliedEta),
     };
+    configuration.managedRound = managedRound(flagOrEnv(
+      flags, 'managed-round', env, 'GAIA_MANAGED_ROUND_JSON',
+    ));
     const observationOut = optionalFlagOrEnv(
       flags, 'observation-out', env, 'GAIA_OBSERVATION_PATH',
     );
@@ -273,10 +311,14 @@ const DEFAULT_DEPENDENCIES = Object.freeze({
   createGhDraftCollectorApi,
   createHostedDraftCollector,
   createGhDraftOperationProvider,
+  createGhManagedRoundApi,
+  createGitHubManagedRoundAdapter,
+  createGitHubManagedRoundEvidencePort,
   createGitHubActionsDraftAdmission,
   createDraftOperationPorts,
   enqueueDraft,
   reconcileDraft,
+  executeManagedRoundUpdate,
   listUnsettledDrafts,
   readWorkflowAdmission,
 });
@@ -329,9 +371,13 @@ export function createHostedDraftPumpRuntime(
         owner: configuration.repository.owner,
         name: configuration.repository.name,
       });
+      const evidencePort = dependencies.createGitHubManagedRoundEvidencePort({ gitData });
       const provider = dependencies.createGhDraftOperationProvider({
         expectedRepository,
         presentation: configuration.presentation,
+        managedRound: {
+          workKey, ...configuration.managedRound.create, evidencePort,
+        },
       });
       const admission = dependencies.createGitHubActionsDraftAdmission({
         expectedRepository: `${configuration.repository.owner}/${configuration.repository.name}`,
@@ -350,7 +396,21 @@ export function createHostedDraftPumpRuntime(
         telemetry,
         store,
       });
-      return dependencies.reconcileDraft(operationId, expectedRevision, operationPorts);
+      const result = await dependencies.reconcileDraft(
+        operationId, expectedRevision, operationPorts,
+      );
+      const advance = configuration.managedRound.advance;
+      if (advance === null) return result;
+      if (result?.kind !== 'Terminal' || result?.pullRequest?.number !== advance.number) {
+        fail('OperationBindingMismatch');
+      }
+      const managedApi = dependencies.createGhManagedRoundApi({ expectedRepository });
+      const adapter = dependencies.createGitHubManagedRoundAdapter({ api: managedApi });
+      const managedRoundUpdate = await dependencies.executeManagedRoundUpdate({
+        workKey, number: advance.number, receipt: advance.receipt,
+        effectActor: advance.effectActor, adapter, evidencePort,
+      });
+      return Object.freeze({ ...result, managedRoundUpdate });
     },
     async listUnsettled() {
       return dependencies.listUnsettledDrafts({ store });
