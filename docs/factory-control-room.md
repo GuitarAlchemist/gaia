@@ -479,6 +479,13 @@ network listener. English is the default; `--language fr` selects the optional F
 deadlock can ever be reported. Its one stdout line now names the obstruction beside the headline
 state and the next action.
 
+An argv name this Adapter does not declare is refused as `unknown option: --x`, exactly as the
+refresh Adapter below already refuses one. It used to absorb any `--name value` pair, so a flag
+that controlled nothing — a misspelling, or `--now <instant>` where the only clock seam is the
+injected `now` — rendered the defaults and reported success. The observation instant is supplied
+by the caller through that injected seam and never through argv; evidence dated after it is still
+refused rather than published.
+
 `npm run factory:dashboard:refresh -- ...` is the explicit GitHub refresh Adapter. Each tick
 performs one fresh, read-only organization survey, reconciles the resulting portfolio through
 the same drain Module, prepares portfolio/snapshot/HTML artifacts off-path, then replaces the
