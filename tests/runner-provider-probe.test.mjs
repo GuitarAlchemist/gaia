@@ -960,6 +960,104 @@ test('P32: every pre-adapter refusal proves the adapter was never called', () =>
 });
 
 // -------------------------------------------------------------------------------------------
+// P33 — the R4 Standards repair: a prior receipt is parsed, not merely re-hashed.
+// -------------------------------------------------------------------------------------------
+
+/**
+ * Re-seal a receipt after changing its content, so the revision is consistent with content this
+ * module never wrote. The revision is a bare content hash and the two bound digests are public
+ * exports, so this is exactly what any caller of the reconciliation path can do.
+ */
+function reseal(receipt, changes) {
+  const { revision, ...body } = { ...receipt, ...changes };
+  void revision;
+  return { ...body, revision: sha256(canonicalJson(body)) };
+}
+
+/** Synthetic non-secrets, shaped like credentials; they authenticate nothing. */
+const FORGED_MCP_NAMES = Object.freeze([
+  'ghp_0123456789abcdef', 'glpat-abcdefghijklmnop', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+]);
+
+test('P33: a recomputed-consistent prior receipt outside the receipt contract is refused, field by field', () => {
+  const mine = probe().receipt;
+  assert.equal(mine.outcome, 'CAPABILITY_OBSERVED');
+  assert.equal(reseal(mine, {}).revision, mine.revision,
+    'this file recomputes the revision exactly as the module does, so every forgery below is whole');
+  // The reference refusal: what gate 7 mints for a receipt that is not this receipt. Every forged
+  // prior below must be refused with exactly these bytes, which is how "nothing from the forgery
+  // is echoed" is checked rather than asserted.
+  const reference = probe({ priorReceipt: { ...mine, idempotencyKey: sha256('elsewhere') } }).receipt;
+  assert.equal(reference.blocker, 'RECEIPT_CONFLICT');
+
+  const observedForgeries = [
+    ['schema', { schema: 'gaia-provider-capability-receipt/2' }],
+    ['outcome: out of vocabulary', { outcome: 'CAPABILITY_GRANTED' }],
+    ['blocker: a message, not a code', { blocker: 'it went fine' }],
+    ['blocker: a code on an observed receipt', { blocker: 'BUDGET_EXCEEDED' }],
+    ['effect', { effect: 'REVIEW_POSTED' }],
+    ['authority', { authority: 'MERGE_APPROVAL' }],
+    ['runnerWorkKey: not a digest', { runnerWorkKey: RUNNER_ID }],
+    ['runnerWorkKey: another runner', { runnerWorkKey: runnerWorkKey(identity({ runnerId: 'gaia-win-runner-02' })) }],
+    ['runnerGeneration: out of range', { runnerGeneration: 1_000_001 }],
+    ['runnerGeneration: another generation', { runnerGeneration: 8 }],
+    ['provider: unregistered', { provider: 'openai' }],
+    ['provider: another provider', { provider: 'notebooklm' }],
+    ['capability: unregistered', { capability: 'ANYTHING' }],
+    ['capability: another capability', { capability: 'MERGE_APPROVAL' }],
+    ['observedAt: the expanded-year instant', { observedAt: '+275760-09-13T00:00:00.000Z' }],
+    ['availability', { availability: 'PROBABLY' }],
+    ['quota: out of vocabulary', { quota: { remaining: -5, limit: 'unbounded', unit: 'DOLLARS' } }],
+    ['usage: out of vocabulary', { usage: { tokens: 'lots' } }],
+    ['usage: absent on an observed receipt', { usage: null }],
+    ['mcpServers: credential-shaped', { mcpServers: [...FORGED_MCP_NAMES] }],
+    ['mcpServers: not an array', { mcpServers: 'filesystem' }],
+    ['observationSource: out of vocabulary', { observationSource: 'HEARSAY' }],
+    ['observationSource: absent on an observed receipt', { observationSource: null }],
+    ['providerBlockers: out of vocabulary', { providerBlockers: ['PROVIDER_ANNOYED'] }],
+    ['providerBlockers: incoherent with AVAILABLE', { providerBlockers: ['PROVIDER_TIMEOUT'] }],
+  ];
+  const walked = new Set(observedForgeries.map(([name]) => name.split(':')[0]));
+  for (const field of PROVIDER_PROBE_RECEIPT_FIELDS) {
+    if (!['idempotencyKey', 'mandateDigest', 'revision'].includes(field)) {
+      assert.ok(walked.has(field), `${field} is walked; the two digests and the revision are P12`);
+    }
+  }
+  const overBudget = probe({
+    fixture: { usage: { tokens: 999999, contextTokens: 2048, wallClockMs: 900 } },
+  }).receipt;
+  assert.equal(overBudget.blocker, 'BUDGET_EXCEEDED');
+  const blockedForgeries = [
+    ['blocked: no blocker', { blocker: null }],
+    ['blocked: an observation', { availability: 'AVAILABLE', usage: { tokens: 1, contextTokens: 1, wallClockMs: 1 } }],
+    ['blocked: a quota', { quota: { remaining: 1, limit: 2, unit: 'REQUESTS' } }],
+    ['blocked: a source', { observationSource: 'LIVE_PROVIDER' }],
+    ['blocked: a server', { mcpServers: ['filesystem'] }],
+    ['blocked: a provider blocker', { providerBlockers: ['PROVIDER_TIMEOUT'] }],
+    ['blocked: an effect', { effect: 'REVIEW_POSTED' }],
+  ];
+
+  for (const [base, forgeries] of [[mine, observedForgeries], [overBudget, blockedForgeries]]) {
+    for (const [name, change] of forgeries) {
+      const forged = reseal(base, change);
+      assert.notEqual(forged.revision, base.revision, `${name}: the forgery differs`);
+      const adapter = countingAdapter();
+      const { receipt } = probe({ priorReceipt: forged, adapter });
+      assert.equal(receipt.blocker, 'RECEIPT_CONFLICT', `${name}: refused, not repaired`);
+      assert.equal(canonicalJson(receipt), canonicalJson(reference),
+        `${name}: the refusal is minted from the context and carries nothing from the forgery`);
+      assert.equal(adapter.calls.length, 0, `${name}: refused before any retry reaches the provider`);
+    }
+  }
+  for (const base of [mine, overBudget]) {
+    const adapter = countingAdapter();
+    assert.equal(canonicalJson(probe({ priorReceipt: reseal(base, {}), adapter }).receipt),
+      canonicalJson(base), 'and a receipt this module minted still replays byte-identically');
+    assert.equal(adapter.calls.length, 0);
+  }
+});
+
+// -------------------------------------------------------------------------------------------
 // Mechanism reverts — each shows a gate tests the mechanism rather than the fixtures.
 // -------------------------------------------------------------------------------------------
 
@@ -1049,7 +1147,9 @@ test('MR5: copying the fixture authority fields gives a hostile fixture a field 
 test('MR6: dropping receipt-key equality answers this mandate with another one', async () => {
   const mutant = await importMutant('receipt-key-equality-removed', (source) => source.replace(
     'if (prior === null || prior.idempotencyKey !== context.idempotencyKey\n'
-    + '        || prior.mandateDigest !== mandateDigest) {',
+    + '        || prior.mandateDigest !== mandateDigest || prior.runnerWorkKey !== workKey\n'
+    + '        || prior.runnerGeneration !== identity.generation || prior.provider !== mandate.provider\n'
+    + '        || prior.capability !== mandate.capability) {',
     'if (prior === null) {',
   ));
   const other = probe({ mandate: { mandateId: 'probe-0002' } }).receipt;
@@ -1179,4 +1279,42 @@ test('MR12: consulting the adapter first turns a refusal into a provider call', 
     assert.equal(probeProvider(buildInput(over), shipped).outcome, 'BLOCKED');
     assert.equal(shipped.calls.length, 0);
   }
+});
+
+test('MR13: re-hashing a prior receipt without parsing it republishes whatever the caller wrote', async () => {
+  const mutant = await importMutant('prior-receipt-contract-dropped', (source) => source.replace(
+    '  try {\n'
+    + '    requireReceiptBody(body);\n'
+    + '  } catch {\n'
+    + '    return null;\n'
+    + '  }\n',
+    '',
+  ));
+  // Every bound identity field is honest; only the content this module must never publish is not.
+  const forged = reseal(probe().receipt, {
+    effect: 'REVIEW_POSTED',
+    authority: 'MERGE_APPROVAL',
+    observationSource: 'LIVE_PROVIDER',
+    mcpServers: [...FORGED_MCP_NAMES],
+  });
+  const input = buildInput({ priorReceipt: forged });
+  const leaky = countingAdapter();
+  const mutated = mutant.probeProvider(input, leaky);
+  assert.equal(mutated.outcome, 'CAPABILITY_OBSERVED');
+  assert.equal(mutated.effect, 'REVIEW_POSTED',
+    'the mutant returns a receipt that records an effect this probe cannot have had');
+  assert.equal(mutated.authority, 'MERGE_APPROVAL');
+  assert.equal(mutated.observationSource, 'LIVE_PROVIDER',
+    'and launders a synthetic reading as live without consulting any adapter at all');
+  assert.deepEqual(mutated.mcpServers, [...FORGED_MCP_NAMES],
+    'and republishes credential-shaped identifiers into a durable, content-addressed receipt');
+  assert.equal(leaky.calls.length, 0);
+  const shipped = countingAdapter();
+  const refused = probeProvider(input, shipped);
+  assert.equal(refused.blocker, 'RECEIPT_CONFLICT');
+  assert.equal(refused.effect, 'NONE');
+  assert.equal(refused.authority, 'NONE');
+  assert.equal(refused.observationSource, null);
+  assert.deepEqual(refused.mcpServers, []);
+  assert.equal(shipped.calls.length, 0);
 });
