@@ -113,6 +113,21 @@ The idempotency key is derived from the work key, the generation, the provider, 
 the mandate id. It binds a receipt to one generation, so a receipt minted by an older generation can
 never be replayed into a newer one.
 
+A prior receipt supplied for reconciliation is untrusted input. Its `revision` is a bare content
+hash that any caller can recompute, and the idempotency key and mandate digest are derivable from
+public exports, so those three values prove that a receipt is whole, not that this module minted
+it. Before gate 7 can return a prior receipt it is parsed against this same contract: `outcome`
+from its vocabulary and `blocker` a registered code exactly when the outcome is `BLOCKED`;
+`effect` and `authority` literally `NONE`; the idempotency key, mandate digest and runner work
+key digest-shaped; `runnerGeneration` bounded; `provider`, `capability`, `availability`,
+`observationSource` and `providerBlockers` from their vocabularies; `observedAt` a comparable
+instant; `quota` and `usage` read by the observation parsers; every MCP name an admitted label,
+in sorted order; a `BLOCKED` receipt carrying no observation and an observed receipt carrying one
+coherent observation. It is then bound to this runner work key, generation, provider, capability,
+idempotency key and mandate digest. A receipt outside that contract, or bound to another context,
+is refused as `RECEIPT_CONFLICT` and never repaired, so the reconciliation path republishes
+nothing the minting path could not have published.
+
 ## Decision order, and why it is the order
 
 Every gate below fails closed to a `BLOCKED` receipt with a typed blocker. The order is the
@@ -132,11 +147,13 @@ earlier gate refuses.
    exist, name this work key, generation, provider, capability and corpus, be unexpired at the
    observed instant, and name an immutable target.
 6. `PROVIDER_UNREGISTERED`, `CAPABILITY_NOT_ADMITTED` — the closed admission table.
-7. `RECEIPT_CONFLICT` — crash reconciliation. A supplied prior receipt must carry this exact
-   idempotency key, this exact mandate digest, and a `revision` equal to its own recomputed digest.
-   If all three hold, that receipt is returned byte-identically **and the adapter is never called**;
-   that is what reconciling receipts before retrying an effect means for a probe. If any check
-   fails, the probe refuses rather than minting a second, differing receipt for one key.
+7. `RECEIPT_CONFLICT` — crash reconciliation. A supplied prior receipt must parse as a receipt
+   this module could have minted (the contract above), carry a `revision` equal to its own
+   recomputed digest, and name this exact idempotency key, mandate digest, runner work key,
+   generation, provider and capability. If all of that holds, that receipt is returned
+   byte-identically **and the adapter is never called**; that is what reconciling receipts before
+   retrying an effect means for a probe. If any check fails, the probe refuses rather than minting
+   a second, differing receipt for one key, and never repairs the receipt it was handed.
 8. `PROVIDER_ADAPTER_FAILED` — the adapter threw, returned a non-object, or returned nothing.
 9. `OBSERVATION_INVALID`, `OBSERVATION_MISBOUND`, `OBSERVATION_INCOHERENT` — the observation is
    closed-parsed, must carry this mandate digest, this provider, this capability and this adapter's
@@ -152,9 +169,9 @@ earlier gate refuses.
     exposed, or that a credential was read.
 13. `BUDGET_EXCEEDED` — reported token, context, or wall-clock usage exceeds the mandate budget.
 
-## Three corrections this design did not survive
+## Four corrections this design did not survive
 
-The order above was decided before the gates ran. Three steps of the original design did not survive
+The order above was decided before the gates ran. Four steps of the original design did not survive
 them, and `src/runner-provider-probe.mjs` implements the corrections structurally rather than as
 advice.
 
@@ -180,6 +197,18 @@ The correction narrows what a name *is*, so that a credential-shaped value has n
 representation to arrive in. The prefix list is retained unchanged, and unextended, as a second
 check on names that are otherwise well-formed labels.
 
+**A recomputed revision is not provenance; the receipt contract is.** The reconciliation gate
+originally checked a prior receipt's key set and its revision, then returned it. A revision is a
+bare content hash any caller can recompute, and the two bound digests are derivable from public
+exports, so an independent review reproduced a receipt-shaped object carrying `effect:
+REVIEW_POSTED`, `authority: MERGE_APPROVAL`, a caller-chosen observation source, five
+credential-shaped MCP names, an out-of-vocabulary quota and usage, and another runner's work key,
+generation, provider and capability being returned as this probe's receipt, with the adapter never
+called. It is the correction above — untrusted content reaching a receipt unparsed — at a third
+seam: the mandate and the observation were parsed, the prior receipt was only re-hashed. A prior
+receipt is now parsed against the receipt contract and bound to the current context before it can
+reconcile anything, and a forgery is refused as `RECEIPT_CONFLICT`, never repaired.
+
 ## What the fail-closed gates honestly prove
 
 - **Budget.** A pure function cannot interrupt a provider mid-call. What it can do is refuse to
@@ -196,7 +225,9 @@ check on names that are otherwise well-formed labels.
 - **Authority.** The refusal is on what the adapter *claims*, not on what it did. This slice cannot
   observe a provider's real behaviour; it can refuse to record a claim of effect as a capability.
 - **Crash and replay.** There is no durable store here. Reconciliation is against a prior receipt the
-  caller supplies. The durable store, its compare-and-set, and its ownership are a later slice.
+  caller supplies, and that receipt is parsed against the receipt contract and bound to the current
+  context before it is believed. What this slice cannot prove is that the store handed back the
+  receipt it was given; the durable store, its compare-and-set, and its ownership are a later slice.
 - **Lease.** This module is a lease *consumer*, not a lease manager. It proves that a probe holding
   the wrong, expired, or mutable-target lease does not run. It does not issue, renew, or revoke.
 
@@ -248,12 +279,15 @@ adapter; and any Linux host adapter. None of these is implied by the vocabulary 
 - A stale, future, draining, foreign-lease, expired-lease, mutable-target, expired-mandate,
   unregistered-provider, or unadmitted-capability probe returns a typed `BLOCKED` receipt.
 - An unmodified prior receipt replays byte-identically without consulting the adapter; a prior
-  receipt for another mandate or a tampered revision is a `RECEIPT_CONFLICT`.
+  receipt for another mandate, runner, generation, provider or capability, a tampered revision, or a
+  recomputed-consistent receipt outside the receipt contract is a `RECEIPT_CONFLICT`, refused
+  field by field and never repaired.
 - A truthful `UNAVAILABLE` reading is reported as an observation, not as a Gaia failure, and every
   successful receipt names the source of the reading, so synthetic evidence is distinguishable at
   rest from a reading a later slice takes from a live provider.
-- Credential-shaped MCP identifiers have no admitted representation at either boundary, a safe
-  identifier is still admitted and still published, and the module source is text.
+- Credential-shaped MCP identifiers have no admitted representation at any boundary — mandate,
+  fixture, observation, or prior receipt — a safe identifier is still admitted and still
+  published, and the module source is text.
 - Every receipt carries `effect: NONE` and `authority: NONE`, and the emitted vocabulary is closed.
 - Repeated probes are byte-identical, and neither key order nor label order changes the revision.
 - Mechanism reverts show each gate is a mechanism rather than a coincidence of the fixtures.

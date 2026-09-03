@@ -138,9 +138,12 @@ labels are derived from the runner identity, never supplied. Every published rec
 its reading came from a synthetic fixture or from a live provider, taken from the adapter's own
 declaration rather than from the answer it returned, so evidence stays distinguishable by origin at
 rest. The one operator-supplied identifier a receipt may carry is bounded to a short lowercase
-label, so credential-shaped material has no admitted representation to travel in. Runner bootstrap, registration,
-mandate execution, drain, removal, durable receipts, and the rebuildable throughput projection
-remain design only; the reserved vocabulary implies none of them. See
+label, so credential-shaped material has no admitted representation to travel in. A prior receipt
+supplied for crash reconciliation is parsed against that same receipt contract and bound to the
+runner, generation, provider, capability and mandate it claims before it is republished, so the
+reconciliation path admits nothing the minting path could not have published. Runner bootstrap,
+registration, mandate execution, drain, removal, durable receipts, and the rebuildable throughput
+projection remain design only; the reserved vocabulary implies none of them. See
 [the self-hosted runner capability probe](docs/self-hosted-runner-provider-probe.md).
 
 ## Authority and state transitions

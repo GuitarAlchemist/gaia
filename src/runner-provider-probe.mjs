@@ -36,15 +36,17 @@
  *    effect or authority is refused rather than recorded, and provider session material has no
  *    field to travel in: every observation field is a closed token, a bounded identifier, a
  *    bounded lowercase label path, or a bounded non-negative integer.
- * 5. **A receipt is minted once per key, or reconciled.** A supplied prior receipt that carries
- *    this idempotency key, this mandate digest, and a revision equal to its own content is
- *    returned byte-identically without re-running the provider. Anything else is a conflict, never
- *    a second, differing receipt for one key.
+ * 5. **A receipt is minted once per key, or reconciled.** A supplied prior receipt is untrusted
+ *    input too: it is parsed against the same closed contract this module mints to, bound to this
+ *    runner work key, generation, provider, capability, idempotency key and mandate digest, and
+ *    must carry a revision equal to its own content. Only then is it returned byte-identically
+ *    without re-running the provider. Anything else is a conflict, never a second, differing
+ *    receipt for one key and never a repaired one.
  *
- * THREE CORRECTIONS THIS MODULE MAKES TO ITS OWN DESIGN
- * -----------------------------------------------------
+ * FOUR CORRECTIONS THIS MODULE MAKES TO ITS OWN DESIGN
+ * ----------------------------------------------------
  * `docs/self-hosted-runner-provider-probe.md` fixed a decision order before the gates were run.
- * Three steps of that design did not survive:
+ * Four steps of that design did not survive:
  *
  * - The lease was checked before the mandate deadline. An expired mandate is not work, so there is
  *   nothing for a lease to be held against; checking the lease first reports `LEASE_EXPIRED` for a
@@ -58,6 +60,14 @@
  *   content-addressed receipt. The accepted representation is now the bound — a short lowercase
  *   label path — so a credential-shaped value has nothing to arrive in. The prefix list is kept
  *   unchanged, and deliberately unextended, as a second check on well-formed labels.
+ * - The reconciliation gate checked a prior receipt's key set and its revision, then returned it.
+ *   A revision is a bare content hash any caller can recompute, and the two bound digests are
+ *   derivable from public exports, so a receipt-shaped object carrying `effect: REVIEW_POSTED`,
+ *   `authority: MERGE_APPROVAL`, a caller-chosen observation source, credential-shaped MCP names
+ *   and another runner's identity was returned as this probe's receipt with the adapter never
+ *   called. That is the previous failure — untrusted content reaching a receipt unparsed — at a
+ *   third seam. A prior receipt is now parsed against the receipt contract and bound to the
+ *   current context before it can reconcile anything; a forgery is refused, never repaired.
  *
  * The digest domain separator is the NUL character, written here as the escape `\0`. The raw byte
  * made every `grep -r` over `src/` skip this file as binary, and made a content-addressed receipt
@@ -537,8 +547,72 @@ function receiptBody(context, extra) {
 const blocked = (context, blocker) => sealReceipt(receiptBody(context, { blocker }));
 
 /**
+ * The closed contract a receipt body is minted to, applied to one read back from a durable store.
+ * A revision is a bare content hash that any caller can recompute, so it proves that a receipt is
+ * whole, not that this module wrote it. Every field is therefore parsed the way the minting path
+ * writes it: `effect` and `authority` literally `NONE`, every token from its vocabulary, every
+ * quantity bounded, every MCP name a label, and a blocked receipt carrying no observation. A body
+ * outside this contract is refused, never repaired, and nothing in it is echoed.
+ */
+function requireReceiptBody(body) {
+  if (body.schema !== PROVIDER_PROBE_RECEIPT_SCHEMA) {
+    refuse(`a ${PROVIDER_PROBE_RECEIPT_SCHEMA} value is required`);
+  }
+  if (!['BLOCKED', 'CAPABILITY_OBSERVED'].includes(body.outcome)) {
+    refuse('the receipt outcome is not registered');
+  }
+  const isBlocked = body.outcome === 'BLOCKED';
+  if (isBlocked ? !PROVIDER_PROBE_BLOCKERS.includes(body.blocker) : body.blocker !== null) {
+    refuse('a receipt names one registered blocker exactly when it is blocked');
+  }
+  if (body.effect !== 'NONE' || body.authority !== 'NONE') {
+    refuse('a receipt records no effect and no authority');
+  }
+  for (const field of ['idempotencyKey', 'mandateDigest', 'runnerWorkKey']) {
+    if (typeof body[field] !== 'string' || !DIGEST.test(body[field])) {
+      refuse(`the receipt ${field} is a digest`);
+    }
+  }
+  if (!Number.isSafeInteger(body.runnerGeneration)
+      || body.runnerGeneration < 0 || body.runnerGeneration > MAX_GENERATION) {
+    refuse('a receipt names one bounded runner generation');
+  }
+  if (!RUNNER_PROVIDERS.includes(body.provider)) refuse('the receipt provider is not registered');
+  if (!PROVIDER_CAPABILITY_KINDS.includes(body.capability)) {
+    refuse('the receipt capability is not registered');
+  }
+  if (!isComparableInstant(body.observedAt)) refuse('a receipt is observed at an exact UTC instant');
+  if (!PROVIDER_AVAILABILITIES.includes(body.availability)) {
+    refuse('the receipt availability is not registered');
+  }
+  readQuota(body.quota);
+  if (body.usage !== null) readUsage(body.usage);
+  const mcpServers = requireMcpServerNames(body.mcpServers, 'receipt MCP servers');
+  if (canonicalJson(mcpServers) !== canonicalJson(body.mcpServers)) {
+    refuse('the receipt MCP servers must be supplied in sorted order');
+  }
+  if (body.observationSource !== null
+      && !PROVIDER_OBSERVATION_SOURCES.includes(body.observationSource)) {
+    refuse('the receipt observation source is not registered');
+  }
+  requireSortedSubset(body.providerBlockers, PROVIDER_REPORTED_BLOCKERS, 'provider blocker',
+    { allowEmpty: true });
+  if (isBlocked) {
+    if (body.availability !== 'UNKNOWN' || body.quota !== null || body.usage !== null
+        || body.mcpServers.length !== 0 || body.observationSource !== null
+        || body.providerBlockers.length !== 0) {
+      refuse('a blocked receipt publishes no observation');
+    }
+  } else if (body.usage === null || body.observationSource === null
+      || (body.availability === 'AVAILABLE') !== (body.providerBlockers.length === 0)) {
+    refuse('an observed receipt carries one coherent observation');
+  }
+}
+
+/**
  * A receipt read back from a durable store is verified against itself before it can reconcile
- * anything: a receipt whose revision no longer matches its content is not evidence.
+ * anything: a receipt whose revision no longer matches its content is not evidence, and neither
+ * is a whole receipt whose content this module could not have minted.
  */
 function readPriorReceipt(value) {
   try {
@@ -548,6 +622,11 @@ function readPriorReceipt(value) {
   }
   const { revision, ...body } = value;
   if (typeof revision !== 'string' || receiptRevision(body) !== revision) return null;
+  try {
+    requireReceiptBody(body);
+  } catch {
+    return null;
+  }
   return Object.freeze({ ...body, revision });
 }
 
@@ -699,11 +778,15 @@ export function probeProvider(input, providerAdapter) {
     return blocked(context, 'CAPABILITY_NOT_ADMITTED');
   }
 
-  // 6: reconciliation, before any retry can reach the provider.
+  // 6: reconciliation, before any retry can reach the provider. The prior receipt is parsed
+  // against the receipt contract and must name this runner, generation, provider, capability and
+  // mandate, not merely carry the two digests a caller can recompute from public exports.
   if (input.priorReceipt !== null) {
     const prior = readPriorReceipt(input.priorReceipt);
     if (prior === null || prior.idempotencyKey !== context.idempotencyKey
-        || prior.mandateDigest !== mandateDigest) {
+        || prior.mandateDigest !== mandateDigest || prior.runnerWorkKey !== workKey
+        || prior.runnerGeneration !== identity.generation || prior.provider !== mandate.provider
+        || prior.capability !== mandate.capability) {
       return blocked(context, 'RECEIPT_CONFLICT');
     }
     return prior;
