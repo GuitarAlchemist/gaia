@@ -499,6 +499,8 @@ a live proof that one labelled issue and one recovery replay create no duplicate
 6. **The observation denominator is narrowed, not exact.** The post-action read closes the window in
    which a concurrent lane commits while a run is selecting or admitting, but not the window between
    that read and receipt emission. A lane committing there is unobserved until the next tick. The
-   correction is one-directional, so the error can only be an over-count rendering `UNSETTLED`, never
-   an under-count rendering `healthy`. Closing the remainder requires a denominator the lane can
-   serialize against, which the per-issue groups deliberately gave up.
+   correction term is one-directional - it can only raise the projection, never lower it - so a lane
+   that committed *before* the read can never be dropped; a lane that commits *after* it is the
+   under-count described above, and it can render `healthy` until the next tick. Closing the remainder
+   requires a denominator the lane can serialize against, which the per-issue groups deliberately gave
+   up.
