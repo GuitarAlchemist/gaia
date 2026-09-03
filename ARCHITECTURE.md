@@ -67,7 +67,7 @@ only in the final column and must not escape in a result or refusal.
 | Coordination kernel | `decide(state, command) -> events`; `apply(state, event) -> state` | Six coordination verbs and replay | stdio MCP edge; deterministic tests |
 | Durable event log | `load() -> events`; `commit(expected revision, events) -> receipt or refusal` | Single-writer append and compare-and-set | local append-only JSONL; in-memory test fixtures |
 | Draft operation | `enqueue(selector)`; `reconcile(identity, expected revision) -> projection or refusal` | One canonical Operation Envelope | protected GitHub Git Data ledger and effect adapter; memory ledger |
-| Hosted Draft intake | `runHostedDraftIntake(trigger, observations) -> receipt or refusal`; `produceHostedDraftPumpObservation(receipt) -> observation or refusal` | Resume one unsettled operation before admitting at most one candidate; authority-free sealed observation | serialized GitHub Actions intake; existing Draft ledger/admission/effect adapters; deterministic fixtures |
+| Hosted Draft intake | `runHostedDraftIntake(trigger, observations) -> receipt or refusal`; `produceHostedDraftPumpObservation(receipt) -> observation or refusal` | Resume one unsettled operation before admitting at most one candidate; authority-free sealed observation | GitHub Actions intake, one recovery group plus one group per labeled issue; existing Draft ledger/admission/effect adapters; deterministic fixtures |
 | Portfolio survey and drain | `survey(observations) -> revision`; `advance(revision) -> intent or refusal` | Read-only inventory to one bounded next transition | GitHub read adapter; deterministic fixtures; append-only drain ledger |
 | Pull-request conflict classification | `classifyPrConflict(observation, claim) -> reading or refusal` | Exact-generation, read-only classification under a closed empty strategy registry | normalized GitHub observation; deterministic fixtures |
 | Runner capability probe | `probe(mandate, lease, adapter) -> receipt or blocker` | Read-only capability question decided by identity, generation, lease, admission and reconciliation before any adapter is consulted | synthetic-fixture probe; deterministic in-memory fixtures |
@@ -115,9 +115,12 @@ reconciliation -> terminal receipt. Draft operations preserve `ENQUEUED`, `CLAIM
 `EFFECT_STARTED`, and `EFFECT_AMBIGUOUS` as nonterminal distinctions. `CREATED`, `REUSED`,
 `REFUSED`, and `CANCELLED` are terminal only when exact evidence supports them. Ambiguous remote
 effects remain nonterminal until reconciled; elapsed time and retries cannot manufacture truth.
-The scheduled Hosted Draft intake is one concrete pump: a serialized run resumes the first
-deterministically ordered unsettled operation before it may admit one eligible issue. Its sealed
-observation is a read model with no authority and cannot replace the durable Draft receipt chain.
+The Hosted Draft intake is one concrete pump: each run resumes the first deterministically
+ordered unsettled operation before it may admit one eligible issue. Scheduled recovery runs in one
+serialized group; issue-triggered runs are partitioned per issue and may execute concurrently. Only
+the recovery group publishes the sealed observation, and its unsettled count is read again after the
+run acts so that work a concurrent lane committed meanwhile is counted. That observation is a read
+model with no authority and cannot replace the durable Draft receipt chain.
 
 Pull-request conflict classification is read-only at this revision. It binds the observed base and
 head generation and can report clean, unknown, superseded, or escalation-required. Its automation
@@ -259,7 +262,8 @@ accepted transitions and receipts, not tokens, lane activity, or prose completio
   Ubuntu remains portability discovery.
 - **Local factory/operator:** bounded Claude/Codex/wmux processes, offline artifacts, explicit
   worktrees, read-only dashboards, and an interactive authority boundary for privileged effects.
-- **Hosted pump:** GitHub Actions runs the serialized scheduled/issue-triggered Draft intake and
+- **Hosted pump:** GitHub Actions runs the scheduled Draft intake in one serialized recovery group
+  and issue-triggered intake partitioned per issue, plus
   the separately sealed effect path. Protected Git refs are the durable ingress/receipt ledger;
   Actions is not the queue or authority source.
 - **Read-only/offline analysis:** portfolio survey, hybrid search, telemetry replay, architecture
