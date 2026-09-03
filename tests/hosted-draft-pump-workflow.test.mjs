@@ -15,6 +15,7 @@ const INPUTS = [
   'committed-revision',
   'ledger-root-oid',
   'ledger-root-revision',
+  'managed-round-json',
 ];
 const GROUP_EXPRESSION = "${{ format('gaia-draft-{0}', inputs['work-key']) }}";
 
@@ -126,6 +127,14 @@ test('the workflow argv and deterministic environment satisfy the real CLI parse
     GAIA_CHECKLIST_JSON:
       '["Create or reuse one exact Draft pull request","Persist one terminal receipt"]',
     GAIA_ETA_MINUTES: '60:120',
+    GAIA_MANAGED_ROUND_JSON: JSON.stringify({
+      create: {
+        receipt: { schema: 'GaiaRoundReceiptV0', kind: 'OPEN' },
+        effectActor: 'github:app:gaia-draft-pump',
+        effectClaim: { schema: 'GaiaManagedRoundEffectClaimV0' },
+      },
+      advance: null,
+    }),
   };
   let parsed;
   let output = '';
@@ -160,4 +169,6 @@ test('the workflow argv and deterministic environment satisfy the real CLI parse
     ],
     eta: { minimumMinutes: 60, maximumMinutes: 120 },
   });
+  assert.equal(parsed.managedRound.create.effectActor, 'github:app:gaia-draft-pump');
+  assert.equal(parsed.managedRound.advance, null);
 });
