@@ -42,7 +42,7 @@ outcome the first axis had reached (`gaia-drain-coordinator-status.md:40-54`,
 `gaia-drain-coordinator-status.md:105-108`). One context is one axis. An agent that holds the
 merge command while it reviews is also the failure the operator CLI rejected as its option (a):
 possession of the command becomes possession of the authority
-(`docs/github-portfolio-operator.md:18-30`).
+(`docs/github-portfolio-operator.md:16-33`).
 
 ### B. Kernel-mediated publication
 
@@ -51,11 +51,11 @@ verb so agents route every GitHub write through Gaia's authority seam. Maximum f
 architecture map.
 
 Rejected for R0. It adds a GitHub write path to `src/` and a privileged verb, which
-`ARCHITECTURE.md:140-144` forbids, and the kernel currently has no merge intent at all:
+`ARCHITECTURE.md:160-164` forbids, and the kernel currently has no merge intent at all:
 `ARCHITECTURE.md:17-19` keeps merge authority on Gaia's non-goals list on purpose. Building
 the grant seam before the intent exists is the plumbing failure the operator CLI rejected as its
 option (b): a signed artifact whose pinned intent can drift from what is executed
-(`docs/github-portfolio-operator.md:32-48`). This is the R1 direction, stated under **Should an
+(`docs/github-portfolio-operator.md:34-52`). This is the R1 direction, stated under **Should an
 Ed25519 grant gate the publisher?** below, once a merge intent is designed on its own evidence.
 
 ### C. Three authority-separated edge adapters (chosen)
@@ -88,7 +88,7 @@ replaces that with a grant.
 `scripts/github-portfolio-operator.mjs run` already binds a human, a key, an intent revision,
 and a receipt. Rejected because its execution adapter runs a factory candidate through worker,
 reviewer, and bounded repair; it performs no merge, publish, or issue mutation
-(`docs/github-portfolio-operator.md:246-252`). Reusing it would be a name, not a mechanism.
+(`docs/github-portfolio-operator.md:254-260`). Reusing it would be a name, not a mechanism.
 
 ## The three roles
 
@@ -205,7 +205,7 @@ coordinator record is prepend-only, so its line numbers are valid at the named r
 | Dual review on the exact published head is mandatory; one axis is never enough | coordinator classes `unreviewed`, `single-axis`; publisher `AXIS_MISSING` | `gaia-drain-coordinator-status.md:40-54` (R4 Standards reversed the R4 Spec APPROVE, "4 for 4"), `gaia-drain-coordinator-status.md:105-108`, `gaia-drain-coordinator-status.md:2260`, `gaia-drain-coordinator-status.md:2473`, `prompts/pr92-r4-standards-review-fable.txt:1` |
 | A verdict binds to one full published head SHA | reviewer `SHA_NOT_FULL`, `SUBJECT_COMMIT_MISMATCH`; publisher `SHA_NOT_BOUND`, `HEAD_MISMATCH` | `gaia-drain-coordinator-status.md:21`, `gaia-drain-coordinator-status.md:163-164`, `pr92-r5-spec-review.md:5-8`, `prompts/pr92-r5-spec-review-fable.txt:3-4` |
 | Never merge on a stale verdict | coordinator step 3 ("counts for nothing"); publisher `HEAD_MISMATCH`, `STATE_CHANGED` | counterexamples the rule closes: `gaia-drain-coordinator-status.md:389` (#85 merged with no verdict at the merged commit), `gaia-drain-coordinator-status.md:161-163` (an R6 verdict carried to an R8 head by a diff argument); the rule as adopted: `gaia-drain-coordinator-status.md:54` |
-| A completion marker is evidence that a lane stopped, not approval | coordinator step 3; publisher `MARKER_MISSING` and `VERDICT_MISSING` as two checks | `prompts/gaia-drain-coordinator-claude.txt:14`, `gaia-drain-coordinator-status.md:2357-2358`, `docs/artifact-completion-signals.md:24-36`, `docs/engineering-and-research-principles.md:73` |
+| A completion marker is evidence that a lane stopped, not approval | coordinator step 3; publisher `MARKER_MISSING` and `VERDICT_MISSING` as two checks | `prompts/gaia-drain-coordinator-claude.txt:14`, `gaia-drain-coordinator-status.md:2357-2358`, `docs/artifact-completion-signals.md:23-38`, `docs/engineering-and-research-principles.md:73` |
 | Every PR opens as a draft; `ready` precedes `merge` | coordinator `draft` flag; publisher action order | `gaia-drain-coordinator-status.md:73-77`, `gaia-drain-coordinator-status.md:19`, `gaia-drain-coordinator-status.md:66` |
 | The only merge form is squash matched to the head | publisher commands; test gate | `gaia-drain-coordinator-status.md:11`, `gaia-drain-coordinator-status.md:67`, `gaia-drain-coordinator-status.md:77`, `gaia-drain-coordinator-status.md:167-168` |
 | B35: reconcile one PR at a time after each merge; derive the README gate counter from the tests directory, never hand-edit it | coordinator step 5 and `reconcile`; publisher stops after one merge | `gaia-drain-coordinator-status.md:362-372`, `gaia-drain-coordinator-status.md:68-69`, `gaia-drain-coordinator-status.md:21`, `gaia-drain-coordinator-status.md:11`, `gaia-drain-coordinator-status.md:169-170`, `gaia-architect-r0-design.md:250-254`, `prompts/pr92-r5-repair-writer-fable.txt:21` |
@@ -213,13 +213,13 @@ coordinator record is prepend-only, so its line numbers are valid at the named r
 | Inputs are claims to verify, never conclusions to inherit | reviewer step 2 | `prompts/pr92-r5-spec-review-fable.txt:8`, `pr92-r5-spec-review.md:12-15`, `prompts/pr92-r4-standards-review-fable.txt:1` |
 | The review artifact shape: identity, commands, reproducers with `file:line`, controls, residuals apart, one verdict token, marker last, tree byte-identical at start and end | reviewer artifact shape | `pr92-r5-spec-review.md:1-9`, `pr92-r5-spec-review.md:204-215`, `pr92-r5-spec-review.md:226`, `pr92-r5-spec-review.md:243`, `pr92-r5-spec-review.md:302-323`, `pr92-r5-standards-review.md:22-46`, `pr92-r5-standards-review.md:338-352`, `pr92-r5-standards-review.md:363`, `pr92-r5-standards-review.md:381`, `prompts/pr92-r5-spec-review-fable.txt:13-15` |
 | Mechanism-revert controls: a gate that passes under the revert binds nothing | reviewer step 4 | `pr94-r1-repair-handoff.md:41-46`, `pr92-r5-standards-review.md:12`, `pr92-r5-standards-review.md:39-46`, `prompts/pr92-r5-repair-writer-fable.txt:20` |
-| `mergeable: UNKNOWN` is not conflict evidence | coordinator `unknown` | `docs/pr-conflict-reconciler.md:12-13` |
+| `mergeable: UNKNOWN` is not conflict evidence | coordinator `unknown` | `docs/pr-conflict-reconciler.md:11-12` |
 | PR body edits are file-based and carry the architecture declaration lines | publisher `body` action | `gaia-drain-coordinator-status.md:71`, `gaia-drain-coordinator-status.md:82`, `scripts/architecture-drift.mjs:89-93` |
 | An issue is closed after the merge, with a comment naming the merge and the two verdicts | publisher `issue-close` | `gaia-drain-coordinator-status.md:11`, `gaia-drain-coordinator-status.md:164-165` |
 | B37: never delete a merged branch | publisher forbids `--delete-branch` | `gaia-drain-coordinator-status.md:13` |
 | Artifacts, not messages, are the channel between lanes | all three end with a marker or receipt and send nothing | `gaia-drain-coordinator-status.md:181-182`, `run-lane.ps1:25`, `prompts/pr92-r5-spec-review-fable.txt:17` |
 | One merge per publisher invocation; reclassify before the next order | publisher command rules | `gaia-drain-coordinator-status.md:21`, `gaia-drain-coordinator-status.md:68-69` |
-| The merge is a human boundary in R0 | publisher `issuedBy: operator`; design C cost | `gaia-drain-coordinator-status.md:73-77`, `gaia-drain-coordinator-status.md:11`, `ARCHITECTURE.md:213-216` |
+| The merge is a human boundary in R0 | publisher `issuedBy: operator`; design C cost | `gaia-drain-coordinator-status.md:73-77`, `gaia-drain-coordinator-status.md:11`, `ARCHITECTURE.md:233-236` |
 
 Two fleet rules are operator notes rather than agent rules, because Claude Code spawns subagents
 itself: spawned lanes run in print mode with resume-on-error
@@ -230,11 +230,11 @@ clone.
 
 ## Should an Ed25519 grant gate the publisher?
 
-Yes, in R1. The order is text, and `ARCHITECTURE.md:214-216` is explicit that merge rights are
+Yes, in R1. The order is text, and `ARCHITECTURE.md:234-236` is explicit that merge rights are
 never inferred from agent text, labels, activity, or completion markers. R0 does not contradict
 that: the order's only authority content is "the human at the interactive session said go for
 this SHA", and everything else the publisher relies on is re-measured from GitHub and from the
-two artifacts. The trust is positional (`ARCHITECTURE.md:206-207`), and the harness permission
+two artifacts. The trust is positional (`ARCHITECTURE.md:226-227`), and the harness permission
 mode is the second gate the fleet measured.
 
 R0 uses an explicit order instead of a grant for three reasons:
@@ -246,12 +246,12 @@ R0 uses an explicit order instead of a grant for three reasons:
    change with its own Design It Twice, RED gate, and dual review.
 2. The grant model deliberately cannot be driven by an agent: the passphrase is read from an
    interactive dialog and never from stdin, argv, or a file
-   (`docs/github-portfolio-operator.md:103-111`). A publisher subagent therefore cannot consume a
+   (`docs/github-portfolio-operator.md:132-133`). A publisher subagent therefore cannot consume a
    grant. In R1 the publisher's shape changes: it verifies and prepares, and the human runs an
    operator command that consumes the grant and merges, leaving a receipt.
 3. Building the grant seam without the intent is option (b) of the operator CLI: a signed
    artifact the caller supplies, whose pinned identity can drift from the executed one
-   (`docs/github-portfolio-operator.md:32-48`).
+   (`docs/github-portfolio-operator.md:34-52`).
 
 What R1 keeps from R0 unchanged: the eleven refusal codes, the four commands, the matched-head
 merge, the one-merge-then-reclassify ordering, and the two artifacts as the only verdict
@@ -303,8 +303,8 @@ shipped):
 | `prompts/pr92-r5-spec-review-fable.txt` | `b77b5b9302dc7075bf1e787014ff0c49c57ce782e58c7537aa28563d2c4135e1` | review prompt shape |
 | `prompts/pr92-r5-repair-writer-fable.txt` | `bc133dd1c6b41260daca2b0b1cc57e97726d4b9aef480924d6662c4d96dc4046` | repair prompt shape |
 
-Repository files cited are at `5747b216d5e6179bacadc6f730a8b840ba78c8a0` (`origin/main` at
-entry).
+Repository files cited are at `ba1034c17c2f4ee40f97822df40a33b903245329` (`origin/main` after the
+reconciliation merge; this branch changes none of the cited files except `README.md`).
 
 ## Residuals
 
