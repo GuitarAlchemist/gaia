@@ -456,3 +456,167 @@ test('the metrics modules add no verb, no effect, and no provider call site', ()
     assert.ok(!/\bgh\s+(?:pr|api|issue)\b/u.test(source), 'no provider command');
   }
 });
+
+const throughDuckDb = async (t, { ingestion, currentHeadOid }) => {
+  const directory = mkdtempSync(join(tmpdir(), 'gaia-pr-delivery-'));
+  try {
+    return await projectPrDeliveryMetricsThroughDuckDb({
+      ingestion, currentHeadOid, databasePath: join(directory, 'delivery.duckdb'),
+    });
+  } catch (error) {
+    if (error instanceof PrDeliveryDuckDbError && error.code === 'DuckDbClientAbsent') {
+      t.diagnostic('optional analytical client absent: SQL equivalence not measured here');
+      return null;
+    }
+    throw error;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+};
+
+test('an interval whose end precedes its start is INCONSISTENT_ORDER in both engines, never a negative duration', async (t) => {
+  // READY_FOR_REVIEW is stamped before DRAFT_OPENED, and the current head's CHECK_QUEUED is stamped
+  // after its CHECK_STARTED: ordinary corrupt-timestamp cases, not exotic ones.
+  const outOfOrder = observations((list) => list.map((observation) => {
+    if (observation.providerEventId === 'PR_ev_ready') {
+      return { ...observation, occurredAt: '2026-08-30T08:50:00.000Z' };
+    }
+    if (observation.providerEventId === 'CHK_r1_queued') {
+      return { ...observation, occurredAt: '2026-08-30T10:08:00.000Z' };
+    }
+    return observation;
+  }));
+  const pure = project(outOfOrder);
+  for (const metric of ['DRAFT_AGE', 'CI_QUEUE_CURRENT_HEAD']) {
+    assert.equal(row(pure, metric).valueMilliseconds, null, metric);
+    assert.equal(row(pure, metric).unknownReason, 'INCONSISTENT_ORDER', metric);
+  }
+  assert.ok(
+    pure.rows.every(({ valueMilliseconds }) => valueMilliseconds === null || valueMilliseconds >= 0),
+    'a negative duration is an invented duration',
+  );
+
+  // The statement set names the guard on every interval, subtraction and reason alike, so the SQL
+  // is held to the same rule even where the optional client is absent.
+  const sql = PR_DELIVERY_DUCKDB_STATEMENTS.selectMetrics;
+  assert.equal(
+    [...sql.matchAll(/AND (\w+) >= (\w+) THEN \1 - \2 END/gu)].length, PR_DELIVERY_INTERVALS.length,
+    'every interval subtraction is guarded by its own ordering',
+  );
+  assert.equal(
+    [...sql.matchAll(/WHEN (\w+) < (\w+) THEN 'INCONSISTENT_ORDER' END/gu)].length,
+    PR_DELIVERY_INTERVALS.length,
+    'every interval names INCONSISTENT_ORDER',
+  );
+
+  const built = await throughDuckDb(t, { ingestion: ingest(outOfOrder), currentHeadOid: HEAD_R1 });
+  if (built !== null) {
+    assert.equal(canonicalJson(built.rows), canonicalJson(pure.rows), 'SQL and pure rows agree');
+  }
+});
+
+test('a fact set is re-verified against its own revisions before anything is projected', () => {
+  const ingestion = ingest();
+  const digest = (value) => `sha256:${createHash('sha256').update(canonicalJson(value)).digest('hex')}`;
+  const restate = (facts) => digest(facts.map(
+    ({ eventIdentity, evidenceRevision }) => ({ eventIdentity, evidenceRevision }),
+  ));
+  const projectFrom = (candidate) => projectPrDeliveryMetrics({
+    ingestion: candidate, currentHeadOid: HEAD_R1, terminalReceipt: null,
+  });
+
+  assert.equal(ingestion.factsRevision, restate(ingestion.facts));
+  assert.equal(
+    projectFrom(ingestion).factsRevision, restate(ingestion.facts),
+    'the published factsRevision is the one re-derived from the facts, not a stamp passed through',
+  );
+
+  // The revision lies about the facts.
+  refusal('IngestionRevisionMismatch', () => projectFrom({
+    ...ingestion, factsRevision: `sha256:${'0'.repeat(64)}`,
+  }));
+  // A fact was altered after it was sealed, and the set revision recomputed to cover it.
+  const [first, ...rest] = ingestion.facts;
+  const altered = [{ ...first, occurredAt: '2020-01-01T00:00:00.000Z' }, ...rest];
+  refusal('FactRevisionMismatch', () => projectFrom({
+    ...ingestion, facts: altered, factsRevision: restate(altered),
+  }));
+  // Facts fabricated wholesale under a valid schema tag, with invented identities and revisions.
+  const fabricated = [
+    { ...first, eventIdentity: `sha256:${'1'.repeat(64)}`, evidenceRevision: `sha256:${'2'.repeat(64)}` },
+  ];
+  refusal('FactRevisionMismatch', () => projectFrom({
+    ...ingestion, facts: fabricated, factsRevision: restate(fabricated),
+  }));
+  // A fact carrying a field its schema does not name, or no fact list at all.
+  const widened = [{ ...first, deliveredAt: '2026-08-30T10:40:00.000Z' }, ...rest];
+  refusal('InvalidIngestion', () => projectFrom({
+    ...ingestion, facts: widened, factsRevision: restate(widened),
+  }));
+  refusal('InvalidIngestion', () => projectFrom({ ...ingestion, facts: undefined }));
+});
+
+test('a force-push back to an earlier head opens a new generation that borrows nothing', async (t) => {
+  const [opened] = observations();
+  const at = (minutes) => new Date(Date.parse(opened.occurredAt) + minutes * MINUTE).toISOString();
+  const check = (kind, minutes, id, outcome = 'NONE') => ({
+    ...opened, kind, occurredAt: at(minutes), providerEventId: id, subject: 'ci', outcome,
+  });
+  // A is opened and goes green; the branch moves to B; then a force-push returns it to A.
+  const revert = [
+    opened,
+    check('CHECK_QUEUED', 5, 'CHK_a0_queued'),
+    check('CHECK_STARTED', 7, 'CHK_a0_started'),
+    check('CHECK_COMPLETED', 10, 'CHK_a0_completed', 'SUCCESS'),
+    { ...opened, kind: 'HEAD_ADVANCED', headOid: HEAD_R1, occurredAt: at(20), providerEventId: 'PR_ev_head_b' },
+    { ...opened, kind: 'HEAD_ADVANCED', headOid: HEAD_R0, occurredAt: at(40), providerEventId: 'PR_ev_head_a_again' },
+  ];
+  const ingestion = ingest(revert);
+  const projection = projectPrDeliveryMetrics({
+    ingestion, currentHeadOid: HEAD_R0, terminalReceipt: null,
+  });
+
+  const { generations } = projection;
+  assert.deepEqual(generations.map(({ headOid }) => headOid), [HEAD_R0, HEAD_R1, HEAD_R0]);
+  assert.equal(generations[0].greenCheckAt, at(10));
+  assert.equal(generations[0].supersededAt, at(20));
+  assert.equal(generations[0].factCount, 4);
+  assert.equal(generations[2].openedAt, at(40));
+  assert.equal(generations[2].greenCheckAt, null, 'a check from before a generation existed is not its check');
+  assert.equal(generations[2].factCount, 1);
+
+  assert.equal(row(projection, 'TIME_TO_GREEN_CURRENT_HEAD').valueMilliseconds, null);
+  assert.equal(
+    row(projection, 'TIME_TO_GREEN_CURRENT_HEAD').unknownReason, 'NO_GREEN_CHECK_ON_CURRENT_HEAD',
+  );
+  assert.equal(row(projection, 'CI_QUEUE_CURRENT_HEAD').unknownReason, 'NO_CHECK_QUEUED_ON_CURRENT_HEAD');
+  assert.equal(row(projection, 'CHECK_RUNS_CURRENT_HEAD').count, 0);
+  assert.equal(row(projection, 'DELIVERY_ROUNDS').count, 3);
+  assert.equal(row(projection, 'HEAD_CHANGES').count, 2);
+
+  const built = await throughDuckDb(t, { ingestion, currentHeadOid: HEAD_R0 });
+  if (built !== null) {
+    assert.equal(canonicalJson(built.rows), canonicalJson(projection.rows), 'SQL and pure rows agree');
+  }
+});
+
+test('an accessor-backed observation is refused, so a value that changes between reads is never published', () => {
+  const volatile = (key, first, later) => {
+    let reads = 0;
+    const observation = { ...observations()[0], providerEventId: `PR_ev_accessor_${key}` };
+    Object.defineProperty(observation, key, {
+      enumerable: true,
+      configurable: true,
+      get() { reads += 1; return reads === 1 ? first : later; },
+    });
+    return { observation, reads: () => reads };
+  };
+  for (const [key, first, later] of [
+    ['occurredAt', '2026-08-30T09:00:00.000Z', 'GARBAGE'],
+    ['headOid', HEAD_R0, 'not-an-oid'],
+  ]) {
+    const probe = volatile(key, first, later);
+    refusal('ObservationInvalid', () => ingest(observations((list) => [...list, probe.observation])));
+    assert.ok(probe.reads() <= 1, `${key} was read ${probe.reads()} times`);
+  }
+});

@@ -124,6 +124,12 @@ export const prDeliveryBodyRevision = (body) => {
   return `sha256:${createHash('sha256').update(body).digest('hex')}`;
 };
 
+/**
+ * Admit one plain object carrying exactly its schema fields as enumerable data properties, and
+ * return a one-read snapshot of it. An accessor could answer the validating read with one value
+ * and the capturing read with another, so a getter is refused, and every field is read exactly
+ * once — from its descriptor — before anything is validated.
+ */
 function exactObject(value, fields, subject, code) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
       || Object.getPrototypeOf(value) !== Object.prototype) {
@@ -135,6 +141,15 @@ function exactObject(value, fields, subject, code) {
       || [...actual].sort().some((key, index) => key !== [...fields].sort()[index])) {
     fail(code, `${subject} must contain exactly its schema fields`);
   }
+  const snapshot = {};
+  for (const key of actual) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) {
+      fail(code, `${subject}.${key} must be an enumerable data property, not an accessor`);
+    }
+    snapshot[key] = descriptor.value;
+  }
+  return Object.freeze(snapshot);
 }
 
 function instant(value, subject, code) {
@@ -179,8 +194,10 @@ function forecastMinutes(value, kind, subject) {
  * `source` is provenance and is deliberately outside the evidence digest: two channels that saw the
  * same provider event must coalesce rather than collide.
  */
-function normalize(observation, { repository, number, observedAtMs }) {
-  exactObject(observation, PR_DELIVERY_OBSERVATION_FIELDS, 'observation', 'ObservationInvalid');
+function normalize(input, { repository, number, observedAtMs }) {
+  const observation = exactObject(
+    input, PR_DELIVERY_OBSERVATION_FIELDS, 'observation', 'ObservationInvalid',
+  );
   const source = member(observation.source, PR_DELIVERY_SOURCES, 'observation.source', 'ObservationInvalid');
   const kind = member(observation.kind, PR_DELIVERY_EVENT_KINDS, 'observation.kind', 'ObservationInvalid');
   const outcome = member(observation.outcome, PR_DELIVERY_OUTCOMES, 'observation.outcome', 'ObservationInvalid');
@@ -332,19 +349,35 @@ const interval = (metric, headBinding, from, to, reasons) => {
 
 const stamp = (fact) => (fact === undefined ? null : { at: Date.parse(fact.occurredAt) });
 
+/**
+ * The facts one generation owns: those carrying its head, stamped at or after its opening instant
+ * and before the next generation opens. Binding is by generation, not by oid alone. A force-push
+ * that returns the branch to an earlier tree (A → B → A) opens a new generation with the old oid,
+ * and the earlier generation's checks stay its own history: a delivery round is a push, not a tree.
+ */
+function boundTo(facts, { headOid, openedAt, supersededAt }) {
+  const from = Date.parse(openedAt);
+  const until = supersededAt === null ? Number.POSITIVE_INFINITY : Date.parse(supersededAt);
+  return facts.filter((fact) => fact.headOid === headOid
+    && Date.parse(fact.occurredAt) >= from && Date.parse(fact.occurredAt) < until);
+}
+
 function generationsOf(facts) {
   const opens = facts.filter(({ kind }) => GENERATION_KINDS.includes(kind));
   return opens.map((open, index) => {
     const next = opens[index + 1];
-    const bound = facts.filter(({ headOid }) => headOid === open.headOid);
+    const window = {
+      headOid: open.headOid,
+      openedAt: open.occurredAt,
+      supersededAt: next === undefined ? null : next.occurredAt,
+    };
+    const bound = boundTo(facts, window);
     const green = bound.find(
       ({ kind, outcome }) => kind === 'CHECK_COMPLETED' && outcome === 'SUCCESS',
     );
     return Object.freeze({
       ordinal: index,
-      headOid: open.headOid,
-      openedAt: open.occurredAt,
-      supersededAt: next === undefined ? null : next.occurredAt,
+      ...window,
       greenCheckAt: green === undefined ? null : green.occurredAt,
       factCount: bound.length,
     });
@@ -364,13 +397,12 @@ function forecastOf(facts, subject, terminalReceipt, mergedOnCurrentHead) {
 
   let delivered = unknown('NO_AUTHORIZED_TERMINAL_RECEIPT');
   if (terminalReceipt !== null && terminalReceipt !== undefined) {
-    exactObject(
+    const { receiptRevision, ...body } = exactObject(
       terminalReceipt,
       ['schema', 'repository', 'pullRequestNumber', 'headOid', 'deliveredAt', 'authority', 'receiptRevision'],
       'terminalReceipt',
       'TerminalReceiptInvalid',
     );
-    const { receiptRevision, ...body } = terminalReceipt;
     if (body.schema !== PR_DELIVERY_TERMINAL_RECEIPT_SCHEMA
         || typeof receiptRevision !== 'string' || !REVISION.test(receiptRevision)
         || revisionOf(body) !== receiptRevision) {
@@ -428,6 +460,47 @@ function forecastOf(facts, subject, terminalReceipt, mergedOnCurrentHead) {
   });
 }
 
+const PR_DELIVERY_FACT_FIELDS = Object.freeze([
+  'schema', 'repository', 'pullRequestNumber', 'kind', 'headOid', 'occurredAt', 'providerEventId',
+  'subject', 'outcome', 'forecastMinimumMinutes', 'forecastMaximumMinutes', 'eventIdentity',
+  'evidenceRevision', 'sources',
+]);
+
+/**
+ * Re-derive a fact set's revisions before trusting it, exactly as a terminal receipt is re-verified
+ * against its own sealed revision. A schema tag is a claim; the digests are the proof. A projection
+ * that stamped an unverified `factsRevision` into a published summary would be publishing
+ * provenance it never checked.
+ */
+function verifiedFacts(ingestion) {
+  if (!Array.isArray(ingestion.facts)) fail('InvalidIngestion', 'ingestion must carry a fact list');
+  for (const fact of ingestion.facts) {
+    const { eventIdentity, evidenceRevision, sources: _sources, ...evidence } = exactObject(
+      fact, PR_DELIVERY_FACT_FIELDS, 'fact', 'InvalidIngestion',
+    );
+    const identity = revisionOf({
+      repository: evidence.repository,
+      pullRequestNumber: evidence.pullRequestNumber,
+      kind: evidence.kind,
+      providerEventId: evidence.providerEventId,
+    });
+    if (evidence.schema !== PR_DELIVERY_FACT_SCHEMA
+        || evidence.repository !== ingestion.repository
+        || evidence.pullRequestNumber !== ingestion.pullRequestNumber
+        || revisionOf(evidence) !== evidenceRevision
+        || identity !== eventIdentity) {
+      fail('FactRevisionMismatch', 'a fact must match its own evidence revision and identity');
+    }
+  }
+  const restated = revisionOf(ingestion.facts.map(
+    ({ eventIdentity, evidenceRevision }) => ({ eventIdentity, evidenceRevision }),
+  ));
+  if (restated !== ingestion.factsRevision) {
+    fail('IngestionRevisionMismatch', 'a fact set must match its own facts revision');
+  }
+  return ingestion.facts;
+}
+
 /**
  * Project one closed set of named intervals and counts.
  *
@@ -441,7 +514,7 @@ export function projectPrDeliveryMetrics({ ingestion, currentHeadOid, terminalRe
   if (typeof currentHeadOid !== 'string' || !GIT_OID.test(currentHeadOid)) {
     fail('InvalidHead', 'currentHeadOid must be a Git object id');
   }
-  const facts = ingestion.facts;
+  const facts = verifiedFacts(ingestion);
   const generations = generationsOf(facts);
   if (!generations.some(({ headOid }) => headOid === currentHeadOid)) {
     fail('CurrentHeadUnwitnessed', 'no observation opens the current head generation');
@@ -453,8 +526,10 @@ export function projectPrDeliveryMetrics({ ingestion, currentHeadOid, terminalRe
     fail('HeadGenerationUnknown', `no generation opens head ${unwitnessed.headOid}`);
   }
 
-  const current = facts.filter(({ headOid }) => headOid === currentHeadOid);
-  const currentGeneration = generations.find(({ headOid }) => headOid === currentHeadOid);
+  // The current generation is the latest one carrying the current head, and a `*_CURRENT_HEAD`
+  // metric reads only the facts that generation owns.
+  const currentGeneration = generations.findLast(({ headOid }) => headOid === currentHeadOid);
+  const current = boundTo(facts, currentGeneration);
   const firstOf = (list, kind, predicate = () => true) => list
     .find((fact) => fact.kind === kind && predicate(fact));
   const lastOf = (list, kind) => [...list].reverse().find((fact) => fact.kind === kind);

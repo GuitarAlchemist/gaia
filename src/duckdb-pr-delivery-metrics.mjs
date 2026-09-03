@@ -30,66 +30,47 @@ import { PR_DELIVERY_COUNTS, PR_DELIVERY_INTERVALS } from './pr-delivery-metrics
 export const PR_DELIVERY_DUCKDB_CLIENT = '@duckdb/node-api';
 export const PR_DELIVERY_DUCKDB_SCHEMA = 'gaia-pr-delivery-metrics-projection/1';
 
+/**
+ * One entry per named metric. An interval names its two bounds and its two absence reasons; the
+ * SQL for its value and its reason is generated from those, so every interval carries the same
+ * ordering guard the authority's `interval()` applies. An end stamped before its start is
+ * `INCONSISTENT_ORDER`, never a negative duration.
+ */
 const METRIC_SELECTS = [
   {
-    metric: 'DRAFT_AGE',
-    kind: 'INTERVAL',
-    headBinding: 'PULL_REQUEST',
-    value: 'CASE WHEN draft_opened IS NOT NULL AND ready IS NOT NULL THEN ready - draft_opened END',
-    reason: "CASE WHEN draft_opened IS NULL THEN 'NO_DRAFT_OPENED'"
-      + " WHEN ready IS NULL THEN 'NO_READY_FOR_REVIEW' END",
+    metric: 'DRAFT_AGE', kind: 'INTERVAL', headBinding: 'PULL_REQUEST',
+    from: 'draft_opened', to: 'ready',
+    reasons: { from: 'NO_DRAFT_OPENED', to: 'NO_READY_FOR_REVIEW' },
   },
   {
-    metric: 'TIME_TO_FIRST_REVIEW',
-    kind: 'INTERVAL',
-    headBinding: 'PULL_REQUEST',
-    value: 'CASE WHEN ready IS NOT NULL AND first_review IS NOT NULL THEN first_review - ready END',
-    reason: "CASE WHEN ready IS NULL THEN 'NO_READY_FOR_REVIEW'"
-      + " WHEN first_review IS NULL THEN 'NO_REVIEW_SUBMITTED' END",
+    metric: 'TIME_TO_FIRST_REVIEW', kind: 'INTERVAL', headBinding: 'PULL_REQUEST',
+    from: 'ready', to: 'first_review',
+    reasons: { from: 'NO_READY_FOR_REVIEW', to: 'NO_REVIEW_SUBMITTED' },
   },
   {
-    metric: 'CI_QUEUE_CURRENT_HEAD',
-    kind: 'INTERVAL',
-    headBinding: 'CURRENT_HEAD',
-    value: 'CASE WHEN head_queued IS NOT NULL AND head_started IS NOT NULL'
-      + ' THEN head_started - head_queued END',
-    reason: "CASE WHEN head_queued IS NULL THEN 'NO_CHECK_QUEUED_ON_CURRENT_HEAD'"
-      + " WHEN head_started IS NULL THEN 'NO_CHECK_STARTED_ON_CURRENT_HEAD' END",
+    metric: 'CI_QUEUE_CURRENT_HEAD', kind: 'INTERVAL', headBinding: 'CURRENT_HEAD',
+    from: 'head_queued', to: 'head_started',
+    reasons: { from: 'NO_CHECK_QUEUED_ON_CURRENT_HEAD', to: 'NO_CHECK_STARTED_ON_CURRENT_HEAD' },
   },
   {
-    metric: 'CI_EXECUTION_CURRENT_HEAD',
-    kind: 'INTERVAL',
-    headBinding: 'CURRENT_HEAD',
-    value: 'CASE WHEN head_started IS NOT NULL AND head_completed IS NOT NULL'
-      + ' THEN head_completed - head_started END',
-    reason: "CASE WHEN head_started IS NULL THEN 'NO_CHECK_STARTED_ON_CURRENT_HEAD'"
-      + " WHEN head_completed IS NULL THEN 'NO_CHECK_COMPLETED_ON_CURRENT_HEAD' END",
+    metric: 'CI_EXECUTION_CURRENT_HEAD', kind: 'INTERVAL', headBinding: 'CURRENT_HEAD',
+    from: 'head_started', to: 'head_completed',
+    reasons: { from: 'NO_CHECK_STARTED_ON_CURRENT_HEAD', to: 'NO_CHECK_COMPLETED_ON_CURRENT_HEAD' },
   },
   {
-    metric: 'TIME_TO_GREEN_CURRENT_HEAD',
-    kind: 'INTERVAL',
-    headBinding: 'CURRENT_HEAD',
-    value: 'CASE WHEN head_opened IS NOT NULL AND head_green IS NOT NULL'
-      + ' THEN head_green - head_opened END',
-    reason: "CASE WHEN head_opened IS NULL THEN 'NO_CURRENT_GENERATION'"
-      + " WHEN head_green IS NULL THEN 'NO_GREEN_CHECK_ON_CURRENT_HEAD' END",
+    metric: 'TIME_TO_GREEN_CURRENT_HEAD', kind: 'INTERVAL', headBinding: 'CURRENT_HEAD',
+    from: 'head_opened', to: 'head_green',
+    reasons: { from: 'NO_CURRENT_GENERATION', to: 'NO_GREEN_CHECK_ON_CURRENT_HEAD' },
   },
   {
-    metric: 'CONFLICT_REPAIR',
-    kind: 'INTERVAL',
-    headBinding: 'PULL_REQUEST',
-    value: 'CASE WHEN conflict_observed IS NOT NULL AND conflict_resolved IS NOT NULL'
-      + ' THEN conflict_resolved - conflict_observed END',
-    reason: "CASE WHEN conflict_observed IS NULL THEN 'NO_CONFLICT_OBSERVED'"
-      + " WHEN conflict_resolved IS NULL THEN 'NO_CONFLICT_RESOLVED' END",
+    metric: 'CONFLICT_REPAIR', kind: 'INTERVAL', headBinding: 'PULL_REQUEST',
+    from: 'conflict_observed', to: 'conflict_resolved',
+    reasons: { from: 'NO_CONFLICT_OBSERVED', to: 'NO_CONFLICT_RESOLVED' },
   },
   {
-    metric: 'TOTAL_LEAD_TIME',
-    kind: 'INTERVAL',
-    headBinding: 'PULL_REQUEST',
-    value: 'CASE WHEN draft_opened IS NOT NULL AND merged IS NOT NULL THEN merged - draft_opened END',
-    reason: "CASE WHEN draft_opened IS NULL THEN 'NO_DRAFT_OPENED'"
-      + " WHEN merged IS NULL THEN 'NOT_TERMINAL' END",
+    metric: 'TOTAL_LEAD_TIME', kind: 'INTERVAL', headBinding: 'PULL_REQUEST',
+    from: 'draft_opened', to: 'merged',
+    reasons: { from: 'NO_DRAFT_OPENED', to: 'NOT_TERMINAL' },
   },
   {
     metric: 'DELIVERY_ROUNDS', kind: 'COUNT', headBinding: 'PULL_REQUEST', count: 'rounds',
@@ -108,12 +89,22 @@ const METRIC_SELECTS = [
   },
 ];
 
-const metricSelect = ({ metric, kind, headBinding, value, count, reason }) => 'SELECT '
-  + `'${metric}' AS metric, '${kind}' AS metric_kind, '${headBinding}' AS head_binding, `
-  + `${kind === 'INTERVAL' ? `CAST(${value} AS BIGINT)` : 'CAST(NULL AS BIGINT)'} AS value_ms, `
-  + `${kind === 'COUNT' ? `CAST(${count} AS BIGINT)` : 'CAST(NULL AS BIGINT)'} AS metric_count, `
-  + `${kind === 'INTERVAL' ? `CAST(${reason} AS VARCHAR)` : 'CAST(NULL AS VARCHAR)'} AS unknown_reason `
-  + 'FROM bounds';
+const intervalValue = ({ from, to }) => `CASE WHEN ${from} IS NOT NULL AND ${to} IS NOT NULL`
+  + ` AND ${to} >= ${from} THEN ${to} - ${from} END`;
+
+const intervalReason = ({ from, to, reasons }) => `CASE WHEN ${from} IS NULL THEN '${reasons.from}'`
+  + ` WHEN ${to} IS NULL THEN '${reasons.to}'`
+  + ` WHEN ${to} < ${from} THEN 'INCONSISTENT_ORDER' END`;
+
+const metricSelect = (entry) => {
+  const { metric, kind, headBinding, count } = entry;
+  return 'SELECT '
+    + `'${metric}' AS metric, '${kind}' AS metric_kind, '${headBinding}' AS head_binding, `
+    + `${kind === 'INTERVAL' ? `CAST(${intervalValue(entry)} AS BIGINT)` : 'CAST(NULL AS BIGINT)'} AS value_ms, `
+    + `${kind === 'COUNT' ? `CAST(${count} AS BIGINT)` : 'CAST(NULL AS BIGINT)'} AS metric_count, `
+    + `${kind === 'INTERVAL' ? `CAST(${intervalReason(entry)} AS VARCHAR)` : 'CAST(NULL AS VARCHAR)'} AS unknown_reason `
+    + 'FROM bounds';
+};
 
 /**
  * The closed statement set. Every metric is named in SQL, so the query is reviewable as a
@@ -138,10 +129,20 @@ export const PR_DELIVERY_DUCKDB_STATEMENTS = Object.freeze({
   insertScope: 'INSERT INTO gaia_pr_delivery_scope ('
     + ' projection_schema, facts_revision, current_head_oid) VALUES (?, ?, ?)',
   commit: 'COMMIT',
+  // The current generation is the latest DRAFT_OPENED or HEAD_ADVANCED carrying the current head.
+  // A head fact is one that generation owns: its oid, at or after its opening, before the next
+  // generation opens. A force-push back to an earlier tree therefore borrows nothing from the
+  // earlier generation of the same oid, exactly as in the authority.
   selectMetrics: 'WITH scope AS (SELECT current_head_oid AS head FROM gaia_pr_delivery_scope),'
     + ' fact AS (SELECT kind, head_oid, outcome,'
     + ' epoch_ms(CAST(occurred_at AS TIMESTAMP)) AS at_ms FROM gaia_pr_delivery_fact),'
-    + ' head_fact AS (SELECT fact.* FROM fact, scope WHERE fact.head_oid = scope.head),'
+    + " generation AS (SELECT at_ms FROM fact WHERE kind IN ('DRAFT_OPENED', 'HEAD_ADVANCED')),"
+    + ' current_generation AS (SELECT (SELECT max(fact.at_ms) FROM fact, scope'
+    + " WHERE fact.head_oid = scope.head AND fact.kind IN ('DRAFT_OPENED', 'HEAD_ADVANCED')) AS opened),"
+    + ' head_fact AS (SELECT fact.* FROM fact, scope, current_generation'
+    + ' WHERE fact.head_oid = scope.head AND fact.at_ms >= current_generation.opened'
+    + ' AND NOT EXISTS (SELECT 1 FROM generation WHERE generation.at_ms > current_generation.opened'
+    + ' AND generation.at_ms <= fact.at_ms)),'
     + ' bounds AS (SELECT'
     + " (SELECT min(at_ms) FROM fact WHERE kind = 'DRAFT_OPENED') AS draft_opened,"
     + " (SELECT min(at_ms) FROM fact WHERE kind = 'READY_FOR_REVIEW') AS ready,"
@@ -157,8 +158,7 @@ export const PR_DELIVERY_DUCKDB_STATEMENTS = Object.freeze({
     + " (SELECT max(at_ms) FROM head_fact WHERE kind = 'CHECK_COMPLETED') AS head_completed,"
     + " (SELECT min(at_ms) FROM head_fact WHERE kind = 'CHECK_COMPLETED'"
     + "  AND outcome = 'SUCCESS') AS head_green,"
-    + " (SELECT min(at_ms) FROM head_fact WHERE kind IN ('DRAFT_OPENED', 'HEAD_ADVANCED'))"
-    + '  AS head_opened,'
+    + ' (SELECT opened FROM current_generation) AS head_opened,'
     + " (SELECT count(*) FROM fact WHERE kind IN ('DRAFT_OPENED', 'HEAD_ADVANCED')) AS rounds,"
     + " (SELECT count(*) FROM fact WHERE kind = 'REVIEW_SUBMITTED') AS reviews,"
     + " (SELECT count(*) FROM head_fact WHERE kind = 'CHECK_COMPLETED') AS head_checks,"
