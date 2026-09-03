@@ -1,5 +1,8 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
+
+import { executeManagedDraftCreation } from './pr-delivery-round-history.mjs';
 
 const execFileAsync = promisify(execFile);
 const GIT_OID = /^[a-f0-9]{40}$/u;
@@ -138,6 +141,8 @@ function renderBody(display, marker) {
   ].join('\n');
 }
 
+const bodyRevision = (body) => createHash('sha256').update(body, 'utf8').digest('hex');
+
 function hasExactMarker(body, marker) {
   if (typeof body !== 'string') return false;
   return body.split(/\r?\n/u).filter((line) => line === markerLine(marker)).length === 1;
@@ -189,6 +194,7 @@ async function defaultRun(command, args, options) {
 export function createGhDraftOperationProvider({
   expectedRepository,
   presentation: suppliedPresentation,
+  managedRound,
   run = defaultRun,
 }) {
   const expected = repository(expectedRepository, 'InvalidConfiguration');
@@ -214,7 +220,7 @@ export function createGhDraftOperationProvider({
       fail('RepositoryIdentityMismatch');
     }
   };
-  const lookup = async (request) => {
+  const lookupCandidate = async (request) => {
     await assertRepositoryIdentity();
     const candidates = parseJson(await invoke(
       'pr', 'list', '--repo', repositoryName, '--state', 'open',
@@ -228,7 +234,22 @@ export function createGhDraftOperationProvider({
     ));
     if (marked.length > 1 || candidates.length > 1) fail('ProviderAmbiguous');
     if (marked.length === 0) fail('ProviderConflict');
-    return validateCandidate(marked[0], request);
+    return Object.freeze({
+      candidate: marked[0], draft: validateCandidate(marked[0], request),
+    });
+  };
+  const lookup = async (request) => (await lookupCandidate(request))?.draft ?? null;
+
+  const managedConfiguration = () => {
+    exactKeys(managedRound, [
+      'workKey', 'receipt', 'effectActor', 'effectClaim', 'evidencePort',
+    ], 'ManagedRoundRequired');
+    if (typeof managedRound.evidencePort?.read !== 'function'
+      || typeof managedRound.evidencePort?.compareAndAppend !== 'function'
+      || typeof managedRound.evidencePort?.leaseState !== 'function') {
+      fail('ManagedRoundRequired');
+    }
+    return managedRound;
   };
 
   return Object.freeze({
@@ -238,34 +259,147 @@ export function createGhDraftOperationProvider({
 
     async createDraft(requestInput) {
       const request = validateRequest(requestInput, expected);
-      const existing = await lookup(request);
-      if (existing !== null) fail('ProviderConflict');
-      const encodedHead = encodeURIComponent(request.headRef);
-      const observedHead = (await invoke(
-        'api', `repos/${repositoryName}/git/ref/heads/${encodedHead}`,
-        '--jq', '.object.sha',
-      )).trim();
-      if (!GIT_OID.test(observedHead)) fail('ProviderProtocolViolation');
-      if (observedHead !== request.headRevision) fail('RequestBindingMismatch');
+      const managed = managedConfiguration();
       const display = boundPresentation(displayTemplate, request);
-      const body = renderBody(display, request.operationMarker);
-      const createdUrl = (await invoke(
-        'pr', 'create', '--repo', repositoryName, '--draft', '--base', request.baseRef,
-        '--head', `${expected.owner}:${request.headRef}`, '--title', display.title,
-        '--body', body,
-      )).trim();
-      const match = PULL_REQUEST_URL.exec(createdUrl);
-      if (match === null || match[1] !== expected.owner || match[2] !== expected.name
-        || !Number.isSafeInteger(Number(match[3])) || Number(match[3]) <= 0) {
-        fail('ProviderProtocolViolation');
-      }
-      const created = parseJson(await invoke(
-        'pr', 'view', match[3], '--repo', repositoryName, '--json',
-        'number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body',
-      ));
-      const validated = validateCandidate(created, request);
-      if (validated.url !== createdUrl) fail('ProviderProtocolViolation');
-      return validated;
+      let last = null;
+      const observation = (entry) => Object.freeze({
+        number: entry.draft.number, headRevision: entry.draft.headRevision,
+        body: entry.candidate.body, bodyRevision: bodyRevision(entry.candidate.body),
+      });
+      const adapter = Object.freeze({
+        async observeByOperation() {
+          if (last === null) last = await lookupCandidate(request);
+          return last === null ? null : observation(last);
+        },
+        async proveCreateAbsent() {
+          return 'UNKNOWN';
+        },
+        async observe(number) {
+          if (last?.draft.number === number) return observation(last);
+          const candidate = parseJson(await invoke(
+            'pr', 'view', String(number), '--repo', repositoryName, '--json',
+            'number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body',
+          ));
+          last = Object.freeze({ candidate, draft: validateCandidate(candidate, request) });
+          return observation(last);
+        },
+        async createDraft(effect) {
+          const encodedHead = encodeURIComponent(request.headRef);
+          const observedHead = (await invoke(
+            'api', `repos/${repositoryName}/git/ref/heads/${encodedHead}`,
+            '--jq', '.object.sha',
+          )).trim();
+          if (!GIT_OID.test(observedHead)) fail('ProviderProtocolViolation');
+          if (observedHead !== request.headRevision) fail('RequestBindingMismatch');
+          const createdUrl = (await invoke(
+            'pr', 'create', '--repo', repositoryName, '--draft', '--base', request.baseRef,
+            '--head', `${expected.owner}:${request.headRef}`, '--title', display.title,
+            '--body', effect.proposedBody,
+          )).trim();
+          const match = PULL_REQUEST_URL.exec(createdUrl);
+          if (match === null || match[1] !== expected.owner || match[2] !== expected.name
+            || !Number.isSafeInteger(Number(match[3])) || Number(match[3]) <= 0) {
+            fail('ProviderProtocolViolation');
+          }
+          const candidate = parseJson(await invoke(
+            'pr', 'view', match[3], '--repo', repositoryName, '--json',
+            'number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body',
+          ));
+          last = Object.freeze({ candidate, draft: validateCandidate(candidate, request) });
+          if (last.draft.url !== createdUrl || candidate.body !== effect.proposedBody) {
+            fail('ProviderProtocolViolation');
+          }
+          return { kind: 'ACKNOWLEDGED', number: last.draft.number };
+        },
+        async compareAndSet() { return { kind: 'STALE' }; },
+      });
+      const result = await executeManagedDraftCreation({
+        workKey: managed.workKey, headRevision: request.headRevision,
+        baseBody: renderBody(display, request.operationMarker), receipt: managed.receipt,
+        effectActor: managed.effectActor, effectClaim: managed.effectClaim,
+        adapter, evidencePort: managed.evidencePort,
+      });
+      if (result.kind !== 'APPLIED' || last === null) fail('ManagedRoundEffectRefused');
+      return last.draft;
+    },
+  });
+}
+
+function parseIncludedResponse(value) {
+  const text = String(value ?? '');
+  const boundary = Math.max(text.lastIndexOf('\r\n\r\n'), text.lastIndexOf('\n\n'));
+  if (boundary < 0) fail('ProviderProtocolViolation');
+  const header = text.slice(0, boundary);
+  const body = text.slice(boundary + (text.startsWith('\r\n', boundary) ? 4 : 2));
+  const etag = /^etag:\s*(\S+)\s*$/imu.exec(header)?.[1];
+  if (typeof etag !== 'string' || etag.length === 0) fail('ProviderProtocolViolation');
+  return { etag, body: parseJson(body) };
+}
+
+export function createGhManagedRoundApi({ expectedRepository, run = defaultRun } = {}) {
+  const expected = repository(expectedRepository, 'InvalidConfiguration');
+  if (typeof run !== 'function') fail('InvalidAdapter');
+  const repositoryName = `${expected.owner}/${expected.name}`;
+  const etags = new Map();
+  const invoke = async (args, staleOnFailure = false) => {
+    try {
+      return await run('gh', args, {
+        encoding: 'utf8', maxBuffer: 1024 * 1024, windowsHide: true,
+      });
+    } catch {
+      if (staleOnFailure) return null;
+      fail('ProviderUnavailable');
+    }
+  };
+  const assertRepositoryIdentity = async () => {
+    const response = await invoke([
+      'repo', 'view', repositoryName, '--json', 'id,nameWithOwner',
+    ]);
+    const observed = parseJson(response?.stdout);
+    exactKeys(observed, ['id', 'nameWithOwner'], 'ProviderProtocolViolation');
+    if (observed.id !== expected.nodeId || observed.nameWithOwner !== repositoryName) {
+      fail('RepositoryIdentityMismatch');
+    }
+  };
+  const observe = async (number) => {
+    if (!Number.isSafeInteger(number) || number <= 0) fail('InvalidInput');
+    await assertRepositoryIdentity();
+    const response = await invoke(['api', '-i', `repos/${repositoryName}/pulls/${number}`]);
+    const included = parseIncludedResponse(response?.stdout);
+    const value = included.body;
+    if (value?.number !== number || value?.state !== 'open' || value?.draft !== true
+      || !GIT_OID.test(value?.head?.sha) || typeof value?.body !== 'string') {
+      fail('ProviderProtocolViolation');
+    }
+    const observed = Object.freeze({
+      number, headRevision: value.head.sha, body: value.body,
+      bodyRevision: bodyRevision(value.body),
+    });
+    etags.set(number, { etag: included.etag, headRevision: observed.headRevision,
+      bodyRevision: observed.bodyRevision });
+    return observed;
+  };
+  return Object.freeze({
+    async createDraft() { fail('UnsupportedCreate'); },
+    async observeByOperation() { return null; },
+    async proveCreateAbsent() { return 'UNKNOWN'; },
+    observe,
+    async compareAndSetBody(effect) {
+      const cached = etags.get(effect?.number);
+      if (!cached || cached.headRevision !== effect.expectedHeadRevision
+        || cached.bodyRevision !== effect.expectedBodyRevision) return { kind: 'STALE' };
+      await assertRepositoryIdentity();
+      const response = await invoke([
+        'api', '-i', '-X', 'PATCH', `repos/${repositoryName}/pulls/${effect.number}`,
+        '-H', `If-Match: ${cached.etag}`, '-f', `body=${effect.proposedBody}`,
+      ], true);
+      if (response === null) return { kind: 'AMBIGUOUS' };
+      const included = parseIncludedResponse(response.stdout);
+      if (included.body?.head?.sha !== effect.expectedHeadRevision
+        || included.body?.body !== effect.proposedBody) return { kind: 'AMBIGUOUS' };
+      etags.set(effect.number, { etag: included.etag,
+        headRevision: effect.expectedHeadRevision, bodyRevision: effect.proposedBodyRevision });
+      return { kind: 'ACKNOWLEDGED' };
     },
   });
 }

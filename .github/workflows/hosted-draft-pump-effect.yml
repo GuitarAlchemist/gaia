@@ -23,6 +23,10 @@ on:
         description: Trusted ledger registry root content revision
         required: true
         type: string
+      managed-round-json:
+        description: Exact operator-authored R0 and optional R1 contract
+        required: true
+        type: string
 permissions:
   actions: read
   contents: read
@@ -85,6 +89,7 @@ jobs:
           GAIA_EXPECTED_REVISION: ${{ inputs['committed-revision'] }}
           GAIA_LEDGER_ROOT_OID: ${{ inputs['ledger-root-oid'] }}
           GAIA_LEDGER_ROOT_REVISION: ${{ inputs['ledger-root-revision'] }}
+          GAIA_MANAGED_ROUND_JSON: ${{ inputs['managed-round-json'] }}
           GAIA_DRAFT_OWNER: Gaia hosted Draft pump
           GAIA_DRAFT_GATE: DELIVERY
           GAIA_CHECKLIST_JSON: '["Create or reuse one exact Draft pull request","Persist one terminal receipt"]'
