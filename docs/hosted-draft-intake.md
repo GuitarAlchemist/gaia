@@ -2,6 +2,11 @@
 
 Status: design gate for issue #70. Base `cb318d222ebe94a25afda43fba9029e984a60540`.
 
+The original repository-wide concurrency policy below was superseded by issue #84. Current
+label-triggered runs are partitioned by issue number while scheduled recovery remains serialized;
+see [Hosted parallel intake lanes R0](hosted-parallel-intake-lanes.md). The rest of this design,
+including the durable CAS and authority boundary, remains current.
+
 ## Problem
 
 PR #69 proved the sealed effect executor, but a human still enqueues and dispatches every Draft
@@ -39,13 +44,80 @@ parameter; only the pinned constant at `scripts/hosted-draft-pump.mjs:27` curren
 to one workflow file. Unpinning that constant into a sealed per-command map is the whole unlock.
 **No `actions: write`, no new repository variable, and no new secret are required.**
 
+### R2 — the observation denominator, designed twice
+
+Alternative C shipped its concurrency group split in R1: labeled intake now runs under
+`gaia-draft-intake-issue-<N>` and scheduled recovery under `gaia-draft-intake-recovery`. Those are
+different group strings and therefore independent queues, so a labeled lane and the recovery lane
+overlap freely. That is the point of issue #84 — and it invalidated an assumption the receipt was
+still built on.
+
+**The defect.** `unsettledCount` was never read after the run acted. It was *projected*: the
+unsettled list snapshotted before selection, plus or minus one for the operation this run itself
+settled or admitted. Under the single repository-wide group that projection was exactly right,
+because nothing else could write to the ledger while the run held the queue. With the groups split,
+a concurrent labeled lane can durably enqueue work during the recovery lane's own run, and the
+projection then corresponds to no ledger state that ever existed at publication time. The recovery
+lane publishes phase `EXPECTED_NONE` with `unsettledCount: 0`; `deriveState` reads a zero
+denominator and renders `EXPECTED_NONE`, whose severity is `healthy`, while durable truth is one
+unsettled operation. Since R1 the recovery lane is the *only* lane given an observation path, so
+nothing publishes the contradicting reading any more.
+
+Three shipped normative statements already describe the count this repair implements — the receipt
+comment at `src/hosted-draft-pump.mjs`, `docs/hosted-draft-pump-producer.md`'s "at the end of this
+run, not at its start", and the receipt section below. The code delivered a before-picture. This is
+a correction of the code to the contract, not a change of contract.
+
+**Option (a) — a post-action authoritative recount.** Re-read the unsettled list after the run has
+acted and publish what that read returned. This replaces arithmetic with a measurement, and it
+closes both interleavings that reproduce the defect: the one where a concurrent lane enqueues while
+this run works, and the one where this run's own enqueue loses the compare-and-set — in the second
+case the winner's write is provably durable before this run's read, so the correction is not merely
+likely but guaranteed. Its cost is one extra ledger read per run. Its honest limit is a residual
+window: a lane that enqueues *after* this run's final read is still not reflected. That window
+shrinks from the whole run — selection, admission, and a provider round trip — to the gap between
+the last read and receipt emission, in which this run performs no effect. It does not reach zero,
+because no observer can verify the absence of a write that happens after its last read.
+
+**Option (b) — an explicit fail-closed scope rule.** Carry the provenance of the denominator on the
+receipt — whether the run can vouch that its count is repository-global — and refuse to render
+`healthy` from a count it cannot vouch for. Two objections, one of substance and one of size. Of
+substance: after the group split no lane can ever vouch, so the rule would refuse `healthy` on every
+reading, deleting issue #70's tracer item 7 — distinguishing a healthy empty queue from a pump that
+never ticked — in the name of protecting it. A rule about a number cannot make the number
+trustworthy; only reading it can. Of size: the flag would have to cross the receipt, the producer's
+evidence fields, and the sealed observation body, touching three modules and the CLI, where (a)
+touches one function. Note also that `deriveState` already fails closed on the denominator it is
+given: `unsettledCount > 0` pre-empts `EXPECTED_NONE`, `ADVANCED` and `REPLAYED` alike. The rule is
+not missing. Its input was wrong.
+
+**Selected: (a), applied in (b)'s direction.** The post-action read is authoritative, and it is
+combined with the published count in one direction only — it may raise the count, never lower it.
+Concretely, the run publishes its projection plus the unsettled operations that appear in the
+post-action read, were absent from the pre-action snapshot, and are not the operation this run
+itself admitted. Those are exactly the durable writes of a concurrent lane.
+
+Two properties follow, and both are asserted. First, the correction is monotone upward, so it can
+only move a reading from `healthy` toward `UNSETTLED`/`warning` and never the reverse: a bug in the
+delta cannot manufacture a false clear, which is the one direction this seam must never fail.
+Second, with no concurrent lane the delta is empty and the published count is unchanged, so the
+serial contract — a completed recovery reads as one fewer, an admission that did not settle reads as
+one more — is preserved exactly rather than restated.
+
+**What this does not claim.** The residual window above is real and is not closed by this repair. A
+published reading is a past-tense fact about the last ledger state its run read; the seam's existing
+freshness machinery, not the denominator, is what carries how old that fact is. What is fixed here
+is narrower and worse than staleness: a run publishing a number contradicted by durable truth it
+could have read and did not, while it was still executing.
+
 ## The intake workflow
 
 `.github/workflows/hosted-draft-intake.yml`, new, structurally mirroring the effect workflow:
 
 - `on: issues: types: [labeled]` and `on: schedule` with one bounded cron, four runs per day.
 - `permissions: actions: read` and `contents: read`, nothing more.
-- `concurrency: group: gaia-draft-intake` with `cancel-in-progress: false`.
+- a composite non-cancelling concurrency group: per issue number for label triggers and one
+  `gaia-draft-intake-recovery` group for scheduled recovery.
 
 The job is gated by an `if:` that admits every non-`issues` event and, for `issues`, only the
 `ready-for-agent` label. The gate is a filter, never authority. Steps mirror the effect workflow one
@@ -59,9 +131,10 @@ The issue number reaches the CLI only through an `env:` binding of `github.event
 interpolated into a `run:` body. It is re-validated as a positive integer and then fully re-derived
 from the API by `createHostedDraftCollector`. Nothing from the webhook payload becomes authority.
 
-The repository-wide group is strictly stronger than the effect workflow's per-work-key group: at most
-one intake run is in progress across the repository, therefore at most one intake-originated effect
-is in flight.
+Label-triggered intake runs for distinct issues may overlap. Duplicate events for one issue share
+one workflow group, while the existing ledger CAS remains the correctness mechanism and chooses the
+one effect winner. Scheduled recovery stays repository-wide because it selects from the shared
+unsettled set.
 
 `GITHUB_TOKEN` is never referenced; every mutating call runs under the App installation token. The
 `permissions:` block is a minimality declaration over an unused token, not the grant. Not required:
@@ -76,25 +149,48 @@ runtime methods:
 
 ```
 1. unsettled = listUnsettledDrafts(ports)
-2. if unsettled is non-empty:
+2. if this is an issue-triggered run, retain only unsettled work for that explicit issue candidate
+3. if the applicable unsettled set is non-empty:
        reconcile unsettled[0] at its committed revision
        emit receipt phase RESUME; stop, admitting no new work this run
-3. candidates:
+4. candidates:
        issues-labeled run -> [ the event issue number ]
        scheduled run      -> open ready-for-agent issues, number ascending, capped at N = 5
-4. for each candidate, at most N probes:
+5. for each candidate, at most N probes:
        enqueue; on a typed collector error or any non-Enqueued result, record a skip and continue
        reconcile the enqueued operation at its committed revision
        emit receipt phase ADMIT; stop
 5. emit receipt phase EXPECTED_NONE
 ```
 
-Step 2 is requirement 3 verbatim: exactly one unsettled operation is resumed, and a resuming run
-admits nothing. Step 4 admits at most one candidate per run, satisfying requirement 4. Both the
+Step 3 is requirement 3 verbatim for scheduled recovery: exactly one unsettled operation is resumed,
+and a resuming run admits nothing. An issue-triggered lane resumes only the operation for its own
+issue, so unrelated recovery cannot steal the lane. Step 5 admits at most one candidate per run,
+satisfying requirement 4. Both the
 unsettled list and the candidate list are deterministically ordered; the chosen order is asserted in
 tests and recorded in the receipt. Note that `listUnsettledDrafts` sorts by `workKey` while
 `runHostedDraftSupervisor` re-sorts by `operationId` — two different deterministic orders over the
 same list. Intake picks one and states it.
+
+The action selector and the observation denominator are deliberately separate. An issue-triggered
+run filters the records it may reconcile, but its receipt counts the full validated unsettled list,
+not the filtered one. That count is the projection over the pre-action snapshot — adjusted for the
+matching operation this run settled or the new operation it admitted — **raised by** the unsettled
+operations a second, post-action read of the ledger returns that were absent from the pre-action
+snapshot and were not admitted by this run. Those are the durable writes of a concurrent lane.
+
+The two reads are both required, and the combination is deliberately one-directional. The
+projection carries what this run did to its own operation, which a bare recount cannot attribute;
+the post-action read carries what other lanes did, which no projection can see. Because the second
+term is only ever added, the published count can be raised toward `UNSETTLED` and never lowered
+toward `healthy` — the direction this seam must never fail in.
+
+This does not make the count instantaneously true, and no mechanism available here would. A lane
+that enqueues after this run's final read is not reflected; that residual window spans receipt
+emission only, during which this run performs no effect, and it is the ordinary staleness of any
+read model rather than a contradiction of durable truth the run had already observed. What it does
+close is the case where a lane rendered the repository healthy while work it could have read was
+durably unsettled. See *R2 — the observation denominator, designed twice* above.
 
 The orchestration itself belongs in `src/hosted-draft-pump.mjs` as a third pure, dependency-injected
 export, `runHostedDraftIntake`, alongside the existing two. The CLI calls it. Reconciliation reuses
@@ -228,9 +324,9 @@ There is no re-enqueue path and no new-generation path, and this design adds nei
 `src/github-actions-draft-admission.mjs` documents that GitHub's workflow-run representation does not
 expose the concurrency group, so the exact group is a **structural invariant of the sealed workflow**.
 With two admission-granting workflows at different group scopes — per-work-key for the effect
-workflow, repository-wide for intake — Actions alone no longer guarantees "at most one in-progress
-effect per work key". A manually dispatched effect run and a scheduled intake run can both hold
-`AVAILABLE` for the same work key.
+workflow, per-issue for labeled intake, and repository-wide for recovery — Actions alone does not
+guarantee "at most one in-progress effect per work key". A manually dispatched effect run and an
+intake run can both hold `AVAILABLE` for the same work key.
 
 The system remains duplicate-free, but for a different reason, and that reason must be stated in its
 own words rather than inherited from the sealed-workflow argument: **the ledger CAS, not Actions,
@@ -246,10 +342,10 @@ tests are not touched.
 
 Two facts make a recovery-only schedule and a lowest-numbered selector both wrong.
 
-**Pending runs coalesce.** With `cancel-in-progress: false`, Actions keeps at most one pending run
-per group and cancels older pending runs. If three issues are labelled while an intake run executes,
-at most one of the three label events survives. The schedule is therefore the only path that
-re-admits the lost ones: it must be an **admission** path, not merely a recovery path.
+**Pending duplicate runs coalesce.** With `cancel-in-progress: false`, Actions bounds pending runs
+inside one issue group. Independent issue labels no longer coalesce with each other. The schedule is
+still the recovery path for work whose label event predated this policy or whose run never reached
+durable enqueue, so it remains an **admission** path, not merely a recovery path.
 
 **A refusal is terminal for a work key forever.** `enqueueDraft` returns `StaleRevision` for any work
 key that already carries a record when the expected committed revision is `NONE`. Verified live at
@@ -268,7 +364,8 @@ Every failure mode denies rather than proceeds, and every denial is a typed, red
 
 | Failure | Detection | Outcome |
 |---|---|---|
-| Two intake triggers race | repository-wide group, `cancel-in-progress: false` | second run queues, then re-reads durable state |
+| Two triggers for one issue race | per-issue group, `cancel-in-progress: false` | second run queues, then re-reads durable state |
+| Two distinct issue triggers overlap | distinct issue groups plus per-work-key CAS | independent work may advance; same-key loser performs no effect |
 | Two processes reconcile one operation | CAS on `CLAIMED` | one advances; loser `StaleRevision`, no provider call |
 | Crash after enqueue | `listUnsettledDrafts` | next intake resumes at step 2 |
 | Crash after `EFFECT_STARTED`, PR created | marker lookup | `REUSED` |
@@ -308,10 +405,17 @@ to the file scope and needs its own RED pass; folding it into the intake change 
 surfaces. This section fixes its contract so that the later change cannot drift.
 
 The read model landed first and the producer landed after it, specified by
-docs/hosted-draft-pump-producer.md. The intake run seals its own transition through
-`src/hosted-draft-pump-producer.mjs` and writes it to `--observation-out`, which the workflow
-uploads as `gaia-hosted-draft-pump-observation`. No human hand-authors the document, and a run that
-cannot honestly say what the pump did publishes nothing and names the refusal in its receipt.
+docs/hosted-draft-pump-producer.md. A run that is given an observation path seals its own
+transition through `src/hosted-draft-pump-producer.mjs` and writes it there, and the workflow
+uploads it as `gaia-hosted-draft-pump-observation`. No human hand-authors the document, and a run
+that cannot honestly say what the pump did publishes nothing and names the refusal in its receipt.
+
+Since issue #84, only the serialized recovery lane is given that path. The reading is sequenced by
+the Actions run id, run ids are executed in order only within one concurrency group, and labeled
+intake is now a group per issue; a lane reading could therefore arrive with a lower sequence than
+the one already published and be refused on healthy forward progress. Keeping one writer for the
+ordered reading is what makes `requireMonotonic` true as written. See
+[Hosted parallel intake lanes R0](hosted-parallel-intake-lanes.md).
 
 ## Deliberately not built
 
@@ -359,10 +463,15 @@ RED before GREEN, all at public seams; no private state is reached.
 | T10 | `createGitHubActionsDraftAdmission` | effect-workflow environment, intake expected path | `reserveEffect` returns `ZERO` |
 | T11 | `createGitHubActionsDraftAdmission` | intake environment, intake path, run `in_progress` | `AVAILABLE` |
 | T12 | CLI `main` with injected argv, env, streams, runtime factory | intake argv with issues-shaped environment | parses; factory receives command `intake` and the policy-sourced ledger root |
-| T13 | `tests/hosted-draft-intake-workflow.test.mjs` | the new YAML | `issues: [labeled]` and `schedule`; group `gaia-draft-intake`; `cancel-in-progress: false`; permissions exactly `actions: read` and `contents: read`; App token; `persist-credentials: false`; `ref: github.workflow_sha`; no `GITHUB_TOKEN` reference; no `actions: write`; no `docker` |
+| T13 | `tests/hosted-draft-intake-workflow.test.mjs` | the new YAML | `issues: [labeled]` and `schedule`; one `concurrency.group`, the per-event expression selecting `gaia-draft-intake-issue-<number>` for `issues` and `gaia-draft-intake-recovery` otherwise, with the flat `gaia-draft-intake` group asserted **absent**; `cancel-in-progress: false`; permissions exactly `actions: read` and `contents: read`; App token; `persist-credentials: false`; `ref: github.workflow_sha`; no `GITHUB_TOKEN` reference; no `actions: write`; no `docker` |
 | T14 | `tests/hosted-draft-pump-workflow.test.mjs`, unchanged | regression | the sealed effect workflow still passes byte for byte |
 | T15 | `listReadyIssues` | fake transport returns a PR row and an issue row | PR dropped; issues ascending by number |
 | T16 | `listUnsettledDrafts` on a corrupt chain | — | `LedgerCorrupt`; nothing admitted |
+| T17 | `runHostedDraftIntake` -> producer -> read model | a lane commits durably while a recovery run selects | receipt and block count 1; state `UNSETTLED`; severity is not `healthy` |
+| T18 | `runHostedDraftIntake` -> producer -> read model | the recovery run lists the same issue and loses the compare-and-set | receipt and block count 1 alongside the `StaleRevision` skip; not `healthy` |
+| T19 | `runHostedDraftIntake` -> producer -> read model | genuinely empty ledger, no candidate | `EXPECTED_NONE` / `healthy` / 0 — the positive control the repair must not break |
+| T20 | `runHostedDraftIntake` | post-action read returns less than the run projected | the count is not lowered; the operation left open is still counted |
+| T21 | `runHostedDraftIntake` | post-action read contains the operation this run admitted | counted once, not twice |
 
 Beyond the suite: focused tests twice, full suite twice, `npm run verify`, deterministic replay, and
 a live proof that one labelled issue and one recovery replay create no duplicate Draft.
@@ -387,3 +496,11 @@ a live proof that one labelled issue and one recovery replay create no duplicate
 5. **The cross-workflow concurrency invariant is weakened**, as stated above. Duplicate-freedom now
    rests on the ledger CAS alone. Any future change that adds a re-enqueue path, or that lets
    `EFFECT_AMBIGUOUS` reach `createDraft`, breaks it.
+6. **The observation denominator is narrowed, not exact.** The post-action read closes the window in
+   which a concurrent lane commits while a run is selecting or admitting, but not the window between
+   that read and receipt emission. A lane committing there is unobserved until the next tick. The
+   correction term is one-directional - it can only raise the projection, never lower it - so a lane
+   that committed *before* the read can never be dropped; a lane that commits *after* it is the
+   under-count described above, and it can render `healthy` until the next tick. Closing the remainder
+   requires a denominator the lane can serialize against, which the per-issue groups deliberately gave
+   up.
