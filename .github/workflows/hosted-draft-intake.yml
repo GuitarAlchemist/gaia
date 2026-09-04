@@ -1,6 +1,7 @@
 name: Hosted Draft intake
 
 on:
+  workflow_dispatch:
   issues:
     types: [labeled]
   schedule:
