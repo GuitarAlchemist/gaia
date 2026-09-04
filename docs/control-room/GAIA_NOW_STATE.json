@@ -1,0 +1,79 @@
+{
+  "schema": "GaiaNowLiveStateV0",
+  "observedAt": "2026-09-04T23:50:07.6513815+00:00",
+  "digest": "live-github",
+  "drafts": [
+    {
+      "number": 116,
+      "title": "docs: checkpoint Gaia Now control surface",
+      "url": "https://github.com/GuitarAlchemist/gaia/pull/116",
+      "branch": "codex/gaia-now-checkpoint-r0",
+      "author": "spareilleux",
+      "createdAt": "2026-09-04T23:26:33Z",
+      "updatedAt": "2026-09-04T23:26:33Z",
+      "checks": {
+        "success": 4,
+        "failure": 4,
+        "pending": 0,
+        "total": 8
+      }
+    },
+    {
+      "number": 109,
+      "title": "test: remove the r8 transient-mutant race from the product enumeration gate (#98)",
+      "url": "https://github.com/GuitarAlchemist/gaia/pull/109",
+      "branch": "codex/issue-98-suite-race-r0",
+      "author": "spareilleux",
+      "createdAt": "2026-09-04T05:52:43Z",
+      "updatedAt": "2026-09-04T05:52:43Z",
+      "checks": {
+        "success": 8,
+        "failure": 0,
+        "pending": 0,
+        "total": 8
+      }
+    },
+    {
+      "number": 97,
+      "title": "feat: github drain agent team R0",
+      "url": "https://github.com/GuitarAlchemist/gaia/pull/97",
+      "branch": "codex/github-drain-agents-r0",
+      "author": "spareilleux",
+      "createdAt": "2026-09-03T23:43:31Z",
+      "updatedAt": "2026-09-04T05:33:05Z",
+      "checks": {
+        "success": 8,
+        "failure": 0,
+        "pending": 0,
+        "total": 8
+      }
+    },
+    {
+      "number": 95,
+      "title": "R0: provider-neutral lane generation bootstrapper (issue #93)",
+      "url": "https://github.com/GuitarAlchemist/gaia/pull/95",
+      "branch": "codex/wmux-bootstrapper-r0",
+      "author": "spareilleux",
+      "createdAt": "2026-09-02T02:18:31Z",
+      "updatedAt": "2026-09-04T05:33:22Z",
+      "checks": {
+        "success": 8,
+        "failure": 0,
+        "pending": 0,
+        "total": 8
+      }
+    }
+  ],
+  "pump": {
+    "runId": 33930096933,
+    "status": "completed",
+    "conclusion": "success",
+    "url": "https://github.com/GuitarAlchemist/gaia/actions/runs/33930096933",
+    "createdAt": "2026-09-04T23:35:45Z",
+    "updatedAt": "2026-09-04T23:40:04Z"
+  },
+  "afk": {
+    "status": "afk",
+    "idleSeconds": 543
+  }
+}
