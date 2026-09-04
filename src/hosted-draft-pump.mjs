@@ -242,6 +242,14 @@ function settledRevision(value, fallback) {
   return fallback;
 }
 
+function unchangedAmbiguousRetry(value, record) {
+  return value.kind === 'Pending'
+    && value.state === 'EFFECT_AMBIGUOUS'
+    && value.effect === 'UNKNOWN'
+    && value.providerError === 'ProviderAmbiguous'
+    && settledRevision(value, record.committedRevision) === record.committedRevision;
+}
+
 export async function runHostedDraftIntake({
   repository, candidates = null, limit = 5,
 } = {}, {
@@ -281,22 +289,31 @@ export async function runHostedDraftIntake({
   const records = explicitIssueNumbers === null
     ? allRecords
     : allRecords.filter((record) => explicitIssueNumbers.has(record.selector.workItem.number));
+  const skipped = [];
   if (records.length > 0) {
-    const record = records[0];
-    const ports = await boundPorts(
-      deps.operationPortsFor, freeze(ownedClone(record, 'InvalidUnsettledOperation')),
-    );
-    const reconciled = result(await deps.reconcileDraft(
-      record.operationId, record.committedRevision, ports,
-    ));
-    const appeared = await concurrentlyAppeared(deps, observedBefore, record.workKey);
-    return intakeReceipt('RESUME', {
-      operationId: record.operationId,
-      workKey: record.workKey,
-      committedRevision: settledRevision(reconciled, record.committedRevision),
-      workItem: record.selector.workItem,
-      unsettledCount: allRecords.length - (settledByThisRun(reconciled) ? 1 : 0) + appeared,
-    }, reconciled, []);
+    for (const record of records.slice(0, limit)) {
+      const ports = await boundPorts(
+        deps.operationPortsFor, freeze(ownedClone(record, 'InvalidUnsettledOperation')),
+      );
+      const reconciled = result(await deps.reconcileDraft(
+        record.operationId, record.committedRevision, ports,
+      ));
+      // A scheduled retry that remains ambiguous at the exact same durable revision performed no
+      // new effect. Quarantine it for this tick so one poison message cannot block the queue. An
+      // issue-scoped run remains fail-closed, and any changed revision stops here for observation.
+      if (explicitIssueNumbers === null && unchangedAmbiguousRetry(reconciled, record)) {
+        skipped.push({ number: record.selector.workItem.number, reason: 'EFFECT_AMBIGUOUS' });
+        continue;
+      }
+      const appeared = await concurrentlyAppeared(deps, observedBefore, record.workKey);
+      return intakeReceipt('RESUME', {
+        operationId: record.operationId,
+        workKey: record.workKey,
+        committedRevision: settledRevision(reconciled, record.committedRevision),
+        workItem: record.selector.workItem,
+        unsettledCount: allRecords.length - (settledByThisRun(reconciled) ? 1 : 0) + appeared,
+      }, reconciled, skipped);
+    }
   }
 
   let numbers;
@@ -310,7 +327,6 @@ export async function runHostedDraftIntake({
   }
   const ordered = [...new Set(numbers)].sort((left, right) => left - right).slice(0, limit);
 
-  const skipped = [];
   for (const number of ordered) {
     const canonicalSelector = selector({
       repository: canonicalRepository, workItem: { kind: 'ISSUE', number },

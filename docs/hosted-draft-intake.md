@@ -151,8 +151,11 @@ runtime methods:
 1. unsettled = listUnsettledDrafts(ports)
 2. if this is an issue-triggered run, retain only unsettled work for that explicit issue candidate
 3. if the applicable unsettled set is non-empty:
-       reconcile unsettled[0] at its committed revision
-       emit receipt phase RESUME; stop, admitting no new work this run
+       for each deterministic record, capped at N = 5:
+         reconcile it at its committed revision
+         scheduled run + unchanged EFFECT_AMBIGUOUS at that exact revision -> record a quarantine
+           skip for this tick and continue
+         otherwise emit receipt phase RESUME and stop
 4. candidates:
        issues-labeled run -> [ the event issue number ]
        scheduled run      -> open ready-for-agent issues, number ascending, capped at N = 5
@@ -163,10 +166,14 @@ runtime methods:
 5. emit receipt phase EXPECTED_NONE
 ```
 
-Step 3 is requirement 3 verbatim for scheduled recovery: exactly one unsettled operation is resumed,
-and a resuming run admits nothing. An issue-triggered lane resumes only the operation for its own
-issue, so unrelated recovery cannot steal the lane. Step 5 admits at most one candidate per run,
-satisfying requirement 4. Both the
+Step 3 remains fail-closed for issue-triggered intake: the lane resumes only the operation for its
+own issue and returns its result, so unrelated recovery cannot steal the lane. Scheduled recovery
+may probe forward only after an exact replay returned `Pending / EFFECT_AMBIGUOUS / UNKNOWN /
+ProviderAmbiguous` at the unchanged committed revision. That predicate proves this retry performed
+no new effect. The record is preserved durably and named in `skipped`; quarantine applies only to
+this tick. Any revision change or different result stops immediately. If every bounded recovery
+probe is quarantined, the scheduled run may continue to candidate admission. Step 5 still admits at
+most one candidate per run, satisfying requirement 4. Both the
 unsettled list and the candidate list are deterministically ordered; the chosen order is asserted in
 tests and recorded in the receipt. Note that `listUnsettledDrafts` sorts by `workKey` while
 `runHostedDraftSupervisor` re-sorts by `operationId` — two different deterministic orders over the
@@ -304,6 +311,12 @@ on every pass and adopts a found PR as `REUSED`.
 **Convergence.** Two triggers reading the same prior state converge because the only writer path is
 the CAS and the only effect path is gated behind a successful chain of CAS steps.
 
+**Poison-message isolation.** Scheduled recovery may skip an unchanged `EFFECT_AMBIGUOUS` record
+only after reconciling it under the same operation identity and committed revision. The skip is not
+a state transition and grants no effect authority; the durable record remains unsettled and visible.
+Issue-triggered retries never quarantine, and any changed revision stops the scheduled tick. Thus a
+bad message cannot block the whole queue without permitting a blind retry or hiding the blocker.
+
 ## Never a duplicate Draft
 
 The dangerous window is `EFFECT_STARTED` committed, create issued, response lost, process dies.
@@ -358,6 +371,14 @@ typed reason in the receipt, up to a bounded `N = 5` probes per run. Probing is 
 `readHead(workKey)` pre-filter specifically because the pre-filter would require a third work-key
 derivation site; a few extra reads per skipped candidate is the cheaper price.
 
+**An unchanged ambiguous recovery is nonterminal but inert for this tick.** A transport-ambiguous
+record may remain at the front of the deterministic unsettled order indefinitely. Retrying the same
+reconciliation can prove that no durable revision changed while still being unable to settle the
+record. Scheduled recovery therefore probes past up to `N = 5` such records and records each as
+`EFFECT_AMBIGUOUS` in `skipped`. This is message-pump quarantine, not acknowledgement: the record
+remains in the unsettled denominator and will be retried on a later tick. A non-ambiguous result or a
+revision change ends the tick before any later work is touched.
+
 ## Fail-closed behavior
 
 Every failure mode denies rather than proceeds, and every denial is a typed, redacted receipt:
@@ -371,6 +392,8 @@ Every failure mode denies rather than proceeds, and every denial is a typed, red
 | Crash after `EFFECT_STARTED`, PR created | marker lookup | `REUSED` |
 | Crash after `EFFECT_STARTED`, PR absent | `EFFECT_AMBIGUOUS` | only `REUSED` reachable; never a blind retry |
 | More than one open PR on the head ref | provider ambiguity check | `EFFECT_AMBIGUOUS`; never a second create |
+| Unchanged ambiguous record heads the scheduled queue | same operation and committed revision after reconcile | record remains unsettled; quarantined for this tick; bounded probe continues |
+| Ambiguous retry changes durable revision | committed revision differs from the listed record | stop the tick and publish the new observation; no later message is touched |
 | Wrong workflow, run not `in_progress`, path or sha mismatch | admission returns `ZERO` | `REFUSED` / `NoEffectCapacity` |
 | Ledger ruleset removed or bypass actor changed | protection re-verified before every write | `LedgerProtectionUnavailable`; nothing written |
 | Ledger root tampered in the policy file | registry oid and revision check | `LedgerRegistryMismatch` |
@@ -451,7 +474,7 @@ RED before GREEN, all at public seams; no private state is reached.
 
 | # | Seam | Scenario | Expected |
 |---|---|---|---|
-| T1 | `runHostedDraftIntake` | one unsettled record present | reconciles it; `enqueueDraft` never called; phase `RESUME` |
+| T1 | `runHostedDraftIntake` | one non-ambiguous unsettled record present | reconciles it; `enqueueDraft` never called; phase `RESUME` |
 | T2 | `runHostedDraftIntake` | no unsettled, no candidates | phase `EXPECTED_NONE`; no provider call |
 | T3 | `runHostedDraftIntake` | first two candidates `StaleRevision`, third `Enqueued` | third admitted; `skipped` names the first two — the starvation regression |
 | T4 | `runHostedDraftIntake` | candidate throws `IssueNotReady` / `HeadIdentityAmbiguous` | skipped with typed code; probing continues |
@@ -472,6 +495,10 @@ RED before GREEN, all at public seams; no private state is reached.
 | T19 | `runHostedDraftIntake` -> producer -> read model | genuinely empty ledger, no candidate | `EXPECTED_NONE` / `healthy` / 0 — the positive control the repair must not break |
 | T20 | `runHostedDraftIntake` | post-action read returns less than the run projected | the count is not lowered; the operation left open is still counted |
 | T21 | `runHostedDraftIntake` | post-action read contains the operation this run admitted | counted once, not twice |
+| T22 | `runHostedDraftIntake` | scheduled queue head remains ambiguous at the unchanged revision; next record settles | first record is quarantined for the tick; second record is reconciled; phase `RESUME` |
+| T23 | `runHostedDraftIntake` | issue-scoped retry remains ambiguous at the unchanged revision | returns that pending result; no quarantine or unrelated work |
+| T24 | `runHostedDraftIntake` | scheduled ambiguous retry returns a changed revision | stops at that record; no later recovery or admission |
+| T25 | `runHostedDraftIntake` | every bounded recovery probe is unchanged and ambiguous; eligible candidate exists | quarantines the old records and admits at most one candidate |
 
 Beyond the suite: focused tests twice, full suite twice, `npm run verify`, deterministic replay, and
 a live proof that one labelled issue and one recovery replay create no duplicate Draft.

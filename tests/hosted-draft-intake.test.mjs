@@ -84,6 +84,147 @@ test('scheduled recovery resumes unsettled work before any candidate is listed o
   assert.deepEqual(receipt.skipped, []);
 });
 
+test('scheduled recovery quarantines an unchanged ambiguous head and drains the next message', async () => {
+  const run = await intake();
+  const records = [
+    { operationId: SHA_A, workKey: SHA_A, committedRevision: SHA_C,
+      selector: selectorFor(51) },
+    { operationId: SHA_B, workKey: SHA_B, committedRevision: SHA_D,
+      selector: selectorFor(52) },
+  ];
+  const reconciled = [];
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return records; },
+    async listReadyIssues() { assert.fail('the second unsettled message must drain first'); },
+    async enqueueDraft() { assert.fail('recovery must not admit before draining unsettled work'); },
+    async reconcileDraft(operationId, expected) {
+      reconciled.push(operationId);
+      if (operationId === SHA_A) {
+        return {
+          kind: 'Pending', state: 'EFFECT_AMBIGUOUS', effect: 'UNKNOWN',
+          providerError: 'ProviderAmbiguous', operationId, committedRevision: expected,
+        };
+      }
+      return {
+        kind: 'Terminal', outcome: 'REUSED', effect: 'NONE',
+        operationId, committedRevision: SHA_A,
+      };
+    },
+  });
+
+  assert.deepEqual(reconciled, [SHA_A, SHA_B]);
+  assert.equal(receipt.phase, 'RESUME');
+  assert.equal(receipt.workItem.number, 52);
+  assert.equal(receipt.unsettledCount, 1);
+  assert.deepEqual(receipt.skipped, [{ number: 51, reason: 'EFFECT_AMBIGUOUS' }]);
+});
+
+test('an issue-scoped retry remains fail-closed on its unchanged ambiguous operation', async () => {
+  const run = await intake();
+  let reconciles = 0;
+  const receipt = await run({ repository: REPOSITORY, candidates: [51] }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() {
+      return [{ operationId: SHA_A, workKey: SHA_A, committedRevision: SHA_C,
+        selector: selectorFor(51) }];
+    },
+    async listReadyIssues() { assert.fail('an issue lane never lists the global queue'); },
+    async enqueueDraft() { assert.fail('the existing operation must remain authoritative'); },
+    async reconcileDraft(operationId, expected) {
+      reconciles += 1;
+      return { kind: 'Pending', state: 'EFFECT_AMBIGUOUS', effect: 'UNKNOWN',
+        providerError: 'ProviderAmbiguous', operationId, committedRevision: expected };
+    },
+  });
+
+  assert.equal(reconciles, 1);
+  assert.equal(receipt.phase, 'RESUME');
+  assert.equal(receipt.workItem.number, 51);
+  assert.equal(receipt.result.state, 'EFFECT_AMBIGUOUS');
+  assert.deepEqual(receipt.skipped, []);
+});
+
+test('scheduled recovery stops when ambiguity advances the durable revision', async () => {
+  const run = await intake();
+  const reconciled = [];
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() {
+      return [
+        { operationId: SHA_A, workKey: SHA_A, committedRevision: SHA_C,
+          selector: selectorFor(51) },
+        { operationId: SHA_B, workKey: SHA_B, committedRevision: SHA_D,
+          selector: selectorFor(52) },
+      ];
+    },
+    async listReadyIssues() { assert.fail('a changed effect boundary stops the tick'); },
+    async enqueueDraft() { assert.fail('a changed effect boundary stops the tick'); },
+    async reconcileDraft(operationId) {
+      reconciled.push(operationId);
+      return { kind: 'Pending', state: 'EFFECT_AMBIGUOUS', effect: 'UNKNOWN',
+        providerError: 'ProviderAmbiguous', operationId, committedRevision: SHA_D };
+    },
+  });
+
+  assert.deepEqual(reconciled, [SHA_A]);
+  assert.equal(receipt.workItem.number, 51);
+  assert.equal(receipt.committedRevision, SHA_D);
+  assert.deepEqual(receipt.skipped, []);
+});
+
+test('scheduled recovery admits one candidate after every probed message stays ambiguously inert', async () => {
+  const run = await intake();
+  const record = {
+    operationId: SHA_A, workKey: SHA_A, committedRevision: SHA_C, selector: selectorFor(51),
+  };
+  let candidateLists = 0;
+  let admissions = 0;
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return [record]; },
+    async listReadyIssues() {
+      candidateLists += 1;
+      return [{ number: 61 }];
+    },
+    async enqueueDraft(candidate) {
+      admissions += 1;
+      assert.equal(candidate.workItem.number, 61);
+      return {
+        kind: 'Enqueued', operationId: SHA_B, workKey: SHA_D,
+        generationKey: SHA_A, committedRevision: SHA_D,
+      };
+    },
+    async reconcileDraft(operationId, expected) {
+      if (operationId === SHA_A) {
+        return {
+          kind: 'Pending', state: 'EFFECT_AMBIGUOUS', effect: 'UNKNOWN',
+          providerError: 'ProviderAmbiguous', operationId, committedRevision: expected,
+        };
+      }
+      return {
+        kind: 'Terminal', outcome: 'CREATED', effect: 'CREATE_DRAFT',
+        operationId, committedRevision: SHA_B,
+      };
+    },
+  });
+
+  assert.equal(candidateLists, 1);
+  assert.equal(admissions, 1);
+  assert.equal(receipt.phase, 'ADMIT');
+  assert.equal(receipt.workItem.number, 61);
+  assert.equal(receipt.unsettledCount, 1, 'the quarantined record remains durably unsettled');
+  assert.deepEqual(receipt.skipped, [{ number: 51, reason: 'EFFECT_AMBIGUOUS' }]);
+});
+
 test('concurrent issue lanes cannot be consumed by unrelated unsettled recovery work', async () => {
   const run = await intake();
   const enqueued = [];
