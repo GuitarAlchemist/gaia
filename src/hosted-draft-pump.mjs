@@ -243,11 +243,16 @@ function settledRevision(value, fallback) {
 }
 
 function unchangedAmbiguousRetry(value, record) {
+  const observedRevision = typeof value.committedRevision === 'string'
+    ? value.committedRevision
+    : typeof value.currentCommittedRevision === 'string'
+      ? value.currentCommittedRevision
+      : null;
   return value.kind === 'Pending'
     && value.state === 'EFFECT_AMBIGUOUS'
     && value.effect === 'UNKNOWN'
     && value.providerError === 'ProviderAmbiguous'
-    && settledRevision(value, record.committedRevision) === record.committedRevision;
+    && observedRevision === record.committedRevision;
 }
 
 export async function runHostedDraftIntake({

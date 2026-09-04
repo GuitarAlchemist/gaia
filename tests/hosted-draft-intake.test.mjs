@@ -179,6 +179,38 @@ test('scheduled recovery stops when ambiguity advances the durable revision', as
   assert.deepEqual(receipt.skipped, []);
 });
 
+test('scheduled recovery stops when an ambiguous retry carries no observed revision', async () => {
+  const run = await intake();
+  const reconciled = [];
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() {
+      return [
+        { operationId: SHA_A, workKey: SHA_A, committedRevision: SHA_C,
+          selector: selectorFor(51) },
+        { operationId: SHA_B, workKey: SHA_B, committedRevision: SHA_D,
+          selector: selectorFor(52) },
+      ];
+    },
+    async listReadyIssues() { assert.fail('missing revision evidence stops the tick'); },
+    async enqueueDraft() { assert.fail('missing revision evidence stops the tick'); },
+    async reconcileDraft(operationId) {
+      reconciled.push(operationId);
+      return {
+        kind: 'Pending', state: 'EFFECT_AMBIGUOUS', effect: 'UNKNOWN',
+        providerError: 'ProviderAmbiguous', operationId,
+      };
+    },
+  });
+
+  assert.deepEqual(reconciled, [SHA_A]);
+  assert.equal(receipt.workItem.number, 51);
+  assert.equal(receipt.committedRevision, SHA_C);
+  assert.deepEqual(receipt.skipped, []);
+});
+
 test('scheduled recovery admits one candidate after every probed message stays ambiguously inert', async () => {
   const run = await intake();
   const record = {

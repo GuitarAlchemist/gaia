@@ -499,6 +499,7 @@ RED before GREEN, all at public seams; no private state is reached.
 | T23 | `runHostedDraftIntake` | issue-scoped retry remains ambiguous at the unchanged revision | returns that pending result; no quarantine or unrelated work |
 | T24 | `runHostedDraftIntake` | scheduled ambiguous retry returns a changed revision | stops at that record; no later recovery or admission |
 | T25 | `runHostedDraftIntake` | every bounded recovery probe is unchanged and ambiguous; eligible candidate exists | quarantines the old records and admits at most one candidate |
+| T26 | `runHostedDraftIntake` | scheduled ambiguous retry carries no observed revision | stops at that record; fallback data cannot prove an unchanged revision |
 
 Beyond the suite: focused tests twice, full suite twice, `npm run verify`, deterministic replay, and
 a live proof that one labelled issue and one recovery replay create no duplicate Draft.
