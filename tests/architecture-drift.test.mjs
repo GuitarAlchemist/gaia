@@ -250,7 +250,13 @@ function createPolicyCliFixture({
 }
 
 function runCli(root, args, env = {}) {
-  return run(root, process.execPath, ['scripts/architecture-drift.mjs', ...args], env);
+  // The fixture owns its event context. Do not let the parent GitHub job silently turn every
+  // child invocation into the production push no-op; tests that exercise that path opt in below.
+  return run(root, process.execPath, ['scripts/architecture-drift.mjs', ...args], {
+    GITHUB_EVENT_NAME: '',
+    GITHUB_EVENT_PATH: '',
+    ...env,
+  });
 }
 
 test('the public drift seam has the same closed report for filesystem and in-memory inventories', () => {
