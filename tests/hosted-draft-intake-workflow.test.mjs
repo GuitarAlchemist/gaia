@@ -29,7 +29,7 @@ function intake() {
   return workflow;
 }
 
-test('intake triggers on issues:labeled and a bounded schedule only', () => {
+test('intake triggers on manual dispatch, issues:labeled, and a bounded schedule only', () => {
   const workflow = intake();
   assert.match(workflow, /^on:\s*$/mu);
   assert.match(workflow, /^ {2}issues:\s*$/mu);
