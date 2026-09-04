@@ -321,15 +321,22 @@ to the SHA-256 revision of the exact `ARCHITECTURE.md` bytes. The named commit m
 same bytes and the behavior this map marks implemented; a design-only commit is not a final
 attestation merely because its tree contains the prose. Keeping the attestation outside this file
 avoids a self-referential content hash while leaving this map byte-stable after review. The record
-is therefore written only after the behavior-bearing commit exists and names that commit.
+is therefore written only after the behavior-bearing commit exists and names that commit. That
+commit is provenance for readers: a squash merge leaves it naming a commit of the merged head
+branch, which main does not contain and a clone need not hold, so the gate never resolves it.
 
 Verification inspects the root README, the pure coordination kernel, append-only event log,
 operation envelope, portfolio/drain, telemetry/control-room, lane, ecosystem, recovery, security,
 and runtime contracts at the attested commit. `npm run architecture:verify` checks this document's
-required sections, internal links, exact content revision and commit witness, declared interface
-contracts, and architecture-sensitive change declaration. The production CLI derives the commit
-witness from raw `git show --end-of-options <commit>:ARCHITECTURE.md` bytes; callers cannot inject
-revision evidence. An explicit base is limited to a full commit identifier or canonical
+required sections, internal links, exact content revision, declared interface contracts, and
+architecture-sensitive change declaration. The content check is the attestation: the record's
+`contentRevision` must equal the SHA-256 of the `ARCHITECTURE.md` bytes in the checked tree, so an
+edit without re-attestation fails as `ARCHITECTURE_CONTENT_REVISION_MISMATCH` in every clone, and a
+record copied from another tree passes only when that tree's bytes are identical. The record's
+`commit` must be a full lowercase commit identifier (`VERIFICATION_RECORD_INVALID` otherwise) and is
+not resolved, so the verdict does not depend on which branch refs a clone has fetched. Callers
+cannot inject revision evidence; the CLI reads the tree and `git diff` for changed paths only. An
+explicit base is limited to a full commit identifier or canonical
 `refs/heads/`, `refs/tags/`, or `refs/remotes/` name and is passed after Git's
 `--end-of-options` delimiter. Detailed subsystem claims remain owned by the linked documents and
 their black-box tests. The CI architecture-impact gate is intentionally pull-request-only because
