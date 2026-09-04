@@ -9,6 +9,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { createGitGhPrReviewThreadEffects } from '../src/git-gh-pr-review-thread-effects.mjs';
 import {
@@ -25,6 +26,21 @@ import { createBoundedRepairLaneEffects } from '../src/pr-review-thread-supervis
 
 const REVIEWED = 'a'.repeat(40);
 const OBSERVED = '2026-08-31T20:00:00.000Z';
+
+const SRC = fileURLToPath(new URL('../src/', import.meta.url));
+const mutantScratch = mkdtempSync(join(tmpdir(), 'gaia-r3-mutant-'));
+test.after(() => rmSync(mutantScratch, { recursive: true, force: true }));
+
+/**
+ * Write a one-expression mutant of a shipped module OUTSIDE `src/`, so the product gates
+ * that enumerate the shipped tree, and `verify`, which scans it, never race this file's
+ * write/remove pairs (#98). Sibling imports are rewritten to absolute URLs.
+ */
+function plantMutant(name, mutant) {
+  const mutantPath = join(mutantScratch, name);
+  writeFileSync(mutantPath, mutant.replaceAll("from './", `from '${pathToFileURL(SRC).href}`), 'utf8');
+  return pathToFileURL(mutantPath).href;
+}
 
 function reviewGraph({ head = REVIEWED, threads = 1 } = {}) {
   return {
@@ -414,18 +430,14 @@ test('R3 MECHANISM REVERT: stable identity and receipt reconciliation prevent du
     runWorker: async () => {}, runReviewer: async () => {}, runRepair: async () => {},
   });
   await original.execute({ intent, idempotencyKey: key });
-  const sourcePath = new URL('../src/github-portfolio-execution.mjs', import.meta.url);
-  const source = readFileSync(sourcePath, 'utf8');
-  const stablePath = new URL('../src/.r3-stable-identity-mutant.mjs', import.meta.url);
-  const reconcilePath = new URL('../src/.r3-reconciliation-mutant.mjs', import.meta.url);
-  try {
+  const source = readFileSync(join(SRC, 'github-portfolio-execution.mjs'), 'utf8');
+  {
     const stableSource = source.replace(
       "kind: 'RUN_FACTORY_AGENT', threadIdentity: evidence?.threadIdentity ?? null,",
       "kind: 'REVERTED_FACTORY_AGENT', threadIdentity: evidence?.threadIdentity ?? null,",
     );
     assert.notEqual(stableSource, source);
-    writeFileSync(stablePath, stableSource);
-    const stableMutant = await import(`${stablePath.href}?r3=stable`);
+    const stableMutant = await import(plantMutant('r3-stable-identity-mutant.mjs', stableSource));
     const stableAdapter = stableMutant.createAgentFactoryExecutionAdapter({
       expectedRepository: 'GuitarAlchemist/gaia', worktree, evidenceRoot,
       executeFactory: async () => { throw new Error('must not run'); },
@@ -438,8 +450,7 @@ test('R3 MECHANISM REVERT: stable identity and receipt reconciliation prevent du
       'if (existsSync(existingReceiptPath)) {', 'if (false) {',
     );
     assert.notEqual(reconcileSource, source);
-    writeFileSync(reconcilePath, reconcileSource);
-    const reconcileMutant = await import(`${reconcilePath.href}?r3=reconcile`);
+    const reconcileMutant = await import(plantMutant('r3-reconciliation-mutant.mjs', reconcileSource));
     let duplicateEffects = 0;
     const reconcileAdapter = reconcileMutant.createAgentFactoryExecutionAdapter({
       expectedRepository: 'GuitarAlchemist/gaia', worktree, evidenceRoot,
@@ -451,24 +462,18 @@ test('R3 MECHANISM REVERT: stable identity and receipt reconciliation prevent du
     });
     await reconcileAdapter.execute({ intent, idempotencyKey: key });
     assert.equal(duplicateEffects, 1, 'without reconciliation the provider effect is repeated');
-  } finally {
-    rmSync(stablePath, { force: true });
-    rmSync(reconcilePath, { force: true });
   }
 });
 
 test('R3 MECHANISM REVERT: removing intent-before-effect starts a lane without durable intent', async () => {
-  const sourcePath = new URL('../src/pr-review-thread-supervisor.mjs', import.meta.url);
-  const mutantPath = new URL('../src/.r3-intent-before-effect-mutant.mjs', import.meta.url);
-  const source = readFileSync(sourcePath, 'utf8');
+  const source = readFileSync(join(SRC, 'pr-review-thread-supervisor.mjs'), 'utf8');
   const mutantSource = source.replace(
     'if (reserve(path, intent)) operationIntent = intent;',
     'if (true) operationIntent = intent;',
   );
   assert.notEqual(mutantSource, source);
-  writeFileSync(mutantPath, mutantSource);
-  try {
-    const mutant = await import(`${mutantPath.href}?r3=intent`);
+  {
+    const mutant = await import(plantMutant('r3-intent-before-effect-mutant.mjs', mutantSource));
     const directory = mkdtempSync(join(tmpdir(), 'gaia-r3-intent-mutant-'));
     const collection = await createGitGhPrReviewThreadEffects({
       readDisputeEvidence: async () => false, run: async () => reviewGraph(),
@@ -503,7 +508,5 @@ test('R3 MECHANISM REVERT: removing intent-before-effect starts a lane without d
       synchronizeTelemetry: async () => ({ rowCount: 0 }), now: () => new Date(OBSERVED),
     }), { code: 'LaneStartFailed' });
     assert.equal(started, 1);
-  } finally {
-    rmSync(mutantPath, { force: true });
   }
 });

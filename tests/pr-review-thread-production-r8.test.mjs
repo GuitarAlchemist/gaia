@@ -5,12 +5,28 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { createGitGhPrReviewThreadEffects } from '../src/git-gh-pr-review-thread-effects.mjs';
 import { runPrReviewThreadSupervisorTick } from '../src/pr-review-thread-supervisor.mjs';
 
 const AT = '2026-09-01T02:00:00.000Z';
 const HEAD = 'a'.repeat(40);
+
+const SRC = fileURLToPath(new URL('../src/', import.meta.url));
+const mutantScratch = mkdtempSync(join(tmpdir(), 'gaia-r8-mutant-'));
+test.after(() => rmSync(mutantScratch, { recursive: true, force: true }));
+
+/**
+ * Write a one-expression mutant of a shipped module OUTSIDE `src/`, so the product gates
+ * that enumerate the shipped tree, and `verify`, which scans it, never race this file's
+ * write/remove pair (#98). Sibling imports are rewritten to absolute URLs.
+ */
+function plantMutant(name, mutant) {
+  const mutantPath = join(mutantScratch, name);
+  writeFileSync(mutantPath, mutant.replaceAll("from './", `from '${pathToFileURL(SRC).href}`), 'utf8');
+  return pathToFileURL(mutantPath).href;
+}
 
 const graph = {
   data: { repository: { pullRequest: {
@@ -97,21 +113,14 @@ test('R8 advancing-clock lost checklist response adopts one exact durable receip
 });
 
 test('R8 MECHANISM REVERT: fresh-tick checklist settlement corrupts the next reconciliation', async () => {
-  const sourcePath = new URL('../src/pr-review-thread-supervisor.mjs', import.meta.url);
-  const mutantPath = new URL('../src/.r8-checklist-bind-mutant.mjs', import.meta.url);
-  const source = readFileSync(sourcePath, 'utf8');
+  const source = readFileSync(join(SRC, 'pr-review-thread-supervisor.mjs'), 'utf8');
   const mutant = source.replace(
     'if (found.body === body) return settle(path, operationIntent, found);',
     'if (found.body === body) return settle(path, intent, found);',
   );
   assert.notEqual(mutant, source);
-  writeFileSync(mutantPath, mutant);
-  try {
-    const module = await import(`${mutantPath.href}?r8=checklist-binding`);
-    await exerciseLostChecklistResponse(module.runPrReviewThreadSupervisorTick, {
-      expectCorruption: true,
-    });
-  } finally {
-    rmSync(mutantPath, { force: true });
-  }
+  const module = await import(plantMutant('r8-checklist-bind-mutant.mjs', mutant));
+  await exerciseLostChecklistResponse(module.runPrReviewThreadSupervisorTick, {
+    expectCorruption: true,
+  });
 });
