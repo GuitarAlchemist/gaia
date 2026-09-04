@@ -1,0 +1,851 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="15">
+  <title>Gaia NOW</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
+    body { margin: 0; background: #07111f; color: #dcecff; }
+    main { width: calc(100vw - 32px); max-width: none; margin: 0 auto; padding: 24px 0; }
+    h1 { margin: 0 0 6px; letter-spacing: .08em; }
+    header { position: sticky; top: 0; z-index: 20; display: flex; justify-content: space-between; align-items: start; gap: 16px; padding: 10px 0; background: #07111fee; backdrop-filter: blur(8px); }
+    button { background: #17304e; color: #dcecff; border: 1px solid #3a5b7f; border-radius: 8px; padding: 9px 13px; cursor: pointer; }
+    .header-actions { display: flex; gap: 8px; align-items: center; }
+    .root-signals { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+    .signal-button { position: relative; font-weight: 900; min-width: 150px; }
+    .header-popover { display: none; position: absolute; z-index: 40; top: calc(100% + 8px); right: 0; width: 270px; padding: 12px; border: 1px solid #75baff; border-radius: 10px; background: #07111f; color: #dcecff; text-align: left; box-shadow: 0 8px 30px #000a; }
+    .signal-button:hover .header-popover, .signal-button:focus .header-popover { display: block; }
+    .mini-radar { width: 150px; height: 110px; display: block; margin: 4px auto; }
+    .mini-radar .axis { stroke: #294765; stroke-width: 1; }
+    .mini-radar .shape { fill: #58e6a844; stroke: #58e6a8; stroke-width: 2; }
+    .mini-radar text { fill: #8fabca; font-size: 8px; }
+    .header-trend { width: 48px; height: 18px; margin-left: 8px; vertical-align: middle; }
+    .header-trend .baseline { stroke: #294765; stroke-width: 1; }
+    .header-trend .up { fill: none; stroke: #58e6a8; stroke-width: 2; }
+    .header-trend .watch { fill: none; stroke: #ffc857; stroke-width: 2; }
+    .signal-button.good { background: #153d33; color: #58e6a8; border-color: #58e6a8; }
+    .signal-button.neutral { background: #3b3014; color: #ffc857; border-color: #ffc857; }
+    .signal-button.bad { background: #461523; color: #ff758c; border-color: #ff758c; animation: attention 1s infinite alternate; }
+    .signal-anchor { scroll-margin-top: 128px; }
+    .signal-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; grid-column: 1 / -1; }
+    .signal-pair .card { min-height: 92px; }
+    .muted-action { color: #8fabca; opacity: .72; }
+    .signal-facts { display: grid; gap: 8px; margin-top: 12px; }
+    .signal-fact { padding: 9px 11px; border-radius: 8px; background: #081625; border: 1px solid #223b58; }
+    .signal-fact.warn { border-color: #ffc857; color: #ffe4a3; }
+    .root-capacity { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+    .capacity-ring-item { display: flex; align-items: center; min-width: 145px; }
+    .capacity-ring-item small { display: block; color: #8fabca; }
+    .info-badge { position: relative; display: inline-grid; place-items: center; width: 18px; height: 18px; margin-left: 6px; border: 1px solid #75baff; border-radius: 50%; color: #75baff; font-size: .72rem; font-weight: 900; cursor: help; }
+    .info-popover { display: none; position: absolute; z-index: 30; top: 24px; left: 0; width: min(330px, 70vw); padding: 10px 12px; border: 1px solid #75baff; border-radius: 8px; background: #07111f; color: #dcecff; font-weight: 500; box-shadow: 0 8px 30px #000a; }
+    .info-badge:hover .info-popover, .info-badge:focus .info-popover { display: block; }
+    .sub { color: #8fabca; margin-bottom: 24px; }
+    .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(360px, .85fr); gap: 16px; align-items: start; grid-auto-flow: dense; }
+    [hidden] { display: none !important; }
+    .card { min-width: 0; background: #0d1d31; border: 1px solid #223b58; border-radius: 12px; padding: 18px; }
+    .wide { grid-column: 1; }
+    .side { grid-column: 2; border-left: 3px solid #3a5b7f; }
+    .state { font-weight: 800; letter-spacing: .05em; }
+    .green { color: #58e6a8; } .red { color: #ff758c; } .amber { color: #ffc857; }
+    code { color: #b9d7ff; word-break: break-all; }
+    li { margin: 9px 0; }
+    a { color: #75baff; }
+    .rule { border-left: 4px solid #58e6a8; padding-left: 14px; }
+    .work-row { display: grid; grid-template-columns: 1.5fr .8fr .8fr; gap: 14px; align-items: center; margin: 14px 0; }
+    .dual-meter { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 14px; margin: 14px 0; background: #081625; border-radius: 9px; }
+    .dual-meter strong, .dual-meter small { display: block; margin-bottom: 5px; }
+    .work-row small { color: #8fabca; display: block; margin-top: 4px; }
+    progress { width: 100%; height: 18px; accent-color: #58e6a8; }
+    .pulse { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #58e6a8; margin-right: 7px; animation: pulse 1.4s infinite; }
+    .attention-icon { display: none; margin-right: 8px; }
+    .user-action[data-action="true"] { border: 2px solid #ff4968; box-shadow: 0 0 0 2px #ff496833, 0 0 26px #ff496844; animation: attention 1s infinite alternate; }
+    .user-action[data-action="true"] .attention-icon { display: inline; }
+    .user-action[data-action="true"] .state { color: #ff758c; }
+    .muted { color: #8fabca; }
+    .tag { display: inline-block; min-width: 78px; text-align: center; font-size: .72rem; font-weight: 800; letter-spacing: .06em; border-radius: 999px; padding: 4px 8px; margin-right: 9px; }
+    .tag.good { color: #071f18; background: #58e6a8; }
+    .tag.warn { color: #271b00; background: #ffc857; }
+    .tag.bad { color: #2a0710; background: #ff758c; }
+    .tag.rule { color: #061a2a; background: #75baff; }
+    .priority { display: inline-block; min-width: 34px; text-align: center; font-weight: 900; border-radius: 6px; padding: 3px 7px; margin-right: 8px; }
+    .p0 { background: #ff4968; color: #2a0710; } .p1 { background: #ffc857; color: #271b00; } .p2 { background: #75baff; color: #061a2a; }
+    .prompt-hint { background: #081625; border: 1px dashed #3a5b7f; border-radius: 8px; padding: 10px 12px; margin-top: 12px; color: #b9d7ff; }
+    .legend { border-style: dashed; opacity: .82; }
+    .radar-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .radar-card { background: #081625; border: 1px solid #223b58; border-radius: 10px; padding: 12px; text-align: center; }
+    .radar { width: 100%; max-width: 240px; aspect-ratio: 1; }
+    .radar .gridline, .radar .axis { fill: none; stroke: #294765; stroke-width: 1; }
+    .radar .shape { fill: #58e6a844; stroke: #58e6a8; stroke-width: 2; }
+    .radar text { fill: #8fabca; font-size: 9px; }
+    .no-data { color: #8fabca; min-height: 220px; display: grid; place-items: center; }
+    .gantt { display: grid; grid-template-columns: 180px 1fr; gap: 9px 12px; align-items: center; margin-top: 14px; }
+    .gantt-track { position: relative; height: 18px; border-radius: 999px; background: #081625; border: 1px solid #223b58; overflow: hidden; }
+    .gantt-bar { position: absolute; top: 2px; bottom: 2px; border-radius: 999px; background: #58e6a8; }
+    .gantt-bar.live { background: #ffc857; animation: pulse 1.4s infinite; }
+    .history { grid-column: 1 / -1; border: 2px solid #75baff; background: #10243a; box-shadow: 0 0 24px #75baff18; }
+    .history-stats { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0 14px; }
+    details.horizon { grid-column: 1; background: #0d1d31; border: 1px solid #223b58; border-radius: 12px; overflow: hidden; }
+    details.horizon > summary { cursor: pointer; display: grid; grid-template-columns: 1fr auto auto; gap: 14px; align-items: center; padding: 16px 18px; font-weight: 800; list-style: none; }
+    details.horizon > summary::-webkit-details-marker { display: none; }
+    details.horizon > summary::before { content: '▸'; color: #75baff; margin-right: 8px; }
+    details.horizon[open] > summary::before { content: '▾'; }
+    .horizon-body { border-top: 1px solid #223b58; padding: 2px 18px 18px; }
+    .risk-reason { color: #8fabca; font-size: .82rem; font-weight: 500; }
+    .timeline { position: relative; margin: 14px 0 0 10px; padding-left: 26px; border-left: 2px solid #294765; }
+    .timeline li { position: relative; list-style: none; margin: 0 0 16px; }
+    .timeline li::before { content: ''; position: absolute; left: -33px; top: 5px; width: 11px; height: 11px; border-radius: 50%; background: #75baff; box-shadow: 0 0 0 4px #0d1d31; }
+    .timeline li.good::before { background: #58e6a8; } .timeline li.bad::before { background: #ff758c; } .timeline time { color: #8fabca; font-size: .78rem; display: block; }
+    .checkpoint-rail { display: grid; grid-template-columns: repeat(7, minmax(130px, 1fr)); gap: 10px; margin-top: 14px; overflow-x: auto; }
+    .checkpoint { position: relative; min-width: 130px; padding: 12px; border: 1px solid #294765; border-radius: 10px; background: #081625; }
+    .checkpoint::after { content: '→'; position: absolute; right: -10px; top: 42%; color: #75baff; z-index: 2; }
+    .checkpoint:last-child::after { content: ''; }
+    .checkpoint.good { border-color: #58e6a8; } .checkpoint.active { border-color: #ffc857; box-shadow: 0 0 16px #ffc85733; }
+    .checkpoint small { display: block; color: #8fabca; margin-top: 6px; }
+    .efficiency-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 14px; }
+    .metric { background: #081625; border: 1px solid #223b58; border-radius: 9px; padding: 11px; }
+    .metric strong, .metric small { display: block; } .metric .value { font-size: 1.35rem; margin: 4px 0; }
+    .trend { font-weight: 900; margin-left: 5px; } .trend.up { color: #58e6a8; } .trend.flat { color: #8fabca; } .trend.down { color: #ff758c; }
+    .top-timeline { grid-column: 1 / -1; border: 2px solid #3a5b7f; }
+    .timeline-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .range-toggle button[aria-pressed="true"] { background: #58e6a8; color: #071f18; border-color: #58e6a8; font-weight: 900; }
+    .horizontal-time { display: grid; grid-template-columns: repeat(7, minmax(120px, 1fr)); gap: 0; margin-top: 18px; overflow-x: auto; padding: 20px 4px 8px; }
+    .time-point { position: relative; min-width: 120px; padding: 18px 10px 8px; border-top: 3px solid #294765; }
+    .time-point::before { content: ''; position: absolute; top: -8px; left: 10px; width: 13px; height: 13px; border-radius: 50%; background: #75baff; box-shadow: 0 0 0 4px #0d1d31; }
+    .time-point.good { border-color: #58e6a8; } .time-point.good::before { background: #58e6a8; }
+    .time-point.bad { border-color: #ff758c; } .time-point.bad::before { background: #ff758c; }
+    .time-point.active { border-color: #ffc857; } .time-point.active::before { background: #ffc857; animation: pulse 1.4s infinite; }
+    .time-point.forecast { border-top-style: dashed; opacity: .78; }
+    .time-point.forecast::before { background: #07111f; border: 2px solid #75baff; width: 10px; height: 10px; }
+    .time-point time, .time-point small { display: block; color: #8fabca; }
+    .sprint-summary { display: grid; grid-template-columns: minmax(0, 1fr) 160px auto; gap: 14px; align-items: center; margin-top: 10px; }
+    .sprint-strip { display: flex; gap: 4px; align-items: stretch; overflow-x: auto; padding: 8px 9px; background: #081625; border: 1px solid #223b58; border-radius: 9px; scrollbar-width: thin; }
+    .sprint-dot { position: relative; min-width: 34px; flex: 1 0 34px; padding: 4px 2px 3px; border-radius: 6px; text-align: center; color: #a9c5df; font-size: .68rem; line-height: 1.15; }
+    .sprint-dot::before { content: ''; display: block; width: 9px; height: 9px; margin: 0 auto 3px; border-radius: 50%; background: #8fabca; }
+    .sprint-dot.good::before { background: #58e6a8; } .sprint-dot.bad::before { background: #ff758c; } .sprint-dot.unobserved { background: #ffc8570d; } .sprint-dot.unobserved::before { background: #ffc857; opacity: .72; } .sprint-dot.active { color: #e6f4ff; background: #75baff18; outline: 1px solid #75baff; font-weight: 800; } .sprint-dot.active::before { background: #ffc857; animation: pulse 1.4s infinite; }
+    .sprint-dot.forecast::before { box-sizing: border-box; background: transparent; border: 2px dashed #75baff; }
+    .sprint-dot.forecast { opacity: .72; }
+    .timeline-marker { cursor: help; }
+    .timeline-marker:focus { outline: 2px solid #75baff; outline-offset: 3px; }
+    .timeline-popover { display: none; position: fixed; z-index: 100; width: min(340px, calc(100vw - 28px)); padding: 12px 14px; border: 1px solid #75baff; border-radius: 10px; background: #07111f; color: #dcecff; box-shadow: 0 12px 36px #000c; pointer-events: none; }
+    .timeline-popover.visible { display: block; }
+    .timeline-popover strong { display: block; color: #75baff; margin-bottom: 7px; }
+    .timeline-popover ul { margin: 0; padding-left: 18px; }
+    .timeline-popover li { margin: 5px 0; }
+    .pump-ledger { display: grid; gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; }
+    .pump-message { display: grid; grid-template-columns: 72px minmax(150px,.7fr) minmax(0,1.8fr); gap: 10px; align-items: center; padding: 9px 11px; border: 1px solid #294765; border-radius: 8px; background: #071629; }
+    .pump-message time { color: #8fabca; font-variant-numeric: tabular-nums; }
+    .pump-message strong { color: #dcecff; }
+    .pump-message.warn { border-color: #ffc857; background: #251d0a; }
+    @media (max-width: 700px) { .pump-message { grid-template-columns: 64px 1fr; } .pump-message span { grid-column: 1 / -1; } }
+    .slot-ping { position: absolute; top: 3px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: #75baff; animation: pulse 1.4s infinite; }
+    .sprint-legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 5px 0 2px; color: #8fabca; font-size: .68rem; }
+    .sprint-legend span::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 4px; border-radius: 50%; vertical-align: 1px; background: currentColor; }
+    .sprint-legend .legend-good { color: #58e6a8; } .sprint-legend .legend-bad { color: #ff758c; } .sprint-legend .legend-missing { color: #ffc857; } .sprint-legend .legend-current { color: #75baff; }
+    .proof-forecast { display: flex; gap: 9px; align-items: center; margin-top: 8px; padding: 8px 10px; border: 1px solid #ffc857; border-radius: 8px; background: #3b301422; color: #ffe4a3; }
+    .proof-forecast strong { color: #ffc857; white-space: nowrap; }
+    .live-ping { display: inline-block; width: 7px; height: 7px; margin: 0 6px 1px 0; border-radius: 50%; background: #75baff; box-shadow: 0 0 0 0 #75baff88; animation: pulse 1.4s infinite; vertical-align: middle; }
+    .sparkline { width: 160px; height: 42px; overflow: visible; }
+    .sparkline .axis { stroke: #294765; stroke-width: 1; } .sparkline .line { fill: none; stroke: #58e6a8; stroke-width: 3; } .sparkline .area { fill: #58e6a822; }
+    .score-pill { min-width: 95px; text-align: right; } .score-pill strong, .score-pill small { display: block; }
+    .provider-matrix { width: 100%; table-layout: fixed; border-collapse: collapse; margin-top: 12px; font-size: .8rem; }
+    .provider-matrix th, .provider-matrix td { padding: 8px 6px; border-bottom: 1px solid #223b58; text-align: left; vertical-align: middle; overflow-wrap: anywhere; }
+    .provider-matrix th { color: #8fabca; font-size: .68rem; letter-spacing: .05em; }
+    .provider-matrix tr.inactive-capability { opacity: .52; }
+    .provider-matrix tr.inactive-capability:hover { opacity: .9; }
+    .quota { min-width: 0; } .quota progress { height: 9px; } .quota small { display: block; white-space: normal; }
+    .progress-ring { --value: 0; --ring: #58e6a8; display: inline-grid; place-items: center; width: 42px; height: 42px; margin-right: 10px; border-radius: 50%; background: conic-gradient(var(--ring) calc(var(--value) * 1%), #223b58 0); vertical-align: middle; }
+    .progress-ring::before { content: ''; grid-area: 1 / 1; width: 31px; height: 31px; border-radius: 50%; background: #0d1d31; }
+    .progress-ring span { grid-area: 1 / 1; z-index: 1; font-size: .66rem; font-weight: 900; }
+    .capacity-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; margin-top: 12px; }
+    .capacity-cell { padding: 10px; border: 1px solid #223b58; border-radius: 8px; background: #081625; } .capacity-cell strong, .capacity-cell small { display: block; }
+    .gate-summary { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)); gap: 8px; margin: 12px 0; }
+    .gate-chip { padding: 9px; border: 1px solid #58e6a8; border-radius: 8px; background: #0b2a25; }
+    .gate-chip strong, .gate-chip small { display: block; } .gate-chip small { color: #8fabca; margin-top: 3px; }
+    .mini-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: .82rem; }
+    .mini-table th, .mini-table td { padding: 8px 6px; border-bottom: 1px solid #223b58; text-align: left; vertical-align: top; }
+    .mini-table th { color: #8fabca; font-size: .72rem; letter-spacing: .05em; }
+    details.tree { margin: 9px 0; border: 1px solid #223b58; border-radius: 8px; background: #081625; }
+    details.tree > summary { cursor: pointer; padding: 10px 12px; font-weight: 700; }
+    details.tree > div { padding: 0 12px 10px 30px; color: #b9d7ff; }
+    @keyframes pulse { 50% { opacity: .28; transform: scale(.75); } }
+    @keyframes attention { to { box-shadow: 0 0 0 4px #ff496855, 0 0 38px #ff496888; } }
+    @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } .wide, .side { grid-column: 1; } .radar-grid, .efficiency-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 760px) { main { width: calc(100vw - 16px); padding: 10px 0; } header { align-items: center; } .root-signals, .signal-pair { grid-template-columns: 1fr; } .dual-meter, .sprint-summary, .capacity-grid { grid-template-columns: 1fr; } .gate-summary { grid-template-columns: repeat(2, minmax(110px, 1fr)); } .work-row { grid-template-columns: 1fr; } details.horizon > summary { grid-template-columns: 1fr; } .gantt { grid-template-columns: 1fr; } .score-pill { text-align: left; } }
+  </style>
+</head>
+<body>
+<main>
+  <header><div><h1>GAIA NOW</h1><div class="sub">Un seul écran utile. Actualisation toutes les 15 secondes.</div></div><div class="header-actions"><div class="root-signals"><button id="systemSignal" class="signal-button good" type="button" aria-controls="systemRootSignal">🤖 IA · R5 approuvé</button><button id="humanSignal" class="signal-button good" type="button" aria-controls="humanRootSignal">👤 Humain · rien requis</button></div><button id="langToggle" type="button">EN</button></div></header>
+  <section id="fr" class="grid">
+    <article class="card top-timeline"><div class="timeline-toolbar"><div><div class="state green">TIMELINE DE COORDINATION</div><small class="muted">Plein = observé. Pointillé = futur conditionnel; la confiance baisse avec l’horizon.</small></div><div class="range-toggle"><button type="button" data-timeline-range="hour" aria-pressed="true">1 HEURE</button><button type="button" data-timeline-range="day" aria-pressed="false">JOUR</button></div></div><div id="timelineHourFr" class="horizontal-time" style="grid-template-columns:repeat(10,minmax(120px,1fr))"><div class="time-point good"><time>13:55</time><strong>Suite R1</strong><small>1793/1793</small></div><div class="time-point bad"><time>14:00</time><strong>Tab storm</strong><small>action inefficace</small></div><div class="time-point good"><time>14:11</time><strong>Terminal sain</strong><small>2 ticks propres</small></div><div class="time-point bad"><time>14:23</time><strong>R1 refusé</strong><small>2 reviews</small></div><div class="time-point good"><time>14:35</time><strong>Conservation</strong><small>RED→GREEN</small></div><div class="time-point good"><time>14:41</time><strong>Suite R2</strong><small>1793/1793</small></div><div class="time-point active"><time>Maintenant</time><strong>Reviews R3</strong><small>Spec APPROVE; Standards actif</small></div><div class="time-point forecast"><time>+5–10 min · 70%</time><strong>Verdict Standards</strong><small>si aucun nouveau blocker</small></div><div class="time-point forecast"><time>+15–30 min · 45%</time><strong>Décision ship</strong><small>si double APPROVE</small></div><div class="time-point forecast"><time>+30–60 min · 25%</time><strong>Pompe suivante</strong><small>si R3 est admis</small></div></div><div id="sprintStripHourFr"><div class="muted" style="margin-top:12px"><strong>MICRO-SPRINTS · 5 MIN</strong> — vert atteint, rouge manqué</div><div class="sprint-strip"><span class="sprint-dot bad">171</span><span class="sprint-dot bad">172</span><span class="sprint-dot good">173</span><span class="sprint-dot good">174</span><span class="sprint-dot good">175</span><span class="sprint-dot good">176</span><span class="sprint-dot bad">177</span><span class="sprint-dot good">178</span><span class="sprint-dot bad">179</span><span class="sprint-dot good">180</span><span class="sprint-dot bad">181</span><span class="sprint-dot good">182</span></div></div><div id="timelineDayFr" class="horizontal-time" hidden><div class="time-point good"><time>Matin</time><strong>Recovery</strong><small>environnement stabilisé</small></div><div class="time-point bad"><time>13:56</time><strong>Régression terminal</strong><small>producteur cherché</small></div><div class="time-point good"><time>14:11</time><strong>Quarantaine</strong><small>non-récurrence</small></div><div class="time-point good"><time>14:23</time><strong>R1 apprend</strong><small>blockers convergents</small></div><div class="time-point active"><time>Maintenant</time><strong>Reviews R3</strong><small>Spec APPROVE</small></div><div class="time-point forecast"><time>Plus tard · faible</time><strong>Projection DuckDB</strong><small>après pompe primitive fiable</small></div></div></article>
+    <details id="microSprintFr" class="horizon" name="horizon-fr" open data-start="2026-09-04T15:05:00-04:00" data-end="2026-09-04T15:10:00-04:00" data-slot-id="MS-20260904-182"><summary><span id="microTitleFr">MS-20260904-182 · INTERVALLE DE CONTRÔLE · 182/288 · 15:05–15:10</span><span class="tag warn">REVIEWS R3</span><span class="risk-reason">checkpoint 181 manqué; travail reporté sans ajout</span></summary><div class="horizon-body">
+      <div id="rolloutGuardFr" class="prompt-hint"><strong>ROLLOVER SERVEUR :</strong> MS-182 observé. MS-181 est archivé comme manqué; aucun travail supplémentaire n’est admis.</div>
+      <p><strong>Checkpoint de preuve :</strong> obtenir un verdict frais Standards ou Spec sur R3. Ce n’est pas une promesse de ship.</p>
+      <div class="dual-meter"><div><strong>TEMPS</strong><progress id="microTimeFr" value="0" max="300"></progress><small id="microClockFr">calcul…</small></div><div><strong>TRAVAIL PROUVÉ</strong><progress value="0" max="1"></progress><small>0/1 verdict frais</small></div></div>
+      <div class="work-row">
+        <div><strong>Double review Petri R3</strong><small>Owners : Standards + Spec indépendants. Snapshot canonique <code>56967997…</code>.</small></div>
+        <div><progress value="0" max="1"></progress><small>0/1 verdict frais</small></div>
+        <div><strong class="amber">ACTIF</strong><small>2 reviewers</small></div>
+      </div>
+      <div class="prompt-hint"><strong>Preuve de départ :</strong> snapshot 268 fichiers, 5 037 044 octets, digest ordinal <code>5696799746cb3c17…</code>; deux reviewers lancés.</div>
+      <div class="muted"><strong>Dernière observation :</strong> 15:06 EDT. Deux reviewers toujours actifs; présence ≠ verdict, donc travail prouvé reste 0/1.</div>
+      <div class="radar-grid" style="margin-top:14px"><div class="radar-card"><strong>INTERVALLE DE CONTRÔLE · LIVE</strong><svg id="microRadarFr" class="radar" viewBox="0 0 220 220" aria-label="Radar du micro-sprint"></svg><small id="microRadarFactsFr">Preuve 100 · Temps restant calculé · Observation fraîche · Flux actif · Réserve préservée</small></div><div class="radar-card"><strong>RISQUE EXPLICABLE</strong><ul style="text-align:left"><li>Le risque de livraison appartient au sprint 30–60 minutes.</li><li>Cette tranche n’exigeait qu’un test déterministe et réversible.</li><li>La marge restante protège la qualité et absorbe la latence de preuve.</li></ul></div></div>
+    </div></details>
+    <details class="horizon" name="horizon-fr"><summary><span>SPRINT DE LIVRAISON 14:30–15:30 · STABILISER LA POMPE</span><span class="tag bad">RISQUE ÉLEVÉ</span><span class="risk-reason">R2 refusé; R3 ciblé actif</span></summary><div class="horizon-body"><p><strong>Commitment :</strong> produire un candidat Petri R3 reviewable qui ferme les deux faux succès reproduits, sans sacrifier les gates de qualité.</p><ul><li>✅ R2 passe 28/28 et 1793/1793.</li><li>✅ Reviews R2 convergent sur deux blockers.</li><li>🟡 Réparer R3 par mécanismes RED→GREEN isolés.</li><li>⬜ Suite complète et nouvelle double review.</li></ul><p class="muted">Si le candidat reviewable n’est pas atteint à 15:30, le sprint échoue honnêtement et le plan est re-groomé; aucun gate ne saute.</p></div></details>
+    <details class="horizon" name="horizon-fr"><summary><span>MÉGA-SPRINT · JOUR · BOUCLE OBSERVABLE</span><span class="tag bad">RISQUE INCONNU</span><span class="risk-reason">baseline journalière absente</span></summary><div class="horizon-body"><p>Objectif : une pompe re-bootstrapable dont chaque claim, preuve, review et blocker est observable.</p><div class="gantt"><strong>Terminal</strong><div class="gantt-track"><span class="gantt-bar" style="left:0;width:44%"></span></div><strong>Boucle continue</strong><div class="gantt-track"><span class="gantt-bar" style="left:18%;width:38%"></span></div><strong>Review Petri</strong><div class="gantt-track"><span class="gantt-bar live" style="left:69%;width:31%"></span></div></div><p class="muted">Gantt provisoire construit avec les événements observés; pas encore une projection DuckDB.</p></div></details>
+    <article class="card history"><div class="state green">GRAPHE DE CHECKPOINTS · CE QUI DÉBLOQUE QUOI</div><div class="checkpoint-rail" style="grid-template-columns:repeat(8,minmax(130px,1fr))"><div class="checkpoint good"><span class="tag good">PROUVÉ</span><strong>Terminal sain</strong><small>Storm identifié et quarantiné.</small></div><div class="checkpoint good"><span class="tag good">PROUVÉ</span><strong>R1 convergent</strong><small>Deux REQUEST_CHANGES indépendants.</small></div><div class="checkpoint good"><span class="tag good">GREEN</span><strong>Autorité exacte</strong><small>Source et head fermés par tests.</small></div><div class="checkpoint good"><span class="tag good">GREEN</span><strong>Conservation</strong><small>A→∅ refusé; A→DONE accepté.</small></div><div class="checkpoint good"><span class="tag good">GREEN</span><strong>DuckDB absent</strong><small>Erreur déterministe, un essai.</small></div><div class="checkpoint good"><span class="tag good">1793/1793</span><strong>Suite R2</strong><small>Rejouée indépendamment.</small></div><div class="checkpoint good"><span class="tag good">1794/1794</span><strong>R3 ciblé</strong><small>Head prioritaire + source enregistrée.</small></div><div class="checkpoint active"><span class="tag warn">ACTIF</span><strong>Double review R3</strong><small>Standards + Spec, snapshot 56967997…</small></div></div><div class="muted" style="margin-top:12px">Les flèches expriment un déblocage prouvé, pas une simple succession temporelle.</div></article>
+    <article class="card wide"><div class="state green">SANTÉ PAR HORIZON · TENDANCES COMPARABLES</div><div class="radar-grid"><div class="radar-card"><strong>CHECKPOINT · 5 MIN</strong><svg id="checkpointRadarFr" class="radar" viewBox="0 0 220 220" aria-label="Radar du checkpoint"></svg><small>Preuve ↑ · fraîcheur ↑ · risque → · flux ↑ · réserve →</small></div><div class="radar-card"><strong>SPRINT · 30–60 MIN</strong><div class="no-data"><span><span class="tag warn">INSUFFISANT</span><br><br>Moins de 5 sprints comparables.<br>Aucune flèche inventée.</span></div></div><div class="radar-card"><strong>CAMPAGNE · JOUR</strong><div class="no-data"><span><span class="tag warn">INSUFFISANT</span><br><br>Projection journalière absente.<br>Tendance non calculable.</span></div></div></div></article>
+    <article class="card wide"><div class="state green">EFFICACITÉ · TROUVER LE PROCHAIN GOULOT</div><div class="efficiency-grid"><div class="metric"><small>CHECKPOINTS ATTEINTS</small><strong class="value">60% <span class="trend flat">→</span></strong><small>6/10; échantillon encore court.</small></div><div class="metric"><small>REPRISES / REWORK</small><strong class="value">3 <span class="trend down">↓</span></strong><small>R1→R2→R3; dette actuelle à réduire.</small></div><div class="metric"><small>ATTENTE DE COORDINATION</small><strong class="value">ACTIVE <span class="trend flat">→</span></strong><small>Deux reviewers R3 actifs.</small></div><div class="metric"><small>PRÉCISION DU RISQUE</small><strong class="value">60% <span class="trend up">↑</span></strong><small>6/10 bien calibrés; historique encore court.</small></div><div class="metric"><small>COÛT PAR PREUVE</small><strong class="value">INCONNU</strong><small>Tokens par checkpoint non encore projetés.</small></div><div class="metric"><small>TRAVAIL / MÉTA-TRAVAIL</small><strong class="value">INCONNU</strong><small>Instrumentation requise; ne pas inventer un ratio.</small></div></div><div class="prompt-hint"><strong>Prochain angle utile :</strong> obtenir un verdict frais R3 et mesurer l’attente de review. Une métrique n’est retenue que si elle change une décision.</div></article>
+    <article class="card wide"><div class="state amber">DÉTECTION DE RÉGRESSION</div><ul><li><span class="tag rule">FAIT BRUT</span>Chaque observation garde heure, source, difficulté, scope, fournisseur et preuve.</li><li><span class="tag warn">SIGNAL</span>Une baisse isolée ouvre une investigation; elle ne prouve pas une régression.</li><li><span class="tag bad">RÉGRESSION</span>Baisse au-delà du seuil, persistante sur des cohortes comparables, sans explication de contexte.</li><li><span class="tag good">RÉPONSE</span>Identifier le changement causal, lancer un test réversible, mesurer puis conserver ou rejeter.</li></ul><div class="muted">Event log = faits immuables. DuckDB = fenêtres, cohortes et tendances rebuildables. La projection n’efface jamais les contre-signaux.</div></article>
+    <article class="card wide"><div class="state green">QUALITÉ DU CONTRAT DE TRAVAIL · COACHING DE PROMPT</div><div class="radar-grid"><div class="radar-card"><strong>DERNIER PROMPT</strong><svg id="promptRadarFr" class="radar" viewBox="0 0 220 220" aria-label="Radar du contrat de travail"></svg><small>Résultat ↑ · preuve → · priorité ↑ · délai → · scope ↑</small></div><div class="radar-card" style="text-align:left"><strong>POINT FORT</strong><p>Tu donnes clairement l’objectif : rendre l’avancement compréhensible et pilotable.</p><strong>ANGLE À RENFORCER</strong><p>Nommer la preuve minimale attendue et ce qui peut être reporté.</p><div class="prompt-hint"><strong>Reformulation :</strong> « Montre le graphe de checkpoints maintenant; preuve = snapshot browser; reporte les raffinements non mesurés. »</div></div></div></article>
+    <article class="card wide"><div class="state green">TIMELINE DES ÉVÉNEMENTS NOTABLES</div><ol class="timeline"><li class="good"><time>13:50–13:55</time><strong>Candidat Petri R1 et suite complète</strong> — 28/28 ciblés puis 1793/1793, second passage indépendant.</li><li class="bad"><time>13:56</time><strong>Action sans effet détectée</strong> — tuer Windows Terminal n’arrête pas sa recréation.</li><li class="good"><time>14:04–14:11</time><strong>Producteur prouvé et quarantiné</strong> — GaiaFleetSupervisor; zéro récidive sur deux ticks.</li><li class="bad"><time>14:21–14:23</time><strong>Double REQUEST_CHANGES Petri</strong> — faux succès de réconciliation et autorité usurpable.</li><li><time>14:25</time><strong>Réparation R2 lancée</strong> — writer unique, premier objectif : test RED reproductible.</li></ol></article>
+    <article id="userActionFr" class="card wide user-action" data-action="false" data-priority="none"><div class="state green"><span class="attention-icon">🚨</span>BLOQUEURS HUMAINS — 0</div><details class="tree" open><summary><span class="tag good">0 ACTION</span>Toi · autorité produit</summary><div><strong>Aucun prompt ni clic requis.</strong> Gaia attend les reviews R3 dans le scope déjà autorisé.</div></details><details class="tree"><summary><span class="tag rule">INFO</span>Blockers machine · 0</summary><div>Les deux blockers R2 sont corrigés dans R3; les reviewers cherchent maintenant une contre-preuve.</div></details><details class="tree"><summary><span class="tag rule">À VENIR</span>Prochaine décision humaine · aucune planifiée</summary><div>Une demande apparaîtra ici seulement si une autorité, un coût, un credential ou un choix produit devient nécessaire.</div></details></article>
+    <article class="card wide"><div class="state green">CONTRAT D’AUTONOMIE · PEUX-TU T’ÉLOIGNER?</div><div class="efficiency-grid"><div class="metric"><small>FENÊTRE SANS SUPERVISION</small><strong class="value green">15 MIN</strong><small>Scope : reviews R3, verdict, reproduction et prochain checkpoint.</small></div><div class="metric"><small>BLOQUEUR HUMAIN</small><strong class="value green">0</strong><small>Aucun credential, coût ou choix produit requis.</small></div><div class="metric"><small>NIVEAU PROUVÉ</small><strong class="value amber">L1 · BORNÉ</strong><small>Une tâche locale continue; pompe GitHub complète non prouvée.</small></div></div><details class="tree" open><summary><span class="tag good">TU PEUX PARTIR</span>Ce que Gaia fera sans prompt</summary><div>Surveiller les deux reviews, vérifier chaque verdict, reproduire tout blocker concret et lancer une réparation bornée autorisée.</div></details><details class="tree"><summary><span class="tag warn">ARRÊT</span>Ce qui te rappellera</summary><div>Credential, dépense, changement de scope, décision produit, action irréversible ou échec répété sans nouvelle information.</div></details><details class="tree"><summary><span class="tag rule">QUESTIONS</span>Paquets de clarification</summary><div>Gaia regroupe les questions par décision et fournit recommandation, options, impact, délai et comportement par défaut. Une réponse met à jour les artifacts autorisés puis libère le travail aval.</div></details><details class="tree"><summary><span class="tag rule">PROMOTION</span>Prochaine preuve d’autonomie</summary><div>30 minutes sans prompt, au moins 3 checkpoints frais, une récupération d’échec et un bootstrap après redémarrage. Ensuite seulement : L2, drainage d’une issue jusqu’à PR reviewable.</div></details></article>
+    <article class="card wide"><div class="state green">COMMENT ME PILOTER</div><div class="radar-grid"><div><strong>Un bon prompt de contrôle</strong><ul><li><strong>Résultat :</strong> ce que tu veux voir changer.</li><li><strong>Échéance :</strong> la tranche ou le moment.</li><li><strong>Preuve :</strong> test, diff, artifact ou état observable.</li><li><strong>Priorité :</strong> ce qui peut être reporté si nécessaire.</li></ul></div><div><strong>Prompts utiles maintenant</strong><ul><li>« MS-174 : montre le test RED avant 14:30. »</li><li>« Explique le blocker sans changer le scope. »</li><li>« Challenge l’hypothèse Petri; quelle alternative simple? »</li></ul></div><div><strong>Friction à éviter</strong><ul><li>« Ajoute aussi… » pendant la tranche active → Wayfinder suivant.</li><li>« Mets plus de lanes » sans partition indépendante → coordination coûteuse.</li><li>« Tout est green » sans postcondition → affirmation non prouvée.</li></ul></div></div><div class="prompt-hint"><strong>Format court :</strong> « Résultat X avant Y; preuve Z; reporte le reste. »</div></article>
+    <article class="card wide legend"><div class="state muted">LÉGENDE DES PRIORITÉS — PAS UN STATUT</div><ul><li><span class="priority p0">P0</span>bloque la pompe; carte rouge clignotante.</li><li><span class="priority p1">P1</span>décision rapide; conséquence et échéance affichées.</li><li><span class="priority p2">P2</span>orientation utile mais non bloquante.</li></ul></article>
+    <article class="card wide"><div class="state amber">HYPOTHÈSES / OBJECTIONS</div><ul>
+      <li><span class="tag rule">INVARIANT</span>DuckDB projette; il n’autorise jamais une action.</li>
+      <li><span class="tag good">VALIDÉ</span>Petri convient aux transitions, locks et invariants.</li>
+      <li><span class="tag warn">OBJECTION</span>Petri n’est pas le transport de télémétrie; SSE réveille, l’event log réconcilie.</li>
+      <li><span class="tag warn">À TESTER</span>Le projecteur DuckDB doit gagner son ajout au baseline par benchmark.</li>
+    </ul><div class="prompt-hint"><strong>Prompt utile maintenant :</strong> « MS-174 : garde le scope R2 et montre le premier RED. » Aucun prompt n’est requis tant que la carte rouge reste éteinte.</div></article>
+    <article class="card wide"><div class="state green">RETOUR SUR TON DERNIER PROMPT</div><ul><li><span class="tag good">JUSTE</span>Séparer temps écoulé et travail prouvé révèle immédiatement un retard.</li><li><span class="tag rule">GARDE-FOU</span>Le temps ne peut jamais faire monter la barre de travail.</li><li><span class="tag good">ADOPTÉ</span>Deux barres indépendantes et un checkpoint de cinq minutes sont maintenant visibles.</li></ul></article>
+    <article class="card side"><div class="state green">HIÉRARCHIE ET LANES</div><ul>
+      <li><strong>Toi — autorité produit</strong><ul>
+        <li><strong>Coordinateur Gaia / Codex</strong> — orchestre, vérifie les preuves et remonte les blockers.<ul>
+          <li><span class="tag good">TERMINÉ</span><strong>Diagnostic terminal / adversarial</strong></li>
+          <li><span class="tag good">TERMINÉ</span><strong>Design boucle continue / architecture</strong></li>
+          <li><span class="tag good">TERMINÉ</span><strong>Review Petri R1 / Standards</strong> — REQUEST_CHANGES</li>
+          <li><span class="tag good">TERMINÉ</span><strong>Review Petri R1 / Spec</strong> — REQUEST_CHANGES</li>
+          <li><span class="tag good">TERMINÉ</span><strong>Reviews Petri R2 / Standards + Spec</strong> — REQUEST_CHANGES</li>
+          <li><span class="tag warn">ACTIF</span><strong>Réparation Petri R3 / writer unique</strong></li>
+        </ul></li>
+      </ul></li>
+    </ul><div class="muted">wmux : 1 pane de statut, 0 lane fantôme. Fleet supervisor : quarantaine.</div></article>
+    <article class="card side"><div class="state green">HISTORIQUE DES CHECKPOINTS 5 MIN</div><div class="history-stats"><span class="tag good">60% ATTEINTS</span><span class="tag bad">40% MANQUÉS</span></div><table class="mini-table"><thead><tr><th>ID / FENÊTRE</th><th>RÉSULTAT</th><th>PREUVE</th></tr></thead><tbody><tr><td>180<br><small>14:55–15:00</small></td><td class="green">ATTEINT</td><td>Head RED→GREEN + 1794/1794</td></tr><tr><td>179<br><small>14:50–55</small></td><td class="red">MANQUÉ</td><td>RED arrivé après limite</td></tr><tr><td>178<br><small>14:45–50</small></td><td class="green">ATTEINT</td><td>Digest canonique + blocker Spec</td></tr><tr><td>177<br><small>14:40–45</small></td><td class="red">MANQUÉ</td><td>Tri non ordinal corrigé après limite</td></tr><tr><td>176<br><small>14:35–40</small></td><td class="green">ATTEINT</td><td>DuckDB absent RED→GREEN</td></tr><tr><td>175<br><small>14:30–35</small></td><td class="green">ATTEINT</td><td>Conservation RED→GREEN</td></tr><tr><td>174<br><small>14:25–30</small></td><td class="green">ATTEINT</td><td>Autorité/head RED→GREEN</td></tr><tr><td>173<br><small>14:20–25</small></td><td class="green">ATTEINT</td><td>2 reviews R1</td></tr><tr><td>172<br><small>14:15–20</small></td><td class="red">MANQUÉ</td><td>Attente externe</td></tr><tr><td>171<br><small>14:10–15</small></td><td class="red">MANQUÉ</td><td>3/4 livrés</td></tr></tbody></table><div class="muted">n=10 · source : ledger JSONL projeté par DuckDB.</div></article>
+    <article class="card side"><div class="state amber">BOUCLE DE CONTRÔLE — MODÈLE DUCKDB</div><ul>
+      <li><strong>Présence :</strong> le superviseur voit réellement le processus et sa surface.</li>
+      <li><strong>Vie :</strong> l’agent répond à un challenge unique avant l’échéance.</li>
+      <li><strong>Progrès :</strong> un digest, test, commit ou artifact vérifiable change.</li>
+      <li><strong>Règle :</strong> heartbeat seul ≠ progrès; DuckDB projette les faits, l’event log reste autoritatif.</li>
+    </ul></article>
+    <article class="card side"><div class="state green">SIGNAUX DE SANTÉ COMPOSABLES</div><ul><li><strong>Présence</strong> ∈ {observée, absente, inconnue}</li><li><strong>Preuve</strong> ∈ {fraîche, stale, invalide}</li><li><strong>Flux</strong> ∈ {avance, bloqué, terminé}</li><li><strong>Risque</strong> = raisons explicites, pas une moyenne opaque</li><li><strong>Admission suivante</strong> = capacité prouvée − marge de sécurité</li></ul><div class="muted">DuckDB agrège ces faits par micro-sprint, sprint et journée; les événements sources restent autoritatifs.</div></article>
+    <article class="card side"><div class="state green">DÉCISION DE GRANULARITÉ</div><ul><li><span class="tag good">ADOPTÉ</span><strong>5 min = checkpoint de preuve</strong><small class="muted">Observe une transition; aucune promesse de livraison.</small></li><li><span class="tag good">ADOPTÉ</span><strong>30–60 min = sprint de livraison</strong><small class="muted">Résultat reviewable; qualité et postconditions dominent l’horloge.</small></li><li><span class="tag rule">JOUR</span><strong>Campagne</strong><small class="muted">Résultats, apprentissage, calibration et changement de plan.</small></li></ul><strong>Escalade</strong><ol><li>Risque élevé : checkpoint = réduction d’incertitude.</li><li>Résultat irréaliste : split ou re-groom avant admission.</li><li>Échec persistant : suspendre le mécanisme et redesigner.</li></ol><div class="muted">La cadence mesure la boucle; elle n’est jamais une excuse pour réduire la qualité.</div></article>
+    <article class="card side"><div class="state green">CAPACITÉ FOURNISSEURS</div><ul><li><span class="tag good">83% RESTE</span><strong>Codex</strong><small class="muted">Fenêtre 7 jours · reset 11 sept. 11:28 EDT · crédits additionnels 0. Spark : classe de modèle, 100% disponible sur sa fenêtre 5 h.</small></li><li><span class="tag warn">INCONNU</span><strong>Claude Code 2.1.260</strong><small class="muted">Client actif; la CLI n’expose pas de commande quota non interactive vérifiée.</small></li><li><span class="tag warn">INCONNU</span><strong>Antigravity / AGY 1.1.23</strong><small class="muted">CLI active; aucune surface usage/quota dans l’aide observée.</small></li><li><span class="tag good">53% RESTE</span><strong>Augment Code / Auggie 0.36.0</strong><small class="muted">21 199 / 40 000 crédits; 17 jours restants, fin du cycle 22 sept. 2026.</small></li><li><span class="tag warn">INCONNU</span><strong>Junie 26.8.31</strong><small class="muted">CLI active; gateway status existe, quota non exposé dans l’aide observée.</small></li></ul><div class="muted">Les alias OG/Auggie sont fusionnés. Routage futur : coût, qualité, quota, latence et réserve — via ports fournisseurs, jamais dans le domaine.</div></article>
+    <article class="card side"><div class="state green">HIÉRARCHIE WAYFINDER · GAIA RECOVERY</div><details class="tree" name="wayfinder-fr"><summary><span class="tag good">FERMÉ</span>Environnement terminal</summary><div>Producteur du tab storm identifié; scheduler quarantiné; non-récurrence prouvée.</div></details><details class="tree" name="wayfinder-fr"><summary><span class="tag good">ACTIF</span>Cockpit observable</summary><div>Micro-sprints, historique, risques, timeline et conseils de prompting.</div></details><details class="tree" name="wayfinder-fr" open><summary><span class="tag warn">R2</span>Drain Petri</summary><div>Source autorisée → réconciliation exacte → conservation → tests DuckDB.</div></details><details class="tree" name="wayfinder-fr"><summary><span class="tag rule">SUIVANT</span>Presence challenge</summary><div>Challenge nonce externe; présence, vie et progrès restent trois faits distincts.</div></details><details class="tree" name="wayfinder-fr"><summary><span class="tag rule">APRÈS</span>Projection DuckDB</summary><div>Event log autoritatif → projection rebuildable → cockpit; aucune autorité dans DuckDB.</div></details><div class="muted">Un seul sibling ouvert. Relations candidates : <code>reports-to</code>, <code>blocks</code>, <code>proves</code>, <code>depends-on</code>.</div></article>
+    <article class="card side"><div class="state amber">MATURITÉ DES MÉCANISMES</div><ul><li><span class="tag good">LIVRÉ</span><strong>State machine + event log CAS</strong><small class="muted">Noyau autoritatif actuel.</small></li><li><span class="tag bad">BLOQUÉ</span><strong>Réseau de Petri R1</strong><small class="muted">Review Spec : faux succès reproductible.</small></li><li><span class="tag warn">CANDIDAT</span><strong>SSE wakeup-only</strong><small class="muted">Branche <code>e170c4e</code>, pas encore main.</small></li><li><span class="tag warn">PROTOTYPE</span><strong>Projections DuckDB</strong><small class="muted">Benchmark et branchement event log requis.</small></li><li><span class="tag rule">DESIGN</span><strong>DAG / WorkGraph advisory</strong><small class="muted">Dépendances et hiérarchie; aucune autorité.</small></li><li><span class="tag rule">DESIGN</span><strong>Challenge nonce de présence</strong><small class="muted">Contrat défini, tracer bullet absent.</small></li><li><span class="tag bad">HYPOTHÈSE</span><strong>Rules engine générique</strong><small class="muted">Pas de besoin prouvé au-delà des transitions actuelles.</small></li></ul></article>
+    <article class="card side"><div class="state amber">DUCKDB 2.0 · VEILLE</div><ul><li><span class="tag warn">ALPHA</span>Version 2.0 en feature freeze; release visée mi-octobre.</li><li><strong>Intérêt Gaia :</strong> recursive CTE accélérés, triggers et mode serveur peuvent aider graphes et projections.</li><li><strong>Décision actuelle :</strong> stable en baseline; 2.0 seulement dans un adapter expérimental isolé.</li></ul><a href="https://duckdb.org/2026/09/02/try-duckdb-20-alpha">Source officielle DuckDB</a></article>
+    <article class="card side rule"><strong>Pipeline :</strong> Intake → Claim → Execute → Prove → Review → Merge → Learn.<br><strong>Règle :</strong> une action ne réussit que lorsque sa postcondition observable est vérifiée.</article>
+  </section>
+  <section id="en" class="grid" hidden>
+    <article id="microSprintEn" class="card wide" data-start="2026-09-04T14:25:00-04:00" data-end="2026-09-04T14:30:00-04:00">
+      <div class="state amber"><span class="pulse"></span>MS-20260904-175 · 175/288 · 14:30–14:35</div>
+      <div class="dual-meter"><div><strong>TIME</strong><progress id="microTimeEn" value="0" max="300"></progress><small id="microClockEn">calculating…</small></div><div><strong>PROVEN WORK</strong><progress value="0" max="1"></progress><small>0/1 verified verdict</small></div></div>
+      <div class="work-row"><div><strong>Fix Windows Terminal tab storm</strong><small>Owner: adversarial agent. Expected proof: producer PID plus bounded non-recurrence test.</small></div><div><progress value="4" max="4"></progress><small>4/4 proven steps</small></div><div><strong class="green">COMPLETE</strong><small>proof 14:10:22</small></div></div>
+      <ul><li>✅ Reproduced hundreds of recreated empty <code>cmd.exe</code> tabs.</li><li>✅ Proved no observed shell had a useful child process.</li><li>✅ Producer identified: minutely <code>GaiaFleetSupervisor</code> task, 77 probes.</li><li>✅ Task quarantined; next tick had zero windows/tabs and wmux <code>pong</code>.</li></ul>
+      <div class="work-row"><div><strong>Trace the continuous loop</strong><small>Owner: architecture agent. Inspecting existing event log, Petri, SSE, and DuckDB seams.</small></div><div><progress value="3" max="3"></progress><small>3/3 observed steps</small></div><div><strong class="green">COMPLETE</strong><small>verdict delivered 14:11</small></div></div>
+      <div class="work-row"><div><strong>Visualize time vs work</strong><small>Independent bars, horizons, and a measurable radar.</small></div><div><progress value="1" max="1"></progress><small>1/1 proven outcome</small></div><div><strong class="green">COMPLETE</strong><small>browser QA</small></div></div>
+      <div class="work-row"><div><strong>Petri R1 — final gate</strong><small>5/6 proven. Two independent reviews required; only one slot is currently free.</small></div><div><progress value="5" max="6"></progress><small>5/6 proven gates</small></div><div><strong class="amber">WAITING</strong><small>starts when a lane is released</small></div></div>
+      <div class="muted"><strong>Last observation:</strong> 14:10:22 EDT. <strong>Current source:</strong> local processes, tests, and artifacts. <strong>Target:</strong> event log → DuckDB projector → this cockpit.</div>
+    </article>
+    <article class="card wide"><div class="state amber">DELIVERY HORIZONS</div><ul><li><strong>Pulse — seconds:</strong> local presence/SSE, without an LLM or progress claim.</li><li><strong>Micro-sprint — 5 min:</strong> one bounded proof; conservative admission.</li><li><strong>Sprint — 30–60 min:</strong> a shippable slice with gates and review.</li><li><strong>Wayfinder:</strong> roadmap and dependencies; not a time promise.</li></ul></article>
+    <article class="card wide"><div class="state green">HEALTH BY HORIZON</div><div class="radar-grid"><div class="radar-card"><strong>MICRO-SPRINT · LIVE</strong><svg id="microRadarEn" class="radar" viewBox="0 0 220 220" aria-label="Micro-sprint radar"></svg><small id="microRadarFactsEn">Work 100 · Time remaining calculated · Fresh evidence · Unblocked 100 · Capacity 75</small></div><div class="radar-card"><strong>SPRINT · 30–60 MIN</strong><div class="no-data"><span><span class="tag warn">INSUFFICIENT</span><br><br>Fewer than 5 comparable runs.<br>No invented score.</span></div></div><div class="radar-card"><strong>MEGA-SPRINT · DAY</strong><div class="no-data"><span><span class="tag warn">INSUFFICIENT</span><br><br>No daily projection yet.<br>Derive it in DuckDB.</span></div></div></div></article>
+    <article id="userActionEn" class="card wide user-action" data-action="false" data-priority="none"><div class="state green"><span class="attention-icon">🚨</span>ATTENTION QUEUE — 0 ITEMS</div><ul><li><strong>No action for you.</strong> Gaia continues without input.</li></ul></article>
+    <article class="card wide legend"><div class="state muted">PRIORITY LEGEND — NOT A STATUS</div><ul><li><span class="priority p0">P0</span>blocks the pump; flashing red card.</li><li><span class="priority p1">P1</span>rapid decision; consequence and deadline shown.</li><li><span class="priority p2">P2</span>useful but non-blocking direction.</li></ul></article>
+    <article class="card wide"><div class="state amber">HYPOTHESES / OBJECTIONS</div><ul><li><span class="tag rule">INVARIANT</span>DuckDB projects; it never authorizes an action.</li><li><span class="tag good">VALIDATED</span>Petri fits transitions, locks, and invariants.</li><li><span class="tag warn">OBJECTION</span>Petri is not telemetry transport; SSE wakes and the event log reconciles.</li><li><span class="tag warn">TO TEST</span>The DuckDB projector must earn its baseline dependency through a benchmark.</li></ul><div class="prompt-hint"><strong>Useful prompt now:</strong> “Prioritize the tab storm” or “Prioritize the DuckDB tracer.” No prompt is required while the red card is off.</div></article>
+    <article class="card wide"><div class="state green">FEEDBACK ON YOUR LAST PROMPT</div><ul><li><span class="tag good">RIGHT</span>Separating elapsed time from proven work exposes delay immediately.</li><li><span class="tag rule">GUARDRAIL</span>Time can never increase the work bar.</li><li><span class="tag good">ADOPTED</span>Two independent bars and a five-minute checkpoint are now visible.</li></ul></article>
+    <article class="card side"><div class="state green">HIERARCHY AND LANES</div><ul>
+      <li><strong>You — product authority</strong><ul>
+        <li><strong>Gaia coordinator / Codex</strong> — orchestrates, verifies evidence, and reports blockers.<ul>
+          <li><span class="tag good">COMPLETE</span><strong>Terminal diagnostic / adversarial</strong></li><li><span class="tag good">COMPLETE</span><strong>Continuous-loop design / architecture</strong></li><li><span class="tag warn">WAITING</span><strong>Petri R1 review / two reviewers</strong></li>
+        </ul></li>
+      </ul></li>
+    </ul><div class="muted">wmux: 1 status pane, 0 phantom lane. Fleet supervisor: quarantined.</div></article>
+    <article class="card side"><div class="state amber">CONTROL LOOP — DUCKDB MODEL</div><ul><li><strong>Presence:</strong> the supervisor observes the process and surface.</li><li><strong>Liveness:</strong> the agent answers a unique challenge before its deadline.</li><li><strong>Progress:</strong> a verifiable digest, test, commit, or artifact changes.</li><li><strong>Rule:</strong> heartbeat alone ≠ progress; DuckDB projects facts while the event log remains authoritative.</li></ul></article>
+    <article class="card side rule">
+      <strong>Pipeline:</strong> Intake → Claim → Execute → Prove → Review → Merge → Learn.<br>
+      <strong>Rule:</strong> an action succeeds only when its observable postcondition is verified.
+    </article>
+  </section>
+</main>
+<script>
+  const fr = document.querySelector('#fr');
+  const en = document.querySelector('#en');
+  const toggle = document.querySelector('#langToggle');
+  const setLanguage = language => {
+    const english = language === 'en';
+    fr.hidden = english;
+    en.hidden = !english;
+    toggle.textContent = english ? 'FR' : 'EN';
+    localStorage.setItem('gaia-now-language', language);
+    document.documentElement.lang = language;
+  };
+  setLanguage(localStorage.getItem('gaia-now-language') || 'fr');
+  toggle.addEventListener('click', () => setLanguage(document.documentElement.lang === 'fr' ? 'en' : 'fr'));
+  document.querySelectorAll('[data-timeline-range]').forEach(button => button.addEventListener('click', () => {
+    const hour = button.dataset.timelineRange === 'hour';
+    document.getElementById('timelineHourFr').hidden = !hour;
+    document.getElementById('sprintStripHourFr').hidden = !hour;
+    document.getElementById('timelineDayFr').hidden = hour;
+    document.querySelectorAll('[data-timeline-range]').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
+  }));
+  const updateSprintClock = () => {
+    for (const [sectionId, progressId, clockId, locale] of [['microSprintFr','microTimeFr','microClockFr','fr'], ['microSprintEn','microTimeEn','microClockEn','en']]) {
+      const section = document.getElementById(sectionId);
+      const start = Date.parse(section.dataset.start);
+      const end = Date.parse(section.dataset.end);
+      const total = Math.max(1, Math.round((end - start) / 1000));
+      const elapsed = Math.max(0, Math.min(total, Math.round((Date.now() - start) / 1000)));
+      document.getElementById(progressId).max = total;
+      document.getElementById(progressId).value = elapsed;
+      const remaining = Math.max(0, total - elapsed);
+      const label = locale === 'fr' ? `${elapsed}s écoulées · ${remaining}s restantes` : `${elapsed}s elapsed · ${remaining}s remaining`;
+      document.getElementById(clockId).textContent = label;
+    }
+    const frSection = document.getElementById('microSprintFr');
+    const start = Date.parse(frSection.dataset.start);
+    const end = Date.parse(frSection.dataset.end);
+    if (Date.now() >= end) {
+      const now = new Date();
+      const slot = now.getHours() * 12 + Math.floor(now.getMinutes() / 5) + 1;
+      const pad = value => String(value).padStart(2, '0');
+      const expectedId = `MS-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${String(slot).padStart(3, '0')}`;
+      document.getElementById('microTitleFr').textContent = `${expectedId} · SLOT COURANT NON PLANIFIÉ`;
+      const guard = document.getElementById('rolloutGuardFr');
+      guard.innerHTML = `<strong>ROLLOVER SERVEUR MANQUANT :</strong> la projection attend ${expectedId}; le contenu visible appartient à ${frSection.dataset.slotId}. Aucun progrès n’est attribué au nouveau slot.`;
+      guard.classList.add('red');
+      frSection.style.borderColor = '#ff758c';
+    }
+    const timeRemaining = Math.round(100 * Math.max(0, Math.min(1, (end - Date.now()) / (end - start))));
+    const evidenceFreshness = Math.round(100 * Math.max(0, Math.min(1, (300000 - (Date.now() - Date.parse('2026-09-04T15:06:00-04:00'))) / 300000)));
+    renderRadar('microRadarFr', [100, timeRemaining, evidenceFreshness, 75, 100], ['Preuve','Temps','Fraîcheur','Flux','Réserve']);
+    renderRadar('microRadarEn', [100, timeRemaining, evidenceFreshness, 75, 100], ['Evidence','Time','Freshness','Flow','Reserve']);
+  };
+  const renderRadar = (id, values, labels) => {
+    const svg = document.getElementById(id);
+    const cx = 110, cy = 110, radius = 72;
+    const point = (i, scale=1) => { const a = -Math.PI/2 + i*2*Math.PI/5; return [cx + Math.cos(a)*radius*scale, cy + Math.sin(a)*radius*scale]; };
+    const poly = scale => Array.from({length:5}, (_,i)=>point(i,scale).join(',')).join(' ');
+    const shape = values.map((v,i)=>point(i,v/100).join(',')).join(' ');
+    const axes = Array.from({length:5},(_,i)=>{const [x,y]=point(i); return `<line class="axis" x1="${cx}" y1="${cy}" x2="${x}" y2="${y}"/>`;}).join('');
+    const texts = labels.map((label,i)=>{const [x,y]=point(i,1.27); return `<text x="${x}" y="${y}" text-anchor="middle">${label} ${values[i]}</text>`;}).join('');
+    svg.innerHTML = `<polygon class="gridline" points="${poly(1)}"/><polygon class="gridline" points="${poly(.66)}"/><polygon class="gridline" points="${poly(.33)}"/>${axes}<polygon class="shape" points="${shape}"/>${texts}`;
+  };
+  renderRadar('checkpointRadarFr', [100, 90, 70, 85, 75], ['Preuve','Fraîcheur','Risque','Flux','Réserve']);
+  renderRadar('promptRadarFr', [95, 65, 90, 70, 85], ['Résultat','Preuve','Priorité','Délai','Scope']);
+  // Legacy renderer is retained only as static fallback; the unified renderer owns the live clock.
+</script>
+<script>
+  // Live projection override: facts below are refreshed from verified local evidence.
+  (() => {
+    const observedAt = '2026-09-04T15:28:00-04:00';
+    const micro = document.getElementById('microSprintFr');
+    micro.dataset.start = '2026-09-04T15:10:00-04:00';
+    micro.dataset.end = '2026-09-04T15:15:00-04:00';
+    micro.dataset.slotId = 'MS-20260904-183';
+    document.getElementById('microTitleFr').textContent = 'MS-20260904-183 · INTERVALLE DE CONTRÔLE · 183/288 · 15:10–15:15';
+    const guard = document.getElementById('rolloutGuardFr');
+    guard.innerHTML = '<strong>PROJECTION FRAÎCHE :</strong> R4 terminé à 15:13; snapshot canonique créé et deux reviews indépendantes lancées.';
+    guard.classList.remove('red');
+    micro.style.borderColor = '#58e6a8';
+
+    const activeTimeline = document.querySelector('#timelineHourFr .time-point.active');
+    if (activeTimeline) activeTimeline.innerHTML = '<time>15:28 · maintenant</time><strong>R5 double APPROVE</strong><small>gate de ship ouvert</small>';
+    const dayTimeline = document.querySelector('#timelineDayFr .time-point.active');
+    if (dayTimeline) dayTimeline.innerHTML = '<time>15:28 · maintenant</time><strong>R5 double APPROVE</strong><small>snapshot intact</small>';
+
+    const strip = document.getElementById('sprintStripHourFr');
+    strip.innerHTML = `<div class="muted" style="margin-top:12px"><strong>MICRO-SPRINTS · 5 MIN</strong> — preuve binaire + tendance glissante</div>
+      <div class="sprint-summary">
+        <div class="sprint-strip" aria-label="Résultats des douze derniers checkpoints"><span class="sprint-dot bad">171</span><span class="sprint-dot bad">172</span><span class="sprint-dot good">173</span><span class="sprint-dot good">174</span><span class="sprint-dot good">175</span><span class="sprint-dot good">176</span><span class="sprint-dot bad">177</span><span class="sprint-dot good">178</span><span class="sprint-dot bad">179</span><span class="sprint-dot good">180</span><span class="sprint-dot bad">181</span><span class="sprint-dot good">182</span><span class="sprint-dot good">183</span></div>
+        <svg class="sparkline" viewBox="0 0 160 42" role="img" aria-label="Taux de réussite glissant"><path class="axis" d="M0 36H160"/><path class="area" d="M2 34 L28 23 L54 7 L80 18 L106 23 L132 18 L158 7 L158 36 L2 36 Z"/><path class="line" d="M2 34 L28 23 L54 7 L80 18 L106 23 L132 18 L158 7"/></svg>
+        <div class="score-pill"><strong class="green">61,5 %</strong><small class="muted">8/13 atteints<br>tendance ↗</small></div>
+      </div>`;
+
+    const hierarchyCards = [...document.querySelectorAll('#fr article.card.side')];
+    const hierarchy = hierarchyCards.find(card => card.textContent.includes('HIÉRARCHIE ET LANES'));
+    if (hierarchy) {
+      hierarchy.innerHTML = `<div class="state green">HIÉRARCHIE ET LANES</div>
+        <details class="tree" open><summary><strong>Toi · autorité produit</strong></summary><div>
+          <details class="tree" open><summary><strong>Coordinateur Gaia / Codex</strong> · contrôle et preuve</summary><div>
+            <details class="tree"><summary><span class="tag good">TERMINÉ</span>Environnement terminal</summary><div>Producteur du tab storm identifié; scheduler quarantiné; deux ticks sans récidive.</div></details>
+            <details class="tree"><summary><span class="tag good">TERMINÉ</span>Petri R1–R3</summary><div>Blockers reproduits puis fermés par RED→GREEN; suites complètes rejouées.</div></details>
+            <details class="tree"><summary><span class="tag bad">R4</span>Reviews indépendantes</summary><div>Spec APPROVE. Standards REQUEST_CHANGES : registration sans timestamp autorise rétroactivement.</div></details>
+            <details class="tree"><summary><span class="tag good">TERMINÉ</span>Writer Petri R5</summary><div>Fail-closed timestamp absent, RED→GREEN, 29/29 deux fois, 1794/1794 deux fois.</div></details>
+            <details class="tree" open><summary><span class="progress-ring" style="--value:100;--ring:#58e6a8" role="progressbar" aria-valuenow="100" aria-valuemin="0" aria-valuemax="100"><span>100%</span></span><strong>Reviews R5 · double APPROVE</strong></summary><div>Standards ✅ · Spec ✅ · snapshot immuable <code>9f708cb9…</code> inchangé. Gate de ship ouvert.</div></details>
+          </div></details>
+        </div></details>
+        <div class="muted">wmux : 1 pane de statut, 0 lane fantôme. Fleet supervisor : quarantaine.</div>
+        <div class="muted" style="margin-top:10px">Fraîcheur : <strong class="green" id="hierarchyAge">calcul…</strong> · source : R5 handoff + snapshot + reviewers</div>`;
+    }
+
+    const provider = hierarchyCards.find(card => card.textContent.includes('CAPACITÉ FOURNISSEURS'));
+    if (provider) {
+      provider.innerHTML = `<div class="state green">CAPACITÉ FOURNISSEURS</div>
+        <table class="provider-matrix"><thead><tr><th>FOURNISSEUR</th><th>COURT</th><th>LONG</th><th>SOURCE / RESET</th></tr></thead><tbody>
+          <tr><td><strong>Codex</strong><small class="muted">Spark = modèle</small></td><td class="quota"><small>5 h · Spark 100% libre</small><progress value="100" max="100"></progress></td><td class="quota"><small>7 j · 83% libre</small><progress value="83" max="100"></progress></td><td><small>API Codex · 11 sept. 11:28</small></td></tr>
+          <tr><td><strong>Claude Code 2.1.260</strong></td><td class="quota"><small>5 h · 93% libre</small><progress value="93" max="100"></progress></td><td class="quota"><small>7 j · 34% libre</small><progress value="34" max="100"></progress><small class="red">Fable 0% libre</small></td><td><small>claude.ai/settings/usage · session +2 h 19 · semaine lun. 20 h</small></td></tr>
+          <tr><td><strong>Antigravity / AGY 1.1.23</strong></td><td class="quota"><small>baseline temporelle</small><progress value="0" max="100"></progress></td><td><small class="amber">valeur à lire dans Settings / Models</small></td><td><small>source officielle UI; CLI sans quota vérifié</small></td></tr>
+          <tr><td><strong>Augment / Auggie 0.36</strong></td><td><small>—</small></td><td class="quota"><small>mois · 53% libre</small><progress value="53" max="100"></progress></td><td><small>21 199 / 40 000 · cycle 22 sept.</small></td></tr>
+          <tr><td><strong>Junie 26.8.31</strong></td><td><small>session via <code>/usage</code></small></td><td class="quota"><small>cycle 30 j · solde non lu</small><progress value="0" max="100"></progress></td><td><small><code>/stats</code> / <code>/quota</code>; headless ne renvoie pas le solde</small></td></tr>
+        </tbody></table><div class="muted">Une barre vide signifie « valeur non observée », jamais « quota épuisé ». Les fenêtres gardent la sémantique réelle du fournisseur.</div>`;
+      provider.insertAdjacentHTML('afterend', `<article class="card side"><div class="state green">CAPACITÉ ET PARALLÉLISATION</div><div class="capacity-grid"><div class="capacity-cell"><strong>2 reviews terminées</strong><small class="green">R5 double APPROVE</small></div><div class="capacity-cell"><strong>1 coordinateur</strong><small class="muted">décision de ship</small></div><div class="capacity-cell"><strong>Budget Claude</strong><small class="green">93% court · 34% semaine</small></div><div class="capacity-cell"><strong>Admission suivante</strong><small class="green">gate ouvert</small></div></div><p class="muted">Le parallélisme est admis seulement pour des responsabilités indépendantes; la marge de coordination et le quota réservé réduisent la capacité brute.</p></article>`);
+    }
+
+    const refreshAge = () => {
+      const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(observedAt)) / 1000));
+      const age = document.getElementById('hierarchyAge');
+      if (age) {
+        age.textContent = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+        age.className = seconds > 300 ? 'red' : seconds > 120 ? 'amber' : 'green';
+      }
+    };
+    refreshAge();
+    setInterval(refreshAge, 1000);
+  })();
+</script>
+<script>
+  // Keep the visible five-minute slot aligned with the wall clock while facts age independently.
+  (() => {
+    return; // Legacy renderer disabled: the unified renderer owns all live projections.
+    const lastEvidence = Date.parse('2026-09-04T15:28:00-04:00');
+    const pad = value => String(value).padStart(2, '0');
+    const refreshProjection = () => {
+      const now = new Date();
+      const start = new Date(now);
+      start.setMinutes(Math.floor(now.getMinutes() / 5) * 5, 0, 0);
+      const end = new Date(start.getTime() + 300000);
+      const slot = start.getHours() * 12 + Math.floor(start.getMinutes() / 5) + 1;
+      const slotId = `MS-${start.getFullYear()}${pad(start.getMonth() + 1)}${pad(start.getDate())}-${String(slot).padStart(3, '0')}`;
+      const micro = document.getElementById('microSprintFr');
+      micro.dataset.start = start.toISOString();
+      micro.dataset.end = end.toISOString();
+      micro.dataset.slotId = slotId;
+      document.getElementById('microTitleFr').textContent = `${slotId} · INTERVALLE DE CONTRÔLE · ${slot}/288 · ${pad(start.getHours())}:${pad(start.getMinutes())}–${pad(end.getHours())}:${pad(end.getMinutes())}`;
+      const ageSeconds = Math.max(0, Math.floor((Date.now() - lastEvidence) / 1000));
+      const fresh = ageSeconds <= 300;
+      const elapsed = Math.max(0, Math.min(300, Math.floor((Date.now() - start.getTime()) / 1000)));
+      document.getElementById('microTimeFr').value = elapsed;
+      document.getElementById('microClockFr').textContent = `${elapsed}s écoulées · ${300 - elapsed}s restantes`;
+      renderRadar('microRadarFr', [100, Math.round((300 - elapsed) / 3), Math.max(0, 100 - Math.round(ageSeconds / 3)), 100, 75], ['Preuve','Temps','Fraîcheur','Flux','Réserve']);
+      const guard = document.getElementById('rolloutGuardFr');
+      guard.innerHTML = fresh
+        ? `<strong>PROJECTION FRAÎCHE :</strong> R5 a reçu deux APPROVE indépendants; gate de ship ouvert. Dernière preuve il y a ${ageSeconds}s.`
+        : `<strong>PREUVE STALE :</strong> aucune postcondition de ship depuis ${Math.floor(ageSeconds / 60)}m ${ageSeconds % 60}s. Les APPROVE restent vrais mais le flux doit avancer.`;
+      guard.classList.toggle('red', !fresh);
+      micro.style.borderColor = fresh ? '#58e6a8' : '#ff758c';
+      const summary = micro.querySelector('summary');
+      const tag = summary?.querySelector('.tag');
+      const reason = summary?.querySelector('.risk-reason');
+      if (tag) { tag.textContent = 'R5 APPROVED'; tag.className = `tag ${fresh ? 'good' : 'bad'}`; }
+      if (reason) reason.textContent = fresh ? 'Standards + Spec APPROVE; décision de ship admise' : 'postcondition de ship attendue; âge au-delà de 5 min';
+    };
+    const micro = document.getElementById('microSprintFr');
+    const paragraph = micro.querySelector('.horizon-body > p');
+    if (paragraph) paragraph.innerHTML = '<strong>Checkpoint de preuve :</strong> double APPROVE R5 obtenu; vérifier maintenant la postcondition de ship.';
+    const work = micro.querySelector('.work-row');
+    if (work) work.innerHTML = '<div><strong>Gate Petri R5</strong><small>Standards + Spec APPROVE. Snapshot <code>9f708cb9…</code> intact.</small></div><div><progress value="5" max="5"></progress><small>5/5 gates prouvés</small></div><div><strong class="green">APPROVED</strong><small>ship suivant</small></div>';
+    const proof = micro.querySelectorAll('.prompt-hint')[1];
+    if (proof) proof.innerHTML = '<strong>Preuve de départ :</strong> R5 29/29 deux fois, 1794/1794 deux fois; snapshot 268 fichiers, digest <code>9f708cb986cef0bd…</code>.';
+    const observation = [...micro.querySelectorAll('.muted')].find(node => node.textContent.includes('Dernière observation'));
+    if (observation) observation.innerHTML = '<strong>Dernière observation :</strong> 15:28 EDT. Standards APPROVE + Spec APPROVE; digest final identique.';
+    const strip = document.querySelector('#sprintStripHourFr .sprint-strip');
+    if (strip && !strip.textContent.includes('184')) strip.insertAdjacentHTML('beforeend', '<span class="sprint-dot active">184</span>');
+    const rail = document.querySelector('.checkpoint-rail');
+    if (rail?.lastElementChild) rail.lastElementChild.innerHTML = '<span class="tag good">APPROVED</span><strong>Double review R5</strong><small>Standards + Spec; digest inchangé.</small>';
+    const replacements = new Map([
+      ['R2 refusé; R3 ciblé actif', 'R4 refusé; R5 ciblé actif'],
+      ['R1→R2→R3; dette actuelle à réduire.', 'R1→R2→R3→R4→R5; dette causale en réduction.'],
+      ['Deux reviewers R3 actifs.', 'Writer R5 actif sur un blocker causal.'],
+      ['obtenir un verdict frais R3 et mesurer l’attente de review.', 'obtenir un RED frais R5 puis mesurer le temps de réparation.'],
+      ['Gaia attend les reviews R3 dans le scope déjà autorisé.', 'Gaia exécute R5 dans le scope causal déjà autorisé.'],
+      ['Scope : reviews R3, verdict, reproduction et prochain checkpoint.', 'Scope : réparation R5, RED/GREEN, tests et prochain checkpoint.'],
+      ['Surveiller les deux reviews, vérifier chaque verdict, reproduire tout blocker concret et lancer une réparation bornée autorisée.', 'Vérifier le RED/GREEN R5, rejouer les tests et lancer deux reviews fraîches si la preuve est complète.'],
+      ['si R3 est admis', 'si R5 obtient double APPROVE'],
+      ['« MS-174 : garde le scope R2 et montre le premier RED. » Aucun prompt n’est requis tant que la carte rouge reste éteinte.', '« Garde R5 borné au timestamp manquant et montre le RED. » Aucun prompt n’est requis tant que la carte rouge reste éteinte.']
+    ]);
+    const walker = document.createTreeWalker(document.getElementById('fr'), NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      let value = walker.currentNode.nodeValue;
+      for (const [from, to] of replacements) value = value.replace(from, to);
+      walker.currentNode.nodeValue = value;
+    }
+    const historyCards = [...document.querySelectorAll('#fr article.card.side')];
+    const history = historyCards.find(card => card.textContent.includes('HISTORIQUE DES CHECKPOINTS'));
+    if (history) {
+      const stats = history.querySelector('.history-stats');
+      if (stats) stats.innerHTML = '<span class="tag good">61,5% ATTEINTS</span><span class="tag bad">38,5% MANQUÉS</span>';
+      const body = history.querySelector('tbody');
+      if (body && !body.textContent.includes('15:10–15')) body.insertAdjacentHTML('afterbegin', '<tr><td>183<br><small>15:10–15</small></td><td class="green">ATTEINT</td><td>R4 1794/1794 + snapshot</td></tr><tr><td>182<br><small>15:05–10</small></td><td class="green">ATTEINT</td><td>Spec R3 APPROVE</td></tr><tr><td>181<br><small>15:00–05</small></td><td class="red">MANQUÉ</td><td>Verdict arrivé après limite</td></tr>');
+      const footer = [...history.querySelectorAll('.muted')].find(node => node.textContent.includes('source : ledger'));
+      if (footer) footer.textContent = 'n=13 · source : ledger JSONL projeté par DuckDB.';
+    }
+    refreshProjection();
+    setInterval(refreshProjection, 1000);
+  })();
+</script>
+<script>
+  // English is a second renderer over the same live facts, not an independently edited snapshot.
+  (() => {
+    return; // Legacy renderer disabled: the unified renderer owns both languages.
+    const english = document.getElementById('en');
+    english.innerHTML = `
+      <article class="card top-timeline"><div class="state green">COORDINATION TIMELINE</div><div class="horizontal-time" style="grid-template-columns:repeat(5,minmax(140px,1fr))"><div class="time-point good"><time>14:11</time><strong>Terminal healthy</strong><small>two clean ticks</small></div><div class="time-point good"><time>15:13</time><strong>R4 repair</strong><small>1794/1794</small></div><div class="time-point bad"><time>15:19</time><strong>R4 review</strong><small>Spec approved; Standards found one blocker</small></div><div class="time-point active"><time>now</time><strong>R5 reviews</strong><small>Standards + Spec in parallel</small></div><div class="time-point forecast"><time>conditional</time><strong>Ship decision</strong><small>only after dual APPROVE</small></div></div></article>
+      <article id="microSprintEn" class="card wide"><div class="state amber"><span class="pulse"></span><span id="microTitleEn">CURRENT FIVE-MINUTE EVIDENCE SLOT</span></div><div class="dual-meter"><div><strong>TIME</strong><progress id="microTimeEn" value="0" max="300"></progress><small id="microClockEn">calculating…</small></div><div><strong>PROVEN WORK</strong><progress value="4" max="5"></progress><small>repair + tests + snapshot proven; reviews active</small></div></div><p><strong>Current evidence:</strong> R5 rejects untimestamped causal registration; 29/29 twice and 1794/1794 twice. Immutable snapshot <code>9f708cb9…</code>.</p></article>
+      <article class="card wide"><div class="state green">MICRO-SPRINT TREND</div><div class="sprint-summary"><div class="sprint-strip"><span class="sprint-dot bad">171</span><span class="sprint-dot bad">172</span><span class="sprint-dot good">173</span><span class="sprint-dot good">174</span><span class="sprint-dot good">175</span><span class="sprint-dot good">176</span><span class="sprint-dot bad">177</span><span class="sprint-dot good">178</span><span class="sprint-dot bad">179</span><span class="sprint-dot good">180</span><span class="sprint-dot bad">181</span><span class="sprint-dot good">182</span><span class="sprint-dot good">183</span><span class="sprint-dot active">184</span></div><svg class="sparkline" viewBox="0 0 160 42" role="img" aria-label="Rolling success trend"><path class="axis" d="M0 36H160"/><path class="area" d="M2 34 L28 23 L54 7 L80 18 L106 23 L132 18 L158 7 L158 36 L2 36 Z"/><path class="line" d="M2 34 L28 23 L54 7 L80 18 L106 23 L132 18 L158 7"/></svg><div class="score-pill"><strong class="green">61.5%</strong><small class="muted">8/13 achieved<br>trend ↗</small></div></div></article>
+      <article id="userActionEn" class="card wide user-action" data-action="false"><div class="state green">HUMAN BLOCKERS — 0</div><p><strong>No click or prompt required.</strong> R5 reviews are already running inside the authorized scope.</p></article>
+      <article class="card side"><div class="state green">HIERARCHY AND LANES</div><details class="tree" open><summary><strong>You · product authority</strong></summary><div><details class="tree" open><summary><strong>Gaia / Codex coordinator</strong></summary><div><details class="tree"><summary><span class="tag good">DONE</span>Terminal environment</summary><div>Tab-storm producer quarantined; non-recurrence proven.</div></details><details class="tree"><summary><span class="tag bad">R4</span>Independent reviews</summary><div>Spec APPROVE; Standards REQUEST_CHANGES on untimestamped registration.</div></details><details class="tree" open><summary><span class="progress-ring" style="--value:80;--ring:#ffc857" role="progressbar" aria-valuenow="80"><span>80%</span></span><strong>Petri R5 review gate</strong></summary><div>Repair ✅ · focused tests ✅ · full suite ✅ · snapshot ✅ · dual verdict ⬜.</div></details></div></details></div></details><div class="muted">Source: R5 handoff + immutable snapshot <code>9f708cb9…</code>.</div></article>
+      <article class="card side"><div class="state green">PROVIDER CAPACITY</div><table class="provider-matrix"><thead><tr><th>PROVIDER</th><th>SHORT</th><th>LONG</th><th>SOURCE / RESET</th></tr></thead><tbody><tr><td><strong>Codex</strong><small class="muted">Spark is a model</small></td><td class="quota"><small>5 h · Spark 100% free</small><progress value="100" max="100"></progress></td><td class="quota"><small>7 d · 83% free</small><progress value="83" max="100"></progress></td><td><small>Codex API · Sep 11 11:28</small></td></tr><tr><td><strong>Claude Code</strong></td><td class="quota"><small>5 h · 93% free</small><progress value="93" max="100"></progress></td><td class="quota"><small>7 d · 34% free</small><progress value="34" max="100"></progress><small class="red">Fable 0% free</small></td><td><small>authenticated usage page</small></td></tr><tr><td><strong>Antigravity / AGY</strong></td><td><small>timed baseline</small></td><td><small class="amber">value not observed</small></td><td><small>Settings / Models</small></td></tr><tr><td><strong>Auggie</strong></td><td><small>—</small></td><td class="quota"><small>month · 53% free</small><progress value="53" max="100"></progress></td><td><small>21,199 / 40,000</small></td></tr><tr><td><strong>Junie</strong></td><td><small><code>/usage</code></small></td><td><small class="amber">balance not observed</small></td><td><small>30-day cycle</small></td></tr></tbody></table></article>
+      <article class="card side"><div class="state green">CAPACITY AND PARALLELISM</div><div class="capacity-grid"><div class="capacity-cell"><strong>2 active reviews</strong><small>R5 Standards + Spec</small></div><div class="capacity-cell"><strong>1 coordinator</strong><small>evidence + cockpit</small></div><div class="capacity-cell"><strong>Claude reserve</strong><small class="green">93% short · 34% week</small></div><div class="capacity-cell"><strong>Next admission</strong><small class="amber">after both verdicts</small></div></div></article>
+      <article class="card side rule"><strong>Invariant:</strong> one fact model, two language renderers. A language switch cannot change operational state.</article>`;
+    const refreshEnglish = () => {
+      const now = new Date();
+      const start = new Date(now); start.setMinutes(Math.floor(now.getMinutes() / 5) * 5, 0, 0);
+      const end = new Date(start.getTime() + 300000);
+      const pad = value => String(value).padStart(2, '0');
+      const elapsed = Math.max(0, Math.min(300, Math.floor((Date.now() - start.getTime()) / 1000)));
+      document.getElementById('microTitleEn').textContent = `${pad(start.getHours())}:${pad(start.getMinutes())}–${pad(end.getHours())}:${pad(end.getMinutes())} · CURRENT EVIDENCE SLOT`;
+      document.getElementById('microTimeEn').value = elapsed;
+      document.getElementById('microClockEn').textContent = `${elapsed}s elapsed · ${300 - elapsed}s remaining`;
+    };
+    refreshEnglish(); setInterval(refreshEnglish, 1000);
+  })();
+</script>
+<script>
+  // Unified bilingual renderer: one state, one layout, two complete dictionaries.
+  (() => {
+    const legacyFr = document.getElementById('fr');
+    const legacyEn = document.getElementById('en');
+    legacyFr.hidden = true;
+    legacyEn.hidden = true;
+    const unified = document.createElement('section');
+    unified.id = 'unifiedDashboard';
+    unified.className = 'grid';
+    legacyEn.insertAdjacentElement('afterend', unified);
+    const timelinePopover = document.createElement('aside');
+    timelinePopover.id = 'timelinePopover';
+    timelinePopover.className = 'timeline-popover';
+    timelinePopover.setAttribute('role', 'tooltip');
+    document.body.appendChild(timelinePopover);
+
+    const markerFor = target => target instanceof Element ? target.closest('.timeline-marker') : null;
+    const hideTimelinePopover = () => timelinePopover.classList.remove('visible');
+    const showTimelinePopover = marker => {
+      if (!marker?.dataset.popoverTitle || !marker.dataset.popoverItems) return;
+      const heading = document.createElement('strong');
+      heading.textContent = marker.dataset.popoverTitle;
+      const list = document.createElement('ul');
+      for (const item of JSON.parse(marker.dataset.popoverItems)) {
+        const row = document.createElement('li');
+        row.textContent = item;
+        list.appendChild(row);
+      }
+      timelinePopover.replaceChildren(heading, list);
+      timelinePopover.classList.add('visible');
+      const rect = marker.getBoundingClientRect();
+      const width = Math.min(340, window.innerWidth - 28);
+      const left = Math.max(14, Math.min(rect.left, window.innerWidth - width - 14));
+      const topBelow = rect.bottom + 8;
+      timelinePopover.style.left = `${left}px`;
+      timelinePopover.style.top = `${Math.min(topBelow, window.innerHeight - timelinePopover.offsetHeight - 14)}px`;
+    };
+
+    const state = {
+      observedAt: '2026-09-04T23:11:11.000Z',
+      digest: '36cb1f1',
+      micro: { achieved: 9, total: 14 },
+      providers: {
+        codexShort: 100, codexLong: 83,
+        claudeShort: 93, claudeLong: 34, fable: 0,
+        auggieLong: 53
+      }
+    };
+    const copy = {
+      fr: {
+        subtitle: 'Un seul écran utile. Actualisation toutes les 15 secondes.', systemSignal: '🤖 IA · pompe bloquée', systemSignalStale: '🤖 IA · pompe stale', humanSignal: '👤 Humain · rien requis',
+        systemTitle: 'Voir l’état agrégé du système IA', humanTitle: 'Voir les décisions requises de l’humain',
+        timeline: 'TIMELINE DE COORDINATION', observed: 'Plein = observé. Pointillé = futur conditionnel.',
+        terminal: 'Terminal sain', terminalProof: 'deux ticks propres', r4: 'R4 refusé utilement', r4Proof: 'blocker causal découvert',
+        r5: 'R5 fusionnée', r5Proof: 'reçu GitHub · 147bafe', ship: 'PR #114 en validation', shipProof: '19:11 · CI 8/8 PASS',
+        future: 'Double review fraîche', futureProof: '+5–10 min · confiance 70%', future2: 'PR #114 reviewable', future2Proof: '+10–20 min · confiance 55%', future3: 'Tick live anti-blocage', future3Proof: 'après merge · confiance 40%', systemRoot: 'SIGNAL RACINE · SYSTÈME IA', humanRoot: 'SIGNAL RACINE · HUMAIN',
+        systemHealth: 'Exécution', systemHealthValue: 'La pompe live reste bloquée sur #82; son correctif #114 avance et CI est 8/8.', providerHealth: 'Capacité disponible', systemAlert: 'Blocker pompe', systemAlertValue: '⛔ EFFECT_AMBIGUOUS en production — correction pas encore fusionnée.', capacityHelp: 'La capacité globale reste suffisante malgré un fournisseur épuisé.', capacityImpact: 'Impact : Fable indisponible pour ce cycle.', capacityMitigation: 'Relève : Codex 83%, Claude 34%, Auggie 53%.', capacityDecision: 'Décision : continuer; escalader si toute relève passe sous 20%.', systemNext: 'Prochaine preuve', systemNextValue: 'Deux APPROVE frais sur le SHA 36cb1f1 de la PR #114.', currentSprint: 'courant', projectedSprint: 'projeté', past: 'passé', present: 'présent',
+        direction: 'Direction', directionValue: 'Bonne — correctif minimal, test négatif et CI prouvés.',
+        collaboration: 'Collaboration', collaborationValue: 'Bonne — tes hypothèses sont explicites et falsifiables.',
+        risk: 'Risque', riskValue: 'Moyen — les reviews fraîches et la preuve live restent dues.', action: 'Action humaine', actionValue: 'Aucune maintenant.',
+        slot: 'INTERVALLE DE PREUVE · 5 MIN', time: 'TEMPS', proven: 'TRAVAIL PROUVÉ',
+        evidence: 'PR #114 : implémentation, test négatif, suite complète, architecture et CI sont prouvés.', nextProof: 'Prochaine preuve : deux reviews indépendantes sur le SHA courant.',
+        gateScope: 'Implémentation', gateScopeProof: 'anti-blocage terminée', gateTdd: 'Tests ciblés', gateTddProof: '20/20 ×2', gateTests: 'Suite complète', gateTestsProof: '1 808/1 808 ×2', gateSnapshot: 'Architecture', gateSnapshotProof: 'gate PASS', gateReviews: 'Reviews', gateReviewsProof: 'en cours sur 36cb1f1', gateAudit: 'AUDIT DES GATES', gateAuditBody: 'Chaque gate a une source indépendante; le temps écoulé ne peut jamais les cocher.',
+        checkpoints: 'GRAPHE DE CHECKPOINTS', trend: 'TENDANCE MICRO-SPRINT', trendSource: 'Historique observé jusqu’à MS-184; chaque tranche sans fait DuckDB reste visible.', nextProofEtaLabel: 'PROCHAINE PREUVE ESTIMÉE', nextProofEta: 'double review PR #114 · 5–10 min · confiance 70% · condition : aucun nouveau blocker', achieved: 'atteints', awaiting: 'attente', noEvidence: 'aucune preuve', liveUpdate: 'mis à jour par l’horloge', legendSuccess: 'preuve atteinte', legendMiss: 'preuve manquée', legendMissing: 'aucune preuve', legendCurrent: 'slot courant',
+        human: 'BLOQUEURS HUMAINS — 0', humanNone: 'Aucune action humaine requise maintenant.',
+        hierarchy: 'HIÉRARCHIE ET LANES', you: 'Toi · autorité produit', coord: 'Coordinateur Gaia / Codex',
+        done: 'TERMINÉ', terminalLane: 'Environnement terminal', prior: 'Petri R1–R5', reviews: 'Reviews anti-blocage #114',
+        reviewsProof: 'Standards + Spec + concurrence sur SHA 36cb1f1.', nextLane: 'Réparation de la pompe', nextLaneProof: 'PR #114 · CI 8/8 · reviews fraîches en cours.',
+        pumpLedger: 'MESSAGES DE LA POMPE · FLUX COURANT', pumpReceived: 'Message reçu', pumpValidated: 'Préconditions validées', pumpResumed: 'Opération reprise', pumpBlocked: 'Accusé manquant', pumpBlockDetail: 'Issue #82 · PENDING / EFFECT_AMBIGUOUS', pumpRepair: 'Correctif matérialisé', pumpReview: 'Review a trouvé un défaut', pumpCorrected: 'Correctif renforcé',
+        proofProvided: 'Preuve fournie', proofExpected: 'Preuve attendue', proofSource: 'Source', proofPredicate: 'Prédicat', noneDeclared: 'non déclaré', prRelation: 'PR', closedIssueRelation: 'Issue fermée par la PR', parentIssueRelation: 'Issue parent', hierarchyRelation: 'Story / epic / wayfinder', siblingRelation: 'Issues sœurs',
+        capacity: 'CAPACITÉ ET PARALLÉLISATION', reviewsDone: '3 reviews', coordinator: '1 coordinateur',
+        reserve: 'Réserve Claude', admission: 'Admission suivante', admissionValue: 'après merge + tick live',
+        providers: 'CAPACITÉ FOURNISSEURS', provider: 'FOURNISSEUR', short: 'COURT', long: 'LONG', source: 'SOURCE / RESET', free: 'libre',
+        unknown: 'non observé', session: 'session', week: '7 jours', month: 'mois', cycle: 'cycle 30 jours', availableIdle: 'installé · non actif', quotaUnverified: 'quota non vérifié', toolNotAgent: 'outil de recherche · pas un agent',
+        invariant: 'INVARIANTS · CANDIDATS À PROMOUVOIR', inv1: 'Une action réussit seulement si sa postcondition est observée.',
+        inv2: 'Un même état alimente les renderers FR et EN.', inv3: 'DuckDB projette les faits; il n’autorise aucune transition.',
+        invRule: 'Promotion : observations répétées → formulation falsifiable → contre-exemple → test/oracle → owner + scope.',
+        r5Status: 'RÉPARATION POMPE · PR #114 EN REVIEW', stepImplementation: 'Quarantaine bornée du message toxique implémentée', stepFocused: 'Tests ciblés 20/20, deux fois', stepFull: 'Suite complète 1 808/1 808, deux fois', stepArchitecture: 'Architecture déclarée; gate CI PASS', stepReview: '8/8 checks GitHub verts; reviews fraîches en cours', notPublished: 'PR #114 encore Draft; aucune preuve live ni succès de pompe déclaré.',
+        deficits: 'DÉFICITS RACINE · FLUX ET PRÉDICATS', designAxis: 'DESIGN', designValue: 'OK', designReason: 'Architecture déclarée; gate PR PASS.', codeAxis: 'CODE', codeValue: 'OK', codeReason: '20/20 et 1 808/1 808 ×2.', planningAxis: 'PLANNING', planningValue: 'OK', planningReason: 'Reviews indépendantes déclenchées.', capacityAxis: 'CAPACITÉ', capacityValue: 'DÉGRADÉE', capacityReason: 'Relève suffisante; Fable épuisé.', publicationAxis: 'PUBLICATION', publicationValue: 'DRAFT', publicationReason: 'PR #114; preuve live après merge.', flowLabel: 'Flux courant', flowValue: 'issue #82 bloque → PR #114 isole → tick live attendu', predicateLabel: 'Prédicat faux', predicateValue: 'pump_live_postcondition = false.', pullPolicy: 'Collecte : Gaia tire les faits autoritatifs. SSE peut réveiller; aucun push de lane ne fait autorité.',
+        sourceLine: 'Source : PR #114, SHA 36cb1f1, tests locaux et 8/8 checks GitHub.', now: 'maintenant', conditional: 'conditionnel',
+        elapsed: 'écoulées', remaining: 'restantes', promptTitle: 'Voir le signal global', overdue: 'preuve stale', etaExpired: 'ETA expirée; confiance suspendue', reforecast: 'recalcul après preuve fraîche'
+      },
+      en: {
+        subtitle: 'One useful screen. Refreshes every 15 seconds.', systemSignal: '🤖 AI · pump blocked', systemSignalStale: '🤖 AI · pump stale', humanSignal: '👤 Human · nothing required',
+        systemTitle: 'View aggregated AI system status', humanTitle: 'View decisions required from the human',
+        timeline: 'COORDINATION TIMELINE', observed: 'Solid = observed. Dashed = conditional future.',
+        terminal: 'Terminal healthy', terminalProof: 'two clean ticks', r4: 'R4 useful rejection', r4Proof: 'causal blocker discovered',
+        r5: 'R5 merged', r5Proof: 'GitHub receipt · 147bafe', ship: 'PR #112 merged', shipProof: '18:22 · receipt 147bafe',
+        future: 'Next admission', futureProof: '+5–15 min · 60% confidence', future2: 'First receipt for the next work item', future2Proof: '+10–25 min · 45% confidence', future3: 'New proof cycle', future3Proof: '+20–40 min · 30% confidence', systemRoot: 'ROOT SIGNAL · AI SYSTEM', humanRoot: 'ROOT SIGNAL · HUMAN',
+        systemHealth: 'Execution', systemHealthValue: 'The GitHub tick succeeded; the pump remains PENDING on issue #82.', providerHealth: 'Available capacity', systemAlert: 'Pump blocker', systemAlertValue: '⛔ EFFECT_AMBIGUOUS — prior effect is not acknowledged.', capacityHelp: 'Overall capacity remains sufficient despite one exhausted provider.', capacityImpact: 'Impact: Fable unavailable for this cycle.', capacityMitigation: 'Fallback: Codex 83%, Claude 34%, Auggie 53%.', capacityDecision: 'Decision: continue; escalate if every fallback drops below 20%.', systemNext: 'Next proof', systemNextValue: 'Terminal reconciliation of the issue #82 operation.', currentSprint: 'current', projectedSprint: 'projected', past: 'past', present: 'present',
+        direction: 'Direction', directionValue: 'Good — every technical predicate is satisfied.',
+        collaboration: 'Collaboration', collaborationValue: 'Good — your hypotheses are explicit and falsifiable.',
+        risk: 'Risk', riskValue: 'Low — merge and GitHub postcondition are proven.', action: 'Human action', actionValue: 'None now.',
+        slot: 'FIVE-MINUTE EVIDENCE SLOT', time: 'TIME', proven: 'PROVEN WORK',
+        evidence: 'R5 implementation, tests, architecture, reviews, CI, and merge are proven.', nextProof: 'Next proof: issue #82 reconciled with a terminal receipt.',
+        gateScope: 'Implementation', gateScopeProof: 'R5 complete', gateTdd: 'Focused tests', gateTddProof: '29/29', gateTests: 'Full suite', gateTestsProof: '1800/1800 ×2', gateSnapshot: 'Architecture', gateSnapshotProof: 'gate PASS', gateReviews: 'Reviews', gateReviewsProof: 'Spec ✅ · Standards ✅', gateAudit: 'GATE AUDIT', gateAuditBody: 'Each gate has an independent source; elapsed time can never check a gate.',
+        checkpoints: 'CHECKPOINT GRAPH', trend: 'MICRO-SPRINT TREND', trendSource: 'Observed history through MS-183; every slot without a DuckDB fact remains visible.', nextProofEtaLabel: 'ESTIMATED NEXT PROOF', nextProofEta: 'next admission · 5–15 min · 60% confidence · condition: pump accepts the next item', achieved: 'achieved', awaiting: 'pending', noEvidence: 'no evidence', liveUpdate: 'updated by the clock', legendSuccess: 'evidence met', legendMiss: 'evidence missed', legendMissing: 'no evidence', legendCurrent: 'current slot',
+        human: 'HUMAN BLOCKERS — 0', humanNone: 'No human action required now.',
+        hierarchy: 'HIERARCHY AND LANES', you: 'You · product authority', coord: 'Gaia / Codex coordinator',
+        done: 'DONE', terminalLane: 'Terminal environment', prior: 'Petri R1–R4', reviews: 'R5 final review',
+        reviewsProof: '3 threads fixed and resolved · SHA 4b7b49a.', nextLane: 'Reconcile the pump', nextLaneProof: 'Issue #82 · EFFECT_AMBIGUOUS · run 33917897845.',
+        pumpLedger: 'PUMP MESSAGES · LATEST TICK', pumpReceived: 'Message received', pumpValidated: 'Preconditions validated', pumpResumed: 'Operation resumed', pumpBlocked: 'Acknowledgement missing', pumpBlockDetail: 'Issue #82 · PENDING / EFFECT_AMBIGUOUS',
+        proofProvided: 'Evidence provided', proofExpected: 'Evidence expected', proofSource: 'Source', proofPredicate: 'Predicate', noneDeclared: 'not declared', prRelation: 'PR', closedIssueRelation: 'Issue closed by PR', parentIssueRelation: 'Parent issue', hierarchyRelation: 'Story / epic / wayfinder', siblingRelation: 'Sibling issues',
+        capacity: 'CAPACITY AND PARALLELISM', reviewsDone: '2 APPROVE', coordinator: '1 coordinator',
+        reserve: 'Claude reserve', admission: 'Next admission', admissionValue: 'after verified ship',
+        providers: 'PROVIDER CAPACITY', provider: 'PROVIDER', short: 'SHORT', long: 'LONG', source: 'SOURCE / RESET', free: 'free',
+        unknown: 'not observed', session: 'session', week: '7 days', month: 'month', cycle: '30-day cycle', availableIdle: 'installed · inactive', quotaUnverified: 'quota unverified', toolNotAgent: 'search tool · not an agent',
+        invariant: 'INVARIANTS · PROMOTION CANDIDATES', inv1: 'An action succeeds only when its postcondition is observed.',
+        inv2: 'One state feeds both FR and EN renderers.', inv3: 'DuckDB projects facts; it authorizes no transition.',
+        invRule: 'Promotion: repeated observations → falsifiable statement → counterexample → test/oracle → owner + scope.',
+        r5Status: 'R5 STATUS · MERGED', stepImplementation: 'Fixes for all 3 review threads complete', stepFocused: 'Focused tests 32/32', stepFull: 'Full suite 1,803/1,803, twice', stepArchitecture: 'Architecture declared and CI gate PASS', stepReview: '3/3 conversations resolved; 8/8 GitHub checks green', notPublished: 'PR #112 merged; GitHub receipt 147bafe at 18:22.',
+        deficits: 'ROOT DEFICITS · FLOW AND PREDICATES', designAxis: 'DESIGN', designValue: 'OK', designReason: 'Architecture declared; PR gate PASS.', codeAxis: 'CODE', codeValue: 'OK', codeReason: '32/32 and 1,803/1,803 ×2.', planningAxis: 'PLANNING', planningValue: 'OK', planningReason: 'Ten-minute pull/reconcile watchdog active.', capacityAxis: 'CAPACITY', capacityValue: 'DEGRADED', capacityReason: 'Fallback sufficient; Fable exhausted.', publicationAxis: 'PUBLICATION', publicationValue: 'MERGED', publicationReason: 'GitHub receipt 147bafe.', flowLabel: 'Current flow', flowValue: 'PR #112 drained → pull the next work item', predicateLabel: 'False predicate', predicateValue: 'next_work_admitted.', pullPolicy: 'Collection: Gaia pulls authoritative facts. SSE may wake it; no lane push grants authority.',
+        sourceLine: 'Source: merged PR #112, commit 147bafe, GitHub CI, and 3 resolved threads.', now: 'now', conditional: 'conditional',
+        elapsed: 'elapsed', remaining: 'remaining', promptTitle: 'View the global signal', overdue: 'stale evidence', etaExpired: 'ETA expired; confidence suspended', reforecast: 'recalculate after fresh evidence'
+      }
+    };
+    let sprintScrollInitialized = false;
+    const render = () => {
+      const language = document.documentElement.lang === 'en' ? 'en' : 'fr';
+      const t = copy[language];
+      const priorSprintStrip = unified.querySelector('#criticalSprintTrend .sprint-strip');
+      const priorSprintScroll = priorSprintStrip ? {
+        left: priorSprintStrip.scrollLeft,
+        atEnd: priorSprintStrip.scrollWidth - priorSprintStrip.clientWidth - priorSprintStrip.scrollLeft <= 4
+      } : null;
+      const now = new Date();
+      const start = new Date(now); start.setMinutes(Math.floor(now.getMinutes() / 5) * 5, 0, 0);
+      const end = new Date(start.getTime() + 300000);
+      const elapsed = Math.max(0, Math.min(300, Math.floor((Date.now() - start.getTime()) / 1000)));
+      const age = Math.max(0, Math.floor((Date.now() - Date.parse(state.observedAt)) / 1000));
+      const evidenceFresh = age <= 300;
+      const currentSlot = start.getHours() * 12 + Math.floor(start.getMinutes() / 5) + 1;
+      const score = (100 * state.micro.achieved / state.micro.total).toFixed(1);
+      const p = state.providers;
+      const pad = value => String(value).padStart(2, '0');
+      const detailsOpen = (key, defaultOpen = false) => {
+        const saved = localStorage.getItem(`gaia-now-details:${key}`);
+        return (saved === null ? defaultOpen : saved === 'true') ? ' open' : '';
+      };
+      document.querySelector('header .sub').textContent = t.subtitle;
+      const systemSignal = document.getElementById('systemSignal');
+      systemSignal.innerHTML = `${evidenceFresh ? t.systemSignal : t.systemSignalStale}<svg class="header-trend" viewBox="0 0 48 18" aria-hidden="true"><path class="baseline" d="M0 16H48"/><path class="watch" d="M1 7L10 6L19 9L28 8L37 10L47 9"/></svg><span class="header-popover" aria-hidden="true"><svg class="mini-radar" viewBox="0 0 120 100"><path class="axis" d="M60 8L105 82L15 82Z M60 55L60 8 M60 55L105 82 M60 55L15 82"/><path class="shape" d="M60 17.7L75.3 63.5L36.2 69.3Z"/><text x="48" y="7">Codex ${p.codexLong}%</text><text x="82" y="92">Claude ${p.claudeLong}%</text><text x="2" y="92">Auggie ${p.auggieLong}%</text></svg><strong>${t.capacityHelp}</strong><ul><li>${t.capacityImpact}</li><li>${t.capacityMitigation}</li><li>${t.capacityDecision}</li></ul></span>`; systemSignal.title = t.systemTitle;
+      systemSignal.className = 'signal-button bad';
+      const humanSignal = document.getElementById('humanSignal');
+      humanSignal.innerHTML = `${t.humanSignal}<svg class="header-trend" viewBox="0 0 48 18" aria-hidden="true"><path class="baseline" d="M0 16H48"/><path class="up" d="M1 13L10 11L19 12L28 8L37 7L47 4"/></svg>`; humanSignal.title = t.humanTitle;
+      humanSignal.className = 'signal-button good';
+      unified.innerHTML = `
+        <article id="criticalTimeline" class="card top-timeline"><div class="timeline-toolbar"><div><div class="state green">${t.timeline}</div><small class="muted">${t.observed}</small></div><small class="muted">${t.sourceLine}</small></div><div class="horizontal-time" style="grid-template-columns:repeat(7,minmax(135px,1fr))"><div class="time-point good"><time>14:11</time><strong>${t.terminal}</strong><small>${t.terminalProof}</small></div><div class="time-point bad"><time>15:19</time><strong>${t.r4}</strong><small>${t.r4Proof}</small></div><div class="time-point good"><time>17:28</time><strong>${t.r5}</strong><small>${t.r5Proof}</small></div><div class="time-point active"><time>${t.now}</time><strong>${t.ship}</strong><small>${t.shipProof}</small></div><div class="time-point forecast"><time>${t.futureProof}</time><strong>${t.future}</strong><small>65%</small></div><div class="time-point forecast"><time>${t.future2Proof}</time><strong>${t.future2}</strong><small>45%</small></div><div class="time-point forecast"><time>${t.future3Proof}</time><strong>${t.future3}</strong><small>30%</small></div></div><div id="criticalSprintTrend"><div class="state green" style="margin-top:12px">${t.trend}</div><div class="sprint-summary"><div class="sprint-strip"><span class="sprint-dot bad">171</span><span class="sprint-dot bad">172</span><span class="sprint-dot good">173</span><span class="sprint-dot good">174</span><span class="sprint-dot good">175</span><span class="sprint-dot good">176</span><span class="sprint-dot bad">177</span><span class="sprint-dot good">178</span><span class="sprint-dot bad">179</span><span class="sprint-dot good">180</span><span class="sprint-dot bad">181</span><span class="sprint-dot good">182</span><span class="sprint-dot good">183</span><span class="sprint-dot active">184<br>${t.currentSprint}</span><span class="sprint-dot forecast">185<br>${t.projectedSprint}</span><span class="sprint-dot forecast">186<br>${t.projectedSprint}</span></div><svg class="sparkline" viewBox="0 0 160 42" role="img" aria-label="trend"><path class="axis" d="M0 36H160"/><path class="area" d="M2 34 L28 23 L54 7 L80 18 L106 23 L132 18 L158 7 L158 36 L2 36 Z"/><path class="line" d="M2 34 L28 23 L54 7 L80 18 L106 23 L132 18 L158 7"/></svg><div class="score-pill"><strong class="green">${score}%</strong><small class="muted">${state.micro.achieved}/${state.micro.total} ${t.achieved}<br>↗</small></div></div><div id="nextProofEta" class="proof-forecast"><strong>${t.nextProofEtaLabel}</strong><span>${t.nextProofEta}</span></div></div></article>
+        <div class="signal-pair"><article id="systemRootSignal" class="card signal-anchor"><div class="state red">${t.systemRoot}</div><div class="signal-facts"><div class="signal-fact"><strong>${t.systemHealth}:</strong> ${t.systemHealthValue}</div><div class="signal-fact"><strong>${t.providerHealth}</strong><div class="root-capacity"><div class="capacity-ring-item"><span class="progress-ring" style="--value:${p.codexLong};--ring:#58e6a8"><span>${p.codexLong}%</span></span><div><strong>Codex</strong><small>${t.week}</small></div></div><div class="capacity-ring-item"><span class="progress-ring" style="--value:${p.claudeLong};--ring:#ffc857"><span>${p.claudeLong}%</span></span><div><strong>Claude</strong><small>${t.week}</small></div></div><div class="capacity-ring-item"><span class="progress-ring" style="--value:${p.auggieLong};--ring:#58e6a8"><span>${p.auggieLong}%</span></span><div><strong>Auggie</strong><small>${t.month}</small></div></div></div></div><div class="signal-fact warn"><strong>${t.systemAlert}:</strong> ${t.systemAlertValue}<span class="info-badge" tabindex="0" aria-label="${t.capacityHelp}">i<span class="info-popover">${t.capacityHelp}</span></span></div><div class="signal-fact"><strong>${t.systemNext}:</strong> ${t.systemNextValue}</div></div></article><article id="humanRootSignal" class="card signal-anchor rule"><div class="state green">${t.humanRoot}</div><div class="signal-facts"><div class="signal-fact"><strong>${t.direction}:</strong> ${t.directionValue}</div><div class="signal-fact"><strong>${t.collaboration}:</strong> ${t.collaborationValue}</div><div class="signal-fact"><strong>${t.risk}:</strong> ${t.riskValue}</div><div class="signal-fact muted-action"><strong>${t.action}:</strong> ${t.actionValue}</div></div></article></div>
+        <article id="r5Status" class="card wide"><div class="state green"><span class="live-ping" title="${t.liveUpdate}" aria-label="${t.liveUpdate}"></span>${t.r5Status}</div><ol><li>✅ ${t.stepImplementation}</li><li>✅ ${t.stepFocused}</li><li>✅ ${t.stepFull}</li><li>✅ ${t.stepArchitecture}</li><li>✅ ${t.stepReview}</li></ol><div class="signal-fact"><strong>✅ ${t.notPublished}</strong></div></article>
+        <article id="rootDeficits" class="card wide"><div class="state amber">${t.deficits}</div><div class="efficiency-grid"><div class="metric"><small>${t.designAxis}</small><strong class="value green">${t.designValue}</strong><small>${t.designReason}</small></div><div class="metric"><small>${t.codeAxis}</small><strong class="value green">${t.codeValue}</strong><small>${t.codeReason}</small></div><div class="metric"><small>${t.planningAxis}</small><strong class="value amber">${t.planningValue}</strong><small>${t.planningReason}</small></div><div class="metric"><small>${t.capacityAxis}</small><strong class="value amber">${t.capacityValue}</strong><small>${t.capacityReason}</small></div><div class="metric"><small>${t.publicationAxis}</small><strong class="value amber">${t.publicationValue}</strong><small>${t.publicationReason}</small></div></div><div class="signal-facts"><div class="signal-fact"><strong>${t.flowLabel}:</strong> ${t.flowValue}</div><div class="signal-fact warn"><strong>${t.predicateLabel}:</strong> ${t.predicateValue}</div><div class="signal-fact"><strong>${t.pullPolicy}</strong></div></div></article>
+        <article id="pumpLedger" class="card wide"><div class="state red"><span class="live-ping" title="${t.liveUpdate}" aria-label="${t.liveUpdate}"></span>${t.pumpLedger}</div><ol class="pump-ledger"><li class="pump-message"><time>18:44</time><strong>${t.pumpReceived}</strong><span>SCHEDULED_RECOVERY · issue #82 · run 33917897845</span></li><li class="pump-message"><time>18:45</time><strong>${t.pumpValidated}</strong><span>identity + App token + ledger root</span></li><li class="pump-message"><time>18:49</time><strong>${t.pumpResumed}</strong><span>operation 12cacc5b… · revision 4bb2d243…</span></li><li class="pump-message warn"><time>18:49</time><strong>${t.pumpBlocked}</strong><span>${t.pumpBlockDetail}</span></li></ol></article>
+        <article id="evidenceSlot" class="card wide"><div class="state green"><span class="live-ping" title="${t.liveUpdate}" aria-label="${t.liveUpdate}"></span>${t.slot} · ${pad(start.getHours())}:${pad(start.getMinutes())}–${pad(end.getHours())}:${pad(end.getMinutes())}</div><div class="dual-meter"><div><strong>${t.time}</strong><progress value="${elapsed}" max="300"></progress><small>${elapsed}s ${t.elapsed} · ${300 - elapsed}s ${t.remaining}</small></div><div><strong>${t.proven}</strong><progress value="5" max="5"></progress><small>5/5 · ${t.r5}</small></div></div><div class="gate-summary"><div class="gate-chip"><strong>✅ ${t.gateScope}</strong><small>${t.gateScopeProof}</small></div><div class="gate-chip"><strong>✅ ${t.gateTdd}</strong><small>${t.gateTddProof}</small></div><div class="gate-chip"><strong>✅ ${t.gateTests}</strong><small>${t.gateTestsProof}</small></div><div class="gate-chip"><strong>✅ ${t.gateSnapshot}</strong><small>${t.gateSnapshotProof}</small></div><div class="gate-chip"><strong>✅ ${t.gateReviews}</strong><small>${t.gateReviewsProof}</small></div></div><p>${t.evidence} ${t.nextProof}</p><details class="tree" data-details-key="gate-audit"${detailsOpen('gate-audit')}><summary>${t.gateAudit}</summary><div>${t.gateAuditBody}</div></details><small class="muted">evidence age ${Math.floor(age / 60)}m ${age % 60}s · ${state.digest}…</small></article>
+        <article class="card history"><div class="state green">${t.checkpoints}</div><div class="checkpoint-rail" style="grid-template-columns:repeat(6,minmax(130px,1fr))"><div class="checkpoint good"><span class="tag good">${t.done}</span><strong>${t.terminal}</strong><small><time>14:11</time> · ${t.past}</small></div><div class="checkpoint good"><span class="tag good">R1–R3</span><strong>RED→GREEN</strong><small><time>14:23–15:10</time> · ${t.past}</small></div><div class="checkpoint bad"><span class="tag bad">R4</span><strong>${t.r4Proof}</strong><small><time>15:19</time> · ${t.past}</small></div><div class="checkpoint good"><span class="tag good">R5</span><strong>1800/1800 ×2</strong><small><time>17:27</time> · ${t.past}</small></div><div class="checkpoint good"><span class="tag good">8×</span><strong>CI PASS</strong><small><time>17:28</time> · ${t.past}</small></div><div class="checkpoint active"><span class="tag warn">${t.now}</span><strong>${t.ship}</strong><small>${t.present}</small></div></div></article>
+        <article class="card wide user-action" data-action="false"><div class="state green"><span class="attention-icon">⚠</span>${t.human}</div><p>${t.humanNone}</p></article>
+        <article class="card side"><div class="state green">${t.hierarchy}</div><details class="tree" data-details-key="hierarchy-root"${detailsOpen('hierarchy-root', true)}><summary><strong>${t.you}</strong></summary><div><details class="tree" data-details-key="hierarchy-coordinator"${detailsOpen('hierarchy-coordinator', true)}><summary><strong>${t.coord}</strong></summary><div><details class="tree" data-details-key="lane-terminal"${detailsOpen('lane-terminal')}><summary><span class="tag good">${t.done}</span>${t.terminalLane}</summary><div>${t.terminalProof}</div></details><details class="tree" data-details-key="lane-prior"${detailsOpen('lane-prior')}><summary><span class="tag good">${t.done}</span>${t.prior}</summary><div>R1→R2→R3→R4→R5</div></details><details class="tree" data-details-key="lane-reviews"${detailsOpen('lane-reviews')}><summary><span class="progress-ring" style="--value:100;--ring:#58e6a8" role="progressbar" aria-valuenow="100"><span>100%</span></span><strong>${t.reviews}</strong></summary><div>${t.reviewsProof}</div></details><details class="tree" data-details-key="lane-ship"${detailsOpen('lane-ship', true)}><summary><span class="progress-ring" style="--value:95;--ring:#ffc857" role="progressbar" aria-valuenow="95"><span>95%</span></span><strong>${t.nextLane}</strong></summary><div>${t.nextLaneProof}</div></details></div></details></div></details></article>
+        <article class="card side"><div class="state green">${t.capacity}</div><div class="capacity-grid"><div class="capacity-cell"><strong>${t.reviewsDone}</strong><small>R5 Standards + Spec</small></div><div class="capacity-cell"><strong>${t.coordinator}</strong><small>${t.ship}</small></div><div class="capacity-cell"><strong>${t.reserve}</strong><small class="green">93% ${t.session} · 34% ${t.week}</small></div><div class="capacity-cell"><strong>${t.admission}</strong><small class="amber">${t.admissionValue}</small></div></div></article>
+        <article class="card side"><div class="state green">${t.providers}</div><table class="provider-matrix"><thead><tr><th>${t.provider}</th><th>${t.short}</th><th>${t.long}</th><th>${t.source}</th></tr></thead><tbody><tr><td><strong>Codex</strong><small class="muted">Spark = model</small></td><td class="quota"><small>5 h · ${p.codexShort}% ${t.free}</small><progress value="${p.codexShort}" max="100"></progress></td><td class="quota"><small>${t.week} · ${p.codexLong}% ${t.free}</small><progress value="${p.codexLong}" max="100"></progress></td><td><small>Codex API</small></td></tr><tr><td><strong>Claude Code</strong></td><td class="quota"><small>5 h · ${p.claudeShort}% ${t.free}</small><progress value="${p.claudeShort}" max="100"></progress></td><td class="quota"><small>${t.week} · ${p.claudeLong}% ${t.free}</small><progress value="${p.claudeLong}" max="100"></progress><small class="red">Fable 0%</small></td><td><small>claude.ai/settings/usage</small></td></tr><tr><td><strong>Antigravity / AGY</strong></td><td><small>${t.unknown}</small></td><td><small>${t.unknown}</small></td><td><small>Settings / Models</small></td></tr><tr><td><strong>Auggie</strong></td><td>—</td><td class="quota"><small>${t.month} · ${p.auggieLong}% ${t.free}</small><progress value="${p.auggieLong}" max="100"></progress></td><td><small>21,199 / 40,000</small></td></tr><tr><td><strong>Junie</strong></td><td><small><code>/usage</code></small></td><td><small>${t.unknown}</small></td><td><small>${t.cycle}</small></td></tr></tbody></table></article>
+        <article class="card side"><div class="state amber">${t.invariant}</div><ul><li>${t.inv1}</li><li>${t.inv2}</li><li>${t.inv3}</li></ul><div class="prompt-hint">${t.invRule}</div></article>`;
+      const activeSprint = unified.querySelector('#criticalSprintTrend .sprint-dot.active');
+      const projectedSprints = unified.querySelectorAll('#criticalSprintTrend .sprint-dot.forecast');
+      for (let slot = 184; slot < currentSlot; slot += 1) {
+        activeSprint.insertAdjacentHTML('beforebegin', `<span class="sprint-dot unobserved" title="MS-${slot} · ${t.noEvidence}">${slot}</span>`);
+      }
+      activeSprint.innerHTML = `<span class="slot-ping" title="${t.liveUpdate}" aria-label="${t.liveUpdate}"></span>${currentSlot}`;
+      activeSprint.title = `MS-${currentSlot} · ${evidenceFresh ? t.currentSprint : t.awaiting}`;
+      projectedSprints[0].textContent = currentSlot + 1;
+      projectedSprints[0].title = `MS-${currentSlot + 1} · ${t.projectedSprint}`;
+      projectedSprints[1].textContent = currentSlot + 2;
+      projectedSprints[1].title = `MS-${currentSlot + 2} · ${t.projectedSprint}`;
+      const liveSprintStrip = unified.querySelector('#criticalSprintTrend .sprint-strip');
+      if (liveSprintStrip) {
+        const maxScroll = Math.max(0, liveSprintStrip.scrollWidth - liveSprintStrip.clientWidth);
+        if (!sprintScrollInitialized || !priorSprintScroll || priorSprintScroll.atEnd) {
+          liveSprintStrip.scrollLeft = maxScroll;
+        } else {
+          liveSprintStrip.scrollLeft = Math.min(priorSprintScroll.left, maxScroll);
+        }
+        sprintScrollInitialized = true;
+      }
+      unified.querySelector('#criticalSprintTrend .state').insertAdjacentHTML('afterend', `<small class="muted">${t.trendSource}</small><div class="sprint-legend"><span class="legend-good">${t.legendSuccess}</span><span class="legend-bad">${t.legendMiss}</span><span class="legend-missing">${t.legendMissing}</span><span class="legend-current">${t.legendCurrent}</span></div>`);
+      if (!evidenceFresh) {
+        const activeTimelinePoint = unified.querySelector('#criticalTimeline .time-point.active');
+        activeTimelinePoint.className = 'time-point bad';
+        activeTimelinePoint.querySelector('time').textContent = `${Math.floor(age / 60)}m · ${t.overdue}`;
+        activeTimelinePoint.querySelector('small').textContent = t.etaExpired;
+        unified.querySelectorAll('#criticalTimeline .time-point.forecast').forEach(point => {
+          point.querySelector('time').textContent = t.reforecast;
+          point.querySelector('small').textContent = '—';
+        });
+      }
+      const formatSlotTime = slot => {
+        const minutes = slot * 5;
+        return `${pad(Math.floor(minutes / 60) % 24)}:${pad(minutes % 60)}`;
+      };
+      unified.querySelectorAll('#criticalSprintTrend .sprint-dot').forEach(marker => {
+        const slot = Number(marker.textContent.match(/\d+/)?.[0]);
+        const stateLabel = marker.classList.contains('forecast') ? t.projectedSprint : marker.classList.contains('active') ? t.currentSprint : marker.classList.contains('unobserved') ? t.noEvidence : marker.classList.contains('good') ? t.legendSuccess : t.legendMiss;
+        const evidenceLabel = marker.classList.contains('unobserved') ? t.noEvidence : marker.classList.contains('forecast') ? t.conditional : marker.classList.contains('active') ? (evidenceFresh ? t.legendSuccess : t.awaiting) : stateLabel;
+        const isForecast = marker.classList.contains('forecast');
+        const hasProof = marker.classList.contains('good') || (marker.classList.contains('active') && evidenceFresh);
+        const expected = isForecast ? t.conditional : marker.classList.contains('bad') || marker.classList.contains('unobserved') ? (language === 'fr' ? 'preuve bornée reportée au slot suivant' : 'bounded proof rolled into the next slot') : (language === 'fr' ? 'reçu terminal de la pompe' : 'terminal pump receipt');
+        marker.classList.add('timeline-marker');
+        marker.tabIndex = 0;
+        marker.setAttribute('aria-describedby', timelinePopover.id);
+        marker.dataset.popoverTitle = `MS-${slot}`;
+        marker.dataset.popoverItems = JSON.stringify([
+          `${language === 'fr' ? 'Fenêtre' : 'Window'}: ${formatSlotTime(slot)}–${formatSlotTime(slot + 1)}`,
+          `${language === 'fr' ? 'État' : 'State'}: ${stateLabel}`,
+          `${t.proofProvided}: ${hasProof ? evidenceLabel : (language === 'fr' ? 'aucune' : 'none')}`,
+          `${t.proofExpected}: ${expected}`,
+          `${t.proofSource}: ${isForecast ? (language === 'fr' ? 'projection conditionnelle' : 'conditional forecast') : 'DuckDB · micro_sprint_projection'}`,
+          `${t.proofPredicate}: ${hasProof ? 'slot_evidence_recorded = true' : 'slot_evidence_recorded = false'}`,
+          `${language === 'fr' ? 'Transition suivante' : 'Next transition'}: ${marker.classList.contains('forecast') ? t.conditional : marker.classList.contains('bad') || marker.classList.contains('unobserved') ? (language === 'fr' ? 'reporter ou réduire le scope' : 'roll over or reduce scope') : (language === 'fr' ? 'tirer le prochain prédicat faux' : 'pull the next false predicate')}`
+        ]);
+      });
+      unified.querySelectorAll('#criticalTimeline .time-point').forEach(marker => {
+        const time = marker.querySelector('time')?.textContent || '—';
+        const label = marker.querySelector('strong')?.textContent || '—';
+        const proof = marker.querySelector('small')?.textContent || '—';
+        const next = marker.nextElementSibling?.querySelector('strong')?.textContent || (language === 'fr' ? 'fin du flux affiché' : 'end of displayed flow');
+        const stateLabel = marker.classList.contains('forecast') ? t.conditional : marker.classList.contains('bad') ? t.legendMiss : marker.classList.contains('active') ? t.currentSprint : t.legendSuccess;
+        marker.classList.add('timeline-marker');
+        marker.tabIndex = 0;
+        marker.setAttribute('aria-describedby', timelinePopover.id);
+        marker.dataset.popoverTitle = label;
+        marker.dataset.popoverItems = JSON.stringify([
+          `${language === 'fr' ? 'Temps' : 'Time'}: ${time}`,
+          `${language === 'fr' ? 'État' : 'State'}: ${stateLabel}`,
+          `${t.proofProvided}: ${marker.classList.contains('forecast') ? (language === 'fr' ? 'aucune' : 'none') : proof}`,
+          `${t.proofExpected}: ${marker.classList.contains('forecast') ? proof : next}`,
+          `${t.proofSource}: ${marker.classList.contains('forecast') ? (language === 'fr' ? 'projection conditionnelle' : 'conditional forecast') : 'GitHub + DuckDB'}`,
+          `${t.proofPredicate}: ${marker.classList.contains('forecast') ? 'conditional_transition' : 'checkpoint_observed = true'}`,
+          `${language === 'fr' ? 'Transition suivante' : 'Next transition'}: ${next}`
+        ]);
+      });
+      const finalReview = unified.querySelector('[data-details-key="lane-reviews"] > summary');
+      finalReview.classList.add('timeline-marker');
+      finalReview.tabIndex = 0;
+      finalReview.setAttribute('aria-describedby', timelinePopover.id);
+      finalReview.dataset.popoverTitle = t.reviews;
+      finalReview.dataset.popoverItems = JSON.stringify([
+        `${t.prRelation}: #112 · https://github.com/GuitarAlchemist/gaia/pull/112`,
+        `${t.closedIssueRelation}: ${t.noneDeclared}`,
+        `${t.parentIssueRelation}: ${t.noneDeclared}`,
+        `${t.hierarchyRelation}: ${t.noneDeclared}`,
+        `${t.siblingRelation}: ${t.noneDeclared}`,
+        `${t.proofSource}: GitHub PR metadata · checked 2026-09-04 18:49 EDT`
+      ]);
+      unified.querySelectorAll('#pumpLedger .pump-message').forEach((message, index) => {
+        message.classList.add('timeline-marker');
+        message.tabIndex = 0;
+        message.setAttribute('aria-describedby', timelinePopover.id);
+        message.dataset.popoverTitle = message.querySelector('strong')?.textContent || t.pumpLedger;
+        message.dataset.popoverItems = JSON.stringify([
+          `${t.proofProvided}: ${message.querySelector('span')?.textContent || '—'}`,
+          `${t.proofExpected}: ${index === 3 ? (language === 'fr' ? 'REUSED ou reçu terminal refusé avec cause' : 'REUSED or causally refused terminal receipt') : (language === 'fr' ? 'message suivant du ledger' : 'next ledger message')}`,
+          `${t.proofSource}: GitHub Actions run 33917897845 + receipt bd65dd2`,
+          `${t.proofPredicate}: ${index === 3 ? 'effect_acknowledged = false' : 'phase_observed = true'}`
+        ]);
+      });
+      const capabilityRows = unified.querySelectorAll('.provider-matrix tbody tr');
+      capabilityRows.forEach((row, index) => { if (index >= 2) row.classList.add('inactive-capability'); });
+      unified.querySelector('.provider-matrix tbody').insertAdjacentHTML('beforeend', `<tr class="inactive-capability"><td><strong>Jules</strong><small class="muted">${t.availableIdle}</small></td><td>—</td><td><small>${t.quotaUnverified}</small></td><td><small>jules CLI</small></td></tr><tr class="inactive-capability"><td><strong>jbcontext</strong><small class="muted">${t.toolNotAgent}</small></td><td><small>0.9.11</small></td><td>—</td><td><small>local CLI</small></td></tr>`);
+      const visibleText = unified.innerText;
+      const trendRect = document.getElementById('criticalSprintTrend').getBoundingClientRect();
+      const trendDocumentBottom = trendRect.bottom + window.scrollY;
+      const qaChecks = [
+        unified.firstElementChild?.id === 'criticalTimeline',
+        trendDocumentBottom <= window.innerHeight,
+        Boolean(document.getElementById('systemRootSignal') && document.getElementById('humanRootSignal')),
+        unified.querySelectorAll('.gate-chip').length === 5,
+        document.documentElement.scrollWidth <= window.innerWidth + 1,
+        systemSignal.getAttribute('aria-controls') === 'systemRootSignal' && humanSignal.getAttribute('aria-controls') === 'humanRootSignal',
+        language === 'fr' ? visibleText.includes('TIMELINE DE COORDINATION') : visibleText.includes('COORDINATION TIMELINE') && !/Aucune|approuvé|reste à prouver/.test(visibleText),
+        [...unified.querySelectorAll('#criticalSprintTrend .sprint-dot')].every(marker => marker.classList.contains('timeline-marker') && marker.dataset.popoverItems),
+        [...unified.querySelectorAll('#criticalTimeline .time-point')].every(marker => marker.classList.contains('timeline-marker') && marker.dataset.popoverItems) && Boolean(finalReview.dataset.popoverItems),
+        Boolean(document.getElementById('nextProofEta')?.textContent.includes(t.nextProofEta)) && unified.querySelectorAll('#pumpLedger .pump-message').length === 4
+      ];
+      const qaPassed = qaChecks.filter(Boolean).length;
+      document.body.dataset.uiQa = `${qaPassed}/10`;
+      document.querySelector('header .sub').textContent = `${t.subtitle} · UI QA ${qaPassed}/10`;
+      if (qaPassed !== qaChecks.length) {
+        systemSignal.className = 'signal-button bad';
+        systemSignal.textContent = language === 'fr' ? '🤖 IA · régression UI' : '🤖 AI · UI regression';
+      }
+    };
+    let lastKnownGood = localStorage.getItem('gaia-now-last-known-good') || '';
+    const safeRender = () => {
+      const previous = unified.innerHTML;
+      try {
+        render();
+        if (document.body.dataset.uiQa !== '10/10') throw new Error(`UI postcondition failed: ${document.body.dataset.uiQa}`);
+        lastKnownGood = unified.innerHTML;
+        localStorage.setItem('gaia-now-last-known-good', lastKnownGood);
+      } catch (error) {
+        unified.innerHTML = previous || lastKnownGood || '<article class="card top-timeline"><div class="state red">Cockpit recovery mode</div><p>The latest render failed. The last known good view was unavailable; inspect the browser console.</p></article>';
+        document.body.dataset.uiQa = 'RECOVERED';
+        const activeLanguage = document.documentElement.lang === 'en' ? 'en' : 'fr';
+        const systemButton = document.getElementById('systemSignal');
+        if (systemButton) {
+          systemButton.className = 'signal-button bad';
+          systemButton.textContent = activeLanguage === 'fr' ? '🤖 IA · rendu restauré' : '🤖 AI · render restored';
+        }
+        document.querySelector('header .sub').textContent = activeLanguage === 'fr' ? 'Régression interceptée; dernier rendu sain restauré.' : 'Regression intercepted; last known good render restored.';
+        console.error('Gaia NOW safe-render rollback', error);
+      }
+    };
+    unified.addEventListener('click', event => {
+      const marker = markerFor(event.target);
+      if (marker) {
+        showTimelinePopover(marker);
+        return;
+      }
+      const summary = event.target instanceof Element ? event.target.closest('summary') : null;
+      const details = summary?.parentElement;
+      if (details instanceof HTMLDetailsElement && details.dataset.detailsKey) {
+        setTimeout(() => localStorage.setItem(`gaia-now-details:${details.dataset.detailsKey}`, String(details.open)), 0);
+      }
+    });
+    unified.addEventListener('mouseover', event => showTimelinePopover(markerFor(event.target)));
+    unified.addEventListener('focusin', event => showTimelinePopover(markerFor(event.target)));
+    unified.addEventListener('mouseout', event => { if (!markerFor(event.relatedTarget)) hideTimelinePopover(); });
+    unified.addEventListener('focusout', event => { if (!markerFor(event.relatedTarget)) hideTimelinePopover(); });
+    document.addEventListener('click', event => { if (!markerFor(event.target)) hideTimelinePopover(); });
+    const enforceUnified = () => { legacyFr.hidden = true; legacyEn.hidden = true; unified.hidden = false; safeRender(); };
+    toggle.addEventListener('click', () => setTimeout(enforceUnified, 0));
+    document.getElementById('systemSignal').addEventListener('click', () => document.getElementById('systemRootSignal')?.scrollIntoView({behavior:'smooth', block:'start'}));
+    document.getElementById('humanSignal').addEventListener('click', () => document.getElementById('humanRootSignal')?.scrollIntoView({behavior:'smooth', block:'start'}));
+    enforceUnified();
+    setInterval(safeRender, 1000);
+  })();
+</script>
+</body>
+</html>
