@@ -9,9 +9,9 @@
   },
   "gaiaArchitectureVerification": {
     "schema": "gaia-architecture-verification/1",
-    "commit": "27f0c1aa62bb44349c3e4f97d033c93a0e35faee",
+    "commit": "15fcacfc6c6d5a1fcd7094c33fd75b8fcaf374c3",
     "date": "2026-09-04",
-    "contentRevision": "sha256:c0f7e794caa016829cb8af8d8d7fa937958d98efefde2ea136a685fa5ff3614c"
+    "contentRevision": "sha256:9e82bcbd298979f98a6e592de0000f55adc426f5265e6cd1dc3e618da15b8be5"
   },
   "scripts": {
     "test": "node --test",
