@@ -182,6 +182,7 @@ export const LANE_BOOTSTRAP_REFUSALS = Object.freeze([
   'GENERATION_COMPENSATED',
   'LANE_LIMIT_EXCEEDED',
   'LAYOUT_CHANGED',
+  'OBSERVATION_UNAVAILABLE',
   'PANE_ABSENT',
   'PROCESS_ABSENT',
   'QUOTA_INSUFFICIENT',
@@ -575,7 +576,9 @@ const NO_COMPENSATION = Object.freeze({
 function requireBootstrapPorts(input) {
   assertExactFields(input, PORT_FIELDS, 'PORTS_INVALID');
   if (!isSafeLaneIdentity(input.actor)) invalid('PORTS_ACTOR_INVALID');
-  if (typeof input.now !== 'function') invalid('PORTS_CLOCK_INVALID');
+  if (typeof input.now !== 'function' || !isExactInstant(input.now())) {
+    invalid('PORTS_CLOCK_INVALID');
+  }
   if (typeof input.store?.read !== 'function' || typeof input.store?.commit !== 'function') {
     invalid('PORTS_STORE_INVALID');
   }
@@ -805,7 +808,9 @@ export async function bootstrapLaneGeneration(manifestInput, portsInput) {
   }
 
   const marker = identity.operationId;
-  let plan = resumed?.plan ?? null;
+  // The store may hand its record back frozen, and the plan is filled in below, so it must be
+  // this attempt's own copy rather than an alias of whatever the store keeps.
+  let plan = resumed?.plan == null ? null : structuredClone(resumed.plan);
 
   const abort = async (refusal, subject) => {
     const compensation = await compensate(provider, workspaceId, marker, plan);
@@ -896,9 +901,18 @@ export async function bootstrapLaneGeneration(manifestInput, portsInput) {
   }
 
   // --- the linearization point: one fresh observation decides everything -------------------
-  const observedAt = ports.now();
-  if (!isExactInstant(observedAt)) invalid('PORTS_CLOCK_INVALID');
-  const observed = await provider.snapshot({ workspaceId });
+  // Every process exists by now, so a host that cannot be observed is compensated, not thrown.
+  let observedAt;
+  let observed;
+  try {
+    observedAt = ports.now();
+    observed = await provider.snapshot({ workspaceId });
+  } catch {
+    return abort('OBSERVATION_UNAVAILABLE', null);
+  }
+  if (!isExactInstant(observedAt) || observed === null || typeof observed !== 'object') {
+    return abort('OBSERVATION_UNAVAILABLE', null);
+  }
   const failure = verifyPlan(observed, plan, manifest, capability, marker, observedAt);
   if (failure !== null) return abort(failure.refusal, failure.subject);
 
