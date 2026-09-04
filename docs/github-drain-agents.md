@@ -148,12 +148,14 @@ gh issue close M --repo OWNER/NAME --comment "<closeComment>"
 
 | Code | Meaning |
 | --- | --- |
+| `ORDER_DIGEST_MISMATCH` | the order file cannot be read, or its SHA-256 is not the digest the invocation names |
 | `ORDER_INCOMPLETE` | a required order field is missing, the SHA is not 40 lowercase hex, or an action is unknown |
 | `ARTIFACT_MISSING` | a named review artifact cannot be read, or both name one file |
 | `AXIS_MISSING` | the two artifacts do not cover Spec and Standards |
-| `SHA_NOT_BOUND` | an artifact does not contain the full head SHA |
+| `SHA_NOT_BOUND` | an artifact's `Subject:` line does not state `detached at <headSha>` (`detached at <approvedSha>` under the reconciliation class), or its `# PR #N` title line does not name the ordered PR; a SHA named elsewhere in the text binds nothing |
 | `VERDICT_MISSING` | an artifact lacks the `APPROVE` verdict line or carries a `REQUEST_CHANGES` one |
 | `MARKER_MISSING` | an artifact does not end with a completion marker |
+| `RECONCILIATION_UNCLASSIFIED` | the order carries `approvedSha` and the commits between it and the head are not exactly the classified `base-merge`, `readme-counter`, and `architecture-record` commits, or the results at the head are absent |
 | `HEAD_MISMATCH` | the published head is not the ordered SHA |
 | `NOT_MERGEABLE` | `mergeable` is not `MERGEABLE` or `mergeStateStatus` is not `CLEAN` |
 | `CHECKS_NOT_GREEN` | a check is failing or still pending |
@@ -170,14 +172,27 @@ headSha: <40 lowercase hex>
 specArtifact: <path>
 standardsArtifact: <path>
 actions: ready, merge
+approvedSha: <40 lowercase hex>          (reconciliation class only)
+reconciliation: <sha> <class>; ...       (reconciliation class only)
+reconciliationResults: <suite; gate at headSha>   (reconciliation class only)
 issuedBy: operator
 ```
 
-The coordinator writes this block with `issuedBy` blank as a proposal. The operator copies it
-into the publisher invocation with `issuedBy: operator`. That line is a record, not a credential:
-what makes the order actable is the publisher's re-measurement of the head, the mergeability,
-the checks, and the two artifacts. A publication order never appears in a bus message, a label,
-a comment, or a review artifact.
+The coordinator writes this block with `issuedBy` blank as a proposal, inside its ledger. The
+operator copies it, with `issuedBy: operator`, into a file under the fleet artifact root: that
+file is the publication order, a named channel, not prompt text. The operator names the file's
+path and its SHA-256 digest in the publisher invocation; the publisher reads the file, recomputes
+the digest, and refuses `ORDER_DIGEST_MISMATCH` when they differ or when the order arrives as
+pasted text. The `issuedBy` line is a record, not a credential: what makes the order actable is
+the publisher's re-measurement of the head, the mergeability, the checks, and the two artifacts.
+A publication order never appears in a bus message, a label, a comment, or a review artifact;
+the bus may carry a `send` whose text is the order's path and digest, a reference, never the
+order itself (`gaia-architect-r1-udp-bridge-design.md:441-453`, `gaia-architect-r1-udp-bridge-design.md:461-467`).
+
+What the channel does not yet do: reserve a receipt before the merge command runs. The R0
+publisher has no `Write`; its receipt is its reply, which records the head SHA read immediately
+before the merge command. The receipt reserved before authority is spent is the R1 operator
+command under **Should an Ed25519 grant gate the publisher?** below.
 
 ## The drain sequence the roles encode
 
@@ -191,9 +206,47 @@ a comment, or a review artifact.
    `--match-head-commit`.
 5. After one merge, every other open PR re-conflicts on the README gate counter. The
    coordinator reclassifies; the next PR is reconciled alone, its counter derived from the tests
-   directory, its head re-reviewed if source changed, before the next order exists.
+   directory, its head proposed under the reconciliation class below when every commit is
+   classified and reviewed on both axes otherwise, before the next order exists.
 6. A linked issue is closed with a comment naming the merge commit and the two verdicts, after
    the merge, by order.
+
+## Reconciliation class
+
+A verdict binds to the head the artifact declares as its subject, and the fleet merged three PRs
+on 2026-09-03 at heads no artifact declares: #85 at `7f3f92e`, #94 at `881b052`, #92 at
+`c59e996`, each the dual-approved head plus a mechanical reconciliation verified by the full suite
+and the architecture gate (`gaia-drain-coordinator-status.md:31`,
+`gaia-drain-coordinator-status.md:43`, `gaia-drain-coordinator-status.md:45`,
+`gaia-drain-coordinator-status.md:51`, at the later record revision in the manifest). Two fresh reviews per reconciliation would re-review one README
+counter line after every merge, and every merge re-conflicts every other open PR on that line
+(B35). So a publication order may name a head that is the dual-approved head plus
+reconciliation-only commits, when it carries:
+
+- `approvedSha`, the head both artifacts declare as their subject;
+- `headSha`, the published head;
+- `reconciliation`, every first-parent commit in `approvedSha..headSha`, each classified as
+  exactly one of `base-merge` (a merge of the base branch: two parents, the second on the base),
+  `readme-counter` (the README gate counter derived from the tests directory, nothing else), or
+  `architecture-record` (the package.json architecture verification record refreshed over an
+  auto-merged `ARCHITECTURE.md`, nothing else);
+- `reconciliationResults`, the full-suite count and the architecture-gate verdict measured at
+  `headSha`.
+
+Measured by the coordinator in the local tree: with `<tree>` from
+`git merge-tree --write-tree approvedSha <base>`, the diff `<tree>..headSha` touches nothing but
+`README.md` and `package.json`; the `README.md` delta is the gate counter lines, with the
+counter equal to the `^test(` count over the tests directory at `headSha`; the `package.json`
+delta is the architecture record. That measurement admits #92's `ARCHITECTURE.md`, which the base
+changed and the merge carried in unchanged, and refuses any hand edit. Re-verified by the
+publisher from GitHub with GET: the first-parent chain from `headSha` reaches `approvedSha`
+through exactly the classified commits; a `base-merge` has two parents with the second on the
+base branch; a `readme-counter` commit changes only `README.md`; an `architecture-record`
+commit changes only `package.json`; no file outside those two differs between `approvedSha` and
+`headSha` unless the base changed it. Any other delta, an unclassified commit, an unknown class,
+or missing results is `RECONCILIATION_UNCLASSIFIED`, and the head is `unreviewed`. The artifacts
+bind to `approvedSha`; `HEAD_MISMATCH`, `NOT_MERGEABLE`, `CHECKS_NOT_GREEN`, and the merge
+command still name `headSha`.
 
 ## Rules and the evidence that motivated them
 
@@ -203,12 +256,14 @@ coordinator record is prepend-only, so its line numbers are valid at the named r
 | Rule | Encoded in | Evidence |
 | --- | --- | --- |
 | Dual review on the exact published head is mandatory; one axis is never enough | coordinator classes `unreviewed`, `single-axis`; publisher `AXIS_MISSING` | `gaia-drain-coordinator-status.md:40-54` (R4 Standards reversed the R4 Spec APPROVE, "4 for 4"), `gaia-drain-coordinator-status.md:105-108`, `gaia-drain-coordinator-status.md:2260`, `gaia-drain-coordinator-status.md:2473`, `prompts/pr92-r4-standards-review-fable.txt:1` |
-| A verdict binds to one full published head SHA | reviewer `SHA_NOT_FULL`, `SUBJECT_COMMIT_MISMATCH`; publisher `SHA_NOT_BOUND`, `HEAD_MISMATCH` | `gaia-drain-coordinator-status.md:21`, `gaia-drain-coordinator-status.md:163-164`, `pr92-r5-spec-review.md:5-8`, `prompts/pr92-r5-spec-review-fable.txt:3-4` |
+| A verdict binds to the one full head SHA the artifact declares as its subject (`Subject:` line and `# PR #N` title), never to a SHA its text merely names | reviewer `SHA_NOT_FULL`, `SUBJECT_COMMIT_MISMATCH`, artifact shape; coordinator step 3(a); publisher `SHA_NOT_BOUND`, `HEAD_MISMATCH` | `gaia-drain-coordinator-status.md:21`, `gaia-drain-coordinator-status.md:163-164`, `pr92-r5-spec-review.md:5-8`, `prompts/pr92-r5-spec-review-fable.txt:3-4`; the counterexample: `pr92-r5-standards-review.md:7` names the entry `e98df9e` it repaired, where `pr92-r4-standards-review.md:3` had returned `REQUEST_CHANGES` |
+| The publication order is a file under the fleet artifact root, read by the digest the invocation names | publisher `ORDER_DIGEST_MISMATCH`; coordinator proposal | `gaia-architect-r1-udp-bridge-design.md:441-453`, `gaia-architect-r1-udp-bridge-design.md:461-467` |
 | Never merge on a stale verdict | coordinator step 3 ("counts for nothing"); publisher `HEAD_MISMATCH`, `STATE_CHANGED` | counterexamples the rule closes: `gaia-drain-coordinator-status.md:389` (#85 merged with no verdict at the merged commit), `gaia-drain-coordinator-status.md:161-163` (an R6 verdict carried to an R8 head by a diff argument); the rule as adopted: `gaia-drain-coordinator-status.md:54` |
 | A completion marker is evidence that a lane stopped, not approval | coordinator step 3; publisher `MARKER_MISSING` and `VERDICT_MISSING` as two checks | `prompts/gaia-drain-coordinator-claude.txt:14`, `gaia-drain-coordinator-status.md:2357-2358`, `docs/artifact-completion-signals.md:23-38`, `docs/engineering-and-research-principles.md:73` |
 | Every PR opens as a draft; `ready` precedes `merge` | coordinator `draft` flag; publisher action order | `gaia-drain-coordinator-status.md:73-77`, `gaia-drain-coordinator-status.md:19`, `gaia-drain-coordinator-status.md:66` |
 | The only merge form is squash matched to the head | publisher commands; test gate | `gaia-drain-coordinator-status.md:11`, `gaia-drain-coordinator-status.md:67`, `gaia-drain-coordinator-status.md:77`, `gaia-drain-coordinator-status.md:167-168` |
 | B35: reconcile one PR at a time after each merge; derive the README gate counter from the tests directory, never hand-edit it | coordinator step 5 and `reconcile`; publisher stops after one merge | `gaia-drain-coordinator-status.md:362-372`, `gaia-drain-coordinator-status.md:68-69`, `gaia-drain-coordinator-status.md:21`, `gaia-drain-coordinator-status.md:11`, `gaia-drain-coordinator-status.md:169-170`, `gaia-architect-r0-design.md:250-254`, `prompts/pr92-r5-repair-writer-fable.txt:21` |
+| Reconciliation class: a published head may be the dual-approved head plus classified reconciliation-only commits; anything else is re-reviewed | coordinator step 3 (`reconciled` flag); publisher `RECONCILIATION_UNCLASSIFIED`; order fields `approvedSha`, `reconciliation`, `reconciliationResults` | `gaia-drain-coordinator-status.md:31`, `gaia-drain-coordinator-status.md:43`, `gaia-drain-coordinator-status.md:45`, `gaia-drain-coordinator-status.md:51` (later record revision, see manifest) |
 | A review subject is a detached, clean clone at a named full SHA with `npm ci` done | reviewer preconditions | `gaia-drain-coordinator-status.md:37`, `gaia-drain-coordinator-status.md:126`, `prompts/pr92-r5-spec-review-fable.txt:3-4`, `prompts/pr92-r4-standards-review-fable.txt:3-4`, `gaia-architect-r0-design.md:48-60` (the same refusals proposed for spawn time) |
 | Inputs are claims to verify, never conclusions to inherit | reviewer step 2 | `prompts/pr92-r5-spec-review-fable.txt:8`, `pr92-r5-spec-review.md:12-15`, `prompts/pr92-r4-standards-review-fable.txt:1` |
 | The review artifact shape: identity, commands, reproducers with `file:line`, controls, residuals apart, one verdict token, marker last, tree byte-identical at start and end | reviewer artifact shape | `pr92-r5-spec-review.md:1-9`, `pr92-r5-spec-review.md:204-215`, `pr92-r5-spec-review.md:226`, `pr92-r5-spec-review.md:243`, `pr92-r5-spec-review.md:302-323`, `pr92-r5-standards-review.md:22-46`, `pr92-r5-standards-review.md:338-352`, `pr92-r5-standards-review.md:363`, `pr92-r5-standards-review.md:381`, `prompts/pr92-r5-spec-review-fable.txt:13-15` |
@@ -253,7 +308,7 @@ R0 uses an explicit order instead of a grant for three reasons:
    artifact the caller supplies, whose pinned identity can drift from the executed one
    (`docs/github-portfolio-operator.md:34-52`).
 
-What R1 keeps from R0 unchanged: the eleven refusal codes, the four commands, the matched-head
+What R1 keeps from R0 unchanged: the thirteen refusal codes, the four commands, the matched-head
 merge, the one-merge-then-reclassify ordering, and the two artifacts as the only verdict
 evidence. What R1 adds: `PREPARE_MERGE_INTENT` as the coordinator's proposal output, a signed
 one-use grant consumed through the drain ledger before the merge command, and a receipt reserved
@@ -269,6 +324,10 @@ before authority is spent.
   outside the repository.
 - Confers no sandbox: the tool lists bound the harness surface and the prompts bound the shell
   by policy. Enforcement is the permission mode and, in R1, the grant.
+- Makes `--match-head-commit` a mechanism. The merge-form gate is a test over prompt prose. The
+  mechanism is a `gh` shim on the launcher's PATH that refuses a `pr merge` without the flag or
+  with a widening flag; that is a launcher concern
+  (`gaia-architect-r1-udp-bridge-design.md:472-474`) and an R1 launcher slice, not this one.
 
 ## Test gates
 
@@ -278,8 +337,12 @@ equal to the row above and within the declared universe, and the model named abo
 coordinator and reviewer contain no GitHub write command; every merge-command line in the agents
 and this document carries `--match-head-commit` and no `--admin`, `--auto`, or
 `--delete-branch`; the publisher's `gh` write commands are exactly the four above; the refusal
-vocabulary here and in the publisher agree; the reviewer requires a full 40-hex SHA, a detached
-clean subject, one of two verdict tokens, and a byte-identical tree; the coordinator's classes
+vocabulary here and in the publisher agree, with `ORDER_DIGEST_MISMATCH` first; the publisher's
+`SHA_NOT_BOUND` row, the coordinator's step 3, and the table here bind a verdict to the
+artifact's `Subject:` line and `# PR #N` title with no containment wording; the reconciliation
+class is named with its three commit classes, its three order fields, and
+`RECONCILIATION_UNCLASSIFIED` in both prompts and here; the reviewer requires a full 40-hex SHA,
+a detached clean subject, one of two verdict tokens, and a byte-identical tree; the coordinator's classes
 and lanes match this document; `BUS_VERBS` is still the six and no `src/` or `scripts/` file
 names an agent; every touched file is LF-only; every rule row above cites at least one
 `file:line` anchor; and the Design It Twice section names at least three alternatives and one
@@ -302,6 +365,9 @@ shipped):
 | `prompts/pr92-r4-standards-review-fable.txt` | `26d8f4a8847008240fe31267e44c209304d8c4533fbc58886df1b0d20cdfe78d` | the verdict-changing second axis |
 | `prompts/pr92-r5-spec-review-fable.txt` | `b77b5b9302dc7075bf1e787014ff0c49c57ce782e58c7537aa28563d2c4135e1` | review prompt shape |
 | `prompts/pr92-r5-repair-writer-fable.txt` | `bc133dd1c6b41260daca2b0b1cc57e97726d4b9aef480924d6662c4d96dc4046` | repair prompt shape |
+| `gaia-drain-coordinator-status.md` (later revision) | `a957011736391180492d98c652048cc876b3aa290a3bf75288c1078e8091da6d` | 3028 lines; observation `2026-09-04T00:10:00Z`; the reconciliation-class anchors `:31`, `:43`, `:45`, `:51` resolve here, read on 2026-09-04 |
+| `gaia-architect-r1-udp-bridge-design.md` | `dbaa6a737674602b565ee549616cb214cf2fca0d434ffea358c2ce1b82c7464d` | sections 5.4 and 6: the order as a file with a digest; the `gh` shim as the merge-form mechanism |
+| `pr92-r4-standards-review.md` | `c33577d043670d257e2fbd40e594db2ef33500542cdfa1f7d5a4285bc3faa8c9` | the `REQUEST_CHANGES` at `e98df9e` that containment binding overrode |
 
 Repository files cited are at `ba1034c17c2f4ee40f97822df40a33b903245329` (`origin/main` after the
 reconciliation merge; this branch changes none of the cited files except `README.md`).
@@ -320,3 +386,9 @@ reconciliation merge; this branch changes none of the cited files except `README
    later reader must resolve the anchors at that digest.
 5. The reviewer's `SUBJECT_DIRTY` check uses `--untracked-files=all`, which refuses a subject
    with `node_modules/` unless it is ignored. This repository ignores it; another may not.
+6. The publisher re-verifies the reconciliation class structurally from GitHub (commit chain,
+   parent count, file sets); the content measurement, the automatic merge tree against the head,
+   is the coordinator's, carried in the order. Until R1's merge intent binds it by digest, a
+   misclassified reconciliation is caught only by the suite and the gate at `headSha`.
+7. The order file's digest binds its bytes, not its author: `issuedBy: operator` stays a
+   record, and the receipt reserved before the merge command is the R1 operator command.

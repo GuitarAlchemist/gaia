@@ -162,9 +162,11 @@ test('the publisher refusal vocabulary and the doc agree code for code', () => {
   const publisherCodes = codesInTable(section(readAgent('github-drain-publisher'), 'Verification, in this order, each a refusal with its name'));
   assert.ok(docCodes.length >= 10, `the doc declares the vocabulary: ${docCodes.length} codes`);
   assert.deepEqual([...publisherCodes].sort(), [...docCodes].sort());
-  for (const code of ['HEAD_MISMATCH', 'MARKER_MISSING', 'VERDICT_MISSING', 'AXIS_MISSING', 'SHA_NOT_BOUND', 'CHECKS_NOT_GREEN', 'NOT_MERGEABLE']) {
+  for (const code of ['HEAD_MISMATCH', 'MARKER_MISSING', 'VERDICT_MISSING', 'AXIS_MISSING', 'SHA_NOT_BOUND', 'CHECKS_NOT_GREEN', 'NOT_MERGEABLE', 'ORDER_DIGEST_MISMATCH', 'RECONCILIATION_UNCLASSIFIED']) {
     assert.ok(docCodes.includes(code), `${code} is in the vocabulary`);
   }
+  assert.equal(publisherCodes[0], 'ORDER_DIGEST_MISMATCH', 'the order file is read by its digest before any other check');
+  assert.match(readAgent('github-drain-publisher'), /sha256sum <orderPath>/, 'the publisher measures the order digest');
 });
 
 test('the reviewer binds to one full SHA on one detached clean clone, one of two verdicts, and a byte-identical tree', () => {
@@ -227,6 +229,65 @@ test('every rule row in the doc cites at least one file:line anchor into the fle
     assert.equal(cells.length, 3, `three cells: ${row.slice(0, 60)}`);
     assert.match(cells[2], /`[\w./-]+\.(?:md|ps1|txt|mjs):\d+(?:-\d+)?`/, `evidence cell cites file:line - ${cells[0]}`);
   }
+});
+
+test('a verdict binds to the head the artifact declares as its subject, never by containment of the SHA', () => {
+  // B1 of the R0 Spec review: every review written after a repair names the entry SHA it
+  // repaired, so "the artifact contains the SHA" bound the R5 APPROVE artifacts of PR #92 to
+  // the head the R4 Standards axis had rejected. The binding is the declared subject only.
+  const publisher = readAgent('github-drain-publisher');
+  const coordinator = readAgent('github-drain-coordinator');
+  const reviewer = readAgent('github-drain-reviewer');
+  const doc = readDoc();
+  const row = (text) => text.split('\n').find((line) => line.startsWith('| `SHA_NOT_BOUND` |'));
+  for (const [name, text] of [['publisher', publisher], ['doc', doc]]) {
+    const line = row(text);
+    assert.ok(line, `${name}: SHA_NOT_BOUND row exists`);
+    assert.match(line, /`Subject:` line/, `${name}: SHA_NOT_BOUND names the Subject line`);
+    assert.match(line, /detached at <headSha>/, `${name}: SHA_NOT_BOUND binds detached at <headSha>`);
+    assert.match(line, /`# PR #N` title line/, `${name}: SHA_NOT_BOUND binds the PR title line`);
+    assert.doesNotMatch(line, /contain/, `${name}: SHA_NOT_BOUND has no containment wording`);
+  }
+  const start = coordinator.indexOf('3. **Verdict evidence.**');
+  const end = coordinator.indexOf('4. **Classify**');
+  assert.ok(start >= 0 && end > start, 'coordinator step 3 exists');
+  const step3 = coordinator.slice(start, end);
+  assert.match(step3, /\(a\) declares `headSha` as its subject/, 'coordinator step 3(a) binds the declared subject');
+  assert.match(step3, /`Subject:` line/, 'coordinator step 3 names the Subject line');
+  assert.match(step3, /detached at <headSha>/, 'coordinator step 3 binds detached at <headSha>');
+  assert.match(step3, /`# PR #N` title line/, 'coordinator step 3 binds the PR title line');
+  assert.match(step3, /binds nothing/, 'coordinator step 3 says a SHA elsewhere in the text binds nothing');
+  assert.doesNotMatch(step3, /\(a\) contains the full head/, 'coordinator step 3(a) no longer binds by containment');
+  assert.match(reviewer, /^Subject: <subject path>, detached at <headSha>$/m, 'the reviewer writes the Subject line the checks bind');
+  assert.match(reviewer, /^# PR #N - /m, 'the reviewer writes the title line the checks bind');
+});
+
+test('a reconciled head is publishable only under the classified reconciliation class', () => {
+  // Spec residual 2: the fleet merged #85, #94, and #92 at heads no artifact declares, each the
+  // dual-approved head plus reconciliation-only commits. The class is named, its commits are
+  // classified, and anything else is RECONCILIATION_UNCLASSIFIED.
+  const publisher = readAgent('github-drain-publisher');
+  const coordinator = readAgent('github-drain-coordinator');
+  const doc = readDoc();
+  for (const [name, text] of [['publisher', publisher], ['coordinator', coordinator], ['doc', doc]]) {
+    assert.ok(text.includes('`RECONCILIATION_UNCLASSIFIED`'), `${name} names RECONCILIATION_UNCLASSIFIED`);
+    for (const cls of ['base-merge', 'readme-counter', 'architecture-record']) {
+      assert.ok(text.includes(`\`${cls}\``), `${name} names the commit class ${cls}`);
+    }
+    for (const field of ['approvedSha:', 'reconciliation:', 'reconciliationResults:']) {
+      assert.ok(text.includes(field), `${name} carries the order field ${field}`);
+    }
+  }
+  const codes = codesInTable(section(publisher, 'Verification, in this order, each a refusal with its name'));
+  assert.ok(codes.indexOf('SHA_NOT_BOUND') < codes.indexOf('RECONCILIATION_UNCLASSIFIED'), 'artifacts bind before the class is checked');
+  assert.ok(codes.indexOf('RECONCILIATION_UNCLASSIFIED') < codes.indexOf('HEAD_MISMATCH'), 'the class is checked before the GitHub head facts');
+  assert.match(publisher, /detached at <approvedSha>/, 'the publisher binds the artifacts to approvedSha under the class');
+  assert.match(coordinator, /`reconciled`/, 'the coordinator flags a reconciled head');
+  assert.match(coordinator, /`RECONCILIATION_UNCLASSIFIED`: the head is `unreviewed`/, 'an unclassified delta falls to unreviewed');
+  for (const text of [coordinator, doc]) {
+    assert.match(text, /git merge-tree --write-tree/, 'the content measurement is the automatic merge tree');
+  }
+  assert.match(doc, /^## Reconciliation class$/m, 'the doc states the class as a rule');
 });
 
 test('the doc designs it twice: at least three alternatives and exactly one chosen', () => {

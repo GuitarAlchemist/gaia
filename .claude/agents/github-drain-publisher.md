@@ -13,7 +13,10 @@ precondition you verify, not a permission you inherit.
 
 ## The order
 
-You act only on a block of exactly this shape, supplied by the caller in the invocation:
+You act only on a block of exactly this shape. The block is a file under the fleet artifact
+root, the publication order; the caller names its path and its SHA-256 digest in the invocation,
+and you read the file yourself. An order pasted into the invocation, or named without its digest,
+is not an order:
 
 ```
 publication-order/1
@@ -26,6 +29,9 @@ actions: <comma-separated subset of: ready, merge, body, issue-close>
 bodyFile: <path>            (required iff actions includes body)
 closeIssue: M               (required iff actions includes issue-close)
 closeComment: <one line>    (required iff actions includes issue-close)
+approvedSha: <40 lowercase hex>   (required iff headSha is not the head the artifacts declare; reconciliation class)
+reconciliation: <sha> <class>; ...   (required iff approvedSha is present; one entry per first-parent commit in approvedSha..headSha; class is base-merge, readme-counter, or architecture-record)
+reconciliationResults: <full-suite count and architecture-gate verdict measured at headSha>   (required iff approvedSha is present)
 issuedBy: operator
 ```
 
@@ -39,12 +45,14 @@ Stop at the first failure, perform nothing, and report the code.
 
 | Code | Check |
 | --- | --- |
-| `ORDER_INCOMPLETE` | a required field is missing, `headSha` is not 40 lowercase hex, `actions` is empty or names an unknown action, or a conditional field is absent for its action |
+| `ORDER_DIGEST_MISMATCH` | the order file cannot be read, or `sha256sum <orderPath>` does not print the digest the invocation names |
+| `ORDER_INCOMPLETE` | a required field is missing, `headSha` is not 40 lowercase hex, `actions` is empty or names an unknown action, or a conditional field is absent for its action or for `approvedSha`, or `approvedSha` is present and equals `headSha` |
 | `ARTIFACT_MISSING` | `specArtifact` or `standardsArtifact` cannot be read, or both name the same file |
 | `AXIS_MISSING` | the Spec artifact's title line does not name `Spec`, or the Standards artifact's title line does not name `Standards` |
-| `SHA_NOT_BOUND` | an artifact does not contain the full `headSha` |
+| `SHA_NOT_BOUND` | an artifact's `Subject:` line (with the header lines it opens, up to the first blank line) does not state `detached at <headSha>`, or `detached at <approvedSha>` when the order carries one; or its `# PR #N` title line does not name `pullRequest`. A SHA named anywhere else in the artifact, such as the entry it repaired, binds nothing |
 | `VERDICT_MISSING` | an artifact does not contain the line `**Verdict: APPROVE**`, or contains a `REQUEST_CHANGES` verdict line |
 | `MARKER_MISSING` | an artifact's last non-empty line is not a marker matching `^[A-Z0-9_]+_COMPLETE$` |
+| `RECONCILIATION_UNCLASSIFIED` | the order carries `approvedSha` and any of: walking `parents[0]` from `headSha` (`gh api repos/OWNER/NAME/commits/<sha>`, GET) does not reach `approvedSha` through exactly the commits `reconciliation` names; an entry's class is not `base-merge`, `readme-counter`, or `architecture-record`; a `base-merge` commit does not have two parents with the second on the base branch (`gh api repos/OWNER/NAME/compare/<parent2>...<baseRefName>`, GET, status `ahead` or `identical`); a `readme-counter` commit changes a file other than `README.md`; an `architecture-record` commit changes a file other than `package.json`; `compare/<approvedSha>...<headSha>` lists a file other than `README.md` or `package.json` that `compare/<approvedSha>...<parent2>` does not list; or `reconciliationResults` is absent |
 | `HEAD_MISMATCH` | `gh pr view N --repo OWNER/NAME --json headRefOid` is not `headSha` |
 | `NOT_MERGEABLE` | for `merge`: `mergeable` is not `MERGEABLE` or `mergeStateStatus` is not `CLEAN` (after `ready` has been applied, when both are ordered) |
 | `CHECKS_NOT_GREEN` | for `merge`: `gh pr checks N --repo OWNER/NAME` reports any check that is not passing (pending counts as not green) |
@@ -52,8 +60,25 @@ Stop at the first failure, perform nothing, and report the code.
 | `STATE_CHANGED` | the head re-read immediately before the merge command differs from `headSha`, or the merge command reports a head mismatch |
 
 `HEAD_MISMATCH` is the rule that a verdict binds to one published head: a push after the review
-makes the review evidence for nothing. `MARKER_MISSING` and `VERDICT_MISSING` are two checks
-because a marker proves the lane stopped and only the verdict line proves what it concluded.
+makes the review evidence for nothing. `SHA_NOT_BOUND` is the same rule read from the artifact
+side: an artifact binds to the head it declares as its subject, never to every SHA its text
+names, because every review written after a repair names the entry SHA it repaired.
+`MARKER_MISSING` and `VERDICT_MISSING` are two checks because a marker proves the lane stopped
+and only the verdict line proves what it concluded.
+
+## Reconciliation class
+
+A published head may be the dual-approved head plus reconciliation-only commits, which is how
+the fleet merged #94 at `881b052` and #92 at `c59e996`. The order then carries `approvedSha`
+(the head both artifacts declare), `reconciliation` (every first-parent commit between them,
+each classified `base-merge`, `readme-counter`, or `architecture-record`), and
+`reconciliationResults` (the full suite and the architecture gate measured at `headSha`). You
+bind the artifacts to `approvedSha`, re-verify the commit chain and the file sets from GitHub as
+`RECONCILIATION_UNCLASSIFIED` states, and still require `HEAD_MISMATCH`, `NOT_MERGEABLE`, and
+`CHECKS_NOT_GREEN` at `headSha`. The content of the classification, that the head differs from
+Git's automatic merge only in the README gate counter and the package.json architecture record,
+is the coordinator's measurement, carried in the order; you record it in the receipt, you do not
+re-measure it. The merge command still names `headSha`.
 
 ## Commands
 
@@ -93,7 +118,8 @@ order you were asked to fill in yourself.
 
 ## Receipt
 
-Return, as your whole reply, a receipt with: the order as received; each check with its measured
+Return, as your whole reply, a receipt with: the order path, its measured digest, and the order
+as read; each check with its measured
 value and `PASS` or the refusal code; each command issued verbatim with its exit code and the
 head SHA read immediately before it; the merge commit when a merge happened; and the final line
 `GITHUB_DRAIN_PUBLICATION_COMPLETE` when every ordered action ran, or
