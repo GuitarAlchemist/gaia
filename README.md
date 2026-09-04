@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 1728 gates
+node --test                                   # 1760 gates
 ```
 
 ### Functional factory tracer
@@ -627,6 +627,9 @@ authoritative for their named contracts.
 | `src/github-portfolio-publication.mjs` | Authorized publication controller: consumes one exact publish grant and sequences only observe, commit, leased push, and pull-request creation; typed redaction and no merge capability. |
 | `src/portfolio-drain.mjs` | Pure portfolio drain state machine: reconciles exact GitHub observations with content-addressed receipts and restrictive policy holds, then proposes bounded authority-free pump decisions. |
 | `src/portfolio-drain-ledger.mjs` | Append-only, CAS-protected receipt ledger and read-only idempotent drain `tick`; binds an exact machine/rules version and performs no worker or GitHub effect. |
+| `src/drain-petri-net.mjs` | Pure bounded Petri-net interpreter for PR drain and lane lifecycles: validates nets, fires deterministic steps, replays evidence, and checks token-conserving reachability without I/O or authority. |
+| `src/drain-petri-net-facts.mjs` | Pure collector from an exact caller-authorized observation source plus content-addressed review artifacts into closed Petri receptivity facts; actor kind and prose grant nothing. |
+| `src/duckdb-drain-petri-net.mjs` | Optional, rebuildable DuckDB analytical projection of Petri markings and firings; named client-absence refusal, no transition or authority surface. |
 | `src/control-room.mjs` | Pure, content-addressed operator read model plus dependency-free HTML renderer; fresh real heartbeats are the only animated signal, and open-ended progress or ETA remains explicitly unknown. |
 | `src/git-gh-publication-effects.mjs` | Concrete local Git and `gh` publication effects with repeated identity checks, explicit remote-branch leases, and exact pull-request reuse. |
 | `src/github-read-adapter.mjs` | Read-only `gh` ingestion adapter with fail-closed query-cap detection. |
@@ -638,6 +641,7 @@ authoritative for their named contracts.
 | `scripts/factory-smoke.mjs` | One-command, evidence-gated coordinator → builder → reviewer tracer around a caller-supplied artifact. Executes no code or model. |
 | `scripts/factory-agent.mjs` | Real Claude worker → Codex read-only review → optional one Claude repair → fresh Codex review tracer. Produces a fail-closed, content-addressed run receipt; never commits or publishes. |
 | `scripts/factory-dashboard.mjs` | One-command portfolio/drain projection → control-room snapshot + standalone HTML adapter, with optional bounded polling and no listener or authority. |
+| `scripts/drain-petri-net.mjs` | Read-only event/artifact runner for the Petri nets, requiring the exact observation-source actor ref and writing only an explicitly requested disposable DuckDB projection. |
 | `src/engineering-flow.mjs` | The closed `gaia-engineering-flow/1` schema, its total verifier, the single digest recipe and the one derivation to the published throughput block. Pure; holds no clock; imports `node:crypto` and the shared exact-instant predicate. |
 | `src/local-lane-observation.mjs` | The closed `gaia-local-lane-observation/1` schema and its total verifier: bounded identities, a positive Unicode label allowlist, a three-value lifecycle and a three-value label state. Pure; imports `node:crypto` only. |
 | `src/local-lane-sensor.mjs` | Structured wmux agent metadata → one sealed observation, as a pure function that reads six named fields and can reach no seventh. |
@@ -656,7 +660,7 @@ authoritative for their named contracts.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 1728 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 1760 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
