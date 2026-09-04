@@ -67,15 +67,17 @@ only in the final column and must not escape in a result or refusal.
 | Coordination kernel | `decide(state, command) -> events`; `apply(state, event) -> state` | Six coordination verbs and replay | stdio MCP edge; deterministic tests |
 | Durable event log | `load() -> events`; `commit(expected revision, events) -> receipt or refusal` | Single-writer append and compare-and-set | local append-only JSONL; in-memory test fixtures |
 | Draft operation | `enqueue(selector)`; `reconcile(identity, expected revision) -> projection or refusal` | One canonical Operation Envelope | protected GitHub Git Data ledger and effect adapter; memory ledger |
-| Hosted Draft intake | `runHostedDraftIntake(trigger, observations) -> receipt or refusal`; `produceHostedDraftPumpObservation(receipt) -> observation or refusal` | Resume one unsettled operation before admitting at most one candidate; authority-free sealed observation | serialized GitHub Actions intake; existing Draft ledger/admission/effect adapters; deterministic fixtures |
+| Hosted Draft intake | `runHostedDraftIntake(trigger, observations) -> receipt or refusal`; `produceHostedDraftPumpObservation(receipt) -> observation or refusal` | Resume one unsettled operation before admitting at most one candidate; authority-free sealed observation | GitHub Actions intake, one recovery group plus one group per labeled issue; existing Draft ledger/admission/effect adapters; deterministic fixtures |
 | Portfolio survey and drain | `survey(observations) -> revision`; `advance(revision) -> intent or refusal` | Read-only inventory to one bounded next transition | GitHub read adapter; deterministic fixtures; append-only drain ledger |
 | Pull-request conflict classification | `classifyPrConflict(observation, claim) -> reading or refusal` | Exact-generation, read-only classification under a closed empty strategy registry | normalized GitHub observation; deterministic fixtures |
+| Runner capability probe | `probe(mandate, lease, adapter) -> receipt or blocker` | Read-only capability question decided by identity, generation, lease, admission and reconciliation before any adapter is consulted | synthetic-fixture probe; deterministic in-memory fixtures |
 | Publication and operator | `prepare(intent)`; `authorize(grant)`; `execute(intent) -> receipt` | Human-mediated privileged effect | GitHub publication/operator adapters; owned in-memory broker tests |
 | Factory telemetry | `record(phase)`; `replay(events) -> lifecycle or refusal` | Closed evidence events and freshness projection | local evidence log; wmux/Claude sensor; deterministic fixtures |
 | Lane generation bootstrap | `bootstrapLaneGeneration(manifest, ports) -> receipt or refusal`; `verifyLaneLaunchReceipt(receipt) -> receipt or refusal` | Complete topology before any spawn, one compare-and-set winner, and a launch receipt published only after one fresh structured verification | deterministic in-memory generation store; deterministic lane-adapter fixture |
 | Control room | `render(snapshot, observed instant) -> read model` | Authority-free operator projection | static HTML/dashboard; in-memory snapshots |
 | Hybrid search | `index(corpus)`; `query(request) -> matches or refusal` | Advisory retrieval with provenance | local JavaScript engine; optional IX embedding input |
 | Architecture drift | `checkArchitectureDrift(inventory) -> report or refusal` | Normalized repository inventory | filesystem inventory; deterministic in-memory inventory |
+| Managed PR delivery rounds | `createInitialManagedRound(input) -> round or refusal`; `executeManagedRoundUpdate(input) -> receipt or blocker` | One evidence-bound managed-section transition with read-after-write proof | GitHub pull-request body CAS and conditional-write adapter; memory evidence and effect adapters |
 
 The architecture-drift verification seam is the only seam introduced by this map itself. One
 black-box contract suite runs against both adapters and includes broken-link, missing-section, stale
@@ -123,14 +125,36 @@ reconciliation -> terminal receipt. Draft operations preserve `ENQUEUED`, `CLAIM
 `EFFECT_STARTED`, and `EFFECT_AMBIGUOUS` as nonterminal distinctions. `CREATED`, `REUSED`,
 `REFUSED`, and `CANCELLED` are terminal only when exact evidence supports them. Ambiguous remote
 effects remain nonterminal until reconciled; elapsed time and retries cannot manufacture truth.
-The scheduled Hosted Draft intake is one concrete pump: a serialized run resumes the first
-deterministically ordered unsettled operation before it may admit one eligible issue. Its sealed
-observation is a read model with no authority and cannot replace the durable Draft receipt chain.
+The Hosted Draft intake is one concrete pump: each run resumes the first deterministically
+ordered unsettled operation before it may admit one eligible issue. Scheduled recovery runs in one
+serialized group; issue-triggered runs are partitioned per issue and may execute concurrently. Only
+the recovery group publishes the sealed observation, and its unsettled count is read again after the
+run acts so that work a concurrent lane committed meanwhile is counted. That observation is a read
+model with no authority and cannot replace the durable Draft receipt chain.
 
 Pull-request conflict classification is read-only at this revision. It binds the observed base and
 head generation and can report clean, unknown, superseded, or escalation-required. Its automation
 strategy registry is empty, so automatic resolution, durable conflict claims, patching, pushing,
 and reconciliation remain explicitly planned rather than implied by the reserved lifecycle words.
+
+Runner capability probing is read-only at this revision and is not a lane, a scheduler, or a grant.
+A probe answers one question — may this execution surface be asked about this capability, at this
+runner generation, under this lease — and returns one content-addressed receipt whose effect and
+authority are `NONE` on every path, including the successful one. Its admission table narrows and
+never grants: writing and merge-approval capabilities are representable exactly so that every
+execution surface is refused them by one shared mechanism rather than by omission, and a surface
+whose security gates have not passed carries an empty row rather than a missing one. Registration
+labels are derived from the runner identity, never supplied. Every published receipt names whether
+its reading came from a synthetic fixture or from a live provider, taken from the adapter's own
+declaration rather than from the answer it returned, so evidence stays distinguishable by origin at
+rest. The one operator-supplied identifier a receipt may carry is bounded to a short lowercase
+label, so credential-shaped material has no admitted representation to travel in. A prior receipt
+supplied for crash reconciliation is parsed against that same receipt contract and bound to the
+runner, generation, provider, capability and mandate it claims before it is republished, so the
+reconciliation path admits nothing the minting path could not have published. Runner bootstrap,
+registration, mandate execution, drain, removal, durable receipts, and the rebuildable throughput
+projection remain design only; the reserved vocabulary implies none of them. See
+[the self-hosted runner capability probe](docs/self-hosted-runner-provider-probe.md).
 
 ## Authority and state transitions
 
@@ -251,7 +275,8 @@ accepted transitions and receipts, not tokens, lane activity, or prose completio
   Ubuntu remains portability discovery.
 - **Local factory/operator:** bounded Claude/Codex/wmux processes, offline artifacts, explicit
   worktrees, read-only dashboards, and an interactive authority boundary for privileged effects.
-- **Hosted pump:** GitHub Actions runs the serialized scheduled/issue-triggered Draft intake and
+- **Hosted pump:** GitHub Actions runs the scheduled Draft intake in one serialized recovery group
+  and issue-triggered intake partitioned per issue, plus
   the separately sealed effect path. Protected Git refs are the durable ingress/receipt ledger;
   Actions is not the queue or authority source.
 - **Read-only/offline analysis:** portfolio survey, hybrid search, telemetry replay, architecture
@@ -287,6 +312,8 @@ are linked here.
   [hybrid semantic search](docs/hybrid-semantic-search.md) — bounded external and offline inputs.
 - [Pull-request conflict classifier](docs/pr-conflict-reconciler.md) — exact-generation read-only
   classification and the deliberately empty automation registry.
+- [Managed PR delivery rounds](docs/pr-delivery-round-history.md) — bounded R0/R1 history,
+  single-owner conditional effect, durable intent, and read-after-write reconciliation.
 - [Crash recovery](docs/crash-recovery.md),
   [artifact completion signals](docs/artifact-completion-signals.md), and
   [holdout-safe reporting](docs/holdout-safe-reporting.md) — recovery, terminal evidence, and

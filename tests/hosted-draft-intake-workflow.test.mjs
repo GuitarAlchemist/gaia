@@ -52,15 +52,61 @@ test('only the ready-for-agent label qualifies an issues-triggered run', () => {
   );
 });
 
-test('intake is serialized repository-wide and never cancels an in-flight operation', () => {
+test('intake partitions labeled issues while scheduled recovery stays serialized', () => {
   const workflow = intake();
   assert.match(workflow, /^concurrency:\s*$/mu);
-  assert.match(workflow, /^ {2}group: gaia-draft-intake\s*$/mu);
+  assert.match(
+    workflow,
+    /^ {2}group: \$\{\{ github\.event_name == 'issues' && format\('gaia-draft-intake-issue-\{0\}', github\.event\.issue\.number\) \|\| 'gaia-draft-intake-recovery' \}\}\s*$/mu,
+  );
   assert.match(workflow, /^ {2}cancel-in-progress: false\s*$/mu);
 
-  // Repository-wide means the group carries no per-run expression.
-  const group = workflow.match(/^ {2}group: (.+)$/mu);
-  assert.doesNotMatch(group[1], /\$\{\{/u, 'the intake group must not interpolate any input');
+  assert.doesNotMatch(
+    workflow,
+    /^ {2}group: gaia-draft-intake\s*$/mu,
+    'unrelated issue runs must not share the old repository-wide group',
+  );
+
+  const group = workflow.match(/^ {2}group: (.+)$/mu)?.[1];
+  assert.ok(group, 'one concurrency group is required');
+  assert.equal(
+    [...group.matchAll(/github\.event\.issue\.number/gu)].length,
+    1,
+    'the issue number is scheduling data exactly once, never effect authority',
+  );
+  assert.equal(
+    [...group.matchAll(/gaia-draft-intake-recovery/gu)].length,
+    1,
+    'every non-issue trigger converges on one recovery group',
+  );
+});
+
+test('the ordered pump observation is bound to the serialized recovery lane only', () => {
+  const workflow = intake();
+  const binding = workflow.match(/^ {10}GAIA_OBSERVATION_PATH: (.+)$/mu)?.[1];
+  assert.ok(binding, 'the intake step must bind the observation path through env:');
+
+  // `sequence` is the Actions run id, and run ids are executed in order only within one
+  // concurrency group. Since the group above partitions labeled runs per issue, two lanes can
+  // finish out of run-id order, and `requireMonotonic` then refuses the later lane's reading as
+  // `IncoherentHostedDraftPump` while the pump is making real forward progress. The ordered
+  // reading therefore keeps one writer: the single non-cancelling recovery group.
+  //
+  // The truthy branch is first on purpose. Actions collapses `A && '' || B` to `B` because an
+  // empty string is falsy, so an inverted binding would hand every run a path and re-arm exactly
+  // the refusal this excludes.
+  assert.equal(
+    binding,
+    "${{ github.event_name != 'issues'"
+    + " && format('{0}/gaia-hosted-draft-pump-observation.json', runner.temp) || '' }}",
+    'only a run outside every issue lane may be given a path to publish an ordered reading',
+  );
+
+  assert.doesNotMatch(
+    workflow,
+    /--observation-out/u,
+    'the binding cannot be a command-line flag: an empty value parses as a flag missing its value',
+  );
 });
 
 test('intake claims no dispatch authority and no GITHUB_TOKEN authority', () => {
@@ -76,13 +122,14 @@ test('intake claims no dispatch authority and no GITHUB_TOKEN authority', () => 
   assert.doesNotMatch(workflow, /workflow_dispatch/u);
 });
 
-test('intake reuses the existing pump identity and adds no new secret or configuration', () => {
+test('intake reuses the pump identity and carries one data-only managed-round configuration', () => {
   const workflow = intake();
   for (const name of [
     'vars.GAIA_PUMP_APP_ID',
     'secrets.GAIA_PUMP_APP_PRIVATE_KEY',
     'vars.GAIA_PUMP_ACTOR_ID',
     'vars.GAIA_REPOSITORY_NODE_ID',
+    'vars.GAIA_MANAGED_ROUND_JSON',
   ]) {
     assert.ok(workflow.includes(name), `intake must reuse ${name}`);
   }

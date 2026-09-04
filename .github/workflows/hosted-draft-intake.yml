@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: gaia-draft-intake
+  group: ${{ github.event_name == 'issues' && format('gaia-draft-intake-issue-{0}', github.event.issue.number) || 'gaia-draft-intake-recovery' }}
   cancel-in-progress: false
 
 jobs:
@@ -27,12 +27,14 @@ jobs:
           GAIA_PUMP_APP_PRIVATE_KEY: ${{ secrets.GAIA_PUMP_APP_PRIVATE_KEY }}
           GAIA_PUMP_ACTOR_ID: ${{ vars.GAIA_PUMP_ACTOR_ID }}
           GAIA_REPOSITORY_NODE_ID: ${{ vars.GAIA_REPOSITORY_NODE_ID }}
+          GAIA_MANAGED_ROUND_JSON: ${{ vars.GAIA_MANAGED_ROUND_JSON }}
         run: |
           $required = @(
             $env:GAIA_PUMP_APP_ID,
             $env:GAIA_PUMP_APP_PRIVATE_KEY,
             $env:GAIA_PUMP_ACTOR_ID,
             $env:GAIA_REPOSITORY_NODE_ID
+            $env:GAIA_MANAGED_ROUND_JSON
           )
           if ($required.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
             throw 'Dedicated Gaia pump identity is not configured.'
@@ -68,15 +70,23 @@ jobs:
 
       - name: Resume or admit exactly one Draft operation
         shell: pwsh
+        # GAIA_OBSERVATION_PATH below is empty for a labeled issue run, which the CLI reads as an
+        # absent value. `sequence` on a published reading is the Actions run id, and run ids
+        # execute in order only within one concurrency group; the group above partitions labeled
+        # runs per issue, so two lanes can finish out of run-id order and the later one's reading
+        # would be refused as IncoherentHostedDraftPump against real forward progress. The ordered
+        # reading therefore keeps one writer: the single non-cancelling recovery group. The truthy
+        # branch is first because Actions collapses `A && '' || B` to `B`.
         env:
           GH_TOKEN: ${{ steps.pump-token.outputs.token }}
           GAIA_PUMP_ACTOR_ID: ${{ vars.GAIA_PUMP_ACTOR_ID }}
           GAIA_REPOSITORY_NODE_ID: ${{ vars.GAIA_REPOSITORY_NODE_ID }}
+          GAIA_MANAGED_ROUND_JSON: ${{ vars.GAIA_MANAGED_ROUND_JSON }}
           GAIA_ISSUE_NUMBER: ${{ github.event.issue.number }}
           GAIA_LEDGER_ROOT_OID: ${{ steps.policy.outputs.oid }}
           GAIA_LEDGER_ROOT_REVISION: ${{ steps.policy.outputs.revision }}
           GAIA_RECEIPT_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-receipt.json
-          GAIA_OBSERVATION_PATH: ${{ runner.temp }}/gaia-hosted-draft-pump-observation.json
+          GAIA_OBSERVATION_PATH: ${{ github.event_name != 'issues' && format('{0}/gaia-hosted-draft-pump-observation.json', runner.temp) || '' }}
           GAIA_ERROR_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-error.json
         run: |
           & node scripts/hosted-draft-pump.mjs intake `
@@ -85,7 +95,6 @@ jobs:
             --repository-node-id $env:GAIA_REPOSITORY_NODE_ID `
             --ledger-root-oid $env:GAIA_LEDGER_ROOT_OID `
             --ledger-root-revision $env:GAIA_LEDGER_ROOT_REVISION `
-            --observation-out $env:GAIA_OBSERVATION_PATH `
             --run-id $env:GITHUB_RUN_ID `
             1> $env:GAIA_RECEIPT_PATH 2> $env:GAIA_ERROR_PATH
           $exitCode = $LASTEXITCODE
@@ -104,10 +113,11 @@ jobs:
           retention-days: 14
           overwrite: false
 
-      # A typed observation refusal is a legitimate outcome, already named in the receipt above, so
-      # an absent document is `warn` rather than `error`. The Control Room reads the absence as a
-      # reading that aged out, which is the honest reading of a run that could not say what the
-      # pump did.
+      # A typed observation refusal is a legitimate outcome, already named in the receipt above,
+      # and an issue lane is given no observation path at all, so an absent document is `warn`
+      # rather than `error`. The Control Room reads the absence as a reading that aged out, which
+      # is the honest reading of a run that could not say what the pump did — or, for a lane, one
+      # that could not be ordered against the others and declined to claim otherwise.
       - name: Upload the verified pump observation
         if: always()
         uses: actions/upload-artifact@v4

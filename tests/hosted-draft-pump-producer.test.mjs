@@ -469,6 +469,19 @@ function intakeArgs(extra = []) {
   ];
 }
 
+function intakeEnv() {
+  return {
+    GAIA_MANAGED_ROUND_JSON: JSON.stringify({
+      create: {
+        receipt: { schema: 'GaiaRoundReceiptV0', kind: 'OPEN' },
+        effectActor: 'github:app:gaia-draft-pump',
+        effectClaim: { schema: 'GaiaManagedRoundEffectClaimV0' },
+      },
+      advance: null,
+    }),
+  };
+}
+
 function stubRuntime(reconciled) {
   return () => Object.freeze({
     async listUnsettled() { return []; },
@@ -493,7 +506,7 @@ test('the hosted intake run writes the sealed observation itself, with no human-
   const path = outPath();
   const exitCode = await main({
     argv: intakeArgs(['--observation-out', path, '--run-id', '9001', '--issue', '70']),
-    env: {},
+    env: intakeEnv(),
     stdout: output.stream,
     stderr: errors.stream,
     runtimeFactory: stubRuntime(terminal()),
@@ -521,7 +534,7 @@ test('an intake run that cannot say what the pump did writes no observation and 
   const path = outPath();
   const exitCode = await main({
     argv: intakeArgs(['--observation-out', path, '--run-id', '9001', '--issue', '70']),
-    env: {},
+    env: intakeEnv(),
     stdout: output.stream,
     stderr: errors.stream,
     runtimeFactory: stubRuntime({ kind: 'StaleRevision', currentCommittedRevision: COMMITTED }),
@@ -538,7 +551,7 @@ test('an observation cannot be requested without the run identity that sequences
   const errors = sink();
   const exitCode = await main({
     argv: intakeArgs(['--observation-out', outPath()]),
-    env: {},
+    env: intakeEnv(),
     stdout: sink().stream,
     stderr: errors.stream,
     runtimeFactory() { assert.fail('argument parsing must refuse before any runtime is built'); },
@@ -553,7 +566,7 @@ test('an intake run that was asked for no observation writes none and claims non
   const output = sink();
   const exitCode = await main({
     argv: intakeArgs(['--issue', '70']),
-    env: {},
+    env: intakeEnv(),
     stdout: output.stream,
     stderr: sink().stream,
     runtimeFactory: stubRuntime(terminal()),
@@ -570,7 +583,7 @@ test('the same hosted run replayed writes byte-identical observation bytes', asy
     let index = 0;
     await main({
       argv: intakeArgs(['--observation-out', path, '--run-id', '9001', '--issue', '70']),
-      env: {},
+      env: intakeEnv(),
       stdout: sink().stream,
       stderr: sink().stream,
       runtimeFactory: stubRuntime(terminal()),
