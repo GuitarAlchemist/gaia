@@ -130,6 +130,22 @@ function racingStore(inner, competitor) {
   };
 }
 
+/** Wrap a store so one commit lands durably but its response never reaches the caller. */
+function lostResponseStore(inner, { loseResponseToState }) {
+  let lost = false;
+  return {
+    read: (workKey) => inner.read(workKey),
+    commit: async (workKey, expectedRevision, record) => {
+      const committed = await inner.commit(workKey, expectedRevision, record);
+      if (!lost && record.state === loseResponseToState) {
+        lost = true;
+        throw new Error('STORE_RESPONSE_LOST');
+      }
+      return committed;
+    },
+  };
+}
+
 const baselinePanes = 1;
 const baselineAgents = 1;
 
@@ -620,6 +636,98 @@ test('B14: a replay after a lost response adopts its own resources instead of cr
   assert.equal(fake.livePaneCount(), baselinePanes + 2);
   assert.equal(fake.liveAgentCount(), baselineAgents + 2);
 });
+
+test('B14: a resume from a recorded but unspawned plan completes the generation instead of throwing', async () => {
+  // The crash point between the IN_FLIGHT commit that records the topology and the first spawn:
+  // the durable record holds a plan whose every agentId is null, and the store hands it back
+  // frozen. The retry must fill its own copy, not write into the store's.
+  const store = createMemoryLaneGenerationStore();
+  const fake = createFakeLaneProvider({ workspaceId: WORKSPACE, clock: () => SPAWNED_AT });
+  const basePorts = { provider: fake.provider, actor: 'actor-alpha', now: () => OBSERVED_AT };
+
+  await assert.rejects(
+    () => bootstrapLaneGeneration(manifest(), {
+      ...basePorts, store: lostResponseStore(store, { loseResponseToState: 'IN_FLIGHT' }),
+    }),
+    /STORE_RESPONSE_LOST/,
+  );
+  const identity = laneGenerationIdentity(requireLaneGenerationManifest(manifest()));
+  const crashed = await store.read(identity.workKey);
+  assert.equal(crashed.record.state, 'IN_FLIGHT');
+  assert.deepEqual(crashed.record.plan.panes.map((entry) => entry.agentId), [null, null]);
+  assert.equal(fake.livePaneCount(), baselinePanes + 2);
+  assert.equal(fake.liveAgentCount(), baselineAgents);
+  assert.equal(fake.operations().filter((op) => op === 'spawn').length, 0);
+
+  const resumed = await bootstrapLaneGeneration(manifest(), { ...basePorts, store });
+  assert.equal(resumed.outcome, 'LAUNCH_RECEIPT_PUBLISHED');
+  assert.equal(resumed.reconciliation, 'RESUMED');
+  assert.equal(fake.operations().filter((op) => op === 'createTopology').length, 1);
+  assert.equal(fake.operations().filter((op) => op === 'spawn').length, 2);
+  assert.equal(fake.livePaneCount(), baselinePanes + 2);
+  assert.equal(fake.liveAgentCount(), baselineAgents + 2);
+  const published = await store.read(identity.workKey);
+  assert.equal(published.record.state, 'ACTIVE');
+  assert.deepEqual(
+    crashed.record.plan.panes.map((entry) => entry.agentId), [null, null],
+    'the record the store handed out is not written through',
+  );
+
+  const replayed = await bootstrapLaneGeneration(manifest(), { ...basePorts, store });
+  assert.equal(replayed.outcome, 'LAUNCH_RECEIPT_REPLAYED');
+  assert.equal(fake.operations().filter((op) => op === 'spawn').length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// B19 — the linearization point sits inside the compensating boundary
+// ---------------------------------------------------------------------------
+
+test('B19: a clock that yields no exact instant is refused at admission with zero effect', async () => {
+  const { fake, store, ports } = harness({ now: () => '2026-09-01 12:00:10' });
+  await assert.rejects(() => bootstrapLaneGeneration(manifest(), ports), /PORTS_CLOCK_INVALID/);
+  assert.deepEqual(fake.mutations(), [], 'nothing was created for a clock that cannot timestamp');
+  assert.equal(fake.livePaneCount(), baselinePanes);
+  assert.equal(fake.liveAgentCount(), baselineAgents);
+  const identity = laneGenerationIdentity(requireLaneGenerationManifest(manifest()));
+  assert.equal(await store.read(identity.workKey), null, 'no record was written at all');
+});
+
+/** A provider whose verification snapshot fails once, after every process exists. */
+const observationFault = (name, answer) => {
+  test(`B19: ${name} after spawn compensates and refuses OBSERVATION_UNAVAILABLE`, async () => {
+    const { fake, store, ports } = harness();
+    let faulted = false;
+    const provider = {
+      ...fake.provider,
+      snapshot: async (request) => {
+        const spawned = fake.operations().filter((op) => op === 'spawn').length;
+        if (!faulted && spawned === 2) {
+          faulted = true;
+          return answer();
+        }
+        return fake.provider.snapshot(request);
+      },
+    };
+    const result = await bootstrapLaneGeneration(manifest(), { ...ports, provider });
+    assert.equal(result.outcome, 'REFUSED');
+    assert.equal(result.refusal, 'OBSERVATION_UNAVAILABLE');
+    assert.ok(LANE_BOOTSTRAP_REFUSALS.includes(result.refusal), 'the refusal is published');
+    assert.equal(result.compensation.agentsStopped, 2);
+    assert.equal(result.compensation.panesClosed, 2);
+    assert.equal(result.compensation.incomplete, false);
+    assert.equal(fake.livePaneCount(), baselinePanes, 'visible pane count unchanged');
+    assert.equal(fake.liveAgentCount(), baselineAgents, 'live agent count unchanged');
+    const identity = laneGenerationIdentity(requireLaneGenerationManifest(manifest()));
+    const head = await store.read(identity.workKey);
+    assert.equal(head.record.state, 'COMPENSATED');
+    assert.equal(head.record.receipt, null);
+  });
+};
+
+observationFault('a host that cannot be observed', () => {
+  throw new Error('HOST_UNREACHABLE');
+});
+observationFault('an observation that is not an object', () => null);
 
 test('B15: bootstrapping a published generation twice returns the first receipt and spawns nothing', async () => {
   const store = createMemoryLaneGenerationStore();
