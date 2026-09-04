@@ -69,6 +69,7 @@ only in the final column and must not escape in a result or refusal.
 | Draft operation | `enqueue(selector)`; `reconcile(identity, expected revision) -> projection or refusal` | One canonical Operation Envelope | protected GitHub Git Data ledger and effect adapter; memory ledger |
 | Hosted Draft intake | `runHostedDraftIntake(trigger, observations) -> receipt or refusal`; `produceHostedDraftPumpObservation(receipt) -> observation or refusal` | Resume one unsettled operation before admitting at most one candidate; authority-free sealed observation | GitHub Actions intake, one recovery group plus one group per labeled issue; existing Draft ledger/admission/effect adapters; deterministic fixtures |
 | Portfolio survey and drain | `survey(observations) -> revision`; `advance(revision) -> intent or refusal` | Read-only inventory to one bounded next transition | GitHub read adapter; deterministic fixtures; append-only drain ledger |
+| Drain Petri net | `buildNet(definition) -> net`; `replay(net, events) -> run`; `collectDrainFacts(input) -> facts or refusal` | Bounded pull-request drain and lane lifecycle with exact-source evidence | JSONL artifact adapter; optional DuckDB read projection; read-only CLI |
 | Pull-request conflict classification | `classifyPrConflict(observation, claim) -> reading or refusal` | Exact-generation, read-only classification under a closed empty strategy registry | normalized GitHub observation; deterministic fixtures |
 | Runner capability probe | `probe(mandate, lease, adapter) -> receipt or blocker` | Read-only capability question decided by identity, generation, lease, admission and reconciliation before any adapter is consulted | synthetic-fixture probe; deterministic in-memory fixtures |
 | Publication and operator | `prepare(intent)`; `authorize(grant)`; `execute(intent) -> receipt` | Human-mediated privileged effect | GitHub publication/operator adapters; owned in-memory broker tests |
@@ -184,6 +185,11 @@ Control-room snapshots, HTML, indexes, caches, and DuckDB PR-review telemetry ar
 projections. Their absence or corruption cannot be treated as loss of hosted authority. DuckDB is
 optional and never decides acceptance, readiness, or an effect. A projection may accelerate or
 explain observation; it may not become a second writer of canonical state.
+
+The drain Petri-net core and fact collector are pure replay modules. Their CLI composes JSONL and
+artifact observations at the edge, and their optional DuckDB adapter rebuilds analytical tables
+from the same deterministic run. Neither the CLI nor the projection may fire a transition or turn
+an observation, actor kind, completion marker, or elapsed time into authority.
 
 ## Providers and offline artifacts
 
