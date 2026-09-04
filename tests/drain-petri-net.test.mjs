@@ -402,7 +402,7 @@ test('provider capacity is a multi-token resource place that lanes take and retu
 // replay determinism
 // ---------------------------------------------------------------------------
 
-test('replay is deterministic across shuffled input orders and yields the same revisions', () => {
+test('replay is deterministic for one durable append order and artifact discovery order', () => {
   const records = loadRecords();
   const artifacts = loadArtifacts();
   const reference = collectDrainFacts({ records, artifacts });
@@ -417,17 +417,46 @@ test('replay is deterministic across shuffled input orders and yields the same r
   let seed = 41;
   const random = () => { seed = (seed * 48271) % 2147483647; return seed / 2147483647; };
   const shuffle = (list) => [...list].sort(() => random() - 0.5);
-  for (const variant of [shuffle(records), [...records].reverse(), shuffle(shuffle(records)), [...records, ...records.slice(0, 5)]]) {
+  for (const variant of [records, [...records, ...records.slice(0, 5)]]) {
     const facts = collectDrainFacts({ records: variant, artifacts: shuffle(artifacts) });
-    assert.equal(facts.inputsRevision, reference.inputsRevision === facts.inputsRevision ? reference.inputsRevision : facts.inputsRevision);
+    assert.equal(facts.inputsRevision, reference.inputsRevision);
     const drainRun = replay(drainFor(facts.pullRequests), facts.drainEvents);
     const laneRun = replay(instantiate(LANE_NET_TEMPLATE, facts.lanes), facts.laneEvents);
     assert.equal(drainRun.markingRevision, referenceDrain.markingRevision, 'drain marking revision');
     assert.equal(laneRun.markingRevision, referenceLane.markingRevision, 'lane marking revision');
     assert.equal(canonicalJson(drainRun.history.map(({ fired, at }) => [at, fired])), canonicalJson(referenceDrain.history.map(({ fired, at }) => [at, fired])));
   }
-  assert.equal(collectDrainFacts({ records: shuffle(records), artifacts }).inputsRevision, reference.inputsRevision, 'a shuffled log has the same inputs revision');
   assert.notEqual(collectDrainFacts({ records: records.slice(0, -1), artifacts }).inputsRevision, reference.inputsRevision);
+});
+
+test('records sharing one timestamp preserve durable append order', () => {
+  const at = '2026-09-04T06:00:00.000Z';
+  const lane = 'act-0041';
+  const facts = collectDrainFacts({
+    records: [
+      { type: 'actor.registered', at: '2026-09-04T05:59:59.000Z', ref: lane, kind: 'lane', isNew: true },
+      { type: 'actor.heartbeat', at, actorId: lane, note: 'attempt=1;phase=start' },
+      { type: 'actor.heartbeat', at, actorId: lane, note: 'attempt=1;exit=0' },
+    ],
+    artifacts: [],
+  });
+  const reversedAtTie = collectDrainFacts({
+    records: [
+      { type: 'actor.registered', at: '2026-09-04T05:59:59.000Z', ref: lane, kind: 'lane', isNew: true },
+      { type: 'actor.heartbeat', at, actorId: lane, note: 'attempt=1;exit=0' },
+      { type: 'actor.heartbeat', at, actorId: lane, note: 'attempt=1;phase=start' },
+    ],
+    artifacts: [],
+  });
+  const run = replay(instantiate(LANE_NET_TEMPLATE, [lane]), facts.laneEvents);
+
+  assert.deepEqual(run.history.flatMap(({ fired }) => fired), [
+    `lane#${lane}/T_START_ATTEMPT`,
+    `lane#${lane}/T_EXIT_CLEAN`,
+  ]);
+  assert.equal(run.marking[`lane#${lane}/L_EXITED_CLEAN`], 1);
+  assert.notEqual(facts.inputsRevision, reversedAtTie.inputsRevision,
+    'reversing equal-time records changes the causal input revision');
 });
 
 test('the fold reads the fleet channels: lifecycle notes, lane sends, pr-observation tokens, and digests', () => {
@@ -470,7 +499,7 @@ test('the fold reads the fleet channels: lifecycle notes, lane sends, pr-observa
     records: [registerCoordinator(), observe('pr=97;head=short'), observe('head=' + H1), observe('pr=97;head=' + H1 + ';state=MAYBE')],
     artifacts: [],
   });
-  assert.deepEqual(bad.refused.map(({ reason, key }) => [reason, key]), [['OBSERVATION_KEY_MISSING', 'pr'], ['OBSERVATION_VALUE_INVALID', 'state'], ['OBSERVATION_VALUE_INVALID', 'head']]);
+  assert.deepEqual(bad.refused.map(({ reason, key }) => [reason, key]), [['OBSERVATION_VALUE_INVALID', 'head'], ['OBSERVATION_KEY_MISSING', 'pr'], ['OBSERVATION_VALUE_INVALID', 'state']]);
   assert.deepEqual(bad.pullRequests, []);
   assert.throws(() => collectDrainFacts({ records: [{ type: 'x', at: 'yesterday' }], artifacts: [] }), (error) => error.code === 'RecordsInvalid');
   assert.throws(() => collectDrainFacts({ records: [], artifacts: [{ name: 'a', bytes: bytes('x') }, { name: 'a', bytes: bytes('y') }] }), (error) => error.code === 'ArtifactsInvalid');
@@ -575,8 +604,8 @@ test('a pr-observation is folded only from the exact caller-authorized source (f
   assert.deepEqual(forged.pullRequests, [], 'the forged observations never open a pull-request instance');
   assert.deepEqual(forged.refused.map(({ reason, key }) => [reason, key]), [
     ['OBSERVATION_SOURCE_UNAUTHORIZED', 'act-0002'],
-    ['OBSERVATION_SOURCE_UNAUTHORIZED', 'act-0003'],
     ['OBSERVATION_SOURCE_UNAUTHORIZED', 'act-0099'],
+    ['OBSERVATION_SOURCE_UNAUTHORIZED', 'act-0003'],
   ]);
 
   // Mechanism-revert control: the identical text from the authorized ref is accepted even though
@@ -647,6 +676,27 @@ test('head advancement preempts downstream merge readiness until a reconciliatio
     assert.deepEqual(reconciled.fired, ['pr#41/T_RECONCILED']);
     assert.deepEqual(active(reconciled.marking), ['PROVIDER_CAPACITY', 'pr#41/P_MERGEABLE']);
   }
+});
+
+test('one classified head-change event advances and reconciles before its edge facts expire', () => {
+  const net = drainFor(['41']);
+  const run = replay(net, [{
+    at: '2026-09-04T06:01:00.000Z',
+    source: 'message.sent#classified-head-change',
+    level: {
+      'pr#41/D_MERGEABLE_CLEAN': { value: true, evidence: { head: H2 } },
+    },
+    edge: {
+      'pr#41/D_HEAD_ADVANCED': { value: true, evidence: { from: H1, to: H2 } },
+      'pr#41/D_RECONCILIATION_CLASSIFIED': { value: true, evidence: { head: H2 } },
+    },
+  }], { marking: markingAt(net, '41', ['P_DUAL_APPROVED']) });
+
+  assert.deepEqual(run.history[0].fired, [
+    'pr#41/T_DUAL_APPROVED_HEAD_ADVANCED',
+    'pr#41/T_RECONCILED',
+  ]);
+  assert.deepEqual(active(run.marking), ['PROVIDER_CAPACITY', 'pr#41/P_MERGEABLE']);
 });
 
 test('reconciliation=CLASSIFIED binds only alongside an actual revision change (forged or stale reconciliation)', () => {
@@ -745,7 +795,14 @@ test('a changed head cannot complete without an actual reconciliation transition
   const beforeClassification = loadRecords()
     .filter(({ at }) => at <= '2026-09-04T06:11:30.000Z')
     .map((record) => record.message?.messageId === 'msg-0008'
-      ? { ...record, message: { ...record.message, text: `${record.message.text};checks=ALL_PASS` } }
+      ? {
+        ...record,
+        at: '2026-09-04T06:11:25.000Z',
+        message: {
+          ...record.message,
+          text: `${record.message.text.replace('draft=true', 'draft=false')};checks=ALL_PASS`,
+        },
+      }
       : record);
   const complete = (from, artifact, at) => ({
     type: 'message.sent', at, message: {
@@ -765,7 +822,8 @@ test('a changed head cannot complete without an actual reconciliation transition
   });
   const provenRun = replay(drainFor(proven.pullRequests), proven.drainEvents);
   assert.ok(provenRun.history.flatMap(({ fired }) => fired).includes('pr#97/T_RECONCILED'));
-  assert.equal(provenRun.marking['pr#97/P_MERGEABLE'], 1);
+  assert.equal(provenRun.marking['pr#97/P_READY'], 1,
+    'the same ALL_PASS non-draft observation continues from reconciliation to ready');
 });
 
 test('an approval bound to one head does not authorize mergeable, ready or merged at a silently later head (adversarial head change)', () => {
@@ -995,7 +1053,7 @@ test('synchronizeDrainPetriNetDuckDb rebuilds through an injected fake seam, det
   assert.equal(receiptOne.effect, 'ANALYTICAL_PROJECTION_REBUILT');
   assert.equal(receiptOne.authority, 'NONE');
   assert.deepEqual(Object.keys(receiptOne.rowCounts).sort(), [...DRAIN_PETRI_DUCKDB_TABLES].sort());
-  assert.equal(receiptOne.rowCounts.steps, 2, 'one step per net');
+  assert.equal(receiptOne.rowCounts.steps, 4, 'one initial snapshot plus one event step per net');
   assert.ok(receiptOne.rowCounts.places > 0 && receiptOne.rowCounts.transitions > 0 && receiptOne.rowCounts.arcs > 0);
   assert.equal(receiptOne.rowCounts.projection, 1);
   const sqls = first.calls.map(({ sql }) => sql);
@@ -1021,6 +1079,27 @@ test('synchronizeDrainPetriNetDuckDb rebuilds through an injected fake seam, det
   // The store holds no decision surface: no UPDATE/MERGE, and no authority-bound column.
   const statements = Object.values(DRAIN_PETRI_DUCKDB_STATEMENTS).join('\n');
   assert.ok(!/\bUPDATE\b|\bMERGE\b/u.test(statements));
+});
+
+test('DuckDB projects an initial marking even when a net has no fact events', async () => {
+  const net = instantiate(LANE_NET_TEMPLATE, ['act-0042']);
+  const run = replay(net, []);
+  const client = fakeDuckDbClient();
+
+  const receipt = await synchronizeDrainPetriNetDuckDb({
+    nets: [{ net, replay: run }], databasePath: 'ignored.duckdb', openClient: async () => client,
+  });
+  const initialStep = client.calls.find(({ sql, params }) => (
+    sql === DRAIN_PETRI_DUCKDB_STATEMENTS.insertStep && params[1] === -1
+  ));
+  const initialMarkings = client.calls.filter(({ sql, params }) => (
+    sql === DRAIN_PETRI_DUCKDB_STATEMENTS.insertMarking && params[1] === -1
+  ));
+
+  assert.deepEqual(initialStep?.params.slice(1, 4), [-1, null, 'initial-marking']);
+  assert.ok(initialMarkings.some(({ params }) => params[3] === 'lane#act-0042/L_REGISTERED'));
+  assert.equal(receipt.rowCounts.steps, 1);
+  assert.ok(receipt.rowCounts.marking_history > 0);
 });
 
 test('queryDrainPetriNetDuckDb reads a named statement through the injected client and coerces bigint rows', async () => {

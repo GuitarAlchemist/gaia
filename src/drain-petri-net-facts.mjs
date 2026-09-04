@@ -226,9 +226,7 @@ function laneCompletionOf(text) {
 const compareRecords = (left, right) => {
   const at = (record) => (typeof record.at === 'string' ? record.at : '');
   if (at(left) !== at(right)) return at(left) < at(right) ? -1 : 1;
-  const l = canonicalJson(left);
-  const r = canonicalJson(right);
-  return l < r ? -1 : l > r ? 1 : 0;
+  return 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -306,11 +304,11 @@ function markerFact(prefix, completion, artifacts) {
 /**
  * Collect the fact events of both nets from bus records and artifact bytes.
  *
- * Records are folded in `(at, canonical record)` order, so a shuffled copy of one log yields the
- * same events. Artifact facts are level facts recomputed for a pull request whenever its head or
- * its visible artifacts change; an artifact becomes visible at the first `lane-complete` message
- * whose digest equals its bytes, and every remaining artifact becomes visible at one terminal
- * snapshot event (the artifact directory carries no instants of its own).
+ * Records are folded by instant, preserving durable append order when instants tie. Artifact facts
+ * are level facts recomputed for a pull request whenever its head or its visible artifacts change;
+ * an artifact becomes visible at the first `lane-complete` message whose digest equals its bytes,
+ * and every remaining artifact becomes visible at one terminal snapshot event (the artifact
+ * directory carries no instants of its own).
  */
 export function collectDrainFacts({ records, artifacts, observationSource }) {
   if (!Array.isArray(records)) fail('RecordsInvalid', 'records must be a list');
@@ -332,12 +330,16 @@ export function collectDrainFacts({ records, artifacts, observationSource }) {
     if (names.has(artifact.name)) fail('ArtifactsInvalid', `artifact ${artifact.name} is listed twice`);
     names.add(artifact.name);
   }
-  // A durable log tolerates re-delivery of the exact same record (ARCHITECTURE.md: "repeated
-  // delivery is idempotent"); once sorted, byte-identical duplicates are adjacent, and folding one
-  // twice would manufacture a second, empty event that a differently-ordered copy of the same
-  // records would not, breaking replay determinism across input orders.
+  // ECMAScript sorting is stable, so records sharing one instant keep their append order. Exact
+  // re-delivery remains idempotent even when another same-instant record separates the copies.
   const sorted = [...records].sort(compareRecords);
-  const ordered = sorted.filter((record, index) => index === 0 || canonicalJson(record) !== canonicalJson(sorted[index - 1]));
+  const seen = new Set();
+  const ordered = sorted.filter((record) => {
+    const key = canonicalJson(record);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
   const registeredActors = new Set();
   const lanes = new Map();

@@ -519,18 +519,35 @@ export function replay(net, events, { marking: start } = {}) {
     }
     level = { ...level, ...normalizeFactMap(net, event.level, 'level', index) };
     const edge = normalizeFactMap(net, event.edge, 'edge', index);
-    // Evolve to a stable situation: the edge facts are offered once, then the level facts alone
-    // keep firing whatever the previous step enabled, until nothing fires.
+    // Evolve to a stable situation. Each edge fact may fire once within this event; unused edges
+    // remain available to a transition enabled by an earlier firing, then every edge expires before
+    // the next event. This lets one classified head-change enter and complete reconciliation while
+    // preventing the same HEAD_ADVANCED edge from cycling the token back into reconciliation.
+    const remainingEdge = { ...edge };
     const fired = [];
-    let result = step(net, marking, { ...level, ...edge });
+    const consumeFiredEdges = (transitionIds) => {
+      for (const transitionId of transitionIds) {
+        const receptivity = net.transitionIndex[transitionId].receptivity;
+        if (net.receptivityIndex[receptivity].kind === 'EDGE') delete remainingEdge[receptivity];
+        // A classified reconciliation is proof about the newly observed head. When the token was
+        // already in P_RECONCILE, HEAD_ADVANCED has no separate transition to consume it; treating
+        // it as still pending would immediately invalidate the reconciliation just proven.
+        if (transitionId.endsWith('/T_RECONCILED')) {
+          delete remainingEdge[transitionId.replace('/T_RECONCILED', '/D_HEAD_ADVANCED')];
+        }
+      }
+    };
+    let result = step(net, marking, { ...level, ...remainingEdge });
     fired.push(...result.fired);
+    consumeFiredEdges(result.fired);
     let iterations = 1;
     while (result.fired.length > 0) {
       if (iterations >= MAX_EVOLUTION_ITERATIONS) {
         fail('EvolutionUnstable', `event ${index} did not reach a stable situation within ${MAX_EVOLUTION_ITERATIONS} steps`);
       }
-      result = step(net, result.marking, level);
+      result = step(net, result.marking, { ...level, ...remainingEdge });
       fired.push(...result.fired);
+      consumeFiredEdges(result.fired);
       iterations += 1;
     }
     marking = result.marking;

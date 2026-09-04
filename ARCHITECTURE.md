@@ -191,6 +191,12 @@ artifact observations at the edge, and their optional DuckDB adapter rebuilds an
 from the same deterministic run. Neither the CLI nor the projection may fire a transition or turn
 an observation, actor kind, completion marker, or elapsed time into authority.
 
+Durable bus records are ordered by their causal instant and retain append order when instants tie;
+canonical content never reorders same-instant events. Each edge fact may fire once during the
+stable evolution of its event, remains available until consumed, then expires before the next
+event. DuckDB records ordinal `-1` as the initial marking, including nets with no fact event,
+without inventing an instant.
+
 ## Providers and offline artifacts
 
 Provider adapters translate a closed intent into a concrete effect and normalize the observation

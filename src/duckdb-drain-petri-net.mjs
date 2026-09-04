@@ -26,7 +26,7 @@
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 
-import { instanceOf, localIdOf, revisionOf } from './drain-petri-net.mjs';
+import { initialMarking, instanceOf, localIdOf, markingRevision, revisionOf } from './drain-petri-net.mjs';
 
 export const DRAIN_PETRI_DUCKDB_CLIENT = '@duckdb/node-api';
 export const DRAIN_PETRI_DUCKDB_SCHEMA = 'gaia-drain-petri-net-projection/1';
@@ -230,7 +230,7 @@ export async function synchronizeDrainPetriNetDuckDb({
   const s = DRAIN_PETRI_DUCKDB_STATEMENTS;
   const ordered = [...nets].sort((left, right) => (left.net.netId < right.net.netId ? -1 : 1));
   const netRevision = revisionOf(Object.fromEntries(ordered.map(({ net }) => [net.netId, net.netRevision])));
-  const markingRevision = revisionOf(Object.fromEntries(ordered.map(({ net, replay }) => [net.netId, replay.markingRevision])));
+  const projectionMarkingRevision = revisionOf(Object.fromEntries(ordered.map(({ net, replay }) => [net.netId, replay.markingRevision])));
   const rowCounts = Object.fromEntries(DRAIN_PETRI_DUCKDB_TABLES.map((table) => [table, 0]));
 
   const client = await openClient(path, { readOnly: false });
@@ -259,6 +259,17 @@ export async function synchronizeDrainPetriNetDuckDb({
         await client.run(s.insertArc, [net.netId, arc.from, arc.to, arc.kind, arc.weight]);
         rowCounts.arcs += 1;
       }
+      const initial = initialMarking(net);
+      await client.run(s.insertStep, [net.netId, -1, null, 'initial-marking', markingRevision(initial), 0]);
+      rowCounts.steps += 1;
+      for (const place of net.places) {
+        const tokens = initial[place.id];
+        if (tokens > 0) {
+          await client.run(s.insertMarking, [net.netId, -1, null, place.id, instanceOf(place.id),
+            localIdOf(place.id), tokens]);
+          rowCounts.marking_history += 1;
+        }
+      }
       for (const entry of replay.history) {
         await client.run(s.insertStep, [net.netId, entry.ordinal, entry.at, entry.source, entry.markingRevision, entry.fired.length]);
         rowCounts.steps += 1;
@@ -282,7 +293,7 @@ export async function synchronizeDrainPetriNetDuckDb({
         }
       }
     }
-    await client.run(s.insertProjection, [DRAIN_PETRI_DUCKDB_SCHEMA, netRevision, markingRevision,
+    await client.run(s.insertProjection, [DRAIN_PETRI_DUCKDB_SCHEMA, netRevision, projectionMarkingRevision,
       client.clientVersion ?? null, client.libraryVersion ?? null]);
     rowCounts.projection += 1;
     await client.run(s.commit);
@@ -293,7 +304,7 @@ export async function synchronizeDrainPetriNetDuckDb({
     schema: DRAIN_PETRI_DUCKDB_SCHEMA,
     databasePath: path,
     netRevision,
-    markingRevision,
+    markingRevision: projectionMarkingRevision,
     nets: Object.freeze(ordered.map(({ net, replay }) => Object.freeze({
       netId: net.netId, netRevision: net.netRevision, markingRevision: replay.markingRevision, steps: replay.history.length,
     }))),
