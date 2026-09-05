@@ -11,7 +11,7 @@
     "schema": "gaia-architecture-verification/1",
     "commit": "1dfca5d44879c57022de3d4f0b671de647ad1840",
     "date": "2026-09-05",
-    "contentRevision": "sha256:ef004f50666a0266875b89e59c2032496d9d42ff13d51f6ed30ccab879dec37f"
+    "contentRevision": "sha256:efc06eabca929b4527e03503e9df84740bb05091190f1d841578d91aa4ba2092"
   },
   "scripts": {
     "test": "node --test",

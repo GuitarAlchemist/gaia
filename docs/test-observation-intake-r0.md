@@ -1,6 +1,11 @@
 # Test observation intake R0 — issue #53
 
-## Accepted first slice
+**Status.** The R0 slice described below is implemented, and the sections up to
+"Why admission was blocked" are retained as dated history of how it was admitted. They describe the
+state on 2026-09-05 before implementation began and are not a description of the current code; the
+current contract is "Implemented R0 slice" onward.
+
+## Accepted first slice (historical, 2026-09-05)
 
 Owner: Codex coordinator, reporting to the operator through issue #53 and its Draft PR.
 This first commit records a source probe and implementation contract, not a completed consumer.
@@ -17,7 +22,7 @@ The issue remains open until its acceptance criteria are proven.
   Implementation has not started; no implementation ETA countdown or success claim is justified.
 - Spending: existing subscriptions only, no paid API, installs, or permission changes.
 
-## Verified source probe
+## Verified source probe (historical, 2026-09-05)
 
 Read through the authenticated GitHub CLI on 2026-09-05 at 14:44 UTC.
 
@@ -45,7 +50,7 @@ An edited body must become a new observation revision, not overwrite the capture
 - Tests exercise the normalizer/input-adapter boundary and demonstrate zero GitHub mutations.
 - Fresh independent Standards and Spec reviews plus CI are required before merge.
 
-## Why admission was blocked
+## Why admission was blocked (historical, 2026-09-05)
 
 Run <https://github.com/GuitarAlchemist/gaia/actions/runs/33972187241> returned
 `EXPECTED_NONE` with `skipped: [{number: 53, reason: "HeadIdentityAmbiguous"}]`.
@@ -79,10 +84,11 @@ a backwards-moving source is recorded as `SOURCE_TIME_REGRESSED` without content
 replace the newer evidence; unavailable, deleted, malformed, unstructured and invalid-timestamp
 sources each produce their own explicit unknown reason; `effect` and `authority` are the constant
 `NONE` regardless of what the body asserts; a source-declared severity is marked
-`SOURCE_DECLARED`; facts, interpretations and recommendations project as three separate lists;
-and the source's argument list contains no mutating token.
+`SOURCE_DECLARED`; facts, interpretations, recommendations and the source's own authority-boundary
+statement project as four separate lists; and the source's argument list contains no mutating
+token.
 
-Not proven: any live read. The fixture is synthetic — see
+Not proven by these gates: any live read. The suite runs against fixtures — see
 `tests/fixtures/test-observation/PROVENANCE.md` — so its digest is deliberately not the digest
 this document records for the live body. `node --test` performs no network call, and nothing here
 is evidence of live integration.
@@ -91,8 +97,9 @@ is evidence of live integration.
 
 - A not-found comment reads as `UNAVAILABLE`, never `DELETED`: deletion and invisibility are
   indistinguishable at that seam, and `DELETED` is reserved for a source that can prove it.
-- Claim kinds come only from a source's own explicit `Fact:` / `Interpretation:` /
-  `Recommendation:` line prefix. No sentence is promoted into a kind by resembling one.
+- Claim kinds come only from a source's own explicit field label, in either the bare `Label:` or
+  the Markdown `- **Label:**` form. The accepted labels are listed in the source-acceptance repair
+  below. No sentence is promoted into a kind by resembling one.
 - The ledger is an in-process value. Durable storage, multi-comment intake, and any transition
   driven by an observation are later slices.
 
@@ -108,7 +115,8 @@ The repair is structural and minimal. It adds no dependency, no effect, no provi
 inference of meaning:
 
 - the labelled-field reader accepts the emphasised Markdown form as well as the bare form;
-- `observation`, `recommended next action` and `authority boundary` join the label vocabulary,
+- `observation`, `recommended next action` and `authority boundary` join the `fact`,
+  `interpretation`, `recommendation`, `severity` and `work` labels already read,
   because those are the labels the source documents actually declare;
 - `AUTHORITY_ASSERTION` is a fourth claim kind: what a source says about its own limits is reported
   as a statement, and `authority` remains the constant `NONE`;
@@ -125,3 +133,42 @@ coordinator's read-only capture byte for byte, and the suite asserts its digest 
 third value beside `LIVE` and `SYNTHETIC_FIXTURE`. **A replay is not a live read.** It shows the
 seam consumes these exact bytes; only a fresh live read shows the comment can be reached now, and
 this repository performed none.
+
+## Review repair (2026-09-05)
+
+Two independent reviews of the integrated branch requested changes, each with a reproduced
+counterexample. All four findings are addressed; each was reproduced red before it was fixed.
+
+1. **Stale replay could resurrect old content.** The admission baseline was the last entry
+   appended, so a regression diagnostic moved it backwards: replaying the same stale read a second
+   time compared it against itself, admitted it as a revision, and published old content.
+   Admission now compares against a monotonic frontier — the newest source instant actually placed
+   in the timeline, ignoring regression diagnostics and readings that carry no instant — a repeated
+   stale read is `ALREADY_HELD`, and the projection publishes the newest placed reading rather than
+   a stale diagnostic. A fresh unavailable or deleted read is still published as current, because
+   that is new information about the source. Gated over `T3, T1, T1, T2` and an unavailable
+   interleaving through the public admission and projection seam.
+2. **Only a not-found read was classified.** A forbidden read and a read that never reached GitHub
+   escaped `read()` as raw errors. There is now one closed classification —
+   `NOT_FOUND`, `FORBIDDEN`, `UNREACHABLE`, `RAISE` — and the first three produce an explicit
+   `UNAVAILABLE` reading that carries nothing of the failure's text. A cancelled read and a
+   programmer error are raised: neither is evidence about the source. No retry, no write, and no
+   widened acceptance.
+3. **Admission trusted the producer.** Any object carrying the right `schema` was stored verbatim,
+   including one asserting `effect: WRITE` and `authority: MERGE`. `requireTestObservation` now
+   verifies the whole published contract — the exact field list, the closed vocabularies, the
+   constant `NONE` effect and authority, identity, digests, instants, claim shape and the rule that
+   an unknown observation publishes no content — before anything is appended.
+4. **Documentation drift.** The observation field is 456 characters, not 600; the historical
+   sections above are now dated as history; the label list and the four projected claim lists are
+   described as they ship.
+
+### Live witness
+
+The coordinator read the live comment on 2026-09-05 at 16:31Z through the shipped adapter:
+`AVAILABLE -> NORMALIZED`, four source-asserted claims, digest
+`sha256:59e82be521246420208b65d8860a9bb161c6da7f2728b1d6160dd3672bc200e2`.
+
+That read was performed by the coordinator, not by this repository's tests. `node --test` makes no
+network call; its evidence is fixture replay, and it remains no proof that the comment is reachable
+now.

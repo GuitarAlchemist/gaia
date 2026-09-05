@@ -21,7 +21,11 @@
  * ------------------------
  * A comment that is not found may have been deleted, or may be in a repository this credential
  * cannot see. Those are indistinguishable from a single not-found response, so the reading says
- * `UNAVAILABLE` and never `DELETED`. A malformed response is handed on as a readable-but-empty
+ * `UNAVAILABLE` and never `DELETED`. A forbidden read and a read that never reached GitHub say the
+ * same `UNAVAILABLE` for the same reason, through one closed classification that keeps none of the
+ * failure's text — a CLI error message carries the command line, and a command line carries the
+ * token. A cancelled read and a defect in this repository are raised instead, because neither is
+ * evidence about the source. A malformed response is handed on as a readable-but-empty
  * body, so the pure normalizer classifies it exactly as it classifies every other unusable source,
  * rather than this adapter inventing a verdict of its own.
  */
@@ -45,12 +49,66 @@ async function runGh(args, { signal } = {}) {
     signal,
     windowsHide: true,
   });
-  return JSON.parse(stdout);
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    // A response this seam cannot parse is unusable provider output, not a defect in this
+    // repository, so it must not be classified as one. The original failure is dropped rather than
+    // wrapped: it carries the unparsed response, and that is exactly what may not travel.
+    throw Object.assign(new Error('the source returned an unreadable response'), {
+      code: 'UNREADABLE_RESPONSE',
+    });
+  }
 }
 
-function notFound(error) {
-  const text = `${error?.code ?? ''} ${error?.message ?? ''} ${error?.stderr ?? ''}`;
-  return text.includes('NOT_FOUND') || text.includes('HTTP 404');
+/**
+ * The closed set of answers this seam has about a failed read.
+ *
+ * `RAISE` is one of them on purpose. A read that failed because the caller aborted it, or because
+ * this repository has a defect, is not evidence about the source, and reporting either as "the
+ * comment is unavailable" would be a false statement about GitHub made from a local fact.
+ */
+export const TEST_OBSERVATION_READ_FAILURES = Object.freeze([
+  'NOT_FOUND', 'FORBIDDEN', 'UNREACHABLE', 'RAISE',
+]);
+
+/**
+ * Classify one failed read into that closed set, from the error's own structured fields and a
+ * bounded status match — never by keeping the text.
+ *
+ * Nothing of the error travels onward. A CLI failure message routinely carries the invoked command
+ * line, and a command line routinely carries a token; a classification is three or four capital
+ * letters and can carry neither.
+ *
+ * `NOT_FOUND` and `FORBIDDEN` are kept apart here even though both currently read as `UNAVAILABLE`,
+ * because they are different facts: one says the comment is not there for anyone, the other says
+ * this credential may not see it. Collapsing them at the point of classification would make the
+ * distinction unrecoverable for the later slice that needs it.
+ */
+export function classifyTestObservationReadFailure(error) {
+  // Cancellation first: an aborted read must not be answered on the strength of what it aborted.
+  if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') return 'RAISE';
+  if (error instanceof TypeError || error instanceof RangeError
+    || error instanceof ReferenceError || error instanceof SyntaxError) {
+    return 'RAISE';
+  }
+  const status = Number.isSafeInteger(error?.status) ? error.status : httpStatus(error);
+  if (status === 404 || error?.code === 'NOT_FOUND') return 'NOT_FOUND';
+  if (status === 401 || status === 403) return 'FORBIDDEN';
+  // Everything left is a read that did not reach an answer: the tool is missing, the process
+  // failed, the network did not resolve. The source is unreachable, which is all this can say.
+  return 'UNREACHABLE';
+}
+
+/**
+ * The one bounded look at an error's text, and the only one: a status code in the shape the CLI
+ * prints. The match is anchored to that shape and the matched digits are all that is kept.
+ */
+function httpStatus(error) {
+  const match = typeof error?.message === 'string'
+    ? error.message.match(/\(HTTP (\d{3})\)/u)
+    : null;
+  return match === null ? null : Number(match[1]);
 }
 
 function commentPath({ repository, commentId }) {
@@ -95,8 +153,10 @@ export function createGitHubTestObservationSource({ run = runGh } = {}) {
       try {
         payload = await run(['api', commentPath(identity)], { signal });
       } catch (error) {
-        if (!notFound(error)) throw error;
-        // Deleted or invisible; the seam cannot tell, so it does not pretend to.
+        if (classifyTestObservationReadFailure(error) === 'RAISE') throw error;
+        // Not found, not permitted, or not reached. All three mean the same thing to a reader of
+        // this reading — the source could not be read — and none of them is a deletion this seam
+        // can prove. The classification stays here; the error itself goes no further.
         return requireTestCommentReading({
           ...base, availability: 'UNAVAILABLE', body: null, createdAt: null, updatedAt: null,
         });

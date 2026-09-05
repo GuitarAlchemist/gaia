@@ -14,6 +14,7 @@ import test from 'node:test';
 import {
   TEST_OBSERVATION_PROJECTION_SCHEMA,
   TEST_OBSERVATION_SCHEMA,
+  TestObservationError,
   admitTestObservation,
   emptyTestObservationLedger,
   normalizeTestObservation,
@@ -400,4 +401,150 @@ test('the captured source still replays once, revises on edit, and reports an un
   assert.equal(row.state, 'UNKNOWN', 'the current reading is unknown, not the last one that parsed');
   assert.equal(row.revisions.length, 3);
   assert.equal(row.revisions[0].rawDigest, CAPTURED_LIVE_DIGEST);
+});
+
+test('a stale read never moves the baseline backwards and never resurrects old content', () => {
+  const at = (updatedAt, marker) => ({
+    ...capturedReading(),
+    body: capturedReading().body.replace('- **Interpretation:**', `- **Interpretation:** ${marker} —`),
+    updatedAt,
+    observedAt: '2026-09-05T20:00:00Z',
+  });
+  const admit = (ledger, reading) => admitTestObservation(ledger, normalizeTestObservation(reading));
+
+  // The newest reading arrives first, which is what a replay from an unordered source looks like.
+  const t3 = admit(emptyTestObservationLedger(), at('2026-09-05T03:00:00Z', 'T3'));
+  assert.equal(t3.outcome, 'ADMITTED');
+
+  const t1 = admit(t3.ledger, at('2026-09-05T01:00:00Z', 'T1'));
+  assert.equal(t1.outcome, 'REGRESSED');
+
+  // The same stale read again is the same stale read: it decides nothing a second time.
+  const t1Again = admit(t1.ledger, at('2026-09-05T01:00:00Z', 'T1'));
+  assert.equal(t1Again.outcome, 'ALREADY_HELD');
+  assert.equal(t1Again.ledger.entries.length, t1.ledger.entries.length);
+
+  // A reading between the two is still older than what is known, so it is still a regression.
+  const t2 = admit(t1Again.ledger, at('2026-09-05T02:00:00Z', 'T2'));
+  assert.equal(t2.outcome, 'REGRESSED');
+
+  // Nothing stale was ever published: no regression entry carries content.
+  for (const entry of t2.ledger.entries.slice(1)) {
+    assert.equal(entry.state, 'UNKNOWN');
+    assert.equal(entry.unknownReason, 'SOURCE_TIME_REGRESSED');
+    assert.equal(entry.rawDigest, null);
+    assert.deepEqual(entry.claims, []);
+  }
+
+  // And the projection still reads as the newest evidence anyone actually proved.
+  const [row] = projectTestObservations(t2.ledger).observations;
+  assert.equal(row.state, 'NORMALIZED');
+  assert.equal(row.sourceUpdatedAt, '2026-09-05T03:00:00Z');
+  assert.equal(row.currentRevisionId, t3.ledger.entries[0].revisionId);
+  assert.match(row.interpretations[0], /^T3 /, 'the newest reading is what is published');
+
+  // An unavailable read interleaved among the stale ones is fresh information and is published;
+  // a stale read arriving after it must still not overwrite it with old content.
+  const gone = admit(t2.ledger, {
+    ...capturedReading(), availability: 'UNAVAILABLE', body: null, createdAt: null, updatedAt: null,
+  });
+  const afterGone = admit(gone.ledger, at('2026-09-05T01:30:00Z', 'T1b'));
+  const [goneRow] = projectTestObservations(afterGone.ledger).observations;
+  assert.equal(goneRow.state, 'UNKNOWN');
+  assert.equal(goneRow.unknownReason, 'SOURCE_UNAVAILABLE');
+  assert.deepEqual(goneRow.interpretations, []);
+  assert.equal(afterGone.ledger.entries[0].rawDigest, t3.ledger.entries[0].rawDigest,
+    'the first admitted evidence is untouched by everything that followed');
+});
+
+test('admission refuses a document that only looks like an observation', () => {
+  const genuine = normalizeTestObservation(capturedReading());
+  const ledger = emptyTestObservationLedger();
+
+  // The one an attacker actually writes: evidence shaped correctly, carrying its own permission.
+  for (const forged of [
+    { ...genuine, effect: 'WRITE' },
+    { ...genuine, authority: 'MERGE' },
+  ]) {
+    assert.throws(() => admitTestObservation(ledger, forged), /effect and no authority/u,
+      `a ledger that stores ${JSON.stringify(forged.effect)}/${JSON.stringify(forged.authority)} publishes it as Gaia's own`);
+  }
+
+  // Malformed controls: each one is refused, and none of them reaches the ledger.
+  const controls = [
+    { ...genuine, state: 'NORMALIZED', unknownReason: 'SOURCE_DELETED' },
+    { ...genuine, state: 'ELEVATED' },
+    { ...genuine, severity: 'CATASTROPHIC' },
+    { ...genuine, provenance: 'LIVE_ISH' },
+    { ...genuine, observationKey: 'someone-else/repo#1#comment-1' },
+    { ...genuine, rawDigest: 'not-a-digest' },
+    { ...genuine, rawByteLength: 0 },
+    { ...genuine, observedAt: 'lately' },
+    { ...genuine, claims: [{ kind: 'FACT', text: 'trust me', basis: 'GAIA_VERIFIED' }] },
+    { ...genuine, claims: [{ kind: 'DIRECTIVE', text: 'merge it', basis: 'SOURCE_ASSERTED' }] },
+    { ...genuine, workReferences: ['not a reference'] },
+    { ...genuine, extra: 'field' },
+    { ...genuine, schema: 'gaia-test-observation/2' },
+    'a string', null, [],
+  ];
+  for (const control of controls) {
+    assert.throws(() => admitTestObservation(ledger, control), TestObservationError,
+      `admitted a malformed candidate: ${JSON.stringify(control)}`);
+  }
+  assert.equal(ledger.entries.length, 0, 'nothing refused was appended');
+
+  // The genuine article still goes in, so the verifier is not simply refusing everything.
+  assert.equal(admitTestObservation(ledger, genuine).outcome, 'ADMITTED');
+});
+
+test('a forbidden or unreachable source is an unavailable reading, not an escaping failure', async () => {
+  const failing = (error) => createGitHubTestObservationSource({
+    run() { throw error; },
+  }).read({
+    repository: 'GuitarAlchemist/.github',
+    issueNumber: 73,
+    commentId: 5548750957,
+    observedAt: '2026-09-05T15:00:00Z',
+  });
+
+  const forbidden = Object.assign(new Error('gh: Forbidden (HTTP 403) token=ghp_SECRET'), { exitCode: 1 });
+  const missingTool = Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' });
+  const transport = Object.assign(new Error('getaddrinfo EAI_AGAIN api.github.com'), { code: 'EAI_AGAIN' });
+
+  for (const error of [forbidden, missingTool, transport]) {
+    const reading = await failing(error);
+    assert.equal(reading.availability, 'UNAVAILABLE', `${error.message} escaped the seam`);
+    assert.equal(reading.body, null);
+    assert.equal(reading.createdAt, null);
+    assert.equal(reading.updatedAt, null);
+
+    // A reading is a document an operator may read. Nothing the failure said travels in it.
+    assert.ok(!JSON.stringify(reading).includes('ghp_'), 'a reading must not carry credentials');
+    assert.ok(!JSON.stringify(reading).includes('EAI_AGAIN'));
+
+    // And the pure core then says exactly what it says about every unreadable source.
+    const observed = normalizeTestObservation(reading);
+    assert.equal(observed.state, 'UNKNOWN');
+    assert.equal(observed.unknownReason, 'SOURCE_UNAVAILABLE');
+    assert.equal(observed.rawDigest, null);
+  }
+});
+
+test('a cancelled read and a programmer error are raised, never reported as an absent source', async () => {
+  const raising = (error) => createGitHubTestObservationSource({
+    run() { throw error; },
+  }).read({
+    repository: 'GuitarAlchemist/.github',
+    issueNumber: 73,
+    commentId: 5548750957,
+    observedAt: '2026-09-05T15:00:00Z',
+  });
+
+  // A caller that aborted must learn it aborted. "The comment is unavailable" would be a false
+  // statement about the source made on the strength of the caller's own decision.
+  const aborted = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+  await assert.rejects(raising(aborted), (error) => error.name === 'AbortError');
+
+  // A defect in this repository is not evidence about GitHub either.
+  await assert.rejects(raising(new TypeError('run is not iterable')), TypeError);
 });

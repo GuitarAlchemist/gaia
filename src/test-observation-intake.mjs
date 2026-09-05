@@ -117,7 +117,7 @@ export const MAX_TEST_OBSERVATION_CLAIMS = 64;
 export const MAX_TEST_OBSERVATION_WORK_REFERENCES = 32;
 /**
  * Long enough for the fields real automated observations actually carry — the source comment this
- * slice was built for has a 600-character observation field — and short enough that one comment
+ * slice was built for has a 456-character observation field — and short enough that one comment
  * cannot fill a projection. A claim past the bound is refused, never shortened: a truncated claim
  * is a claim the source did not make.
  */
@@ -165,6 +165,8 @@ function refuse(message) {
 
 const ordinal = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
+const isDigest = (value) => typeof value === 'string' && /^sha256:[0-9a-f]{64}$/u.test(value);
+
 const isInstant = (value) => typeof value === 'string' && INSTANT.test(value)
   && Number.isFinite(Date.parse(value));
 
@@ -211,7 +213,7 @@ export function requireTestCommentReading(value) {
 }
 
 /**
- * Read the three kinds of sentence out of a body, and only where the source said which is which.
+ * Read the kinds of sentence out of a body, and only where the source said which is which.
  *
  * Bounded on every axis: claim count, claim length and reference count. The body is never
  * rewritten — the digest is what preserves it — so the trimming here affects the projection's
@@ -456,15 +458,95 @@ function appended(ledger, entry) {
  * backwards; and a backwards source is recorded rather than admitted, so a stale mirror cannot
  * overwrite the newer evidence it disagrees with. Nothing here can remove or edit an entry.
  */
-export function admitTestObservation(ledgerInput, observationInput) {
-  const ledger = requireLedger(ledgerInput);
-  const candidate = observationInput;
-  if (candidate === null || typeof candidate !== 'object'
-    || candidate.schema !== TEST_OBSERVATION_SCHEMA) {
+/**
+ * The total verifier of an observation, applied before anything is admitted.
+ *
+ * A ledger that accepts any object carrying the right `schema` accepts an object that says
+ * `effect: WRITE` and `authority: MERGE`, stores it verbatim, and hands it to a projection an
+ * operator reads as Gaia's own evidence. Trusting the producer is not available here: the whole
+ * point of the ledger is that it holds what it can check.
+ *
+ * It checks against the same published field list and vocabularies the normalizer builds from, so
+ * there is exactly one definition of an observation and no second one to drift.
+ */
+export function requireTestObservation(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     refuse('only a normalized observation can be admitted');
   }
+  if (JSON.stringify(Object.keys(value).sort())
+    !== JSON.stringify([...TEST_OBSERVATION_FIELDS].sort())) {
+    refuse('an observation carries exactly its declared fields');
+  }
+  if (value.schema !== TEST_OBSERVATION_SCHEMA) refuse('unsupported observation schema');
+  // Constants, not fields a producer may choose. An observation is evidence; nothing about holding
+  // one lets anything act, and a document claiming otherwise is refused rather than stored.
+  if (value.effect !== 'NONE' || value.authority !== 'NONE') {
+    refuse('an observation carries no effect and no authority');
+  }
+  if (!TEST_OBSERVATION_STATES.includes(value.state)) refuse('unknown observation state');
+  if (value.state === 'NORMALIZED'
+    ? value.unknownReason !== null
+    : !TEST_OBSERVATION_UNKNOWN_REASONS.includes(value.unknownReason)) {
+    refuse('an observation state and its reason must agree');
+  }
+  if (!TEST_OBSERVATION_PROVENANCES.includes(value.provenance)) refuse('unknown provenance');
+  if (!TEST_OBSERVATION_SEVERITIES.includes(value.severity)
+    || !TEST_OBSERVATION_SEVERITY_BASES.includes(value.severityBasis)) {
+    refuse('unknown severity');
+  }
+  if (typeof value.repository !== 'string' || !SOURCE_REPOSITORY.test(value.repository)
+    || !Number.isSafeInteger(value.issueNumber) || value.issueNumber < 1
+    || !Number.isSafeInteger(value.commentId) || value.commentId < 1
+    || typeof value.sourceUrl !== 'string' || !value.sourceUrl.startsWith('https://')
+    || value.observationKey !== testObservationKey(value)) {
+    refuse('an observation carries one exact source identity');
+  }
+  if (!isDigest(value.revisionId)
+    || (value.previousRevisionId !== null && !isDigest(value.previousRevisionId))) {
+    refuse('an observation carries content-addressed revision identity');
+  }
+  if (value.rawDigest !== null && !isDigest(value.rawDigest)) refuse('invalid raw source digest');
+  if (!Number.isSafeInteger(value.rawByteLength) || value.rawByteLength < 0
+    || (value.rawDigest === null) !== (value.rawByteLength === 0)) {
+    refuse('a raw digest and a raw length are present together or not at all');
+  }
+  for (const instant of [value.sourceCreatedAt, value.sourceUpdatedAt]) {
+    if (instant !== null && !isInstant(instant)) refuse('invalid source instant');
+  }
+  if (!isInstant(value.observedAt)) refuse('an observation carries the instant it was observed');
+  if (!Array.isArray(value.claims) || value.claims.length > MAX_TEST_OBSERVATION_CLAIMS) {
+    refuse('invalid claims');
+  }
+  for (const claim of value.claims) {
+    if (claim === null || typeof claim !== 'object'
+      || JSON.stringify(Object.keys(claim).sort()) !== JSON.stringify(['basis', 'kind', 'text'])
+      || !TEST_OBSERVATION_CLAIM_KINDS.includes(claim.kind)
+      || claim.basis !== TEST_OBSERVATION_CLAIM_BASIS
+      || typeof claim.text !== 'string' || claim.text.length === 0
+      || claim.text.length > MAX_TEST_CLAIM_LENGTH) {
+      refuse('every claim is one bounded sentence asserted by the source');
+    }
+  }
+  if (!Array.isArray(value.workReferences)
+    || value.workReferences.length > MAX_TEST_OBSERVATION_WORK_REFERENCES
+    || value.workReferences.some((reference) => typeof reference !== 'string'
+      || !WORK_REFERENCE.test(reference))) {
+    refuse('every work reference names one repository and one number');
+  }
+  if (value.state === 'UNKNOWN'
+    && (value.rawDigest !== null || value.claims.length > 0 || value.workReferences.length > 0)) {
+    refuse('an unknown observation publishes no content');
+  }
+  return value;
+}
+
+export function admitTestObservation(ledgerInput, observationInput) {
+  const ledger = requireLedger(ledgerInput);
+  const candidate = requireTestObservation(observationInput);
+
   const history = ledger.entries.filter((entry) => entry.observationKey === candidate.observationKey);
-  if (history.some((entry) => entry.revisionId === candidate.revisionId)) {
+  const held = new Set(history.map((entry) => entry.revisionId));
+  if (held.has(candidate.revisionId)) {
     // Byte-identical evidence already held. Returning the same ledger object, not a copy, is what
     // makes replay observably free of effect.
     return admission('ALREADY_HELD', ledger);
@@ -472,35 +554,64 @@ export function admitTestObservation(ledgerInput, observationInput) {
   const latest = history.at(-1) ?? null;
   if (latest === null) return admission('ADMITTED', appended(ledger, candidate));
 
-  const previousInstant = latest.sourceUpdatedAt;
-  const candidateInstant = candidate.sourceUpdatedAt;
-  if (previousInstant !== null && candidateInstant !== null
-    && Date.parse(candidateInstant) < Date.parse(previousInstant)) {
-    const regressive = Object.freeze({
-      ...candidate,
-      state: 'UNKNOWN',
-      unknownReason: 'SOURCE_TIME_REGRESSED',
-      // The content of a read that cannot be placed in the timeline is not republished as
-      // evidence; the digest would otherwise read as a competing version of the truth.
-      rawDigest: null,
-      rawByteLength: 0,
-      severity: 'UNKNOWN',
-      severityBasis: 'ABSENT',
-      claims: Object.freeze([]),
-      workReferences: Object.freeze([]),
-      previousRevisionId: latest.revisionId,
-      revisionId: testObservationRevisionId({
-        observationKey: candidate.observationKey,
-        state: 'UNKNOWN',
-        unknownReason: 'SOURCE_TIME_REGRESSED',
-        rawDigest: null,
-        sourceUpdatedAt: candidateInstant,
-      }),
-    });
+  const frontier = sourceFrontier(history);
+  if (frontier !== null && candidate.sourceUpdatedAt !== null
+    && Date.parse(candidate.sourceUpdatedAt) < Date.parse(frontier.sourceUpdatedAt)) {
+    const regressive = regressionEntry(candidate, frontier);
+    // A stale read that has already been recorded as stale decides nothing a second time. Without
+    // this the same mirror could be replayed forever, each replay appending another entry.
+    if (held.has(regressive.revisionId)) return admission('ALREADY_HELD', ledger);
     return admission('REGRESSED', appended(ledger, regressive));
   }
   const revision = Object.freeze({ ...candidate, previousRevisionId: latest.revisionId });
   return admission('REVISED', appended(ledger, revision));
+}
+
+/**
+ * The newest source instant this ledger has actually placed in the timeline — the frontier a later
+ * reading has to beat to be believed.
+ *
+ * Derived from placed evidence only, never from the last entry appended. That distinction is the
+ * whole point: a regression diagnostic records that a stale mirror was seen, and if it were allowed
+ * to become the baseline, replaying that same mirror once more would compare it against itself,
+ * find no regression, and publish the old content as current. Readings with no source instant —
+ * an unavailable or deleted source — cannot move a frontier they carry no evidence about.
+ */
+function sourceFrontier(history) {
+  let frontier = null;
+  for (const entry of history) {
+    if (entry.unknownReason === 'SOURCE_TIME_REGRESSED' || entry.sourceUpdatedAt === null) continue;
+    if (frontier === null || Date.parse(entry.sourceUpdatedAt) > Date.parse(frontier.sourceUpdatedAt)) {
+      frontier = entry;
+    }
+  }
+  return frontier;
+}
+
+/**
+ * The diagnostic an out-of-order read leaves behind: it says a stale source was seen, and it says
+ * nothing else. The content is dropped rather than republished, because a digest here would read as
+ * a competing version of the truth, and it is linked to the frontier it failed to beat.
+ */
+function regressionEntry(candidate, frontier) {
+  const parts = {
+    observationKey: candidate.observationKey,
+    state: 'UNKNOWN',
+    unknownReason: 'SOURCE_TIME_REGRESSED',
+    rawDigest: null,
+    sourceUpdatedAt: candidate.sourceUpdatedAt,
+  };
+  return Object.freeze({
+    ...candidate,
+    ...parts,
+    rawByteLength: 0,
+    severity: 'UNKNOWN',
+    severityBasis: 'ABSENT',
+    claims: Object.freeze([]),
+    workReferences: Object.freeze([]),
+    previousRevisionId: frontier.revisionId,
+    revisionId: testObservationRevisionId(parts),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -544,7 +655,14 @@ export function projectTestObservations(ledgerInput) {
   const observations = [...byKey.entries()]
     .sort(([a], [b]) => ordinal(a, b))
     .map(([observationKey, history]) => {
-      const current = history.at(-1);
+      // The current reading is the newest one that was actually placed in the timeline. A stale
+      // mirror is recorded in `revisions` and is visible there, but it is not what an operator is
+      // shown: it carries no content, and letting it become the current row would turn somebody
+      // else's replay into an apparent loss of everything already known. An unavailable or deleted
+      // source is different — that is fresh information about the source — so it does become
+      // current, exactly as it did before.
+      const placed = history.filter((entry) => entry.unknownReason !== 'SOURCE_TIME_REGRESSED');
+      const current = placed.at(-1) ?? history.at(-1);
       return Object.freeze({
         observationKey,
         repository: current.repository,
