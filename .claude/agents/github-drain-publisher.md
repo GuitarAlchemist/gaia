@@ -104,7 +104,8 @@ Rules on the commands:
   comment names that merge commit and the two review artifacts.
 - `body` writes only the bytes of `bodyFile`; you never compose a body.
 - After a successful merge, record `gh pr view N --repo OWNER/NAME --json mergeCommit,state` and
-  stop. You do not merge a second PR in the same invocation: each merge re-conflicts every other
+  continue the remaining ordered actions for this PR. Stop after every ordered action has a verified result,
+  or at the first failure with the completed actions recorded. You do not merge a second PR in the same invocation: each merge re-conflicts every other
   open PR on the README gate counter, and the coordinator must classify again before another order
   exists.
 

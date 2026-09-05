@@ -109,7 +109,10 @@ verdict-changing R4 Standards review and every R5 review and repair ran on that 
 
 Authority: read GitHub (`gh pr list`, `gh pr view`, `gh pr checks`, `gh issue list`,
 `gh issue view`, `gh api` GET only) and the local tree (`git fetch`, `rev-parse`, `merge-base`,
-`log`, `diff`, `status`, `ls-files`, `show`); write exactly one file, the ledger. Refuses to
+`log`, `diff`, `status`, `ls-files`, `show`). The reconciliation measurement also permits
+`git merge-tree --write-tree <approvedSha> <baseSha>`: it stores Git objects but does not
+change the working tree, index, or local branches. Fetch may update remote-tracking refs.
+The only authored output file is the ledger. Refuses to
 merge, mark ready, edit a body, close or comment, review, label, push, commit, checkout, repair,
 resolve a conflict, spawn or message a lane, or edit any other file.
 
@@ -195,6 +198,12 @@ before the merge command. The receipt reserved before authority is spent is the 
 command under **Should an Ed25519 grant gate the publisher?** below.
 
 ## The drain sequence the roles encode
+
+Review identity includes a digest of actual tracked working-tree bytes at entry and exit,
+plus a clean-status check at both points. An unchanged Git index alone cannot prove restoration.
+The reviewer definition supplies the executable measurement. Publisher completion means every
+ordered action for the single PR has a verified result, including ordered body/issue updates
+after merge; a failure records completed effects and stops the remaining actions.
 
 1. Every PR opens as a draft and stays one until both axes approve its exact head.
 2. The coordinator classifies; unreviewed heads get both axes on one detached clean clone at the

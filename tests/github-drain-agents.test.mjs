@@ -11,7 +11,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -69,6 +71,47 @@ function section(text, heading) {
 }
 
 const codesInTable = (text) => [...text.matchAll(/^\| `([A-Z_]+)` \|/gm)].map((m) => m[1]);
+
+test('review identity detects an unstaged mutation and requires final cleanliness', () => {
+  const reviewer = readAgent('github-drain-reviewer');
+  const code = reviewer.match(/<!-- tracked-byte-digest -->\n```js\n([\s\S]*?)\n```/)?.[1];
+  assert.ok(code, 'reviewer supplies an executable tracked-byte measurement');
+  const dir = mkdtempSync(join(tmpdir(), 'gaia-review-identity-'));
+  const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+  const digest = () => execFileSync(process.execPath, ['--input-type=module', '--eval', code],
+    { cwd: dir, encoding: 'utf8', windowsHide: true }).trim();
+  try {
+    git('init', '--quiet');
+    writeFileSync(join(dir, 'subject.txt'), 'before');
+    git('add', 'subject.txt');
+    const index = git('ls-files', '-s');
+    const before = digest();
+    writeFileSync(join(dir, 'subject.txt'), 'after!');
+    assert.equal(git('ls-files', '-s'), index, 'old index-only measurement misses the mutation');
+    assert.notEqual(digest(), before, 'actual tracked bytes reveal the mutation');
+    writeFileSync(join(dir, 'subject.txt'), 'before');
+    assert.equal(digest(), before, 'byte restoration restores the digest');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  }
+  const ending = reviewer.slice(reviewer.indexOf('6. **Fixed point at end.**'), reviewer.indexOf('7. **Verdict.**'));
+  assert.match(ending, /git status --porcelain --untracked-files=all/);
+  assert.match(ending, /SUBJECT_MUTATED/);
+});
+
+test('publisher completes the ordered PR actions before stopping', () => {
+  const commands = section(readAgent('github-drain-publisher'), 'Commands');
+  assert.match(commands, /continue the remaining ordered actions for this PR/);
+  assert.match(commands, /Stop after every ordered action has a verified result/);
+  assert.doesNotMatch(commands, /and\s+stop\./);
+});
+
+test('coordinator explicitly permits the bounded merge-tree measurement', () => {
+  const authority = section(readAgent('github-drain-coordinator'), 'Authority');
+  assert.match(authority, /git merge-tree --write-tree <approvedSha> <baseSha>/);
+  assert.match(authority, /Git objects/);
+  assert.match(authority, /working tree, index, or local branches/);
+});
 
 /** Lines of a text that match a command pattern. */
 function commandLines(text, re) {
