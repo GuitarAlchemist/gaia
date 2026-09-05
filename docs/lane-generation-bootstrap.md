@@ -7,6 +7,19 @@ open, and the falsifiers the tests attempt.
 
 ## Operator problem
 
+### Recovery admission repair decision — 2026-09-05
+
+Review of `8182831` reproduced a quota-only deadlock: a generation left in
+`COMPENSATING` cannot clean its resources when remaining launch units fall to zero;
+an `ACTIVE` receipt likewise cannot replay. Resolve persisted generation identity,
+ownership and terminal replay before applying launch quota admission. Cleanup-only
+recovery does not launch and therefore requires no fresh launch units. New and
+unfinished startup paths retain quota admission before any claim or provider effect.
+Keep provider identity/capability validation and per-work execution exclusion intact.
+The falsifier is identical public bootstrap input with only remaining units changed
+from two to zero: cleanup must restore baseline and replay must return the original
+receipt without a new spawn, while a fresh generation still refuses insufficient quota.
+
 ### Execution exclusion repair decision — 2026-09-05
 
 The retained two-lane counterexample pauses one invocation after its first spawn effect.
