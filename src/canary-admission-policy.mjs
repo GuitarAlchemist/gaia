@@ -116,3 +116,40 @@ export function prepareCanaryManagedRound({ policy: supplied, snapshot, executor
   validateManagedDraftConfiguration(result);
   return result;
 }
+
+/** Bounded operation seam. External I/O is injected; callers do not sequence claim checks. */
+export function createCanaryDraftAdmission({ policy: supplied, snapshot, pumpActorId,
+  executorEpoch, readPolicy, readOperation, reserveEffect, now, lookupExact, createDraft }) {
+  if ([readPolicy, readOperation, reserveEffect, now, lookupExact, createDraft]
+    .some(port => typeof port !== 'function')) refuse('InvalidCanaryPorts');
+  const policy = bindCanaryAdmissionPolicy({ policy: supplied, snapshot, pumpActorId });
+  if (!snapshot.terminal && !['EFFECT_STARTED', 'EFFECT_AMBIGUOUS'].includes(snapshot.state)) {
+    const observed = instant(now());
+    if (observed < instant(policy.validFrom) || observed >= instant(policy.validUntil)) {
+      refuse('CanaryPolicyExpired');
+    }
+  }
+  const unchangedPolicy = async () => {
+    const current = validateCanaryAdmissionPolicy(await readPolicy());
+    if (digest(current) !== digest(policy)) refuse('CanaryPolicyChanged');
+  };
+  return Object.freeze({
+    lookupExact,
+    async createDraft(request) {
+      await unchangedPolicy();
+      const current = await readOperation(policy.operationId);
+      const prepared = prepareCanaryManagedRound({ policy, snapshot: current,
+        executorEpoch, pumpActorId, observedAt: now() });
+      const allowed = await reserveEffect({ workKey: current.identity.workKey,
+        operationId: policy.operationId, executorEpoch, claimedRevision: current.committedRevision });
+      if (allowed !== 'AVAILABLE') refuse('CanaryAdmissionRefused');
+      const confirmed = await readOperation(policy.operationId);
+      if (confirmed?.committedRevision !== current.committedRevision) refuse('CanaryClaimChanged');
+      await unchangedPolicy();
+      const managed = prepareCanaryManagedRound({ policy, snapshot: confirmed,
+        executorEpoch, pumpActorId, observedAt: now() });
+      if (managed.receipt.revision !== prepared.receipt.revision) refuse('CanaryClaimChanged');
+      return createDraft(request, managed);
+    },
+  });
+}

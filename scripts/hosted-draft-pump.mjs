@@ -30,7 +30,7 @@ import {
 import { createGitHubActionsDraftAdmission } from '../src/github-actions-draft-admission.mjs';
 import { runHostedDraftIntake } from '../src/hosted-draft-pump.mjs';
 import { produceHostedDraftPumpObservation } from '../src/hosted-draft-pump-producer.mjs';
-import { bindCanaryAdmissionPolicy, prepareCanaryManagedRound,
+import { createCanaryDraftAdmission,
   validateCanaryAdmissionPolicy } from '../src/canary-admission-policy.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -412,46 +412,18 @@ export function createHostedDraftPumpRuntime(
       });
       let provider = lookupProvider;
       if (configuration.canaryPolicy) {
-        const policy = bindCanaryAdmissionPolicy({
+        provider = createCanaryDraftAdmission({
           policy: configuration.canaryPolicy, snapshot,
           pumpActorId: configuration.pumpActorId,
-        });
-        // Terminal/ambiguous recovery is read-only at the provider; expiry forbids new effects,
-        // not observation of effects that may already exist.
-        if (!snapshot.terminal && !['EFFECT_STARTED', 'EFFECT_AMBIGUOUS'].includes(snapshot.state)) {
-          const observed = Date.parse(dependencies.now());
-          if (!Number.isFinite(observed) || observed < Date.parse(policy.validFrom)
-            || observed >= Date.parse(policy.validUntil)) fail('CanaryPolicyExpired');
-        }
-        provider = Object.freeze({
+          executorEpoch: admission.executorEpoch,
+          readPolicy: () => JSON.parse(readFileSync(configuration.canaryPolicyPath, 'utf8')),
+          readOperation: operation => store.inspectByOperation(operation),
+          reserveEffect: claim => admission.reserveEffect(claim),
+          now: dependencies.now,
           lookupExact: request => lookupProvider.lookupExact(request),
-          async createDraft(request) {
-            const currentPolicy = validateCanaryAdmissionPolicy(JSON.parse(
-              readFileSync(configuration.canaryPolicyPath, 'utf8'),
-            ));
-            if (JSON.stringify(currentPolicy) !== JSON.stringify(policy)) fail('CanaryPolicyChanged');
-            const current = await store.inspectByOperation(operationId);
-            const prepared = prepareCanaryManagedRound({
-              policy, snapshot: current, executorEpoch: admission.executorEpoch,
-              pumpActorId: configuration.pumpActorId, observedAt: dependencies.now(),
-            });
-            const allowed = await admission.reserveEffect({
-              workKey, operationId, executorEpoch: admission.executorEpoch,
-              claimedRevision: current.committedRevision,
-            });
-            if (allowed !== 'AVAILABLE') fail('CanaryAdmissionRefused');
-            const confirmed = await store.inspectByOperation(operationId);
-            if (confirmed?.committedRevision !== current.committedRevision) fail('CanaryClaimChanged');
-            // Recheck time after the external admission read; expiry must not be extended by waiting.
-            const managed = prepareCanaryManagedRound({
-              policy, snapshot: confirmed, executorEpoch: admission.executorEpoch,
-              pumpActorId: configuration.pumpActorId, observedAt: dependencies.now(),
-            });
-            if (managed.receipt.revision !== prepared.receipt.revision) fail('CanaryClaimChanged');
-            return dependencies.createGhDraftOperationProvider({
-              ...providerOptions, managedRound: { workKey, ...managed, evidencePort },
-            }).createDraft(request);
-          },
+          createDraft: (request, managed) => dependencies.createGhDraftOperationProvider({
+            ...providerOptions, managedRound: { workKey, ...managed, evidencePort },
+          }).createDraft(request),
         });
       }
       const operationPorts = dependencies.createDraftOperationPorts({

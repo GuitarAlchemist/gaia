@@ -57,3 +57,29 @@ Do not install a policy with guessed reviewer principals. Code availability is
 not policy activation, a successful Draft is not agent authorization, and a
 single supervised canary is not continuous autonomy. Rollback removes explicit
 policy selection; it does not erase durable operation/effect evidence.
+
+## Independent review repair and abstraction evidence
+
+The operation seam `createCanaryDraftAdmission` owns the ordering of policy,
+clock, durable-state and Actions observations. The CLI only supplies external
+ports and constructs the existing provider. Deleting this module forces that
+load-bearing ordering and its refusal conditions back into the caller; it is
+not a pass-through wrapper. Pure derivation remains independently testable.
+
+The hosted CLI contract covers normal creation, terminal replay, policy expiry,
+wrong generation, stopped Actions, unrelated queue work, policy replacement and
+ledger movement during admission, expiry during the external read, and ambiguous
+lookup-only recovery. Refusals leave managed evidence UNSEEN and create no Draft.
+The ledger-movement case injects a changed external storage observation; it is
+not evidence of cross-host locking or production crash recovery.
+
+Mutation experiment: remove the policy-revision guard, run the public test named
+`changes during admission`, and the policy case fails (one create instead of
+zero). Removing the committed-revision guard instead fails the ledger case in
+the same way. Both guards were restored and the controls pass again. Removing
+only the explicit producer expiry guard does not escape the downstream lease
+validator; that mutant survived the effect assertion and is not reported killed.
+These observations establish only the named invariants, not complete mutation
+coverage or live autonomy. The existing reconciler conservatively classifies an
+exception after EFFECT_STARTED as ambiguous, even when this admission seam refused
+before calling the provider; this slice does not widen retry authority.

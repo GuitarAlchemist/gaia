@@ -19,7 +19,8 @@ const canonical = v => v === null || typeof v !== 'object' ? JSON.stringify(v)
 const hash = v => createHash('sha256').update(canonical(v)).digest('hex');
 
 async function fixture(t, { stopped = false, expired = false, unrelated = false,
-  replay = false, expiredRecovery = false, mutatePolicy = () => {} } = {}) {
+  replay = false, expiredRecovery = false, changeDuringAdmission = null,
+  mutatePolicy = () => {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'gaia-canary-contract-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const repository = { nodeId: 'R_test', owner: 'test-org', name: 'test-repo' };
@@ -38,6 +39,14 @@ async function fixture(t, { stopped = false, expired = false, unrelated = false,
     admission: { reserveEffect: async () => 'ZERO' }, executorEpoch: { runId: 50, runAttempt: 1 },
     telemetry: { append: async () => {} } });
   const enqueued = await enqueueDraft({ repository: { owner: repository.owner, name: repository.name }, workItem }, 'NONE', seed);
+  let changedStorageObservation = false;
+  const readStoredOperation = seed.store.inspectByOperation.bind(seed.store);
+  // External storage observation fault: the composition must reject a revision change.
+  seed.store.inspectByOperation = async id => {
+    const observed = await readStoredOperation(id);
+    return changedStorageObservation && observed
+      ? { ...observed, committedRevision: '9'.repeat(64) } : observed;
+  };
   if (unrelated) {
     const other = structuredClone(envelope);
     other.workItem.number = 41;
@@ -82,7 +91,16 @@ async function fixture(t, { stopped = false, expired = false, unrelated = false,
     createGitHubManagedRoundEvidencePort: () => evidence,
     createGitHubActionsDraftAdmission, createDraftOperationPorts, enqueueDraft, reconcileDraft, listUnsettledDrafts,
     now: () => expired || recoveryTime ? policy.validUntil : '2026-09-05T21:10:00.000Z',
-    readWorkflowAdmission: async () => { reads++; return {
+    readWorkflowAdmission: async () => {
+      reads++;
+      if (reads === 2) {
+        if (changeDuringAdmission === 'policy') {
+          writeFileSync(path, JSON.stringify({ ...policy, accountableOwner: 'github:user:replacement' }));
+        }
+        if (changeDuringAdmission === 'expiry') recoveryTime = true;
+        if (changeDuringAdmission === 'ledger') changedStorageObservation = true;
+      }
+      return {
       repository: { full_name: 'test-org/test-repo' }, id: 50, run_attempt: 1,
       path: '.github/workflows/hosted-draft-intake.yml', head_sha: 'e'.repeat(40),
       status: stopped && reads > 1 ? 'completed' : 'in_progress' }; },
@@ -117,7 +135,7 @@ async function fixture(t, { stopped = false, expired = false, unrelated = false,
     } catch (error) { recovery = { error: error.code }; }
   }
   return { code, output: firstOutput, errors, creates, reads, candidate, seed, enqueued,
-    replayCode, replayOutput, recovery };
+    replayCode, replayOutput, recovery, managedEvidence: await evidence.read(enqueued.workKey) };
 }
 
 test('hosted intake uses its real runtime and claim producer to create one policy-bound Draft', async t => {
@@ -176,4 +194,24 @@ test('policy expiry does not erase read-only reconciliation of an already termin
   assert.equal(result.recovery.kind, 'Terminal', JSON.stringify(result.recovery));
   assert.equal(result.recovery.pullRequest.number, 121);
   assert.equal(result.creates, 1);
+});
+
+test('changes during admission cannot acquire a managed claim or create a Draft', async t => {
+  for (const change of ['policy', 'ledger', 'expiry']) {
+    await t.test(change, async subtest => {
+      const result = await fixture(subtest, { changeDuringAdmission: change });
+      assert.equal(result.creates, 0);
+      assert.deepEqual(result.managedEvidence, { state: 'UNSEEN' });
+      assert.notEqual(JSON.parse(result.output).result.outcome, 'CREATED');
+    });
+  }
+});
+
+test('ambiguous canary recovery remains lookup-only without renewing managed authority', async t => {
+  const result = await fixture(t, { stopped: true, replay: true });
+  assert.equal(result.replayCode, 0, result.errors);
+  assert.equal(JSON.parse(result.replayOutput).result.state, 'EFFECT_AMBIGUOUS');
+  assert.equal(result.creates, 0);
+  assert.deepEqual(result.managedEvidence, { state: 'UNSEEN' });
+  assert.equal(result.reads, 2, 'the retry must not request fresh create authority');
 });

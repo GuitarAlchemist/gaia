@@ -307,9 +307,12 @@ The opt-in hosted intake `--canary-policy` composition uses
 `src/canary-admission-policy.mjs` to validate a versioned, one-operation policy and
 derive managed Draft input from an actual `EFFECT_STARTED` ledger snapshot. The
 policy pins repository, issue, generation, source head, actor and responsibility
-assignments; it is not a live claim or an agent-execution grant. The composition
-rechecks Actions admission and the ledger revision at effect time, then delegates
-claim acquisition to the existing managed evidence CAS and verifies Draft readback.
+assignments; it is not a live claim or an agent-execution grant. Its operation seam,
+`createCanaryDraftAdmission`, owns policy rereading, expiry, Actions re-admission
+and ledger revision checks at effect time, then passes closed managed input to
+the existing effect adapter. That adapter acquires the managed evidence CAS claim
+and verifies Draft readback. The CLI injects filesystem, store, admission, clock
+and effect ports; it does not sequence the admission decision.
 Legacy intake retains its static configuration validation. The full unsettled list
 remains visible to the intake count even when selection is limited to one issue.
 
