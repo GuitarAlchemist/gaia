@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { validateManagedDraftConfiguration } from './pr-delivery-round-history.mjs';
+import { independentAgentReviewers } from './agent-review-identity.mjs';
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const SHA1 = /^[a-f0-9]{40}$/u;
@@ -32,13 +33,14 @@ function instant(value) {
 
 /** Validate explicit policy, not live evidence. A digest does not grant authority. */
 export function validateCanaryAdmissionPolicy(policy) {
+  const ai = policy?.schema === 'GaiaCanaryAdmissionPolicyV1';
   exact(policy, ['schema', 'version', 'repository', 'issue', 'operationId', 'generationKey',
     'headRevision', 'effectActorId', 'validFrom', 'validUntil', 'accountableOwner',
-    'effectOwner', 'reviewOwners', 'allowedEffect', 'roundBudget']);
+    'effectOwner', 'reviewOwners', 'allowedEffect', 'roundBudget', ...(ai ? ['writerIdentity'] : [])]);
   exact(policy.repository, ['nodeId', 'owner', 'name']);
   exact(policy.reviewOwners, ['standards', 'spec']);
   const from = instant(policy.validFrom); const until = instant(policy.validUntil);
-  if (policy.schema !== 'GaiaCanaryAdmissionPolicyV0' || policy.version !== 1
+  if ((!ai && policy.schema !== 'GaiaCanaryAdmissionPolicyV0') || policy.version !== 1
     || [policy.operationId, policy.generationKey, policy.headRevision, policy.repository.nodeId,
       policy.repository.owner, policy.repository.name, policy.accountableOwner, policy.effectOwner,
       policy.reviewOwners.standards, policy.reviewOwners.spec].some(value => typeof value !== 'string')
@@ -52,8 +54,9 @@ export function validateCanaryAdmissionPolicy(policy) {
     || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(policy.repository.name)
     || !PRINCIPAL.test(policy.accountableOwner)
     || !/^github:app:[A-Za-z0-9][A-Za-z0-9-]{0,63}$/u.test(policy.effectOwner)
-    || !PRINCIPAL.test(policy.reviewOwners.standards) || !PRINCIPAL.test(policy.reviewOwners.spec)
-    || policy.reviewOwners.standards === policy.reviewOwners.spec) refuse('InvalidCanaryPolicy');
+    || (ai ? !independentAgentReviewers(policy.writerIdentity, policy.reviewOwners)
+      : !PRINCIPAL.test(policy.reviewOwners.standards) || !PRINCIPAL.test(policy.reviewOwners.spec)
+        || policy.reviewOwners.standards === policy.reviewOwners.spec)) refuse('InvalidCanaryPolicy');
   return JSON.parse(JSON.stringify(policy));
 }
 
@@ -87,6 +90,7 @@ export function prepareCanaryManagedRound({ policy: supplied, snapshot, executor
     ownershipRevision: digest({ policyRevision, identity, kind: 'responsibility' }),
     accountableOwner: policy.accountableOwner, supervisor, executionOwner, reportsTo: supervisor,
     reviewOwners: policy.reviewOwners, effectOwner: policy.effectOwner, escalatesTo: policy.accountableOwner,
+    ...(policy.schema === 'GaiaCanaryAdmissionPolicyV1' ? { writerIdentity: policy.writerIdentity } : {}),
   };
   const command = {
     commandRevision: digest({ policyRevision, identity, kind: 'command' }), commandOwner: supervisor,
@@ -94,7 +98,8 @@ export function prepareCanaryManagedRound({ policy: supplied, snapshot, executor
     capabilities: ['ASSIGN', 'REVOKE', 'STOP', 'RETRY', 'ESCALATE'],
   };
   const body = {
-    schema: 'GaiaRoundReceiptV0', kind: 'OPEN', ordinal: 0, predecessorRoundKey: 'NONE',
+    schema: policy.schema === 'GaiaCanaryAdmissionPolicyV1' ? 'GaiaRoundReceiptV1' : 'GaiaRoundReceiptV0',
+    kind: 'OPEN', ordinal: 0, predecessorRoundKey: 'NONE',
     trigger: 'DRAFT_CREATED', roundBudget: 1, responsibility, command,
     evidence: {
       designCommit: 'UNKNOWN(NOT_MEASURED)', redCommit: 'UNKNOWN(NOT_REACHED)',

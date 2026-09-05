@@ -149,6 +149,36 @@ test('hosted intake uses its real runtime and claim producer to create one polic
   assert.match(result.candidate.body, /UNKNOWN\(NOT_REACHED\)/);
 });
 
+test('hosted intake creates and reads back V1 AI assignments without asserting review approval', async t => {
+  const result = await fixture(t, { replay: true, mutatePolicy: p => {
+    p.schema = 'GaiaCanaryAdmissionPolicyV1';
+    p.writerIdentity = 'gaia:agent:v1:codex:11111111-1111-4111-8111-111111111111:writer';
+    p.reviewOwners = {
+      standards: 'gaia:agent:v1:codex:11111111-1111-4111-8111-111111111111:standards',
+      spec: 'gaia:agent:v1:claude:22222222-2222-4222-8222-222222222222:spec',
+    };
+  } });
+  assert.equal(result.code, 0, result.errors);
+  assert.equal(JSON.parse(result.output).result.outcome, 'CREATED', result.output);
+  assert.equal(result.creates, 1);
+  assert.equal(result.replayCode, 0);
+  assert.match(result.candidate.body, /Writer identity: `gaia:agent:v1:codex:/);
+  assert.match(result.candidate.body, /Spec review owner: `gaia:agent:v1:claude:/);
+  assert.match(result.candidate.body, /Review verdicts: `UNKNOWN\(NOT_REACHED\)`/);
+});
+
+test('hosted intake refuses self-reviewed V1 before any managed claim or Draft', async t => {
+  const result = await fixture(t, { mutatePolicy: p => {
+    p.schema = 'GaiaCanaryAdmissionPolicyV1';
+    p.writerIdentity = 'gaia:agent:v1:codex:11111111-1111-4111-8111-111111111111:writer';
+    p.reviewOwners = { standards: p.writerIdentity,
+      spec: 'gaia:agent:v1:claude:22222222-2222-4222-8222-222222222222:spec' };
+  } });
+  assert.notEqual(result.code, 0);
+  assert.equal(result.creates, 0);
+  assert.deepEqual(result.managedEvidence, { state: 'UNSEEN' });
+});
+
 test('hosted intake creates no Draft when Actions stops before the effect', async t => {
   const result = await fixture(t, { stopped: true });
   assert.equal(result.creates, 0);

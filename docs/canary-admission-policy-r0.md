@@ -1,5 +1,37 @@
 # One-operation canary admission policy
 
+## V1 AI reviewer assignments — approved scope, 2026-09-05
+
+The user authorized representing real AI reviewers without invented GitHub accounts.
+Three options were compared before code: loosen the V0 GitHub regex (rejected:
+silently changes a closed contract); map AI sessions to fake GitHub users (rejected:
+false provenance); add an explicit V1 policy/receipt (selected: opt-in and reversible).
+
+V0 remains unchanged. V1 adds a writer identity and two independent AI reviewer
+assignments. Identity grammar is `gaia:agent:v1:PROVIDER:SESSION_UUID:AGENT_ID`;
+the session and agent IDs must come from the actual harness, not a model name or
+an invented account. The same session/agent under another provider spelling is
+the same actor for conflict checks. Distinct child agents within one coordinator
+session are permitted; independence refers to separate agent contexts, not paid
+subscriptions or provider diversity. Assignment provenance is checked by the
+operator when admitting the exact policy; parsing a string is not authentication.
+
+The managed round carries the writer/reviewer identities and the exact source
+generation, including through its rendered GitHub readback. OPEN retains
+`UNKNOWN(NOT_REACHED)` review verdicts. It neither manufactures an APPROVE nor
+imports reviews of the pump implementation as reviews of the future canary task.
+Actual acceptance still requires independent source evidence and a verdict bound
+to the candidate, as enforced by the existing factory/publish path. This change
+does not implement new identity authentication or widen that acceptance path.
+
+Public seams remain the agreed policy producer and hosted intake CLI through its
+real reconciler/managed receipt consumer. Tests must prove V1 round-trip creation,
+deterministic identity preservation, same-reviewer and writer-reviewer refusal,
+wrong-head refusal, unchanged V0 rejection, and no provider effect on refusal.
+No new concurrent effect or linearization point: the existing ledger and managed
+claim CAS retain exclusive ownership. Missing/live unverified assignments must
+not be activated. Rollback deselects V1; retain its durable receipts for readback.
+
 Related: #40, PR #121. Decision recorded before implementation, 2026-09-05.
 User authorization: one versioned admission policy for one canary; no merge,
 deployment, new credentials or replacement of the human execution grant.

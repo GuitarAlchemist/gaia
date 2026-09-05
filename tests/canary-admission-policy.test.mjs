@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { prepareCanaryManagedRound, validateCanaryAdmissionPolicy } from '../src/canary-admission-policy.mjs';
-import { validateManagedDraftConfiguration } from '../src/pr-delivery-round-history.mjs';
+import { validateManagedDraftConfiguration, createInitialManagedRound,
+  planManagedRoundUpdate } from '../src/pr-delivery-round-history.mjs';
+import { createHash } from 'node:crypto';
 
 // Synthetic identities exercise the contract; they are never activation material.
 const policy = {
@@ -23,6 +25,60 @@ const snapshot = {
 };
 const input = () => ({ policy: structuredClone(policy), snapshot: structuredClone(snapshot),
   executorEpoch: { ...epoch }, pumpActorId: 123, observedAt: '2026-09-05T21:10:00.000Z' });
+
+test('V1 canary assignments preserve real-shaped AI identities without inventing approval', () => {
+  const value = input();
+  value.policy.schema = 'GaiaCanaryAdmissionPolicyV1';
+  value.policy.writerIdentity = 'gaia:agent:v1:codex:11111111-1111-4111-8111-111111111111:writer';
+  value.policy.reviewOwners = {
+    standards: 'gaia:agent:v1:codex:11111111-1111-4111-8111-111111111111:standards',
+    spec: 'gaia:agent:v1:claude:22222222-2222-4222-8222-222222222222:spec',
+  };
+  const result = prepareCanaryManagedRound(value);
+  assert.equal(result.receipt.schema, 'GaiaRoundReceiptV1');
+  assert.equal(result.receipt.responsibility.writerIdentity, value.policy.writerIdentity);
+  assert.deepEqual(result.receipt.responsibility.reviewOwners, value.policy.reviewOwners);
+  assert.deepEqual(result.receipt.evidence.reviewVerdicts, ['UNKNOWN(NOT_REACHED)']);
+  assert.equal(result.receipt.command.generation, policy.headRevision);
+  assert.doesNotThrow(() => validateManagedDraftConfiguration(result));
+  assert.deepEqual(prepareCanaryManagedRound(value), result);
+  const initial = createInitialManagedRound({ workKey: value.snapshot.identity.workKey,
+    headRevision: policy.headRevision, receipt: result.receipt });
+  const body = initial.managedSection;
+  const projection = planManagedRoundUpdate({ workKey: value.snapshot.identity.workKey,
+    observation: { number: 121, headRevision: policy.headRevision, body,
+      bodyRevision: createHash('sha256').update(body).digest('hex') },
+    receipt: { schema: 'GaiaRoundDeadlineReceiptV0', revision: 'f'.repeat(64),
+      observedAt: '2026-09-05T22:01:00.000Z' } });
+  assert.equal(projection.kind, 'ESCALATE', JSON.stringify(projection));
+});
+
+test('V1 refuses writer review, provider aliases, missing identities and V0 downgrade', () => {
+  const base = input();
+  base.policy.schema = 'GaiaCanaryAdmissionPolicyV1';
+  base.policy.writerIdentity = 'gaia:agent:v1:codex:11111111-1111-4111-8111-111111111111:writer';
+  base.policy.reviewOwners = {
+    standards: 'gaia:agent:v1:codex:11111111-1111-4111-8111-111111111111:standards',
+    spec: 'gaia:agent:v1:claude:22222222-2222-4222-8222-222222222222:spec',
+  };
+  for (const mutate of [
+    p => { p.reviewOwners.spec = p.writerIdentity; },
+    p => { p.reviewOwners.spec = p.reviewOwners.standards.replace(':codex:', ':claude:'); },
+    p => { p.reviewOwners.spec = p.writerIdentity.replace(':codex:', ':claude:'); },
+    p => { delete p.writerIdentity; },
+    p => { p.reviewOwners.spec = 'claude-sonnet-5'; },
+    p => { p.schema = 'GaiaCanaryAdmissionPolicyV0'; },
+    p => { p.schema = 'GaiaCanaryAdmissionPolicyV0'; delete p.writerIdentity; },
+  ]) {
+    const value = structuredClone(base); mutate(value.policy);
+    assert.throws(() => prepareCanaryManagedRound(value), { code: 'InvalidCanaryPolicy' });
+  }
+  const stale = structuredClone(base); stale.snapshot.envelope.generation.headRevision = 'f'.repeat(40);
+  assert.throws(() => prepareCanaryManagedRound(stale), { code: 'CanaryPolicyScopeMismatch' });
+  const forged = prepareCanaryManagedRound(base);
+  forged.receipt.responsibility.reviewOwners.spec = base.policy.writerIdentity;
+  assert.throws(() => validateManagedDraftConfiguration(forged), { code: 'ReviewOwnerConflict' });
+});
 
 test('one canary policy produces a valid managed receipt bound to durable execution evidence', () => {
   const result = prepareCanaryManagedRound(input());
