@@ -7,6 +7,34 @@ open, and the falsifiers the tests attempt.
 
 ## Operator problem
 
+### Review repair decision — 2026-09-05
+
+Independent Standards and Spec reviews rejected the combined candidate `a8d120eb`.
+Two counterexamples are retained in PR #95 comment `5548856272`. This bounded repair
+addresses incomplete cleanup only; overlapping same-actor resumptions remain a P1
+blocker and no concurrency-complete claim or merge is permitted from this slice.
+
+At the existing `bootstrapLaneGeneration(manifest, ports)` seam, a cleanup attempt must
+first persist `COMPENSATING` by CAS against its last accepted revision. A stale loser
+returns `STALE_REVISION` without cleanup. The intent is written before cleanup effects,
+so a lost response or interrupted cleanup can be reconciled at the same ordinal. While
+that intent exists, a newer ordinal is refused. The owning actor's next invocation
+continues cleanup only, never startup. Terminal `COMPENSATED` requires successful cleanup
+and a fresh structured observation with no operation-marked panes or agent records.
+An unavailable observation or unresolved cleanup remains `COMPENSATING` and returns
+`CLEANUP_INCOMPLETE`; successful cleanup recovery returns `GENERATION_COMPENSATED`.
+
+Falsifiers: cleanup methods throw; cleanup methods acknowledge without removing resources;
+the cleanup-intent response is lost; a successor is attempted before cleanup settles.
+Recovery must restore the fixture's baseline, preserve Music, and perform no new spawns.
+The narrower alternative (leave `IN_FLIGHT`) is rejected: it can restart failed work
+instead of finishing cleanup. Marking failure terminal is rejected because it admits
+orphan overlap. No new bus verb, provider authority, dependency or production adapter.
+
+This is not an execution fence: same-actor overlapping resumptions can still perform
+concurrent provider effects. That separate counterexample must be closed before review
+approval. A read-before-effect check or process-local mutex is not a cross-host repair.
+
 Two reproduced failures, both recorded in issue #93, say the same thing about the same seam.
 
 On 2026-09-01 a lane spawn accepted a pane identity that no longer existed and returned a
