@@ -582,6 +582,30 @@ test('B20: incomplete cleanup blocks successors and resumes cleanup without spaw
   assert.equal((await store.read(identity.workKey)).record.state, 'COMPENSATED');
 });
 
+test('B20: exhausted launch quota does not prevent owned cleanup recovery', async () => {
+  const { fake, ports } = harness({ faults: { omitReportingParentOnLane: 'ALL' } });
+  const unavailable = async () => { throw new Error('TEMPORARY_CLEANUP_FAILURE'); };
+  const first = await bootstrapLaneGeneration(manifest(), {
+    ...ports,
+    provider: { ...fake.provider, stopAgent: unavailable, reapSurface: unavailable, closePane: unavailable },
+  });
+  assert.equal(first.refusal, 'CLEANUP_INCOMPLETE');
+  const spawns = fake.operations().filter(op => op === 'spawn').length;
+  const provider = {
+    ...fake.provider,
+    describe: async () => ({
+      ...await fake.provider.describe(),
+      costObservation: { basis: 'DECLARED_UNITS', remainingUnits: 0 },
+    }),
+  };
+  const recovered = await bootstrapLaneGeneration(manifest(), { ...ports, provider });
+  assert.equal(recovered.refusal, 'GENERATION_COMPENSATED');
+  assert.equal(recovered.compensation.incomplete, false);
+  assert.equal(fake.livePaneCount(), baselinePanes);
+  assert.equal(fake.liveAgentCount(), baselineAgents);
+  assert.equal(fake.operations().filter(op => op === 'spawn').length, spawns);
+});
+
 test('B20: cleanup acknowledgements without removal never settle the generation', async () => {
   const { fake, store, ports } = harness({ faults: { omitReportingParentOnLane: 'ALL' } });
   const first = await bootstrapLaneGeneration(manifest(), {
