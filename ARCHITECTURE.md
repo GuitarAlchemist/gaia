@@ -158,8 +158,16 @@ refuses admission without starting an agent. The module-level port remains optio
 existing compositions; the operator CLI has no admission opt-out. This narrows the
 existing human-mediated grant and creates no new authority. It does not close the interval
 between readback and process start or prove cross-process execution exclusion. A safe live
-worker profile, real operator authorization, and an operation-linked canary remain
-unproven; tests use injected provider transport and do not establish autonomous draining.
+worker profile is selectable with `--execution-profile claude-visible-restricted`.
+The provider adapter in `src/factory-visible-claude.mjs` implements the existing worker,
+reviewer and repair ports through an inherited interactive terminal. It restricts Claude
+to file tools and working directories, removes API-key fallback through the existing
+subscription environment, and binds bounded provider results to fresh attempt identities.
+The owned process must stop before output acceptance; timeout, mismatch and cleanup
+failure refuse. Results remain untrusted provider evidence; factory candidate validation
+and human-mediated authority are unchanged. This is not an OS sandbox guarantee.
+Real operator authorization and an operation-linked canary remain unproven; controlled
+provider tests alone do not establish autonomous draining.
 
 Pull-request conflict classification is read-only at this revision. It binds the observed base and
 head generation and can report clean, unknown, superseded, or escalation-required. Its automation

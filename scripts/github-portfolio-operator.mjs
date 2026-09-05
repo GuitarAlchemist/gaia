@@ -33,6 +33,7 @@ import {
   runCodexReviewer,
 } from '../src/factory-agent.mjs';
 import { createCliProgress, instrumentFactoryAdapters } from '../src/cli-progress.mjs';
+import { createVisibleClaudeAdapters } from '../src/factory-visible-claude.mjs';
 
 class UsageError extends Error {
   constructor(message) {
@@ -48,6 +49,7 @@ const USAGE = `usage:
       --private-key FILE --public-key FILE --ledger DIR --worktree DIR
       --evidence-root DIR --draft-receipt FILE --out NEW_FILE [--ttl-seconds 120]
       [--timeout-ms 600000] [--progress-format human|jsonl]
+      [--execution-profile default|claude-visible-restricted]
 
 Both commands require an interactive session. Windows reads the passphrase from a masked
 OS dialog; other platforms use the terminal. Run reads its confirmation from the
@@ -63,7 +65,7 @@ const OPTIONS = {
   init: ['private-key', 'public-key'],
   run: [
     'portfolio', 'repository', 'private-key', 'public-key', 'ledger', 'worktree',
-    'evidence-root', 'draft-receipt', 'out', 'ttl-seconds', 'timeout-ms', 'progress-format',
+    'evidence-root', 'draft-receipt', 'out', 'ttl-seconds', 'timeout-ms', 'progress-format', 'execution-profile',
   ],
 };
 
@@ -134,6 +136,7 @@ export async function runPortfolioOperatorCli(argv, {
   runWorker = runClaudeWorker,
   runReviewer = runCodexReviewer,
   runRepair = runClaudeRepair,
+  visibleProviderLaunch,
   readPassphraseFn = readPassphrase,
   confirmFn = confirmAtTerminal,
   isInteractive = () => process.stdin.isTTY,
@@ -183,7 +186,18 @@ export async function runPortfolioOperatorCli(argv, {
   if (!['human', 'jsonl'].includes(progressFormat)) {
     throw new UsageError('--progress-format must be human or jsonl');
   }
+  const executionProfile = args['execution-profile'] ?? 'default';
+  if (!['default', 'claude-visible-restricted'].includes(executionProfile)) {
+    throw new UsageError('--execution-profile must be default or claude-visible-restricted');
+  }
   assertInteractive(isInteractive);
+  const providerAdapters = executionProfile === 'claude-visible-restricted'
+    ? createVisibleClaudeAdapters({
+      // Production additionally requires stdout to be an actual terminal; tests supply
+      // a controlled external process boundary rather than launching a paid provider.
+      ...(visibleProviderLaunch ? { launch: visibleProviderLaunch, isInteractive } : {}),
+    })
+    : { runWorker, runReviewer, runRepair };
   const progress = createCliProgress({
     timeoutMs,
     format: progressFormat,
@@ -197,9 +211,9 @@ export async function runPortfolioOperatorCli(argv, {
   let receipt;
   try {
     const adapters = instrumentFactoryAdapters({
-      runWorker: (context) => runWorker(context, { timeoutMs }),
-      runReviewer: (context) => runReviewer(context, { timeoutMs }),
-      runRepair: (context) => runRepair(context, { timeoutMs }),
+      runWorker: (context) => providerAdapters.runWorker(context, { timeoutMs }),
+      runReviewer: (context) => providerAdapters.runReviewer(context, { timeoutMs }),
+      runRepair: (context) => providerAdapters.runRepair(context, { timeoutMs }),
       progress,
     });
     const baseExecution = createExecution({

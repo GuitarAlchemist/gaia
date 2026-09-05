@@ -153,11 +153,22 @@ node scripts/github-portfolio-operator.mjs run \
   [--ttl-seconds 120] \
   [--timeout-ms 600000] \
   [--progress-format human|jsonl]
+  [--execution-profile default|claude-visible-restricted]
 ```
 
 `--repository` is a pre-commitment: the operator states which repository they are willing
 to authorize before the intent is known, and the execution adapter refuses any intent that
 names another one.
+
+`--execution-profile claude-visible-restricted` selects the interactive subscription-backed
+Claude adapters for worker, reviewer and bounded repair. The operator terminal must be
+visible and interactive on both input and output. No print-mode fallback occurs. Each
+invocation has a fresh context, working-directory restrictions, file tools only, an
+attempt-bound result and mandatory provider shutdown before acceptance. The supervisor
+runs tests separately; agents in this profile cannot execute shell commands. Existing
+human confirmation, encrypted-key unlock, admission and grant consumption are unchanged.
+See [the profile contract](visible-worker-r0.md) for limits. Omission preserves the
+existing default profile; choosing this option does not authorize execution.
 
 `--draft-receipt` is required. It names the hosted pump intake receipt for the issue; the
 Draft it describes is read back from GitHub on every advance and must still be the exact

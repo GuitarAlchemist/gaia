@@ -17,6 +17,45 @@ writeFileSync(draftReceiptPath, '{}', 'utf8');
 const injectedAdmission = () => ({ read: async () => null });
 test.after(() => rmSync(scratch, { recursive: true, force: true }));
 
+test('operator explicitly selects visible restricted execution without replacing admission or authority', async () => {
+  const key = join(scratch, 'visible.pub');
+  writeFileSync(key, 'fixture public key');
+  let executed = false;
+  const code = await runPortfolioOperatorCli([
+    'run', '--portfolio', join(scratch, 'p.json'), '--repository', 'GuitarAlchemist/gaia',
+    '--private-key', join(scratch, 'private'), '--public-key', key,
+    '--ledger', join(scratch, 'ledger-visible'), '--worktree', scratch,
+    '--evidence-root', join(scratch, 'evidence-visible'), '--draft-receipt', draftReceiptPath,
+    '--out', join(scratch, 'visible-receipt'), '--execution-profile', 'claude-visible-restricted',
+  ], {
+    isInteractive: () => true,
+    visibleProviderLaunch: (request) => {
+      let close;
+      const closed = new Promise((resolve) => { close = resolve; });
+      writeFileSync(request.resultPath, JSON.stringify({ schema: 'gaia-visible-agent-result/1',
+        binding: request.binding, status: 'completed', summary: 'Visible fixture completed.' }));
+      return { closed, stop: async () => close() };
+    },
+    createAuthority: () => ({ marker: 'authority-kept' }),
+    createDraftAdmission: () => ({ marker: 'admission-kept' }),
+    createGithubRead: () => ({}),
+    createExecution: ({ runWorker }) => ({ execute: () => runWorker({ cwd: scratch, task: 'fixture', baseHead: 'a'.repeat(40) }) }),
+    runWorker: () => { assert.fail('must not use headless fallback'); },
+    runOperator: async ({ authority, draftAdmission, execution }) => {
+      assert.equal(authority.marker, 'authority-kept');
+      assert.equal(draftAdmission.marker, 'admission-kept');
+      const result = await execution.execute({});
+      assert.equal(JSON.parse(result.output).summary, 'Visible fixture completed.');
+      executed = true;
+      return { status: 'AUTHORIZED', transition: { status: 'CANDIDATE_READY' } };
+    },
+    summarize: () => ({ text: 'fixture', exitCode: 0 }),
+    writeStdout: () => {}, writeProgress: () => {},
+  });
+  assert.equal(code, 0);
+  assert.equal(executed, true);
+});
+
 function parseProgress(chunks) {
   return chunks.join('').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
