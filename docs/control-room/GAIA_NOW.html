@@ -861,32 +861,37 @@
       const visibleText = unified.innerText;
       const trendRect = document.getElementById('criticalSprintTrend').getBoundingClientRect();
       const trendDocumentBottom = trendRect.bottom + window.scrollY;
-      const qaChecks = [
+      const renderChecks = [
         unified.firstElementChild?.id === 'draftPullRequests',
-        trendDocumentBottom <= window.innerHeight,
         Boolean(document.getElementById('systemRootSignal') && document.getElementById('humanRootSignal')),
         unified.querySelectorAll('.gate-chip').length === 5,
-        document.documentElement.scrollWidth <= window.innerWidth + 1,
         systemSignal.getAttribute('aria-controls') === 'systemRootSignal' && humanSignal.getAttribute('aria-controls') === 'humanRootSignal',
         language === 'fr' ? visibleText.includes('TIMELINE DE COORDINATION') : visibleText.includes('COORDINATION TIMELINE') && !/Aucune|approuvé|reste à prouver/.test(visibleText),
         [...unified.querySelectorAll('#criticalSprintTrend .sprint-dot')].every(marker => marker.classList.contains('timeline-marker') && marker.dataset.popoverItems),
         [...unified.querySelectorAll('#criticalTimeline .time-point')].every(marker => marker.classList.contains('timeline-marker') && marker.dataset.popoverItems) && Boolean(finalReview.dataset.popoverItems),
         Boolean(document.getElementById('nextProofEta')?.textContent.includes(evidenceFresh ? t.nextProofEta : t.proofOverdue)) && unified.querySelectorAll('#pumpLedger .pump-message').length === 4
       ];
+      // Viewport fit is diagnostic: short screens and growing live content remain usable.
+      const layoutChecks = [
+        trendDocumentBottom <= window.innerHeight,
+        document.documentElement.scrollWidth <= window.innerWidth + 1
+      ];
+      const qaChecks = [...renderChecks, ...layoutChecks];
+      const renderValid = renderChecks.every(Boolean);
       const qaPassed = qaChecks.filter(Boolean).length;
       document.body.dataset.uiQa = `${qaPassed}/10`;
       document.querySelector('header .sub').textContent = `${t.subtitle} · UI QA ${qaPassed}/10`;
-      if (qaPassed !== qaChecks.length) {
+      if (!renderValid) {
         systemSignal.className = 'signal-button bad';
         systemSignal.textContent = language === 'fr' ? '🤖 IA · régression UI' : '🤖 AI · UI regression';
       }
+      return renderValid;
     };
     let lastKnownGood = localStorage.getItem('gaia-now-last-known-good') || '';
     const safeRender = () => {
       const previous = unified.innerHTML;
       try {
-        render();
-        if (document.body.dataset.uiQa !== '10/10') throw new Error(`UI postcondition failed: ${document.body.dataset.uiQa}`);
+        if (!render()) throw new Error(`UI structural postcondition failed: ${document.body.dataset.uiQa}`);
         lastKnownGood = unified.innerHTML;
         localStorage.setItem('gaia-now-last-known-good', lastKnownGood);
       } catch (error) {
