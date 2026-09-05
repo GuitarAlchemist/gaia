@@ -74,7 +74,7 @@ only in the final column and must not escape in a result or refusal.
 | Runner capability probe | `probe(mandate, lease, adapter) -> receipt or blocker` | Read-only capability question decided by identity, generation, lease, admission and reconciliation before any adapter is consulted | synthetic-fixture probe; deterministic in-memory fixtures |
 | Publication and operator | `prepare(intent)`; `authorize(grant)`; `execute(intent) -> receipt` | Human-mediated privileged effect | GitHub publication/operator adapters; owned in-memory broker tests |
 | Factory telemetry | `record(phase)`; `replay(events) -> lifecycle or refusal` | Closed evidence events and freshness projection | local evidence log; wmux/Claude sensor; deterministic fixtures |
-| Lane generation bootstrap | `bootstrapLaneGeneration(manifest, ports) -> receipt or refusal`; `verifyLaneLaunchReceipt(receipt) -> receipt or refusal` | Complete topology before any spawn, one compare-and-set winner, and a launch receipt published only after one fresh structured verification | deterministic in-memory generation store; deterministic lane-adapter fixture |
+| Lane generation bootstrap | `bootstrapLaneGeneration(manifest, ports) -> receipt or refusal`; `verifyLaneLaunchReceipt(receipt) -> receipt or refusal` | Topology before spawn, verified launch receipt, and recoverable CAS cleanup intent; overlapping same-actor resumption is a known review blocker | deterministic in-memory generation store; deterministic lane-adapter fixture |
 | Control room | `render(snapshot, observed instant) -> read model` | Authority-free operator projection | static HTML/dashboard; in-memory snapshots |
 | Hybrid search | `index(corpus)`; `query(request) -> matches or refusal` | Advisory retrieval with provenance | local JavaScript engine; optional IX embedding input |
 | Architecture drift | `checkArchitectureDrift(inventory) -> report or refusal` | Normalized repository inventory | filesystem inventory; deterministic in-memory inventory |
@@ -117,7 +117,10 @@ One declared generation of lanes is bootstrapped from an authoritative content-a
 Identity is derived from that document rather than from a remembered pane, the complete empty
 topology exists before any process, and a lane is never `ACTIVE` until a durable launch receipt is
 published against one fresh structured observation. A refused launch compensates only the
-resources its own operation created, and a concurrent or stale attempt performs no effect. The
+resources its own operation created. Cleanup persists `COMPENSATING` before effects, blocks
+successor generations while unresolved, and becomes `COMPENSATED` only after observed removal.
+Same-actor overlapping resumptions remain a known review blocker: CAS on the record does not
+fence every provider effect. No cross-host concurrency safety is claimed for this candidate. The
 shipped adapters behind that seam are deterministic fixtures; a durable record store and a real
 terminal host remain planned.
 

@@ -155,7 +155,7 @@ export const LANE_GENERATION_RECORD_FIELDS = Object.freeze([
 
 /** `ACTIVE` exists only beside a published receipt. There is no state meaning "probably fine". */
 export const LANE_GENERATION_STATES = Object.freeze([
-  'ACTIVE', 'CLAIMED', 'COMPENSATED', 'IN_FLIGHT',
+  'ACTIVE', 'CLAIMED', 'COMPENSATED', 'COMPENSATING', 'IN_FLIGHT',
 ]);
 
 export const LANE_LAUNCH_RECEIPT_FIELDS = Object.freeze([
@@ -180,6 +180,7 @@ export const LANE_BOOTSTRAP_REFUSALS = Object.freeze([
   'CAPABILITY_INSUFFICIENT',
   'CLAIM_HELD',
   'GENERATION_COMPENSATED',
+  'CLEANUP_INCOMPLETE',
   'LANE_LIMIT_EXCEEDED',
   'LAYOUT_CHANGED',
   'OBSERVATION_UNAVAILABLE',
@@ -654,6 +655,17 @@ async function compensate(provider, workspaceId, operationMarker, plan) {
       counts.panesClosed += 1;
     } catch { counts.incomplete = true; }
   }
+  // An acknowledged effect is not proof of removal. Unavailable or incomplete observations
+  // retain the cleanup intent so a later invocation can reconcile it without starting work.
+  try {
+    const after = await provider.snapshot({ workspaceId });
+    if (after?.workspaceId !== workspaceId || !Array.isArray(after.panes)
+      || !Array.isArray(after.agents)
+      || after.panes.some(pane => pane.operationMarker === operationMarker)
+      || after.agents.some(agent => agent.operationMarker === operationMarker)) {
+      counts.incomplete = true;
+    }
+  } catch { counts.incomplete = true; }
   return counts;
 }
 
@@ -813,12 +825,23 @@ export async function bootstrapLaneGeneration(manifestInput, portsInput) {
   let plan = resumed?.plan == null ? null : structuredClone(resumed.plan);
 
   const abort = async (refusal, subject) => {
+    const intent = await store.commit(
+      identity.workKey, expectedRevision, recordBody('COMPENSATING', plan, null),
+    );
+    if (intent.stale === true) return refuse('STALE_REVISION');
+    expectedRevision = intent.committedRevision;
     const compensation = await compensate(provider, workspaceId, marker, plan);
+    if (compensation.incomplete) {
+      return refuse('CLEANUP_INCOMPLETE', subject, compensation, expectedRevision);
+    }
     const committed = await store.commit(
       identity.workKey, expectedRevision, recordBody('COMPENSATED', plan, null),
     );
+    if (committed.stale === true) return refuse('STALE_REVISION', subject, compensation);
     return refuse(refusal, subject, compensation, committed.committedRevision ?? null);
   };
+
+  if (resumed?.state === 'COMPENSATING') return abort('GENERATION_COMPENSATED', null);
 
   // --- topology: the complete empty grid, before any process exists ------------------------
   const before = await provider.snapshot({ workspaceId });

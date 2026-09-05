@@ -504,6 +504,38 @@ test('B20: incomplete cleanup blocks successors and resumes cleanup without spaw
   assert.equal((await store.read(identity.workKey)).record.state, 'COMPENSATED');
 });
 
+test('B20: cleanup acknowledgements without removal never settle the generation', async () => {
+  const { fake, store, ports } = harness({ faults: { omitReportingParentOnLane: 'ALL' } });
+  const first = await bootstrapLaneGeneration(manifest(), {
+    ...ports,
+    provider: {
+      ...fake.provider,
+      stopAgent: async () => ({ stopped: true }),
+      reapSurface: async () => ({ reaped: true }),
+      closePane: async () => ({ closed: true }),
+    },
+  });
+  assert.equal(first.refusal, 'CLEANUP_INCOMPLETE');
+  assert.equal((await store.read(laneGenerationIdentity(manifest()).workKey)).record.state, 'COMPENSATING');
+  const recovered = await bootstrapLaneGeneration(manifest(), ports);
+  assert.equal(recovered.refusal, 'GENERATION_COMPENSATED');
+  assert.equal(fake.livePaneCount(), baselinePanes);
+  assert.equal(fake.liveAgentCount(), baselineAgents);
+});
+
+test('B20: a lost cleanup-intent response resumes cleanup instead of startup', async () => {
+  const { fake, store, ports } = harness({ faults: { omitReportingParentOnLane: 'ALL' } });
+  await assert.rejects(() => bootstrapLaneGeneration(manifest(), {
+    ...ports, store: lostResponseStore(store, { loseResponseToState: 'COMPENSATING' }),
+  }), /STORE_RESPONSE_LOST/);
+  const spawns = fake.operations().filter(op => op === 'spawn').length;
+  const recovered = await bootstrapLaneGeneration(manifest(), ports);
+  assert.equal(recovered.refusal, 'GENERATION_COMPENSATED');
+  assert.equal(fake.operations().filter(op => op === 'spawn').length, spawns);
+  assert.equal(fake.livePaneCount(), baselinePanes);
+  assert.equal(fake.liveAgentCount(), baselineAgents);
+});
+
 test('B7: a partial spawn failure leaves the visible and live counts unchanged', async () => {
   const { fake, store, ports } = harness({ faults: { spawnThrowsOnLane: 'lane-supervisor' } });
   const result = await bootstrapLaneGeneration(manifest(), ports);

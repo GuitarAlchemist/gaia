@@ -230,7 +230,7 @@ an exited process.
 ### `gaia-lane-generation-record/1` — the durable transition record
 
 `schema`, `workKey`, `generationId`, `generationOrdinal`, `operationId`, `actor`, `state`, `plan`,
-`receipt`. `state` is one of `CLAIMED`, `IN_FLIGHT`, `ACTIVE`, `COMPENSATED`. There is no state
+`receipt`. `state` is one of `CLAIMED`, `IN_FLIGHT`, `ACTIVE`, `COMPENSATING`, `COMPENSATED`. There is no state
 that means "probably fine": `ACTIVE` exists only beside a published receipt.
 
 ### `gaia-lane-launch-receipt/1` — the linearization point
@@ -259,9 +259,10 @@ publication is refused by its own reader.
    was returned, the process is live, the startup evidence its provider declared is present within
    the effective deadline, and each lane's reporting edge is registered;
 9. publish the receipt and move the record to `ACTIVE`;
-10. on any refusal in 5-9, compensate exactly: stop the agents this operation spawned, reap their
-    surfaces, close the panes this operation created — in reverse order, by recorded identity
-    only — then record `COMPENSATED` and return a typed refusal.
+10. on any refusal in 5-9, CAS a `COMPENSATING` intent before cleanup; a stale CAS performs no
+    cleanup. Stop operation-marked agents, reap surfaces, and close panes in reverse order.
+    Record `COMPENSATED` only after successful cleanup and a fresh empty operation observation.
+    Otherwise retain `COMPENSATING`; the same actor may retry cleanup, but no successor starts.
 
 Step 5 before step 7 is the rule the 2026-09-02 failure violated. The whole grid is built before
 any provider process exists, so a generation is never expanded around live surfaces.
