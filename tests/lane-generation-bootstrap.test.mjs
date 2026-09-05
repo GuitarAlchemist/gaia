@@ -480,6 +480,30 @@ test('B6: a newer ordinal does not silently supersede a live generation in R0', 
 // B7 / B8 — exact compensation, and nothing beyond it
 // ---------------------------------------------------------------------------
 
+test('B20: incomplete cleanup blocks successors and resumes cleanup without spawning', async () => {
+  const { fake, store, ports } = harness({ faults: { omitReportingParentOnLane: 'ALL' } });
+  const unavailable = async () => { throw new Error('TEMPORARY_CLEANUP_FAILURE'); };
+  const first = await bootstrapLaneGeneration(manifest(), {
+    ...ports,
+    provider: { ...fake.provider, stopAgent: unavailable, reapSurface: unavailable, closePane: unavailable },
+  });
+  assert.equal(first.compensation.incomplete, true);
+  const identity = laneGenerationIdentity(manifest());
+  assert.equal((await store.read(identity.workKey)).record.state, 'COMPENSATING');
+  const spawns = fake.operations().filter(op => op === 'spawn').length;
+  const mutations = fake.mutations().length;
+  const successor = await bootstrapLaneGeneration(manifest({ generationOrdinal: 2 }), ports);
+  assert.equal(successor.refusal, 'CLAIM_HELD');
+  assert.equal(fake.mutations().length, mutations, 'unsettled cleanup admits no successor effects');
+  const recovered = await bootstrapLaneGeneration(manifest(), ports);
+  assert.equal(recovered.refusal, 'GENERATION_COMPENSATED');
+  assert.equal(recovered.compensation.incomplete, false);
+  assert.equal(fake.operations().filter(op => op === 'spawn').length, spawns);
+  assert.equal(fake.livePaneCount(), baselinePanes);
+  assert.equal(fake.liveAgentCount(), baselineAgents);
+  assert.equal((await store.read(identity.workKey)).record.state, 'COMPENSATED');
+});
+
 test('B7: a partial spawn failure leaves the visible and live counts unchanged', async () => {
   const { fake, store, ports } = harness({ faults: { spawnThrowsOnLane: 'lane-supervisor' } });
   const result = await bootstrapLaneGeneration(manifest(), ports);
