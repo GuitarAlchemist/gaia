@@ -60,6 +60,21 @@ test('Gaia NOW keeps usable layouts live and recovers structural failures', {
     return { ...fixture.drafts[0], number, title: `Viewport refresh witness ${number}`, mergeStateStatus: 'CLEAN' };
   }
 
+  await t.test('language changes preserve historical PR facts and do not claim live pump health', async t => {
+    const { page } = await openPage(t, { height: 1400, now: new Date('2026-09-05T12:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-09-05T12:00:05Z'));
+    const selectors = ['#r5Status', '#rootDeficits', '#systemRootSignal', '.gate-summary', '#criticalTimeline .time-point'];
+    const facts = async () => Promise.all(selectors.map(async selector =>
+      (await page.locator(selector).allTextContents()).join(' ').replace(/(?<=\d)[ ,](?=\d{3})/g, '').match(/\d+(?:\/\d+)?|DRAFT|MERGED|36cb1f1|147bafe/g) || []));
+    const french = await facts();
+    await page.locator('#langToggle').click();
+    await page.clock.runFor(1);
+    assert.deepEqual(await facts(), french, 'locale must not change PR numbers, test counts, hashes or publication state');
+    assert.match(await page.locator('#r5Status').innerText(), /PR #114/);
+    assert.doesNotMatch(await page.locator('#r5Status').innerText(), /PR #112|MERGED/);
+    assert.match(await page.locator('#systemSignal').innerText(), /not measured/i);
+  });
+
   await t.test('sprint dates roll over at local midnight without turning historical evidence into current proof', async t => {
     for (const language of ['fr', 'en']) {
       const { page } = await openPage(t, { height: 1400, now: new Date('2026-09-05T03:59:00Z'), timezoneId: 'America/Toronto' });
@@ -138,7 +153,9 @@ test('Gaia NOW keeps usable layouts live and recovers structural failures', {
     await page.locator('#langToggle').click();
     await page.clock.runFor(1);
     assert.equal(await page.locator('html').getAttribute('lang'), 'en');
-    assert.match(await page.locator('#draftPullRequests').innerText(), /DRAFT PRS/);
+    assert.match(await page.locator('#draftPullRequests').innerText(), /PRS WITH DRAFT STATUS/);
+    assert.match(await page.locator('#draftPullRequests').innerText(), /Open PRs may still be under review or repair/);
+    assert.doesNotMatch(await page.locator('#draftPullRequests').innerText(), /no materialized work/);
     assert.notEqual(await page.locator('body').getAttribute('data-ui-qa'), 'RECOVERED');
     assert.deepEqual(errors, []);
   });

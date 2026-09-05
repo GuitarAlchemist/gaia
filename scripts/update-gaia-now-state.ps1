@@ -52,14 +52,24 @@ function Get-CheckSummary {
     param($Rollup)
     $summary = [ordered]@{ success = 0; failure = 0; pending = 0; neutral = 0; total = 0 }
     foreach ($check in @($Rollup)) {
+        if ($null -eq $check) { continue }
         $summary.total++
+        if ($null -eq $check.status) {
+            # StatusContext entries carry no run status; their state is already terminal or pending.
+            if ($check.state -eq 'SUCCESS') { $summary.success++ }
+            elseif ($check.state -in @('FAILURE', 'ERROR')) { $summary.failure++ }
+            else { $summary.pending++ }
+            continue
+        }
         if ($check.status -ne 'COMPLETED') { $summary.pending++; continue }
         if ($check.conclusion -eq 'SUCCESS') { $summary.success++; continue }
         if ($check.conclusion -in @('FAILURE', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE')) {
             $summary.failure++
             continue
         }
-        $summary.neutral++
+        if ($check.conclusion -in @('SKIPPED', 'NEUTRAL')) { $summary.neutral++; continue }
+        # An unrecognised conclusion is never reported as settled work.
+        $summary.pending++
     }
     return $summary
 }

@@ -87,6 +87,78 @@ function gh {
   }
 });
 
+test('Gaia NOW updater classifies check runs and legacy status contexts', {
+  skip: process.platform !== 'win32' && 'The updater observes Windows host idle state',
+}, () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-now-checks-'));
+  try {
+    const fixturePath = join(scratch, 'github.json');
+    const outputPath = join(scratch, 'state.json');
+    const wrapperPath = join(scratch, 'run.ps1');
+    const scriptPath = fileURLToPath(new URL('../scripts/update-gaia-now-state.ps1', import.meta.url));
+    writeFileSync(wrapperPath, `
+param($FixturePath, $OutputPath, $ScriptPath)
+$fixture = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json
+function gh {
+  $global:LASTEXITCODE = 0
+  if ($args[0] -eq 'api' -and $args[1] -eq 'graphql') {
+    return '{"data":{"repository":{"issues":{"totalCount":4},"ready":{"totalCount":0},"pullRequests":{"totalCount":4}}}}'
+  }
+  if ($args[0] -eq 'api') { return ConvertTo-Json -InputObject $fixture.pages -Depth 20 }
+  if ($args[0] -eq 'pr' -and $args[1] -eq 'view') {
+    return ConvertTo-Json -InputObject $fixture.details.PSObject.Properties[$args[2]].Value -Depth 20
+  }
+  if ($args[0] -eq 'run' -and $args[1] -eq 'list') { return '[]' }
+  throw 'Unexpected GitHub command'
+}
+& $ScriptPath -OutputPath $OutputPath
+`, 'utf8');
+
+    const draft = (number, statusCheckRollup) => ({
+      number, title: `Draft ${number}`, isDraft: true,
+      url: `https://github.com/GuitarAlchemist/gaia/pull/${number}`, headRefName: `draft-${number}`,
+      author: { login: 'witness' }, createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-05T00:00:00Z',
+      mergeStateStatus: 'BLOCKED', statusCheckRollup,
+    });
+    const fixture = {
+      pages: [[{ number: 201, draft: true }, { number: 202, draft: true }, { number: 203, draft: true }, { number: 204, draft: true }]],
+      details: {
+        // A union of CheckRun and StatusContext entries, as GitHub actually returns them.
+        201: draft(201, [
+          { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SKIPPED' },
+          { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'NEUTRAL' },
+          { __typename: 'CheckRun', status: 'IN_PROGRESS', conclusion: null },
+          { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'STALE' },
+          { __typename: 'StatusContext', context: 'ci/green', state: 'SUCCESS' },
+          { __typename: 'StatusContext', context: 'ci/red', state: 'FAILURE' },
+          { __typename: 'StatusContext', context: 'ci/waiting', state: 'PENDING' },
+        ]),
+        202: draft(202, [
+          { __typename: 'StatusContext', context: 'ci/broken', state: 'ERROR' },
+          { __typename: 'StatusContext', context: 'ci/queued', state: 'EXPECTED' },
+          { __typename: 'StatusContext', context: 'ci/odd', state: 'MYSTERY' },
+        ]),
+        203: draft(203, null),
+        204: draft(204, []),
+      },
+    };
+    writeFileSync(fixturePath, JSON.stringify(fixture));
+    const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', wrapperPath,
+      '-FixturePath', fixturePath, '-OutputPath', outputPath, '-ScriptPath', scriptPath], { encoding: 'utf8', timeout: 30000 });
+    assert.equal(result.status, 0, result.stderr || result.error?.message);
+    const state = JSON.parse(readFileSync(outputPath, 'utf8'));
+    assert.deepEqual(state.drafts.map((entry) => [entry.number, entry.checks]), [
+      [201, { success: 2, failure: 1, pending: 3, neutral: 2, total: 8 }],
+      [202, { success: 0, failure: 1, pending: 2, neutral: 0, total: 3 }],
+      [203, { success: 0, failure: 0, pending: 0, neutral: 0, total: 0 }],
+      [204, { success: 0, failure: 0, pending: 0, neutral: 0, total: 0 }],
+    ]);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
 test('Gaia NOW updater measures host idle time in wrapping tick units', {
   skip: process.platform !== 'win32' && 'The updater observes Windows host idle state',
 }, () => {
