@@ -410,6 +410,42 @@ test('B17: a declared-marker provider that never registers the marker is refused
 // B5 / B6 — one winner, and stale losers with no effect
 // ---------------------------------------------------------------------------
 
+test('B5: overlapping same-actor resume cannot spawn a duplicate lane', async () => {
+  const { fake, ports } = harness();
+  let entered;
+  let release;
+  let paused = false;
+  const reached = new Promise(resolve => { entered = resolve; });
+  const barrier = new Promise(resolve => { release = resolve; });
+  const provider = {
+    ...fake.provider,
+    async spawn(request) {
+      const result = await fake.provider.spawn(request);
+      if (!paused) { paused = true; entered(); await barrier; }
+      return result;
+    },
+  };
+  const first = bootstrapLaneGeneration(manifest(), { ...ports, provider });
+  await reached;
+  let second;
+  let before;
+  let after;
+  try {
+    before = fake.operations();
+    second = await bootstrapLaneGeneration(manifest(), { ...ports, provider });
+    after = fake.operations();
+  } finally { release(); }
+  const winner = await first;
+  assert.equal(second.refusal, 'EXECUTION_HELD');
+  assert.deepEqual(after, before, 'contender performs no provider call');
+  assert.equal(winner.outcome, 'LAUNCH_RECEIPT_PUBLISHED');
+  assert.equal(fake.operations().filter(operation => operation === 'spawn').length, 2);
+  assert.equal(fake.liveAgentCount(), baselineAgents + 2);
+  const replay = await bootstrapLaneGeneration(manifest(), { ...ports, provider });
+  assert.equal(replay.outcome, 'LAUNCH_RECEIPT_REPLAYED');
+  assert.deepEqual(replay.receipt, winner.receipt);
+});
+
 test('B5: a second actor meeting a held claim performs no effect at all', async () => {
   const store = createMemoryLaneGenerationStore();
   const alpha = harness({
