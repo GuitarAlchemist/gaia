@@ -383,6 +383,35 @@ test('R08 cancellation at EFFECT_STARTED defers, then returns the existing CREAT
   assert.equal(provider.count('createDraft'), 1);
 });
 
+test('merged delivery reconciles a lost Draft response without creating again', async () => {
+  const mod = await api('merged delivery');
+  let remote = null;
+  const provider = fakeProvider({
+    lookup: () => remote,
+    create(request) {
+      remote = exactDraft(request, {
+        state: 'MERGED', isDraft: false, headRevision: OID_C,
+        mergedEvidence: {
+          generationHeadRevision: request.headRevision, headRevision: OID_C,
+          mergeCommit: OID_A, mergedAt: '2026-09-01T22:21:25Z', comparison: 'ahead',
+        },
+      });
+      throw new Error('response lost');
+    },
+  });
+  const fixture = await harness(mod, { provider });
+  const accepted = assertEnqueued(await enqueue(mod, fixture));
+  const pending = await mod.reconcileDraft(accepted.operationId, accepted.committedRevision, fixture.ports);
+  assert.equal(pending.state, 'EFFECT_AMBIGUOUS');
+  const recovered = await mod.reconcileDraft(accepted.operationId, pending.committedRevision, fixture.ports);
+  assertTerminal(recovered, 'REUSED');
+  assert.equal(recovered.pullRequest.state, 'MERGED');
+  assert.equal(recovered.pullRequest.isDraft, false);
+  assert.equal(recovered.pullRequest.headRevision, OID_C);
+  assert.equal(provider.count('createDraft'), 1);
+  assert.deepEqual(await mod.reconcileDraft(accepted.operationId, recovered.committedRevision, fixture.ports), recovered);
+});
+
 test('R09 a possibly successful lost response stays EFFECT_AMBIGUOUS and cancellation defers', async () => {
   const mod = await api('R09 EFFECT_AMBIGUOUS cancellation');
   let remote = null;
