@@ -14,11 +14,16 @@
     button { background: #17304e; color: #dcecff; border: 1px solid #3a5b7f; border-radius: 8px; padding: 9px 13px; cursor: pointer; }
     .header-actions { display: flex; gap: 8px; align-items: center; }
     .root-signals { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
-    .draft-grid { display: grid; gap: 8px; margin-top: 10px; }
-    .draft-row { display: grid; grid-template-columns: auto minmax(220px, 1fr) auto auto; gap: 10px; align-items: center; padding: 10px 12px; border: 1px solid #294765; border-radius: 9px; background: #09182a; }
-    .draft-row a { color: #dcecff; font-weight: 750; text-decoration: none; }
+    .draft-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; margin-top: 10px; }
+    .draft-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid #294765; border-radius: 9px; background: #09182a; }
+    .draft-row > div { min-width: 0; }
+    .draft-row .tag { min-width: 0; margin-right: 0; }
+    .draft-row a { display: block; overflow: hidden; color: #dcecff; font-weight: 750; text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
     .draft-row a:hover { color: #75baff; text-decoration: underline; }
-    .draft-meta { color: #8fabca; font-size: .78rem; }
+    .draft-meta { overflow: hidden; color: #8fabca; font-size: .78rem; text-overflow: ellipsis; white-space: nowrap; }
+    #draftPullRequests { padding: 6px 12px; }
+    #draftPullRequests .draft-grid { margin-top: 4px; }
+    #draftPullRequests .draft-row { padding-block: 4px; }
     .draft-empty { padding: 14px; border: 1px solid #ff758c; border-radius: 9px; background: #33131b; color: #ffd7df; }
     .ci-pill { border-radius: 999px; padding: 4px 8px; font-size: .72rem; font-weight: 800; white-space: nowrap; }
     .ci-pill.good { background: #103b2b; color: #58e6a8; }
@@ -704,7 +709,7 @@
         const total = Number(checks.total || success + failure + pending);
         const ciClass = failure > 0 ? 'bad' : pending > 0 ? 'warn' : 'good';
         const ciText = failure > 0 ? `${failure} ${t.failed}` : pending > 0 ? `${pending} ${t.pending}` : `${success}/${total} ${t.checks}`;
-        return `<div class="draft-row"><span class="tag warn">#${Number(draft.number)}</span><div><a href="${escapeHtml(draft.url)}" target="_blank" rel="noreferrer">${escapeHtml(draft.title)}</a><div class="draft-meta">${escapeHtml(draft.branch)} · ${escapeHtml(draft.author || '—')}</div></div><span class="ci-pill ${ciClass}">${escapeHtml(ciText)}</span><span class="draft-meta">${t.updated} ${relativeAge(draft.updatedAt)}</span></div>`;
+        return `<div class="draft-row"><span class="tag warn">#${Number(draft.number)}</span><div><a href="${escapeHtml(draft.url)}" target="_blank" rel="noreferrer">${escapeHtml(draft.title)}</a><div class="draft-meta">${escapeHtml(draft.branch)} · ${escapeHtml(draft.author || '—')} · ${t.updated} ${relativeAge(draft.updatedAt)}</div></div><span class="ci-pill ${ciClass}">${escapeHtml(ciText)}</span></div>`;
       }).join('') : `<div class="draft-empty"><strong>${t.draftsNone}</strong></div>`;
       const escalations = drafts.flatMap(draft => {
         const items = [];
