@@ -61,6 +61,19 @@ function run(script, args, { env = {} } = {}) {
   });
 }
 
+/**
+ * What a CLI subprocess left behind when the report a gate expected is missing: the exit
+ * code, stderr, the stdout tail, and every failed check the report did carry. A full-suite
+ * run that fails here once in ten is only attributable if the failure names its cause
+ * (#98: the first such failure was a verify crash on a transient file under src/; the
+ * next one, after that cause was removed, reported an empty array and nothing else).
+ */
+function subprocessDiagnostic({ code, stdout, stderr, json }) {
+  const failed = json?.sections?.flatMap((s) => s.checks.filter((c) => !c.ok).map((c) => `${c.name}: ${c.detail}`)) ?? null;
+  return `exit ${code}; stderr: ${stderr.trim().slice(0, 600) || '(empty)'}; `
+    + `stdout tail: ${stdout.trim().slice(-300) || '(empty)'}; failed checks: ${JSON.stringify(failed)}`;
+}
+
 test.after(() => rmSync(SCRATCH, { recursive: true, force: true, maxRetries: 12, retryDelay: 25 }));
 
 /** A minimal but genuine multi-party exchange, built with the real reducer's events. */
@@ -757,7 +770,7 @@ test('verify does not certify a directory whose log parses but cannot be replaye
   const verify = await run(CTL, ['verify', '--data-dir', dir]);
   const checks = verify.json?.evidence?.positive?.checks ?? [];
   const replayable = checks.find((c) => c.name === 'replayable');
-  assert.ok(replayable, `the report is the replay failure alone: ${JSON.stringify(checks.map((c) => c.name))}`);
+  assert.ok(replayable, `the report is the replay failure alone: ${JSON.stringify(checks.map((c) => c.name))}; ${subprocessDiagnostic(verify)}`);
   assert.equal(replayable.ok, false, 'the log genuinely does not replay');
   for (const name of [CORRELATION_CHECK, IDENTITY_CHECK]) {
     assert.equal(checks.find((c) => c.name === name), undefined,
@@ -814,6 +827,7 @@ test('claiming a dead-issuer log IS evidence fails, and so does claiming a thin 
   assert.equal(claimedDead.code, 1, `a dead-issuer log claimed as evidence fails: ${claimedDead.stdout}`);
 
   const claimedThin = await run(CTL, ['verify', '--data-dir', dir, '--evidence', thin]);
+  assert.ok(claimedThin.json, `verify emitted a report: ${subprocessDiagnostic(claimedThin)}`);
   assert.equal(claimedThin.code, 1, `a one-actor log claimed as evidence fails: ${claimedThin.stdout}`);
   assert.equal(claimedThin.json.evidenceGatesResult, true, 'because the caller claimed it');
 });
