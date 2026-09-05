@@ -156,7 +156,7 @@ function parseJson(stdout) {
   }
 }
 
-function validateCandidate(candidate, request) {
+function validateCandidate(candidate, request, mergedEvidence = null) {
   const code = 'ProviderConflict';
   exactKeys(candidate, [
     'number', 'url', 'isDraft', 'state', 'baseRefName', 'headRefName', 'headRefOid',
@@ -167,9 +167,12 @@ function validateCandidate(candidate, request) {
   if (!Number.isSafeInteger(candidate.number) || candidate.number <= 0
     || match === null || Number(match[3]) !== candidate.number
     || match[1] !== request.repository.owner || match[2] !== request.repository.name
-    || candidate.isDraft !== true || candidate.state !== 'OPEN'
+    || (mergedEvidence === null
+      ? candidate.isDraft !== true || candidate.state !== 'OPEN'
+      : candidate.isDraft !== false || candidate.state !== 'MERGED')
     || candidate.baseRefName !== request.baseRef || candidate.headRefName !== request.headRef
-    || candidate.headRefOid !== request.headRevision
+    || (mergedEvidence === null ? candidate.headRefOid !== request.headRevision
+      : candidate.headRefOid !== mergedEvidence.headRevision)
     || typeof candidate.headRepositoryOwner.id !== 'string'
     || candidate.headRepositoryOwner.id.length === 0
     || candidate.headRepositoryOwner.login !== request.repository.owner
@@ -177,13 +180,14 @@ function validateCandidate(candidate, request) {
   return Object.freeze({
     number: candidate.number,
     url: candidate.url,
-    isDraft: true,
-    state: 'OPEN',
+    isDraft: candidate.isDraft,
+    state: candidate.state,
     operationMarker: request.operationMarker,
     repository: request.repository,
     baseRef: request.baseRef,
     headRef: request.headRef,
-    headRevision: request.headRevision,
+    headRevision: candidate.headRefOid,
+    ...(mergedEvidence === null ? {} : { mergedEvidence }),
   });
 }
 
@@ -220,10 +224,10 @@ export function createGhDraftOperationProvider({
       fail('RepositoryIdentityMismatch');
     }
   };
-  const lookupCandidate = async (request) => {
+  const lookupCandidate = async (request, allowMerged = false) => {
     await assertRepositoryIdentity();
     const candidates = parseJson(await invoke(
-      'pr', 'list', '--repo', repositoryName, '--state', 'open',
+      'pr', 'list', '--repo', repositoryName, '--state', 'all',
       '--head', request.headRef, '--limit', '100', '--json',
       'number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body',
     ));
@@ -234,11 +238,47 @@ export function createGhDraftOperationProvider({
     ));
     if (marked.length > 1 || candidates.length > 1) fail('ProviderAmbiguous');
     if (marked.length === 0) fail('ProviderConflict');
+    if (allowMerged && marked[0].state === 'MERGED') {
+      const candidate = marked[0];
+      if (!GIT_OID.test(candidate.headRefOid)) fail('ProviderConflict');
+      const fields = 'number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body,mergedAt,mergeCommit';
+      const readMerged = async () => parseJson(await invoke(
+        'pr', 'view', String(candidate.number), '--repo', repositoryName, '--json', fields,
+      ));
+      const observed = await readMerged();
+      const compared = parseJson(await invoke(
+        'api', `repos/${repositoryName}/compare/${request.headRevision}...${candidate.headRefOid}`,
+      ));
+      if (!['ahead', 'identical'].includes(compared?.status) || compared.behind_by !== 0
+        || !Number.isSafeInteger(compared.ahead_by) || compared.ahead_by < 0
+        || (compared.status === 'identical') !== (compared.ahead_by === 0)
+        || (compared.status === 'identical') !== (request.headRevision === candidate.headRefOid)
+        || compared.base_commit?.sha !== request.headRevision) fail('ProviderConflict');
+      const current = await readMerged();
+      if (typeof current?.mergedAt !== 'string'
+        || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(current.mergedAt)
+        || !Number.isFinite(Date.parse(current.mergedAt))
+        || new Date(current.mergedAt).toISOString().replace('.000Z', 'Z') !== current.mergedAt
+        || !GIT_OID.test(current.mergeCommit?.oid)
+        || current.mergedAt !== observed.mergedAt
+        || current.mergeCommit.oid !== observed.mergeCommit?.oid) fail('ProviderConflict');
+      const mergedEvidence = Object.freeze({
+        generationHeadRevision: request.headRevision, headRevision: candidate.headRefOid,
+        mergeCommit: current.mergeCommit.oid, mergedAt: current.mergedAt, comparison: compared.status,
+      });
+      // Validate both reads, not a branch name or a marker copied into an unrelated PR.
+      for (const reading of [candidate, observed, current]) {
+        const { mergedAt, mergeCommit, ...identity } = reading;
+        if (identity.number !== candidate.number) fail('ProviderConflict');
+        validateCandidate(identity, request, mergedEvidence);
+      }
+      return Object.freeze({ candidate: current, draft: validateCandidate(candidate, request, mergedEvidence) });
+    }
     return Object.freeze({
       candidate: marked[0], draft: validateCandidate(marked[0], request),
     });
   };
-  const lookup = async (request) => (await lookupCandidate(request))?.draft ?? null;
+  const lookup = async (request) => (await lookupCandidate(request, true))?.draft ?? null;
 
   const managedConfiguration = () => {
     exactKeys(managedRound, [

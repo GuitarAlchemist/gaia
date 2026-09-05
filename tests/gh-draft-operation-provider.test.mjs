@@ -169,7 +169,7 @@ const REPO_VIEW_ARGS = [
   'repo', 'view', 'GuitarAlchemist/gaia', '--json', 'id,nameWithOwner',
 ];
 const PR_LIST_ARGS = [
-  'pr', 'list', '--repo', 'GuitarAlchemist/gaia', '--state', 'open',
+  'pr', 'list', '--repo', 'GuitarAlchemist/gaia', '--state', 'all',
   '--head', 'codex/hosted-draft-pump-r0', '--limit', '100',
   '--json',
   'number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body',
@@ -290,6 +290,69 @@ test('lookupExact returns only the open Draft bound to the exact repository, gen
     headRevision: HEAD_REVISION,
   });
   assert.equal(fake.calls.length, 2);
+});
+
+test('lookupExact recovers a merged PR only with exact generation inclusion and merge metadata', async () => {
+  const currentHead = 'c'.repeat(40);
+  const merged = exactPullRequest({ state: 'MERGED', isDraft: false, headRefOid: currentHead });
+  const calls = [];
+  const provider = createGhDraftOperationProvider({
+    expectedRepository: REPOSITORY, presentation: PRESENTATION,
+    run: async (command, args) => {
+      calls.push(args);
+      let value;
+      if (args[0] === 'repo') value = { id: REPOSITORY.nodeId, nameWithOwner: 'GuitarAlchemist/gaia' };
+      else if (args[0] === 'pr' && args[1] === 'list') value = [merged];
+      else if (args[0] === 'api') {
+        assert.equal(args[1], `repos/GuitarAlchemist/gaia/compare/${HEAD_REVISION}...${currentHead}`);
+        value = { status: 'ahead', behind_by: 0, ahead_by: 2, base_commit: { sha: HEAD_REVISION } };
+      } else if (args[0] === 'pr' && args[1] === 'view') {
+        value = { ...merged, mergedAt: '2026-09-01T22:21:25Z', mergeCommit: { oid: 'e'.repeat(40) } };
+      } else assert.fail('unexpected effect');
+      return { stdout: JSON.stringify(value) };
+    },
+  });
+  const result = await provider.lookupExact(request());
+  assert.equal(result.state, 'MERGED');
+  assert.equal(result.isDraft, false);
+  assert.equal(result.headRevision, currentHead);
+  assert.equal(result.mergedEvidence.generationHeadRevision, HEAD_REVISION);
+  assert.equal(result.mergedEvidence.mergeCommit, 'e'.repeat(40));
+  assert.ok(calls.some(args => args.includes('all')));
+});
+
+test('merged lookup refuses wrong identity, ancestry, metadata and moving observations', async (t) => {
+  const currentHead = 'c'.repeat(40);
+  for (const fault of ['marker', 'owner', 'base', 'duplicate', 'diverged', 'behind', 'wrong-base', 'merge-oid', 'merge-date', 'moved-head', 'moved-marker', 'closed']) {
+    await t.test(fault, async () => {
+      const candidate = exactPullRequest({ state: 'MERGED', isDraft: false, headRefOid: currentHead });
+      if (fault === 'marker') candidate.body = exactBody('f'.repeat(64));
+      if (fault === 'owner') candidate.headRepositoryOwner.login = 'other';
+      if (fault === 'base') candidate.baseRefName = 'other';
+      if (fault === 'closed') candidate.state = 'CLOSED';
+      let reads = 0;
+      const provider = createGhDraftOperationProvider({
+        expectedRepository: REPOSITORY, presentation: PRESENTATION,
+        run: async (command, args) => {
+          let value;
+          if (args[0] === 'repo') value = { id: REPOSITORY.nodeId, nameWithOwner: 'GuitarAlchemist/gaia' };
+          else if (args[0] === 'pr' && args[1] === 'list') value = fault === 'duplicate' ? [candidate, candidate] : [candidate];
+          else if (args[0] === 'api') value = {
+            status: fault === 'diverged' ? 'diverged' : 'ahead', behind_by: fault === 'behind' ? 1 : 0,
+            ahead_by: 2, base_commit: { sha: fault === 'wrong-base' ? currentHead : HEAD_REVISION },
+          };
+          else if (args[0] === 'pr' && args[1] === 'view') {
+            reads++;
+            value = { ...candidate, mergedAt: fault === 'merge-date' ? '2026-02-30T00:00:00Z' : '2026-09-01T22:21:25Z', mergeCommit: { oid: fault === 'merge-oid' ? 'bad' : 'e'.repeat(40) } };
+            if (reads === 2 && fault === 'moved-head') value.headRefOid = 'd'.repeat(40);
+            if (reads === 2 && fault === 'moved-marker') value.body = exactBody('f'.repeat(64));
+          } else assert.fail('no mutation is allowed');
+          return { stdout: JSON.stringify(value) };
+        },
+      });
+      await assert.rejects(provider.lookupExact(request()), GhDraftOperationProviderError);
+    });
+  }
 });
 
 test('lookupExact rejects an unsealed or differently bound provider request before contacting GitHub', async () => {

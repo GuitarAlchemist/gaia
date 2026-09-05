@@ -1,7 +1,7 @@
 # Reconcile a delivered Draft operation
 
 Parent: #40. Observed failure: hosted intake run `33942991011` retains operation
-`12cacc5b9a32bfd91a6cec5c43f373065b...` as ambiguous (use the full ID in its receipt).
+`12cacc5b9a32bfd91a6cec5c43f373065ccebff208a047a27344c323ccff542d` as ambiguous.
 PR #83 carries the exact full marker and was merged on 2026-09-01. Lookup currently
 searches only open Drafts, so a lost receipt cannot recover after delivery advances.
 

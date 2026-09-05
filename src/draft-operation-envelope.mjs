@@ -427,7 +427,7 @@ function validateOperationRecord(record, identity, envelope, previous) {
   if (body.kind === 'CREATED' || body.kind === 'REUSED') {
     requireExactKeys(body, [...common, 'pullRequest'], 'LedgerCorrupt');
     const pullRequest = sanitizeExactDraft(
-      body.pullRequest, providerRequest({ identity, envelope }),
+      body.pullRequest, providerRequest({ identity, envelope }), body.kind === 'REUSED',
     );
     if (!pullRequest) throw new DraftOperationError('LedgerCorrupt');
     return { outcome: body.kind, pullRequest, committedRevision: record.committedRevision };
@@ -1022,7 +1022,7 @@ function readProviderFieldOnce(value, key) {
   }
 }
 
-function sanitizeExactDraft(candidate, request) {
+function sanitizeExactDraft(candidate, request, allowMerged = false) {
   if (candidate === null || candidate === undefined) return null;
   const number = readProviderFieldOnce(candidate, 'number');
   const url = readProviderFieldOnce(candidate, 'url');
@@ -1033,6 +1033,26 @@ function sanitizeExactDraft(candidate, request) {
   const baseRef = readProviderFieldOnce(candidate, 'baseRef');
   const headRef = readProviderFieldOnce(candidate, 'headRef');
   const headRevision = readProviderFieldOnce(candidate, 'headRevision');
+  let mergedEvidence = null;
+  if (allowMerged && state === 'MERGED' && isDraft === false) {
+    const evidence = readProviderFieldOnce(candidate, 'mergedEvidence');
+    requireExactKeys(evidence, [
+      'generationHeadRevision', 'headRevision', 'mergeCommit', 'mergedAt', 'comparison',
+    ], 'ProviderProtocolViolation');
+    const values = Object.fromEntries(Object.keys(evidence).map(key => [key, readProviderFieldOnce(evidence, key)]));
+    const validInstant = typeof values.mergedAt === 'string'
+      && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(values.mergedAt)
+      && Number.isFinite(Date.parse(values.mergedAt))
+      && new Date(values.mergedAt).toISOString().replace('.000Z', 'Z') === values.mergedAt;
+    if (values.generationHeadRevision !== request.headRevision || values.headRevision !== headRevision
+      || typeof headRevision !== 'string' || !/^[a-f0-9]{40}$/.test(headRevision)
+      || typeof values.mergeCommit !== 'string' || !/^[a-f0-9]{40}$/.test(values.mergeCommit)
+      || !validInstant || !['ahead', 'identical'].includes(values.comparison)
+      || (values.comparison === 'identical') !== (headRevision === request.headRevision)) {
+      throw new DraftOperationError('ProviderProtocolViolation');
+    }
+    mergedEvidence = closedObject(Object.entries(values));
+  }
   const repository = {
     nodeId: readProviderFieldOnce(repositoryCandidate, 'nodeId'),
     owner: readProviderFieldOnce(repositoryCandidate, 'owner'),
@@ -1040,11 +1060,11 @@ function sanitizeExactDraft(candidate, request) {
   };
   if (!Number.isSafeInteger(number) || number <= 0
     || typeof url !== 'string' || url.length === 0 || /[\u0000-\u001f\u007f]/u.test(url)
-    || isDraft !== true || state !== 'OPEN'
+    || (mergedEvidence === null && (isDraft !== true || state !== 'OPEN'))
     || operationMarker !== request.operationMarker
     || baseRef !== request.baseRef
     || headRef !== request.headRef
-    || headRevision !== request.headRevision
+    || (mergedEvidence === null && headRevision !== request.headRevision)
     || repository.nodeId !== request.repository.nodeId
     || repository.owner !== request.repository.owner
     || repository.name !== request.repository.name) {
@@ -1053,13 +1073,14 @@ function sanitizeExactDraft(candidate, request) {
   return closedObject([
     ['number', number],
     ['url', url],
-    ['isDraft', true],
-    ['state', 'OPEN'],
+    ['isDraft', isDraft],
+    ['state', state],
     ['operationMarker', request.operationMarker],
     ['repository', request.repository],
     ['baseRef', request.baseRef],
     ['headRef', request.headRef],
-    ['headRevision', request.headRevision],
+    ['headRevision', headRevision],
+    ...(mergedEvidence === null ? [] : [['mergedEvidence', mergedEvidence]]),
   ]);
 }
 
@@ -1140,7 +1161,7 @@ export async function reconcileDraft(operationId, expectedCommittedRevision, por
     const request = providerRequest(snapshot);
     let existing;
     try {
-      existing = sanitizeExactDraft(await ports.provider.lookupExact(request), request);
+      existing = sanitizeExactDraft(await ports.provider.lookupExact(request), request, true);
     } catch (error) {
       if (snapshot.state === 'EFFECT_STARTED' || snapshot.state === 'EFFECT_AMBIGUOUS') {
         return snapshot.state === 'EFFECT_AMBIGUOUS' ? pendingResult(snapshot)

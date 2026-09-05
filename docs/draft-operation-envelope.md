@@ -2,6 +2,11 @@
 
 Status: design gate for issue #56 after PR #58 tripped `BLOCKED_REDESIGN`.
 
+Historical recovery extension: [merged-operation reconciliation](pump-merged-recovery.md).
+`REUSED` may preserve a verified `MERGED` PR and its closed `mergedEvidence` rather
+than invent an open Draft. Only lookup adoption and its persisted replay accept
+this variant; a CREATE acknowledgement still requires the exact open Draft.
+
 ## Problem
 
 The failed composition in PR #45 and the deep-module attempt in PR #58 both allowed distinctions

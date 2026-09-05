@@ -412,6 +412,35 @@ test('merged delivery reconciles a lost Draft response without creating again', 
   assert.deepEqual(await mod.reconcileDraft(accepted.operationId, recovered.committedRevision, fixture.ports), recovered);
 });
 
+test('merged evidence must be bound and cannot serve as a CREATE acknowledgement', async (t) => {
+  const mod = await api('merged evidence refusal');
+  for (const fault of ['generation', 'head', 'merge', 'time', 'comparison', 'missing', 'create']) {
+    await t.test(fault, async () => {
+      const merged = request => exactDraft(request, {
+        state: 'MERGED', isDraft: false, headRevision: OID_C,
+        mergedEvidence: {
+          generationHeadRevision: fault === 'generation' ? OID_C : request.headRevision,
+          headRevision: fault === 'head' ? OID_A : OID_C,
+          mergeCommit: fault === 'merge' ? 'bad' : OID_A,
+          mergedAt: fault === 'time' ? '2026-02-30T00:00:00Z' : '2026-09-01T22:21:25Z',
+          comparison: fault === 'comparison' ? 'diverged' : 'ahead',
+        },
+      });
+      const answer = request => {
+        const result = merged(request);
+        if (fault === 'missing') delete result.mergedEvidence;
+        return result;
+      };
+      const provider = fakeProvider({ lookup: fault === 'create' ? () => null : answer, create: answer });
+      const fixture = await harness(mod, { provider });
+      const accepted = await enqueue(mod, fixture);
+      const result = await mod.reconcileDraft(accepted.operationId, accepted.committedRevision, fixture.ports);
+      assert.notEqual(result.outcome, 'CREATED');
+      assert.notEqual(result.outcome, 'REUSED');
+    });
+  }
+});
+
 test('R09 a possibly successful lost response stays EFFECT_AMBIGUOUS and cancellation defers', async () => {
   const mod = await api('R09 EFFECT_AMBIGUOUS cancellation');
   let remote = null;
