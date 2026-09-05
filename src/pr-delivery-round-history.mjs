@@ -1069,6 +1069,18 @@ async function reconcileExisting(port, operationId, observed) {
   return persistApplied(port, record);
 }
 
+// Validate configuration without constructing a runtime, recording intent, or calling a provider.
+// Exact request/head binding and durable effect authorization still run at execution time.
+export function validateManagedDraftConfiguration(input) {
+  keys(input, ['receipt', 'effectActor', 'effectClaim'], 'InvalidInput');
+  effectClaim(input.effectClaim);
+  const headRevision = input.receipt?.command?.generation;
+  if (typeof headRevision !== 'string' || !GIT_OID.test(headRevision)) fail('InvalidReceipt');
+  const receipt = openReceipt(input.receipt, headRevision);
+  if (receipt.responsibility.effectOwner === 'NONE') fail('EffectAuthorityAbsent');
+  if (input.effectActor !== receipt.responsibility.effectOwner) fail('EffectOwnerMismatch');
+}
+
 export async function executeManagedDraftCreation(input) {
   keys(input, [
     'workKey', 'headRevision', 'baseBody', 'receipt', 'effectActor', 'effectClaim',

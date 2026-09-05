@@ -12,17 +12,53 @@ const WORK_KEY = 'b'.repeat(64);
 const REVISION = 'c'.repeat(64);
 const ROOT_OID = 'd'.repeat(40);
 const ROOT_REVISION = 'e'.repeat(64);
-const MANAGED_CREATE = Object.freeze({
-  receipt: { schema: 'GaiaRoundReceiptV0', kind: 'OPEN' },
-  effectActor: 'github:app:gaia-draft-pump',
-  effectClaim: { schema: 'GaiaManagedRoundEffectClaimV0', claimId: '1'.repeat(64) },
-});
+import { MANAGED_CREATE } from './helpers/managed-draft-config.mjs';
 const MANAGED_ADVANCE = Object.freeze({
   number: 69,
   receipt: { schema: 'GaiaRoundReceiptV0', kind: 'ADVANCE' },
   effectActor: 'github:app:gaia-draft-pump',
 });
 const MANAGED_JSON = JSON.stringify({ create: MANAGED_CREATE, advance: null });
+
+test('intake rejects the production schema-only claim before any runtime or ledger effects', async () => {
+  const output = sink(); const errors = sink(); let runtimeStarted = false;
+  const exitCode = await main({
+    argv:[...commonArgs('intake'),'--repository-node-id','R_node','--owner','GuitarAlchemist'],
+    env:{GAIA_ISSUE_NUMBER:'53',GAIA_MANAGED_ROUND_JSON:JSON.stringify({
+      create:{receipt:{schema:'GaiaRoundReceiptV0',kind:'OPEN'},effectActor:'github:app:gaia-draft-pump',effectClaim:{schema:'GaiaManagedRoundEffectClaimV0'}},advance:null})},
+    stdout:output.stream,stderr:errors.stream,
+    runtimeFactory(){runtimeStarted=true;throw new Error('Runtime must not start');},
+  });
+  assert.equal(runtimeStarted,false);
+  assert.equal(exitCode,2);
+  assert.equal(output.text(),'');
+  assert.deepEqual(errors.json(),{schema:'GaiaHostedDraftPumpCliErrorV0',error:'InvalidArguments'});
+});
+
+test('intake rejects malformed receipts and claims with redacted errors before effects', async (context) => {
+  for (const [name, mutate] of [
+    ['schema-only receipt', value => { value.receipt = {schema:'GaiaRoundReceiptV0',kind:'OPEN'}; }],
+    ['wrong effect owner', value => { value.effectActor = 'github:app:other-app'; }],
+    ['lease exceeds ten minutes', value => { value.effectClaim.leaseExpiresAt = '2026-09-05T15:11:00.000Z'; }],
+    ['unknown claim field', value => { value.effectClaim.secret = 'never-publish-this'; }],
+    ['invalid command generation', value => { value.receipt.command.generation = 'not-a-head'; }],
+  ]) {
+    await context.test(name, async () => {
+      const create = structuredClone(MANAGED_CREATE); mutate(create);
+      const output = sink(); const errors = sink(); let runtimeStarted = false;
+      const exitCode = await main({
+        argv:[...commonArgs('intake'),'--repository-node-id','R_node'],
+        env:{GAIA_ISSUE_NUMBER:'53',GAIA_MANAGED_ROUND_JSON:JSON.stringify({create,advance:null})},
+        stdout:output.stream,stderr:errors.stream,
+        runtimeFactory(){runtimeStarted=true;throw new Error('Runtime must not start');},
+      });
+      assert.equal(runtimeStarted,false);
+      assert.equal(exitCode,2);
+      assert.equal(output.text(),'');
+      assert.deepEqual(errors.json(),{schema:'GaiaHostedDraftPumpCliErrorV0',error:'InvalidArguments'});
+    });
+  }
+});
 
 function sink() {
   let value = '';
