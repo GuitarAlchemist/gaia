@@ -1,0 +1,13 @@
+{
+  "schema": "gaia-test-comment-reading/1",
+  "provenance": "SYNTHETIC_FIXTURE",
+  "availability": "AVAILABLE",
+  "repository": "GuitarAlchemist/.github",
+  "issueNumber": 73,
+  "commentId": 5548750957,
+  "sourceUrl": "https://github.com/GuitarAlchemist/.github/issues/73#issuecomment-5548750957",
+  "body": "Severity: WARNING\nFact: the nightly suite reported 3 failing gates on 2026-09-04.\nFact: the failing gates all read the hosted draft ledger.\nInterpretation: the failures look like one shared ledger read, not three defects.\nRecommendation: triage the ledger read before splitting the work.\nWork: GuitarAlchemist/gaia#53\n",
+  "createdAt": "2026-09-05T02:30:12Z",
+  "updatedAt": "2026-09-05T02:30:12Z",
+  "observedAt": "2026-09-05T15:00:00Z"
+}

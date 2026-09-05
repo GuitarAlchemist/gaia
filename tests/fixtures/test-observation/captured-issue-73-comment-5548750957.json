@@ -1,0 +1,13 @@
+{
+  "schema": "gaia-test-comment-reading/1",
+  "provenance": "CAPTURED_REPLAY",
+  "availability": "AVAILABLE",
+  "repository": "GuitarAlchemist/.github",
+  "issueNumber": 73,
+  "commentId": 5548750957,
+  "sourceUrl": "https://github.com/GuitarAlchemist/.github/issues/73#issuecomment-5548750957",
+  "body": "### Automated observation — GuitarAlchemist/gaia issue #117 adds durable conflict-claim slice\n\n- **Observed at:** 2026-09-05T01:29:12Z\n- **Repository / subject:** GuitarAlchemist/gaia issue #117 (`feat: turn PR conflict escalations into durable pump claims`)\n- **Observation:** A new OPEN+needs-triage P1 design slice was created to turn an authoritatively observed conflicting PR generation into one durable, generation-bound claim instead of leaving conflict as dashboard-only escalation. The contract keys ownership to exact repository/PR/base/head identity, requires one append/CAS linearization point, typed stale-loser/duplicate no-effect behavior, crash recovery, and operation-identity reconciliation after ambiguous dispatch.\n- **Authority boundary:** The slice authorizes only a durable claim plus bounded escalation receipt. It explicitly grants no merge, force-push, blanket conflict strategy, credential, workflow, permission, or automatic file-edit authority. No implementation PR exists yet.\n- **Interpretation:** `NEW GAIA CONFLICT-RECOVERY ROADMAP / NEEDS-TRIAGE DESIGN P1 / DURABLE CLAIM CONTRACT DEFINED / NO IMPLEMENTATION START / NO AUTHORITY WIDENING`.\n- **Recommended next action:** Admit only after one exact owner, current-code evidence, prerequisites and spend cap are bound; then use a normal linked Draft PR for the smallest claim/dispatch tracer. Do not dispatch or mutate GitHub merely from issue creation.\n- **Automation note:** No repository mutation was performed except appending this observation comment.",
+  "createdAt": "2026-09-05T02:30:12Z",
+  "updatedAt": "2026-09-05T02:30:12Z",
+  "observedAt": "2026-09-05T16:10:00Z"
+}
