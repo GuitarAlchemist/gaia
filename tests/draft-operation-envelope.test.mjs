@@ -383,6 +383,64 @@ test('R08 cancellation at EFFECT_STARTED defers, then returns the existing CREAT
   assert.equal(provider.count('createDraft'), 1);
 });
 
+test('merged delivery reconciles a lost Draft response without creating again', async () => {
+  const mod = await api('merged delivery');
+  let remote = null;
+  const provider = fakeProvider({
+    lookup: () => remote,
+    create(request) {
+      remote = exactDraft(request, {
+        state: 'MERGED', isDraft: false, headRevision: OID_C,
+        mergedEvidence: {
+          generationHeadRevision: request.headRevision, headRevision: OID_C,
+          mergeCommit: OID_A, mergedAt: '2026-09-01T22:21:25Z', comparison: 'ahead',
+        },
+      });
+      throw new Error('response lost');
+    },
+  });
+  const fixture = await harness(mod, { provider });
+  const accepted = assertEnqueued(await enqueue(mod, fixture));
+  const pending = await mod.reconcileDraft(accepted.operationId, accepted.committedRevision, fixture.ports);
+  assert.equal(pending.state, 'EFFECT_AMBIGUOUS');
+  const recovered = await mod.reconcileDraft(accepted.operationId, pending.committedRevision, fixture.ports);
+  assertTerminal(recovered, 'REUSED');
+  assert.equal(recovered.pullRequest.state, 'MERGED');
+  assert.equal(recovered.pullRequest.isDraft, false);
+  assert.equal(recovered.pullRequest.headRevision, OID_C);
+  assert.equal(provider.count('createDraft'), 1);
+  assert.deepEqual(await mod.reconcileDraft(accepted.operationId, recovered.committedRevision, fixture.ports), recovered);
+});
+
+test('merged evidence must be bound and cannot serve as a CREATE acknowledgement', async (t) => {
+  const mod = await api('merged evidence refusal');
+  for (const fault of ['generation', 'head', 'merge', 'time', 'comparison', 'missing', 'create']) {
+    await t.test(fault, async () => {
+      const merged = request => exactDraft(request, {
+        state: 'MERGED', isDraft: false, headRevision: OID_C,
+        mergedEvidence: {
+          generationHeadRevision: fault === 'generation' ? OID_C : request.headRevision,
+          headRevision: fault === 'head' ? OID_A : OID_C,
+          mergeCommit: fault === 'merge' ? 'bad' : OID_A,
+          mergedAt: fault === 'time' ? '2026-02-30T00:00:00Z' : '2026-09-01T22:21:25Z',
+          comparison: fault === 'comparison' ? 'diverged' : 'ahead',
+        },
+      });
+      const answer = request => {
+        const result = merged(request);
+        if (fault === 'missing') delete result.mergedEvidence;
+        return result;
+      };
+      const provider = fakeProvider({ lookup: fault === 'create' ? () => null : answer, create: answer });
+      const fixture = await harness(mod, { provider });
+      const accepted = await enqueue(mod, fixture);
+      const result = await mod.reconcileDraft(accepted.operationId, accepted.committedRevision, fixture.ports);
+      assert.notEqual(result.outcome, 'CREATED');
+      assert.notEqual(result.outcome, 'REUSED');
+    });
+  }
+});
+
 test('R09 a possibly successful lost response stays EFFECT_AMBIGUOUS and cancellation defers', async () => {
   const mod = await api('R09 EFFECT_AMBIGUOUS cancellation');
   let remote = null;
