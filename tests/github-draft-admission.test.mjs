@@ -12,13 +12,17 @@ import {
 import { initOperatorKeypair } from '../src/github-portfolio-operator.mjs';
 import { createPortfolioFactory } from '../src/github-portfolio.mjs';
 import { runPortfolioOperatorCli } from '../scripts/github-portfolio-operator.mjs';
+import { main as runHostedPump } from '../scripts/hosted-draft-pump.mjs';
+import { createMemoryDraftOperationPorts, enqueueDraft, reconcileDraft,
+  listUnsettledDrafts } from '../src/draft-operation-envelope.mjs';
+import { MANAGED_CREATE } from './helpers/managed-draft-config.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-draft-admission-'));
 test.after(() => rmSync(scratch, { recursive: true, force: true }));
 
 // The envelope's own identity function, restated here so the fixture receipt carries a
 // chain the adapter must be able to recompute rather than a chain the test asserts by
-// fiat. If the envelope's canonical form changes, this fixture and the adapter both fail.
+// fiat. The producer-composition test below, not this copied form, checks compatibility.
 function canonical(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -32,7 +36,7 @@ const GENERATION = {
   baseRef: 'main',
   headRef: 'gaia/draft-issue-7',
   headRevision: 'c'.repeat(40),
-  policyRevision: 'sha256:portfolio-policy-v1',
+  policyRevision: '1'.repeat(40),
 };
 const WORK_KEY = contentRevision({
   schema: 'GaiaDraftWorkKeyV0', repositoryNodeId: REPOSITORY.nodeId, workItem: WORK_ITEM,
@@ -77,7 +81,7 @@ function intakeReceipt(overrides = {}) {
     schema: 'GaiaHostedDraftPumpCliReceiptV0',
     command: 'intake',
     trigger: 'ISSUES_LABELED',
-    phase: 'ADMITTED',
+    phase: 'ADMIT',
     operationId: OPERATION_ID,
     workKey: WORK_KEY,
     committedRevision: 'f'.repeat(64),
@@ -119,6 +123,76 @@ function fakeGh(pullRequests) {
   };
   return { calls, run };
 }
+
+test('scheduled intake receipts from the real producer remain admissible with diagnostic annotations', async () => {
+  const queueReceiptRevision = '2'.repeat(64);
+  const observedSourceRevision = '3'.repeat(64);
+  const envelope = {
+    schema: 'GaiaDraftOperationEnvelopeV0', repository: REPOSITORY, workItem: WORK_ITEM,
+    readyItem: {
+      schema: 'GaiaReadyItemIdentityV0', queueReceiptRevision, occurrence: 1,
+      id: contentRevision({ schema: 'GaiaReadyItemIdV0', workKey: WORK_KEY,
+        queueReceiptRevision, occurrence: 1, observedSourceRevision }),
+    },
+    observedSourceRevision, generation: GENERATION, requestedEffect: 'CREATE_DRAFT',
+  };
+  const ports = createMemoryDraftOperationPorts({
+    collector: { collect: async () => envelope },
+    provider: {
+      lookupExact: async () => null,
+      createDraft: async (request) => ({
+        number: 121, url: 'https://github.com/GuitarAlchemist/ga/pull/121',
+        isDraft: true, state: 'OPEN', operationMarker: request.operationMarker,
+        repository: request.repository, baseRef: request.baseRef,
+        headRef: request.headRef, headRevision: request.headRevision,
+      }),
+    },
+    admission: { reserveEffect: async () => 'AVAILABLE' },
+    executorEpoch: { runId: 9001, runAttempt: 1 }, telemetry: { append: async () => {} },
+  });
+  let output = ''; let errors = ''; let observation;
+  const code = await runHostedPump({
+    argv: ['intake', '--repository', 'GuitarAlchemist/ga', '--pump-actor-id', '1234',
+      '--repository-node-id', REPOSITORY.nodeId, '--ledger-root-oid', '4'.repeat(40),
+      '--ledger-root-revision', '5'.repeat(64)],
+    env: { GAIA_MANAGED_ROUND_JSON: JSON.stringify({ create: MANAGED_CREATE, advance: null }),
+      GAIA_OBSERVATION_PATH: 'unused-observation.json', GITHUB_RUN_ID: '9001' },
+    now: () => '2026-09-05T19:00:00.000Z',
+    stdout: { write: (value) => { output += value; } },
+    stderr: { write: (value) => { errors += value; } },
+    writeFile: (_path, value) => { observation = JSON.parse(value); },
+    runtimeFactory: () => ({
+      enqueue: (selector) => enqueueDraft(selector, 'NONE', ports),
+      reconcile: ({ operationId, expectedRevision }) => reconcileDraft(operationId, expectedRevision, ports),
+      listUnsettled: () => listUnsettledDrafts(ports),
+      listReadyIssues: async () => [{ number: WORK_ITEM.number }],
+    }),
+  });
+  assert.equal(code, 0, errors);
+  const receipt = JSON.parse(output);
+  assert.equal(receipt.result.outcome, 'CREATED');
+  assert.equal(receipt.observation.state, 'PRODUCED');
+  assert.equal(receipt.observation.revision, observation.revision);
+  const gh = fakeGh(() => [{ body: `<!-- gaia-operation:${receipt.operationId} -->` }]);
+  const read = (value) => createGitHubDraftAdmissionAdapter({
+    expectedRepository: 'GuitarAlchemist/ga', receiptText: JSON.stringify(value), run: gh.run,
+  }).read({ repository: 'GuitarAlchemist/ga', itemKind: 'ISSUE', itemNumber: WORK_ITEM.number });
+  const admitted = await read(receipt);
+  assert.equal(admitted.number, 121);
+  assert.equal(admitted.headRevision, GENERATION.headRevision);
+  assert.equal(gh.calls.length, 2, 'diagnostic success never replaces provider readback');
+  assert.deepEqual(await read({ ...receipt, observation: {
+    state: 'REFUSED', reason: 'UnobservableHostedDraftPumpReceipt',
+  } }), admitted, 'observation failure is not an admission decision');
+  for (const bad of [null, { state: 'PRODUCED', revision: 'wrong' },
+    { state: 'REFUSED', reason: 'unrecognized' },
+    { state: 'PRODUCED', revision: observation.revision, extra: true }]) {
+    await assert.rejects(read({ ...receipt, observation: bad }),
+      (error) => error.code === 'DraftExpectationInvalid');
+  }
+  await assert.rejects(read({ ...receipt, undeclared: true }),
+    (error) => error.code === 'DraftExpectationInvalid');
+});
 
 test('the Draft admission adapter reads back the exact issue-bound Draft and refuses everything else', async () => {
   const receiptText = JSON.stringify(intakeReceipt());

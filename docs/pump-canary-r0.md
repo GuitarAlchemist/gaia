@@ -149,3 +149,15 @@ CLI. Nothing about the grant, the key unlock, or the typed confirmation changes.
 Not claimed: cross-process at-most-once, closure of the window between the
 last readback and the worker process start, or any proof that the pump as a
 whole is autonomous. The adapter is a precondition and evidence binding only.
+
+## Decision C.2: producer-compatible diagnostic annotation (2026-09-05)
+
+Independent Spec review of candidate `91b7493` reproduced rejection of genuine
+scheduled receipts: the hosted CLI adds `observation` after producing its receipt.
+Keep the receipt contract closed, but admit that one optional diagnostic field in
+the producer's two declared forms (`PRODUCED` with revision or `REFUSED` with reason).
+It is never admission evidence or authority: the exact provider read and grant
+checks still decide admission. Unknown fields and malformed annotations still refuse.
+Regression proof must compose the real envelope/reconciler, hosted intake CLI,
+observation producer, and admission adapter with only external ports replaced.
+Do not copy a hypothetical CLI receipt as the compatibility oracle.

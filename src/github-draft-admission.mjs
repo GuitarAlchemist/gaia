@@ -102,7 +102,24 @@ export function readDraftExpectation(receiptText, expectedRepository) {
   ownFields(receipt, [
     'schema', 'command', 'trigger', 'phase', 'operationId', 'workKey', 'committedRevision',
     'workItem', 'unsettledCount', 'result', 'skipped', 'telemetry',
+    ...(receipt && Object.hasOwn(receipt, 'observation') ? ['observation'] : []),
   ], 'receipt');
+  // The hosted CLI adds this diagnostic after the evidence receipt is produced.
+  // It cannot replace the fresh provider lookup or confer admission/authority.
+  if (Object.hasOwn(receipt, 'observation')) {
+    const annotation = receipt.observation;
+    if (annotation?.state === 'PRODUCED') {
+      ownFields(annotation, ['state', 'revision'], 'observation');
+      revision(annotation.revision, 'observation.revision');
+    } else if (annotation?.state === 'REFUSED') {
+      ownFields(annotation, ['state', 'reason'], 'observation');
+      if (!['InvalidHostedDraftPumpReceipt', 'UnobservableHostedDraftPumpReceipt',
+        'InvalidHostedDraftPump', 'IncoherentHostedDraftPump', 'ObservationFailed']
+        .includes(annotation.reason)) throw invalid('observation reason is undeclared');
+    } else {
+      throw invalid('observation state is undeclared');
+    }
+  }
   if (receipt.schema !== 'GaiaHostedDraftPumpCliReceiptV0') throw invalid('has a foreign schema');
   if (receipt.command !== 'intake') throw invalid('is not an intake receipt');
   ownFields(receipt.workItem, ['kind', 'number'], 'workItem');
