@@ -24,6 +24,8 @@ if (guarded && log) {
   const root = `${resolve(guarded).toLowerCase()}${sep}`;
   const append = fs.appendFileSync;
   const WRITE_FLAG = /[wa+]/;
+  const NUMERIC_WRITE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_RDWR
+    | fs.constants.O_CREAT | fs.constants.O_TRUNC;
 
   const toPath = (target) => {
     if (target instanceof URL) return fileURLToPath(target);
@@ -32,7 +34,7 @@ if (guarded && log) {
   };
   const opensForWrite = (flags) => (typeof flags === 'string'
     ? WRITE_FLAG.test(flags)
-    : typeof flags === 'number' && (flags & 3) !== 0);
+    : typeof flags === 'number' && (flags & NUMERIC_WRITE_FLAGS) !== 0);
   const refuse = (operation, target) => {
     const path = toPath(target);
     if (path === null || !`${resolve(path).toLowerCase()}${sep}`.startsWith(root)) return;

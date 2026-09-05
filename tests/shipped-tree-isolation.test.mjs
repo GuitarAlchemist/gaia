@@ -99,6 +99,74 @@ test('MECHANISM REVERT: an r8 gate that plants its mutant in src/ is refused and
   assert.ok(!existsSync(join(SRC, '.r8-checklist-bind-mutant.mjs')), 'and nothing landed in src/');
 });
 
+test('numeric creation and truncation flags are refused while O_RDONLY remains allowed', () => {
+  const guardedRoot = mkdtempSync(join(scratch, 'numeric-flags-'));
+  const log = join(scratch, 'numeric-flags.refused.jsonl');
+  const operations = ['openSync', 'open', 'promises.open'];
+  for (const operation of operations) {
+    writeFileSync(join(guardedRoot, `${operation}.existing`), 'keep this content', 'utf8');
+  }
+  const probe = `
+    import fs from 'node:fs';
+    import { join } from 'node:path';
+    const root = process.env.GAIA_SRC_WRITE_GUARD_ROOT;
+    const { O_RDONLY, O_CREAT, O_TRUNC } = fs.constants;
+    const opens = {
+      openSync: (path, flags) => fs.closeSync(fs.openSync(path, flags)),
+      open: (path, flags) => new Promise((resolve, reject) => {
+        fs.open(path, flags, (error, fd) => {
+          if (error) return reject(error);
+          fs.close(fd, (error) => error ? reject(error) : resolve());
+        });
+      }),
+      'promises.open': async (path, flags) => {
+        const handle = await fs.promises.open(path, flags);
+        await handle.close();
+      },
+    };
+    const outcomes = [];
+    for (const [operation, open] of Object.entries(opens)) {
+      for (const [mode, flags, suffix] of [
+        ['create', O_CREAT | O_RDONLY, 'missing'],
+        ['truncate', O_TRUNC | O_RDONLY, 'existing'],
+        ['read', O_RDONLY, 'existing'],
+      ]) {
+        let outcome = 'allowed';
+        try { await open(join(root, operation + '.' + suffix), flags); }
+        catch (error) { outcome = error.code; }
+        outcomes.push({ operation, mode, outcome });
+      }
+    }
+    console.log(JSON.stringify(outcomes));
+  `;
+  const result = spawnSync(process.execPath, [
+    '--import', pathToFileURL(GUARD).href, '--input-type=module', '--eval', probe,
+  ], {
+    cwd: ROOT, encoding: 'utf8', windowsHide: true,
+    env: {
+      ...process.env,
+      GAIA_SRC_WRITE_GUARD_ROOT: guardedRoot,
+      GAIA_SRC_WRITE_GUARD_LOG: log,
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), operations.flatMap((operation) => [
+    { operation, mode: 'create', outcome: 'GAIA_SRC_WRITE_REFUSED' },
+    { operation, mode: 'truncate', outcome: 'GAIA_SRC_WRITE_REFUSED' },
+    { operation, mode: 'read', outcome: 'allowed' },
+  ]));
+  for (const operation of operations) {
+    assert.ok(!existsSync(join(guardedRoot, `${operation}.missing`)), `${operation} did not create a file`);
+    assert.equal(readFileSync(join(guardedRoot, `${operation}.existing`), 'utf8'), 'keep this content');
+  }
+  const refused = readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.deepEqual(refused.map(({ operation, path }) => ({ operation, path })),
+    operations.flatMap((operation) => [
+      { operation, path: join(guardedRoot, `${operation}.missing`) },
+      { operation, path: join(guardedRoot, `${operation}.existing`) },
+    ]));
+});
+
 test('no test names a dotfile under src/ as a place to write', () => {
   // The cheap tripwire for the one spelling used twice before #98. It is not the
   // measurement — the guard above is — but it catches the copy-paste at review time.
