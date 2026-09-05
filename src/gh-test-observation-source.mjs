@@ -25,9 +25,8 @@
  * same `UNAVAILABLE` for the same reason, through one closed classification that keeps none of the
  * failure's text — a CLI error message carries the command line, and a command line carries the
  * token. A cancelled read and a defect in this repository are raised instead, because neither is
- * evidence about the source. A malformed response is handed on as a readable-but-empty
- * body, so the pure normalizer classifies it exactly as it classifies every other unusable source,
- * rather than this adapter inventing a verdict of its own.
+ * evidence about the source. Unparseable JSON is an unavailable response. A parsed response with
+ * an unusable body is passed to the pure normalizer, which classifies its content as malformed.
  */
 
 import { execFile } from 'node:child_process';

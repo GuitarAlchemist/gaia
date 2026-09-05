@@ -163,7 +163,26 @@ counterexample. All four findings are addressed; each was reproduced red before 
    sections above are now dated as history; the label list and the four projected claim lists are
    described as they ship.
 
-### Live witness
+### Recovery and admission-integrity follow-up
+
+The next Spec review reproduced two further admission defects. The coordinator first added failing
+public-seam tests, then repaired them without adding an effect or persistence mechanism:
+
+- Deduplication compares against the current placed observation, not every historical revision.
+  An unchanged valid source returning after an unavailable or malformed reading is a new recovery
+  entry. Consecutive unchanged reads still return the same ledger. Stale-read diagnostics cannot
+  move the source-time frontier backwards.
+- Admission recomputes the revision content address, binding normalized claims, severity, source
+  metadata and raw digest. A changed claim or forged digest cannot reuse a genuine revision ID.
+  Predecessor links are derived from the ledger, including a null predecessor on first admission.
+
+Revision IDs identify content, not unique event occurrences. Recovery may repeat a content ID;
+ledger order and observed timestamps identify its occurrence. Previous-revision links describe
+adjacent content and must not be traversed as a unique-event DAG. Observation time is excluded
+from content identity so unchanged polling remains idempotent. The hash is an integrity check,
+not a signature or authentication of a producer: source claims remain SOURCE_ASSERTED.
+
+### Live witness (coordinator)
 
 The coordinator read the live comment on 2026-09-05 at 16:31Z through the shipped adapter:
 `AVAILABLE -> NORMALIZED`, four source-asserted claims, digest

@@ -314,6 +314,14 @@ export function testObservationRevisionId(parts) {
     parts.unknownReason ?? null,
     parts.rawDigest ?? null,
     parts.sourceUpdatedAt ?? null,
+    parts.sourceCreatedAt ?? null,
+    parts.rawByteLength,
+    parts.sourceUrl,
+    parts.provenance,
+    parts.severity,
+    parts.severityBasis,
+    parts.claims.map(({ kind, basis, text }) => [kind, basis, text]),
+    parts.workReferences,
   ]));
 }
 
@@ -323,13 +331,12 @@ export function testObservationKey({ repository, issueNumber, commentId }) {
 }
 
 function observation(reading, observationKey, fields) {
-  return Object.freeze({
+  const value = {
     schema: TEST_OBSERVATION_SCHEMA,
     // Constants, not inputs. No comment can raise them and no caller can pass them in.
     effect: 'NONE',
     authority: 'NONE',
     observationKey,
-    revisionId: testObservationRevisionId({ observationKey, ...fields }),
     previousRevisionId: null,
     provenance: reading.provenance,
     repository: reading.repository,
@@ -338,7 +345,8 @@ function observation(reading, observationKey, fields) {
     sourceUrl: reading.sourceUrl,
     observedAt: reading.observedAt,
     ...fields,
-  });
+  };
+  return Object.freeze({ ...value, revisionId: testObservationRevisionId(value) });
 }
 
 function unknownObservation(reading, observationKey, unknownReason) {
@@ -447,13 +455,18 @@ function admission(outcome, ledger) {
 
 function appended(ledger, entry) {
   if (ledger.entries.length >= MAX_TEST_OBSERVATION_ENTRIES) refuse('the observation ledger is full');
-  return Object.freeze({ ...ledger, entries: Object.freeze([...ledger.entries, entry]) });
+  const held = Object.freeze({
+    ...entry,
+    claims: Object.freeze(entry.claims.map((claim) => Object.freeze({ ...claim }))),
+    workReferences: Object.freeze([...entry.workReferences]),
+  });
+  return Object.freeze({ ...ledger, entries: Object.freeze([...ledger.entries, held]) });
 }
 
 /**
  * Admit one observation into the ledger. Pure, append-only, and total.
  *
- * The decision order is the contract. A revision already held is answered before any timestamp is
+ * The decision order is the contract. The current placed revision is answered before any timestamp is
  * compared, so re-reading an unchanged comment can never be mistaken for a source that went
  * backwards; and a backwards source is recorded rather than admitted, so a stale mirror cannot
  * overwrite the newer evidence it disagrees with. Nothing here can remove or edit an entry.
@@ -537,6 +550,9 @@ export function requireTestObservation(value) {
     && (value.rawDigest !== null || value.claims.length > 0 || value.workReferences.length > 0)) {
     refuse('an unknown observation publishes no content');
   }
+  if (value.revisionId !== testObservationRevisionId(value)) {
+    refuse('revision identity does not match observation content');
+  }
   return value;
 }
 
@@ -546,13 +562,16 @@ export function admitTestObservation(ledgerInput, observationInput) {
 
   const history = ledger.entries.filter((entry) => entry.observationKey === candidate.observationKey);
   const held = new Set(history.map((entry) => entry.revisionId));
-  if (held.has(candidate.revisionId)) {
-    // Byte-identical evidence already held. Returning the same ledger object, not a copy, is what
-    // makes replay observably free of effect.
+  const current = history.findLast((entry) => entry.unknownReason !== 'SOURCE_TIME_REGRESSED');
+  if (current?.revisionId === candidate.revisionId) {
+    // Only the current state deduplicates a reading. Historical content can become current again
+    // after an availability gap; that recovery must be recorded, not hidden as an old duplicate.
     return admission('ALREADY_HELD', ledger);
   }
   const latest = history.at(-1) ?? null;
-  if (latest === null) return admission('ADMITTED', appended(ledger, candidate));
+  if (latest === null) {
+    return admission('ADMITTED', appended(ledger, Object.freeze({ ...candidate, previousRevisionId: null })));
+  }
 
   const frontier = sourceFrontier(history);
   if (frontier !== null && candidate.sourceUpdatedAt !== null
@@ -601,7 +620,7 @@ function regressionEntry(candidate, frontier) {
     rawDigest: null,
     sourceUpdatedAt: candidate.sourceUpdatedAt,
   };
-  return Object.freeze({
+  const diagnostic = {
     ...candidate,
     ...parts,
     rawByteLength: 0,
@@ -610,8 +629,8 @@ function regressionEntry(candidate, frontier) {
     claims: Object.freeze([]),
     workReferences: Object.freeze([]),
     previousRevisionId: frontier.revisionId,
-    revisionId: testObservationRevisionId(parts),
-  });
+  };
+  return Object.freeze({ ...diagnostic, revisionId: testObservationRevisionId(diagnostic) });
 }
 
 // ---------------------------------------------------------------------------

@@ -457,6 +457,25 @@ test('a stale read never moves the baseline backwards and never resurrects old c
     'the first admitted evidence is untouched by everything that followed');
 });
 
+test('an unchanged source recovers after a transient unavailable or malformed reading', () => {
+  const valid = normalizeTestObservation(capturedReading());
+  for (const interrupted of [
+    { ...capturedReading(), availability: 'UNAVAILABLE', body: null, createdAt: null, updatedAt: null },
+    { ...capturedReading(), body: '' },
+  ]) {
+    const first = admitTestObservation(emptyTestObservationLedger(), valid);
+    const gap = admitTestObservation(first.ledger, normalizeTestObservation(interrupted));
+    assert.equal(projectTestObservations(gap.ledger).observations[0].state, 'UNKNOWN');
+    const restored = admitTestObservation(gap.ledger, valid);
+    assert.equal(restored.outcome, 'REVISED');
+    assert.equal(projectTestObservations(restored.ledger).observations[0].state, 'NORMALIZED');
+    assert.equal(restored.ledger.entries.length, 3, 'the interruption and recovery remain observable');
+    const replay = admitTestObservation(restored.ledger, valid);
+    assert.equal(replay.outcome, 'ALREADY_HELD');
+    assert.equal(replay.ledger, restored.ledger);
+  }
+});
+
 test('admission refuses a document that only looks like an observation', () => {
   const genuine = normalizeTestObservation(capturedReading());
   const ledger = emptyTestObservationLedger();
@@ -495,6 +514,30 @@ test('admission refuses a document that only looks like an observation', () => {
 
   // The genuine article still goes in, so the verifier is not simply refusing everything.
   assert.equal(admitTestObservation(ledger, genuine).outcome, 'ADMITTED');
+});
+
+test('admission verifies revision content and owns predecessor links', () => {
+  const genuine = normalizeTestObservation(capturedReading());
+  const first = admitTestObservation(emptyTestObservationLedger(), genuine);
+  for (const forged of [
+    { ...genuine, revisionId: `sha256:${'a'.repeat(64)}` },
+    { ...genuine, claims: genuine.claims.map((claim, index) => index === 0
+      ? { ...claim, text: 'A different claim under the original digest.' } : claim) },
+    { ...genuine, sourceUrl: 'https://example.com/not-the-source' },
+  ]) {
+    assert.throws(() => admitTestObservation(emptyTestObservationLedger(), forged), TestObservationError);
+    assert.throws(() => admitTestObservation(first.ledger, forged), TestObservationError);
+  }
+  const dangling = { ...genuine, previousRevisionId: `sha256:${'b'.repeat(64)}` };
+  const admitted = admitTestObservation(emptyTestObservationLedger(), dangling);
+  assert.equal(admitted.ledger.entries[0].previousRevisionId, null,
+    'the ledger derives linkage; a producer cannot invent a predecessor');
+  assert.equal(admitTestObservation(first.ledger, genuine).outcome, 'ALREADY_HELD');
+  const mutable = JSON.parse(JSON.stringify(genuine));
+  const held = admitTestObservation(emptyTestObservationLedger(), mutable);
+  mutable.claims[0].text = 'Changed after admission';
+  assert.equal(held.ledger.entries[0].claims[0].text, genuine.claims[0].text,
+    'a caller cannot change admitted content after its digest was checked');
 });
 
 test('a forbidden or unreachable source is an unavailable reading, not an escaping failure', async () => {
