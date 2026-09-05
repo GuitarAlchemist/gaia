@@ -176,6 +176,30 @@ test('Gaia NOW keeps usable layouts live and recovers structural failures', {
     });
   }
 
+  await t.test('review expander preserves open and closed choices across timer rebuilds with its popover usable', async t => {
+    const { page } = await openPage(t, { height: 1400 });
+    const details = page.locator('[data-details-key="lane-reviews"]');
+    const summary = details.locator(':scope > summary');
+    assert.equal(await details.evaluate(element => element.open), false);
+    await summary.click();
+    assert.equal(await details.evaluate(element => element.open), true);
+    assert.equal(await page.locator('#timelinePopover').isVisible(), true);
+    assert.match(await page.locator('#timelinePopover').innerText(), /PR/);
+    await page.clock.runFor(1);
+    await page.clock.fastForward(1100);
+    await capture(page, 'review-expander-open-after-rebuild');
+    assert.equal(await details.evaluate(element => element.open), true);
+    await summary.click();
+    assert.equal(await details.evaluate(element => element.open), false);
+    assert.equal(await page.locator('#timelinePopover').isVisible(), true);
+    await page.clock.runFor(1);
+    await page.clock.fastForward(1100);
+    await capture(page, 'review-expander-closed-after-rebuild');
+    assert.equal(await details.evaluate(element => element.open), false);
+    await summary.focus();
+    assert.equal(await page.locator('#timelinePopover').isVisible(), true);
+  });
+
   await t.test('impossible calendar dates retain the last valid snapshot as not live', async t => {
     const { page, setState } = await openPage(t, { height: 1400, now: new Date('2026-03-02T00:00:00Z') });
     setState({ drafts: [draft(950)] });

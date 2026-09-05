@@ -943,7 +943,6 @@
       const marker = markerFor(event.target);
       if (marker) {
         showTimelinePopover(marker);
-        return;
       }
       const summary = event.target instanceof Element ? event.target.closest('summary') : null;
       const details = summary?.parentElement;
