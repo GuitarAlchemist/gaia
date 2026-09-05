@@ -24,12 +24,12 @@ test('Gaia NOW keeps usable layouts live and recovers structural failures', {
   });
   t.after(() => browser.close());
 
-  async function openPage(t, { height, broken = false }) {
+  async function openPage(t, { height, broken = false, now = new Date() }) {
     const context = await browser.newContext({ viewport: { width: 1280, height } });
     t.after(() => context.close());
     const page = await context.newPage();
-    await page.clock.install();
-    let liveState = { ...fixture, observedAt: new Date().toISOString(), drafts: [] };
+    await page.clock.install({ time: now });
+    let liveState = { ...fixture, observedAt: now.toISOString(), drafts: [] };
     let failRefresh = false;
     const errors = [];
     page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
@@ -175,4 +175,36 @@ test('Gaia NOW keeps usable layouts live and recovers structural failures', {
       assert.notEqual(await page.locator('body').getAttribute('data-ui-qa'), 'RECOVERED');
     });
   }
+
+  await t.test('impossible calendar dates retain the last valid snapshot as not live', async t => {
+    const { page, setState } = await openPage(t, { height: 1400, now: new Date('2026-03-02T00:00:00Z') });
+    setState({ drafts: [draft(950)] });
+    await page.clock.fastForward(16000);
+    await page.waitForLoadState('networkidle');
+    assert.match(await page.locator('#draftPullRequests').innerText(), /COLLECTE FRAÎCHE/);
+    for (const observedAt of ['2026-02-30T00:00:00Z', '2026-02-29T00:00:00Z', '2026-02-28T24:00:00Z', '2026-03-02T00:60:00Z', '2026-03-02T00:00:60Z', '2026-03-02T00:00:00+24:00']) {
+      setState({ observedAt, drafts: [draft(951)] });
+      await page.clock.fastForward(16000);
+      await page.waitForLoadState('networkidle');
+      if (observedAt.includes('02-30')) await capture(page, 'invalid-calendar-retained-snapshot');
+      const text = await page.locator('#draftPullRequests').innerText();
+      assert.match(text, /Viewport refresh witness 950/, observedAt);
+      assert.doesNotMatch(text, /Viewport refresh witness 951/, observedAt);
+      assert.match(text, /NON ACTUEL/, observedAt);
+      assert.equal(await page.locator('#draftPullRequests .live-ping').count(), 0);
+    }
+  });
+
+  await t.test('valid leap dates, fractional seconds and offsets remain supported', async t => {
+    const { page, setState } = await openPage(t, { height: 1400, now: new Date('2024-02-29T12:00:00Z') });
+    for (const observedAt of ['2024-02-29T07:00:00.1234567-05:00', '2024-02-29T13:00:00.123+01:00']) {
+      setState({ observedAt, drafts: [draft(952)] });
+      await page.clock.fastForward(16000);
+      await page.waitForLoadState('networkidle');
+      const text = await page.locator('#draftPullRequests').innerText();
+      assert.match(text, /Viewport refresh witness 952/);
+      assert.match(text, /COLLECTE FRAÎCHE/);
+      assert.ok(text.includes(observedAt));
+    }
+  });
 });

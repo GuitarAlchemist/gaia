@@ -960,12 +960,22 @@
     toggle.addEventListener('click', () => setTimeout(enforceUnified, 0));
     document.getElementById('systemSignal').addEventListener('click', () => document.getElementById('systemRootSignal')?.scrollIntoView({behavior:'smooth', block:'start'}));
     document.getElementById('humanSignal').addEventListener('click', () => document.getElementById('humanRootSignal')?.scrollIntoView({behavior:'smooth', block:'start'}));
+    const parseObservationTime = value => {
+      const parts = typeof value === 'string' && value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/);
+      if (!parts) return NaN;
+      const [year, month, day, hour, minute, second, offsetHour, offsetMinute] = parts.slice(1).map(part => Number(part || 0));
+      const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+      const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      // Date.parse normalizes impossible dates such as February 30; validate source components first.
+      if (month < 1 || month > 12 || day < 1 || day > daysInMonth[month - 1] || hour > 23 || minute > 59 || second > 59 || offsetHour > 23 || offsetMinute > 59) return NaN;
+      return Date.parse(value);
+    };
     const refreshLiveState = async () => {
       try {
         const response = await fetch(`./GAIA_NOW_STATE.json?t=${Date.now()}`, { cache: 'no-store' });
         if (!response.ok) throw new Error(`live state HTTP ${response.status}`);
         const next = await response.json();
-        const observed = typeof next?.observedAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(next.observedAt) ? Date.parse(next.observedAt) : NaN;
+        const observed = parseObservationTime(next?.observedAt);
         if (!Number.isFinite(observed) || observed > Date.now() || !Array.isArray(next.drafts) || next.drafts.some(draft => !draft || typeof draft !== 'object')) throw new Error('invalid live state payload');
         liveState = {
           observedAt: next.observedAt,
