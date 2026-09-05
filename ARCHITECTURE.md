@@ -142,6 +142,12 @@ publishes the sealed observation, and its unsettled count is read again after th
 work a concurrent lane committed meanwhile is counted. That observation is a read model with no
 authority and cannot replace the durable Draft receipt chain.
 
+The hosted CLI validates the complete managed OPEN receipt and effect claim through the
+domain validators before constructing its runtime. Invalid configuration creates neither
+an admission record nor a provider effect; the CLI returns a closed argument error. This
+preflight does not authorize an effect or settle an existing ambiguous operation. Exact
+head binding and durable claim enforcement remain execution-time responsibilities.
+
 Pull-request conflict classification is read-only at this revision. It binds the observed base and
 head generation and can report clean, unknown, superseded, or escalation-required. Its automation
 strategy registry is empty, so automatic resolution, durable conflict claims, patching, pushing,

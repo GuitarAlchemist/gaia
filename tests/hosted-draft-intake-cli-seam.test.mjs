@@ -1,3 +1,4 @@
+import { MANAGED_CREATE } from './helpers/managed-draft-config.mjs';
 /**
  * The workflow-to-CLI seam.
  *
@@ -32,11 +33,7 @@ const ROOT_REVISION = 'e'.repeat(64);
 const GENERATION_KEY = 'f'.repeat(64);
 const LABELLED_ISSUE = 70;
 const MANAGED_ROUND_JSON = JSON.stringify({
-  create: {
-    receipt: { schema: 'GaiaRoundReceiptV0', kind: 'OPEN' },
-    effectActor: 'github:app:gaia-draft-pump',
-    effectClaim: { schema: 'GaiaManagedRoundEffectClaimV0' },
-  },
+  create: MANAGED_CREATE,
   advance: null,
 });
 

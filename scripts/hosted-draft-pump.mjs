@@ -21,6 +21,7 @@ import {
   createGitHubManagedRoundAdapter,
   createGitHubManagedRoundEvidencePort,
   executeManagedRoundUpdate,
+  validateManagedDraftConfiguration,
 } from '../src/pr-delivery-round-history.mjs';
 import {
   createGhDraftCollectorApi,
@@ -122,8 +123,8 @@ function configuredText(value, maximum = 512) {
   return value;
 }
 
-function flagOrEnv(flags, flag, env, name) {
-  return configuredText(flags.get(flag) ?? envValue(env, name));
+function flagOrEnv(flags, flag, env, name, maximum = 512) {
+  return configuredText(flags.get(flag) ?? envValue(env, name), maximum);
 }
 
 function optionalFlagOrEnv(flags, flag, env, name) {
@@ -193,6 +194,7 @@ function managedRound(value) {
   exactObject(parsed, ['create', 'advance']);
   exactObject(parsed.create, ['receipt', 'effectActor', 'effectClaim']);
   if (typeof parsed.create.effectActor !== 'string') fail();
+  validateManagedDraftConfiguration(parsed.create);
   if (parsed.advance !== null) {
     exactObject(parsed.advance, ['number', 'receipt', 'effectActor']);
     if (!Number.isSafeInteger(parsed.advance.number) || parsed.advance.number <= 0
@@ -237,7 +239,7 @@ function parseConfiguration(argv, env) {
       eta: eta(flagOrEnv(flags, 'eta-minutes', env, 'GAIA_ETA_MINUTES')),
     };
     configuration.managedRound = managedRound(flagOrEnv(
-      flags, 'managed-round', env, 'GAIA_MANAGED_ROUND_JSON',
+      flags, 'managed-round', env, 'GAIA_MANAGED_ROUND_JSON', 64 * 1024,
     ));
   }
   if (command === 'intake') {
@@ -257,7 +259,7 @@ function parseConfiguration(argv, env) {
       eta: suppliedEta === undefined ? INTAKE_PRESENTATION.eta : eta(suppliedEta),
     };
     configuration.managedRound = managedRound(flagOrEnv(
-      flags, 'managed-round', env, 'GAIA_MANAGED_ROUND_JSON',
+      flags, 'managed-round', env, 'GAIA_MANAGED_ROUND_JSON', 64 * 1024,
     ));
     const observationOut = optionalFlagOrEnv(
       flags, 'observation-out', env, 'GAIA_OBSERVATION_PATH',
