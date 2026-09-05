@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -1356,5 +1356,114 @@ test('the R2 slice composes real authority, real execution, and one local factor
     } catch {
       // Windows can hold a Git handle briefly after a linked worktree is removed.
     }
+  }
+});
+
+test('advance admits one OPEN Draft as a restrictive precondition before any grant is consumed', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gaia-portfolio-draft-admission-'));
+  const ledgerDir = join(root, 'ledger');
+  mkdirSync(ledgerDir);
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const authority = createFileEd25519AuthorityAdapter({
+    publicKey, ledgerDir, now: () => new Date('2026-09-05T18:00:00.000Z'),
+  });
+  let executed = 0;
+  const factoryExecution = {
+    execute: async ({ intent }) => {
+      executed += 1;
+      return { schema: 'gaia-agent-factory-receipt/1', status: 'completed', task: intent.task };
+    },
+  };
+  const admitted = {
+    number: 121, isDraft: true, state: 'OPEN', headRef: 'codex/issue40-pump-canary-r0',
+    headRevision: 'a0e8777842d4a3133ae182bc9601222012945e15',
+  };
+  let current = null;
+  const reads = [];
+  const draftAdmission = {
+    read: async (request) => {
+      reads.push(request);
+      if (current instanceof Error) throw current;
+      return current;
+    },
+  };
+  const request = { organization: 'GuitarAlchemist', policyRevision: 'sha256:portfolio-policy-v1' };
+  const build = (ports) => createPortfolioFactory({
+    githubRead: { read: async () => completeSnapshot([ga]) }, authority, factoryExecution, ...ports,
+  });
+  let portfolio;
+  const signedGrant = (intentRevision, grantId) => {
+    const payload = {
+      schema: 'gaia-github-portfolio-grant/1', grantId, intentRevision,
+      action: 'RUN_FACTORY_AGENT', repository: 'GuitarAlchemist/ga', itemKind: 'ISSUE',
+      itemId: 'issue-ga-1', itemNumber: 1, snapshotRevision: portfolio.revision,
+      expiresAt: '2026-09-05T19:00:00.000Z',
+    };
+    return { ...payload, signature: sign(null, portfolioGrantPreimage(payload), privateKey).toString('base64url') };
+  };
+
+  try {
+    // Absent port: the intent is exactly what it was before this seam existed.
+    const plain = build({});
+    portfolio = await plain.survey(request);
+    const unbound = await plain.advance({ portfolio });
+    assert.equal(Object.hasOwn(unbound.intent, 'draft'), false);
+
+    const factory = build({ draftAdmission });
+    const refused = async (grant, code) => {
+      await assert.rejects(factory.advance({ portfolio, ...(grant ? { grant } : {}) }),
+        (error) => error instanceof PortfolioFactoryError && error.code === code, code);
+    };
+    // No Draft: refused on preview and on the authorized path, spending nothing.
+    const staleGrant = signedGrant(unbound.intent.intentRevision, 'grant-unbound');
+    await refused(undefined, 'DraftAdmissionMissing');
+    await refused(staleGrant, 'DraftAdmissionMissing');
+    current = { ...admitted, isDraft: false };
+    await refused(undefined, 'DraftNotAdmitted');
+    current = { ...admitted, state: 'CLOSED' };
+    await refused(staleGrant, 'DraftNotAdmitted');
+    current = { ...admitted, headRevision: 'not-a-revision' };
+    await refused(undefined, 'DraftEvidenceInvalid');
+    current = { ...admitted, extra: 'field' };
+    await refused(undefined, 'DraftEvidenceInvalid');
+    current = Object.assign(new Error('provider stack trace with a token'), { code: 'ProviderDown' });
+    await assert.rejects(factory.advance({ portfolio }), (error) => (
+      error instanceof PortfolioFactoryError && error.code === 'DraftAdmissionUnavailable'
+        && !error.message.includes('provider stack trace')
+    ));
+    assert.equal(executed, 0);
+    assert.deepEqual(readdirSync(ledgerDir), []);
+    assert.deepEqual(reads[0], { repository: 'GuitarAlchemist/ga', itemKind: 'ISSUE', itemNumber: 1 });
+
+    // Admitted: the preview intent binds the Draft, so the revision the operator types
+    // and the grant carries already names the exact pull request and head revision.
+    current = admitted;
+    const preview = await factory.advance({ portfolio });
+    assert.equal(preview.status, 'AWAITING_AUTHORITY');
+    assert.deepEqual(preview.intent.draft, {
+      number: 121, headRef: 'codex/issue40-pump-canary-r0',
+      headRevision: 'a0e8777842d4a3133ae182bc9601222012945e15',
+    });
+    assert.notEqual(preview.intent.intentRevision, unbound.intent.intentRevision);
+    const grant = signedGrant(preview.intent.intentRevision, 'grant-draft-121');
+
+    // The Draft moved after confirmation: the existing authority scope check refuses and
+    // the ledger stays empty, so the same grant is still unspent.
+    current = { ...admitted, headRevision: 'b'.repeat(40) };
+    await assert.rejects(factory.advance({ portfolio, grant }),
+      (error) => error instanceof PortfolioAuthorityError && error.code === 'GrantScopeMismatch');
+    assert.equal(executed, 0);
+
+    current = admitted;
+    const completed = await factory.advance({ portfolio, grant });
+    assert.equal(completed.status, 'CANDIDATE_READY');
+    assert.deepEqual(completed.intent.draft, preview.intent.draft);
+    assert.equal(completed.intent.intentRevision, preview.intent.intentRevision);
+    assert.equal(executed, 1);
+    await assert.rejects(factory.advance({ portfolio, grant }),
+      (error) => error instanceof PortfolioAuthorityError && error.code === 'GrantConsumed');
+    assert.equal(executed, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

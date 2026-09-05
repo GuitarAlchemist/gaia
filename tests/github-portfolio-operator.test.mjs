@@ -1165,6 +1165,7 @@ test('the operator process reaches no GitHub, key, or receipt when run cannot be
     '--ledger', dir,
     '--worktree', dir,
     '--evidence-root', dir,
+    '--draft-receipt', join(dir, 'intake-receipt.json'),
     '--out', outPath,
   ];
 
@@ -1663,6 +1664,11 @@ test('the process reports every terminal receipt, and its exit code matches the 
   // refusal is the documented `PortfolioUnreadable` rather than a filesystem errno.
   writeFileSync(portfolioPath, 'this file is not a portfolio\n', { encoding: 'utf8', flag: 'wx' });
 
+  // The shipped command will not run without a Draft receipt. This run refuses at the
+  // portfolio stage, before the factory ever consults admission, so the file only has to
+  // exist: its content is validated on the first admission read, which is never reached.
+  const draftReceiptPath = join(dir, 'intake-receipt.json');
+  writeFileSync(draftReceiptPath, '{}\n', { encoding: 'utf8', flag: 'wx' });
   const args = [
     'run',
     '--portfolio', portfolioPath,
@@ -1672,6 +1678,7 @@ test('the process reports every terminal receipt, and its exit code matches the 
     '--ledger', ledgerDir,
     '--worktree', local.worktree,
     '--evidence-root', local.evidenceRoot,
+    '--draft-receipt', draftReceiptPath,
     '--out', outPath,
   ];
 

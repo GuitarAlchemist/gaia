@@ -95,6 +95,15 @@ would expose mechanisms, widen authority, or make replay depend on hidden state.
     it is an ordinary own data property — so it is projected as one and committed by
     `receiptRevision`, never turned into a provider-owned prototype whose contents read
     back off the receipt but sit outside the hash that binds it.
+14. Draft admission, when a `draftAdmission` read port is composed, is a restrictive
+    precondition and never authority. Every `advance()` asks the port for one fresh
+    trusted provider read of the Draft bound to the scheduled item and refuses with
+    `DraftAdmissionMissing`, `DraftNotAdmitted`, `DraftEvidenceInvalid`, or
+    `DraftAdmissionUnavailable` before any grant is consumed. Admitted evidence
+    `{ number, headRef, headRevision }` sits inside the intent body, so the revision the
+    operator types and the grant carries binds the exact Draft; a Draft that moves after
+    confirmation is refused by the existing authority scope check. Without the port the
+    intent is unchanged. See docs/pump-canary-r0.md, Decision C.
 
 ## Relationship evidence
 

@@ -9,6 +9,12 @@ import { tmpdir } from 'node:os';
 import { runPortfolioOperatorCli } from '../scripts/github-portfolio-operator.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-operator-progress-'));
+// The shipped CLI refuses to run without a Draft receipt. These gates are about progress
+// reporting, so the admission adapter is injected and the receipt file is a placeholder
+// the injected adapter never reads.
+const draftReceiptPath = join(scratch, 'intake-receipt.json');
+writeFileSync(draftReceiptPath, '{}', 'utf8');
+const injectedAdmission = () => ({ read: async () => null });
 test.after(() => rmSync(scratch, { recursive: true, force: true }));
 
 function parseProgress(chunks) {
@@ -33,6 +39,7 @@ test('operator run keeps its final result on stdout and reports authorized repai
     '--ledger', join(scratch, 'ledger'),
     '--worktree', join(scratch, 'worktree'),
     '--evidence-root', join(scratch, 'evidence'),
+    '--draft-receipt', draftReceiptPath,
     '--out', join(scratch, 'receipt.json'),
     '--timeout-ms', '2000',
     '--progress-format', 'jsonl',
@@ -46,6 +53,7 @@ test('operator run keeps its final result on stdout and reports authorized repai
     writeProgress: (chunk) => stderr.push(chunk),
     createGithubRead: () => ({ read: async () => ({}) }),
     createAuthority: () => ({ consume: async () => ({}) }),
+    createDraftAdmission: injectedAdmission,
     createExecution: ({ runWorker, runReviewer, runRepair }) => ({
       execute: async () => {
         authorityExecutions += 1;
@@ -122,6 +130,7 @@ test('operator progress writer failure cannot prevent the authorized result', as
     '--ledger', join(scratch, 'broken-ledger'),
     '--worktree', join(scratch, 'broken-worktree'),
     '--evidence-root', join(scratch, 'broken-evidence'),
+    '--draft-receipt', draftReceiptPath,
     '--out', join(scratch, 'broken-receipt.json'),
   ], {
     isInteractive: () => true,
@@ -129,6 +138,7 @@ test('operator progress writer failure cannot prevent the authorized result', as
     writeProgress: async () => { throw new Error('stderr unavailable'); },
     createGithubRead: () => ({}),
     createAuthority: () => ({}),
+    createDraftAdmission: injectedAdmission,
     createExecution: () => ({ execute: async () => { executed += 1; } }),
     runOperator: async ({ execution }) => {
       await execution.execute({});
@@ -156,6 +166,7 @@ test('operator defaults to human progress and reserves authorized wording for gr
     '--ledger', join(scratch, 'human-ledger'),
     '--worktree', join(scratch, 'human-worktree'),
     '--evidence-root', join(scratch, 'human-evidence'),
+    '--draft-receipt', draftReceiptPath,
     '--out', join(scratch, 'human-receipt.json'),
   ], {
     isInteractive: () => true,
@@ -163,6 +174,7 @@ test('operator defaults to human progress and reserves authorized wording for gr
     writeProgress: (chunk) => stderr.push(chunk),
     createGithubRead: () => ({}),
     createAuthority: () => ({}),
+    createDraftAdmission: injectedAdmission,
     createExecution: ({ runWorker, runReviewer }) => ({
       execute: async () => {
         await runWorker({});
@@ -200,6 +212,7 @@ test('operator progress format refuses every value outside the closed pair', asy
     '--ledger', join(scratch, 'invalid-format-ledger'),
     '--worktree', join(scratch, 'invalid-format-worktree'),
     '--evidence-root', join(scratch, 'invalid-format-evidence'),
+    '--draft-receipt', draftReceiptPath,
     '--out', join(scratch, 'invalid-format-receipt.json'),
     '--progress-format', 'none',
   ], {

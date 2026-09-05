@@ -68,7 +68,7 @@ only in the final column and must not escape in a result or refusal.
 | Durable event log | `load() -> events`; `commit(expected revision, events) -> receipt or refusal` | Single-writer append and compare-and-set | local append-only JSONL; in-memory test fixtures |
 | Draft operation | `enqueue(selector)`; `reconcile(identity, expected revision) -> projection or refusal` | One canonical Operation Envelope; effect-free historical adoption requires a uniquely marked merged PR with exact generation inclusion and merge evidence | protected GitHub Git Data ledger and effect adapter; memory ledger |
 | Hosted Draft intake | `runHostedDraftIntake(trigger, observations) -> receipt or refusal`; `produceHostedDraftPumpObservation(receipt) -> observation or refusal` | Bounded unsettled recovery before admitting at most one candidate; unchanged ambiguous records are quarantined for the scheduled tick without being settled; authority-free sealed observation | GitHub Actions intake, one recovery group plus one group per labeled issue; existing Draft ledger/admission/effect adapters; deterministic fixtures |
-| Portfolio survey and drain | `survey(observations) -> revision`; `advance(revision) -> intent or refusal` | Read-only inventory to one bounded next transition | GitHub read adapter; deterministic fixtures; append-only drain ledger |
+| Portfolio survey and drain | `survey(observations) -> revision`; `advance(revision) -> intent or refusal` | Read-only inventory to one bounded next transition; optional restrictive Draft admission before authority consumption | GitHub inventory and exact Draft read adapters; deterministic fixtures; append-only drain ledger |
 | Drain Petri net | `buildNet(definition) -> net`; `replay(net, events) -> run`; `collectDrainFacts(input) -> facts or refusal` | Bounded pull-request drain and lane lifecycle with exact-source evidence | JSONL artifact adapter; optional DuckDB read projection; read-only CLI |
 | Pull-request conflict classification | `classifyPrConflict(observation, claim) -> reading or refusal` | Exact-generation, read-only classification under a closed empty strategy registry | normalized GitHub observation; deterministic fixtures |
 | Runner capability probe | `probe(mandate, lease, adapter) -> receipt or blocker` | Read-only capability question decided by identity, generation, lease, admission and reconciliation before any adapter is consulted | synthetic-fixture probe; deterministic in-memory fixtures |
@@ -148,6 +148,18 @@ domain validators before constructing its runtime. Invalid configuration creates
 an admission record nor a provider effect; the CLI returns a closed argument error. This
 preflight does not authorize an effect or settle an existing ambiguous operation. Exact
 head binding and durable claim enforcement remain execution-time responsibilities.
+
+The shipped portfolio operator requires an intake receipt as an untrusted expectation for
+one issue. Its read-only Draft adapter re-reads the provider and checks the repository,
+operation marker, exact pull-request number, base, head, and OPEN Draft state. Preview and
+authorized advance both repeat that read; admitted evidence enters the intent revision
+before grant consumption. Missing, moved, foreign, ambiguous, or unavailable evidence
+refuses admission without starting an agent. The module-level port remains optional for
+existing compositions; the operator CLI has no admission opt-out. This narrows the
+existing human-mediated grant and creates no new authority. It does not close the interval
+between readback and process start or prove cross-process execution exclusion. A safe live
+worker profile, real operator authorization, and an operation-linked canary remain
+unproven; tests use injected provider transport and do not establish autonomous draining.
 
 Pull-request conflict classification is read-only at this revision. It binds the observed base and
 head generation and can report clean, unknown, superseded, or escalation-required. Its automation

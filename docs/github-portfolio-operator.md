@@ -148,6 +148,7 @@ node scripts/github-portfolio-operator.mjs run \
   --ledger        ../state/gaia-operator-ledger \
   --worktree      ../candidate-worktree \
   --evidence-root ../state/gaia-operator-evidence \
+  --draft-receipt ../state/gaia-hosted-draft-pump-receipt.json \
   --out           ../state/gaia-operator-receipt.json \
   [--ttl-seconds 120] \
   [--timeout-ms 600000] \
@@ -156,7 +157,13 @@ node scripts/github-portfolio-operator.mjs run \
 
 `--repository` is a pre-commitment: the operator states which repository they are willing
 to authorize before the intent is known, and the execution adapter refuses any intent that
-names another one. The pinned `--portfolio` file is a revision, not a plan: GitHub is
+names another one.
+
+`--draft-receipt` is required. It names the hosted pump intake receipt for the issue; the
+Draft it describes is read back from GitHub on every advance and must still be the exact
+OPEN draft on the same head before any grant is minted. There is no option that runs
+without that admission. The rule and its refusal codes are recorded in
+[Pump canary R0](pump-canary-r0.md), Decisions C and C.1. The pinned `--portfolio` file is a revision, not a plan: GitHub is
 re-read and the portfolio rebuilt, and a revision mismatch is a refusal, never a fresh
 selection.
 

@@ -211,3 +211,59 @@ test('a Windows short path and its long form bind the same canonical roots', {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].evidenceDir, join(realpathSync.native(evidenceRoot), 'c'.repeat(64)));
 });
+
+test('redelivery under one idempotency key performs no second factory effect and fails closed on a torn or foreign receipt', async () => {
+  const worktree = linkedWorktree('redelivery', 'https://github.com/GuitarAlchemist/ga.git');
+  const evidenceRoot = evidenceRootFor('redelivery');
+  let factoryRuns = 0;
+  const adapter = createAgentFactoryExecutionAdapter({
+    expectedRepository: 'GuitarAlchemist/ga',
+    worktree,
+    evidenceRoot,
+    executeFactory: async (request) => {
+      factoryRuns += 1;
+      return { schema: 'gaia-agent-factory-receipt/1', status: 'completed', task: request.task };
+    },
+    runWorker: async () => {},
+    runReviewer: async () => {},
+  });
+  const intent = intentFor('GuitarAlchemist/ga');
+  const idempotencyKey = 'd'.repeat(64);
+
+  // First delivery: one factory effect, one durable receipt bound to this intent.
+  const first = await adapter.execute({ intent, idempotencyKey });
+  assert.equal(factoryRuns, 1);
+  assert.equal(first.status, 'completed');
+
+  // Duplicate delivery of the same intent under the same key: no second effect, and the
+  // answer is the persisted receipt, not a fresh provider run.
+  const again = await adapter.execute({ intent, idempotencyKey });
+  assert.equal(factoryRuns, 1);
+  assert.deepEqual(again, first);
+  assert.deepEqual(await adapter.findReceipt({ idempotencyKey, intent }),
+    { ...first, addressedCommentIds: [] });
+
+  // A different intent replayed under the same key must not be executed against the
+  // receipt of another operation, nor be reported as that operation's result.
+  const foreign = { ...intent, task: `${intent.task} (changed)` };
+  await assert.rejects(adapter.execute({ intent: foreign, idempotencyKey }),
+    (error) => error instanceof PortfolioExecutionError
+      && error.code === 'ExecutionReceiptMismatch');
+  await assert.rejects(adapter.findReceipt({ idempotencyKey, intent: foreign }),
+    (error) => error instanceof PortfolioExecutionError
+      && error.code === 'ExecutionReceiptMismatch');
+  assert.equal(factoryRuns, 1);
+
+  // An interrupted receipt write leaves a torn file. Redelivery must neither trust it nor
+  // run the factory a second time on top of it.
+  const tornKey = 'e'.repeat(64);
+  mkdirSync(join(evidenceRoot, tornKey));
+  writeFileSync(join(evidenceRoot, tornKey, 'receipt.json'), '{"schema":"gaia-portfolio-exec', 'utf8');
+  await assert.rejects(adapter.execute({ intent, idempotencyKey: tornKey }),
+    (error) => error instanceof PortfolioExecutionError
+      && error.code === 'CorruptExecutionReceipt');
+  await assert.rejects(adapter.findReceipt({ idempotencyKey: tornKey, intent }),
+    (error) => error instanceof PortfolioExecutionError
+      && error.code === 'CorruptExecutionReceipt');
+  assert.equal(factoryRuns, 1);
+});
