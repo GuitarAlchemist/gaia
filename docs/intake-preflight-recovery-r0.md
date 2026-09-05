@@ -29,12 +29,17 @@ invalid independently of any GitHub availability assumption.
 
 ## Remaining recovery boundary
 
-This prevents new poisoned admissions; it does not erase or settle the existing #53
-operation. A static shared variable is also not a valid source of generation-specific
+This rejects schema-malformed configuration only; it does not erase or settle the existing
+#53 operation. A well-formed receipt bound to another head can still throw
+`StaleCommandGeneration` during execution and become `EFFECT_AMBIGUOUS`. Per-operation
+head binding before effect intent remains unresolved. A static shared variable is not a valid source of generation-specific
 ownership and fresh effect leases. Full recovery requires a real per-operation receipt
 and an audited reconciliation of the existing ambiguity. An absent PR alone does not
 prove that an earlier remote request cannot still finish. No blind retry is authorized
 by this design, and no autonomy claim follows from a passing preflight test.
+
+Operator input remains single-line minified JSON: the existing argument parser rejects
+control characters, including literal newlines. The 64 KiB limit does not change that rule.
 
 Owner: Codex coordinator. Independent review: Standards and Spec on the exact commit.
 Next proof: CLI regression goes RED, then GREEN without any ledger or GitHub writes.
