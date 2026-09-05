@@ -564,6 +564,7 @@
 
     const state = {
       observedAt: '2026-09-04T23:11:11.000Z',
+      contentObservedAt: '2026-09-04T23:11:11.000Z',
       digest: '36cb1f1',
       micro: { achieved: 9, total: 14 },
       drafts: [],
@@ -658,7 +659,7 @@
       const start = new Date(now); start.setMinutes(Math.floor(now.getMinutes() / 5) * 5, 0, 0);
       const end = new Date(start.getTime() + 300000);
       const elapsed = Math.max(0, Math.min(300, Math.floor((Date.now() - start.getTime()) / 1000)));
-      const age = Math.max(0, Math.floor((Date.now() - Date.parse(state.observedAt)) / 1000));
+      const age = Math.max(0, Math.floor((Date.now() - Date.parse(state.contentObservedAt)) / 1000));
       const evidenceFresh = age <= 300;
       const currentSlot = start.getHours() * 12 + Math.floor(start.getMinutes() / 5) + 1;
       const score = (100 * state.micro.achieved / state.micro.total).toFixed(1);

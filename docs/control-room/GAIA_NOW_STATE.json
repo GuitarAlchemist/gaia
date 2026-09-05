@@ -1,6 +1,6 @@
 {
   "schema": "GaiaNowLiveStateV0",
-  "observedAt": "2026-09-04T23:50:07.6513815+00:00",
+  "observedAt": "2026-09-05T00:02:19.0561349+00:00",
   "digest": "live-github",
   "drafts": [
     {
@@ -10,11 +10,12 @@
       "branch": "codex/gaia-now-checkpoint-r0",
       "author": "spareilleux",
       "createdAt": "2026-09-04T23:26:33Z",
-      "updatedAt": "2026-09-04T23:26:33Z",
+      "updatedAt": "2026-09-04T23:53:32Z",
       "checks": {
-        "success": 4,
-        "failure": 4,
+        "success": 8,
+        "failure": 0,
         "pending": 0,
+        "neutral": 0,
         "total": 8
       }
     },
@@ -30,6 +31,7 @@
         "success": 8,
         "failure": 0,
         "pending": 0,
+        "neutral": 0,
         "total": 8
       }
     },
@@ -45,6 +47,7 @@
         "success": 8,
         "failure": 0,
         "pending": 0,
+        "neutral": 0,
         "total": 8
       }
     },
@@ -60,6 +63,7 @@
         "success": 8,
         "failure": 0,
         "pending": 0,
+        "neutral": 0,
         "total": 8
       }
     }
@@ -74,6 +78,6 @@
   },
   "afk": {
     "status": "afk",
-    "idleSeconds": 543
+    "idleSeconds": 1275
   }
 }

@@ -40,12 +40,16 @@ function Invoke-GhJson {
 
 function Get-CheckSummary {
     param($Rollup)
-    $summary = [ordered]@{ success = 0; failure = 0; pending = 0; total = 0 }
+    $summary = [ordered]@{ success = 0; failure = 0; pending = 0; neutral = 0; total = 0 }
     foreach ($check in @($Rollup)) {
         $summary.total++
         if ($check.status -ne 'COMPLETED') { $summary.pending++; continue }
         if ($check.conclusion -eq 'SUCCESS') { $summary.success++; continue }
-        $summary.failure++
+        if ($check.conclusion -in @('FAILURE', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE')) {
+            $summary.failure++
+            continue
+        }
+        $summary.neutral++
     }
     return $summary
 }
@@ -92,9 +96,17 @@ function Write-LiveState {
     if (-not (Test-Path -LiteralPath $outputDirectory)) {
         throw "Output directory does not exist: $outputDirectory"
     }
-    $temporary = "$resolvedOutput.tmp"
-    $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $temporary -Encoding utf8
-    Move-Item -LiteralPath $temporary -Destination $resolvedOutput -Force
+    $temporary = "$resolvedOutput.$PID.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $json = ($state | ConvertTo-Json -Depth 8) -replace "`r`n", "`n"
+        [IO.File]::WriteAllText($temporary, "$json`n", [Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temporary -Destination $resolvedOutput -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) {
+            Remove-Item -LiteralPath $temporary -Force
+        }
+    }
 }
 
 do {
@@ -102,8 +114,8 @@ do {
         Write-LiveState
     }
     catch {
-        Write-Error $_
         if (-not $Watch) { throw }
+        Write-Warning "Gaia Now refresh failed; retrying after $IntervalSeconds seconds: $($_.Exception.Message)"
     }
     if ($Watch) { Start-Sleep -Seconds $IntervalSeconds }
 } while ($Watch)
