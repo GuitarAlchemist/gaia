@@ -303,6 +303,23 @@ remote authority broker are not implemented.
 
 ## Observability, provenance, freshness, ETA, and delivery metrics
 
+The opt-in hosted intake `--canary-policy` composition uses
+`src/canary-admission-policy.mjs` to validate a versioned, one-operation policy and
+derive managed Draft input from an actual `EFFECT_STARTED` ledger snapshot. The
+policy pins repository, issue, generation, source head, actor and responsibility
+assignments; it is not a live claim or an agent-execution grant. The composition
+rechecks Actions admission and the ledger revision at effect time, then delegates
+claim acquisition to the existing managed evidence CAS and verifies Draft readback.
+Legacy intake retains its static configuration validation. The full unsettled list
+remains visible to the intake count even when selection is limited to one issue.
+
+These are local candidate capabilities, not proof of live activation or autonomy.
+The selected file must come from the trusted hosted checkout; no workflow activation
+is included. Review principals and separate human execution authorization must be
+real. Production expiry/positive-absence recovery remains unqualified, and the final
+read-to-effect interval is not a cross-system atomic revocation guarantee.
+See [the bounded canary design](docs/canary-admission-policy-r0.md).
+
 Every decision-bearing artifact binds stable identities, content revisions, producer/method
 context, and derivation links. Raw agent output is untrusted evidence and never becomes an
 architecture claim without a source witness. Freshness, quality, acceptance, and authority are
