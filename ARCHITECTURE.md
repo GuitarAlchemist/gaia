@@ -316,6 +316,15 @@ and effect ports; it does not sequence the admission decision.
 Legacy intake retains its static configuration validation. The full unsettled list
 remains visible to the intake count even when selection is limited to one issue.
 
+Explicit `GaiaCanaryAdmissionPolicyV1` produces `GaiaRoundReceiptV1` with a
+writer identity and independent AI reviewer assignments; V0 keeps its GitHub-only
+review principals. Shared pure `src/agent-review-identity.mjs` validates the
+provider/session/agent shape and refuses shared writer/reviewer actor contexts,
+including provider aliases. This is assignment validation, not authentication:
+the operator must verify actual harness provenance. Managed rendering/readback
+preserves these identities and UNKNOWN review verdicts; the change grants neither
+review approval nor execution authority. The canary still permits one round only.
+
 These are local candidate capabilities, not proof of live activation or autonomy.
 The selected file must come from the trusted hosted checkout; no workflow activation
 is included. Review principals and separate human execution authorization must be

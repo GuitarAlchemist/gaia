@@ -205,7 +205,10 @@ async function importMutant(name, mutate) {
 
 async function importRoundHistoryMutant(name, mutate) {
   const sourceUrl = new URL('../src/pr-delivery-round-history.mjs', import.meta.url);
-  const original = readFileSync(sourceUrl, 'utf8');
+  const dependencyUrl = new URL('../src/agent-review-identity.mjs', import.meta.url).href;
+  const original = readFileSync(sourceUrl, 'utf8').replace(
+    "'./agent-review-identity.mjs'", JSON.stringify(dependencyUrl),
+  );
   const mutated = mutate(original);
   assert.notEqual(mutated, original, `${name} must alter the round-history mechanism`);
   const directory = mkdtempSync(join(tmpdir(), `gaia-round-history-${name}-`));
