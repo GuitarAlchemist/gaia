@@ -97,7 +97,7 @@ test('the ordered pump observation is bound to the serialized recovery lane only
   // the refusal this excludes.
   assert.equal(
     binding,
-    "${{ github.event_name != 'issues'"
+    "${{ github.event_name != 'issues' && !inputs.one_canary"
     + " && format('{0}/gaia-hosted-draft-pump-observation.json', runner.temp) || '' }}",
     'only a run outside every issue lane may be given a path to publish an ordered reading',
   );

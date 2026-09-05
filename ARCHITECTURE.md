@@ -324,6 +324,11 @@ including provider aliases. This is assignment validation, not authentication:
 the operator must verify actual harness provenance. Managed rendering/readback
 preserves these identities and UNKNOWN review verdicts; the change grants neither
 review approval nor execution authority. The canary still permits one round only.
+An optional `one_canary` boolean dispatch selects the fixed trusted-checkout policy
+through `GAIA_CANARY_POLICY`. It defaults false; issue/schedule runs keep legacy
+inputs. Selection omits only legacy managed JSON and the optional ordered
+observation. App identity, sealed workflow SHA, admission and claim CAS remain
+mandatory. No live policy is shipped; absent policy refuses before runtime entry.
 
 These are local candidate capabilities, not proof of live activation or autonomy.
 The selected file must come from the trusted hosted checkout; no workflow activation

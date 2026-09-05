@@ -1,5 +1,22 @@
 # One-operation canary admission policy
 
+## Sealed workflow selection — 2026-09-05
+
+The approved intake policy path was unreachable from the shipped workflow.
+Use one optional boolean dispatch input, default false, to select the fixed
+trusted-checkout path `.github/gaia/canary-policy.json` through the CLI environment.
+Alternatives rejected: arbitrary dispatch JSON/path (unbounded input), or replacing
+legacy repository configuration globally (changes unrelated scheduled work).
+Schedule and issue events keep legacy behavior. Canary selection skips only the
+legacy managed JSON requirement, never the App identity or policy validation.
+The source policy must already exist and pass the operation-bound validator;
+missing policy fails closed. No policy, task, claim or grant is synthesized here.
+Keep sealed workflow SHA, permissions, App token, and concurrency unchanged.
+Suppress the optional ordered observation for this issue-bound canary.
+Test at the existing workflow-to-CLI and real hosted-intake seams: boolean routing,
+missing-file refusal, normal legacy events, and valid policy environmental input.
+This selection is not live activation; no default policy is installed by this slice.
+
 ## V1 AI reviewer assignments — approved scope, 2026-09-05
 
 The user authorized representing real AI reviewers without invented GitHub accounts.

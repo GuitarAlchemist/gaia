@@ -20,7 +20,7 @@ const hash = v => createHash('sha256').update(canonical(v)).digest('hex');
 
 async function fixture(t, { stopped = false, expired = false, unrelated = false,
   replay = false, expiredRecovery = false, changeDuringAdmission = null,
-  mutatePolicy = () => {} } = {}) {
+  mutatePolicy = () => {}, policyEnvironment = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'gaia-canary-contract-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const repository = { nodeId: 'R_test', owner: 'test-org', name: 'test-repo' };
@@ -117,6 +117,10 @@ async function fixture(t, { stopped = false, expired = false, unrelated = false,
       return runtime;
     },
     stdout: { write: v => { output += v; } }, stderr: { write: v => { errors += v; } } };
+  if (policyEnvironment) {
+    invocation.argv.splice(-2);
+    invocation.env.GAIA_CANARY_POLICY = path;
+  }
   const code = await main(invocation);
   const firstOutput = output;
   let replayCode; let replayOutput;
@@ -137,6 +141,14 @@ async function fixture(t, { stopped = false, expired = false, unrelated = false,
   return { code, output: firstOutput, errors, creates, reads, candidate, seed, enqueued,
     replayCode, replayOutput, recovery, managedEvidence: await evidence.read(enqueued.workKey) };
 }
+
+test('hosted intake accepts the workflow policy environment through the real admission path', async t => {
+  const result = await fixture(t, { policyEnvironment: true, replay: true });
+  assert.equal(result.code, 0, result.errors);
+  assert.equal(JSON.parse(result.output).result.outcome, 'CREATED');
+  assert.equal(result.creates, 1);
+  assert.equal(result.replayCode, 0);
+});
 
 test('hosted intake uses its real runtime and claim producer to create one policy-bound Draft', async t => {
   const result = await fixture(t);

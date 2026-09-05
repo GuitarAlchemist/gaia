@@ -260,7 +260,7 @@ function parseConfiguration(argv, env) {
       checklist: suppliedChecklist ? checklist(flags, env) : INTAKE_PRESENTATION.checklist,
       eta: suppliedEta === undefined ? INTAKE_PRESENTATION.eta : eta(suppliedEta),
     };
-    const canaryPath = flags.get('canary-policy');
+    const canaryPath = optionalFlagOrEnv(flags, 'canary-policy', env, 'GAIA_CANARY_POLICY');
     if (canaryPath !== undefined) {
       configuration.canaryPolicyPath = configuredText(canaryPath);
       configuration.canaryPolicy = validateCanaryAdmissionPolicy(JSON.parse(readFileSync(canaryPath, 'utf8')));

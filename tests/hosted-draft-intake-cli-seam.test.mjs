@@ -56,6 +56,8 @@ function expressions(event, temp) {
     ['vars.GAIA_PUMP_ACTOR_ID', '1234'],
     ['vars.GAIA_REPOSITORY_NODE_ID', 'R_kgDOGaia'],
     ['vars.GAIA_MANAGED_ROUND_JSON', MANAGED_ROUND_JSON],
+    ["github.event_name == 'workflow_dispatch' && inputs.one_canary && '.github/gaia/canary-policy.json' || ''",
+      event === 'canary' ? '.github/gaia/canary-policy.json' : ''],
     ['vars.GAIA_PUMP_APP_ID', '424242'],
     ['secrets.GAIA_PUMP_APP_PRIVATE_KEY', 'fixture-private-key'],
     ['steps.policy.outputs.oid', ROOT_OID],
@@ -65,9 +67,9 @@ function expressions(event, temp) {
     // string, which the CLI reads as an absent value, so no ordered reading is published from a
     // lane that cannot be ordered against the others.
     [
-      "github.event_name != 'issues'"
+      "github.event_name != 'issues' && !inputs.one_canary"
       + " && format('{0}/gaia-hosted-draft-pump-observation.json', runner.temp) || ''",
-      event === 'issues' ? '' : `${temp}/gaia-hosted-draft-pump-observation.json`,
+      event === 'issues' || event === 'canary' ? '' : `${temp}/gaia-hosted-draft-pump-observation.json`,
     ],
     ['github.run_id', '9001'],
     ['github.run_attempt', '1'],
@@ -236,6 +238,21 @@ test('positive control: the shipped intake workflow yields one well-formed CLI i
   assert.equal(argv[0], 'intake');
   assert.ok(argv.length >= 3 && argv.length % 2 === 1, 'the CLI takes a command plus flag pairs');
   assert.equal(environment.GITHUB_REPOSITORY, 'GuitarAlchemist/gaia');
+});
+
+test('explicit canary dispatch selects only the fixed policy and refuses its absence before runtime', async () => {
+  const workflow = workflowText();
+  assert.match(workflow, /one_canary:\s*\n\s+description:.*\n\s+type: boolean\s*\n\s+default: false/u);
+  const temp = mkdtempSync(join(tmpdir(), 'gaia-intake-canary-seam-'));
+  const { argv, environment } = invocation(workflow, 'canary', temp);
+  assert.equal(environment.GAIA_CANARY_POLICY, '.github/gaia/canary-policy.json');
+  assert.equal(environment.GAIA_OBSERVATION_PATH, '');
+  assert.equal(existsSync(environment.GAIA_CANARY_POLICY), false, 'no live policy is shipped by this slice');
+  const errors = sink(); let entered = false;
+  const code = await main({ argv, env: environment, stdout: sink().stream, stderr: errors.stream,
+    runtimeFactory: () => { entered = true; throw Error('must not enter runtime'); } });
+  assert.notEqual(code, 0);
+  assert.equal(entered, false);
 });
 
 test('a scheduled recovery tick reaches the CLI and is admitted as a schedule, not refused', async () => {
