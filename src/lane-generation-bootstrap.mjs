@@ -790,11 +790,6 @@ async function executeLaneGeneration(manifest, ports, identity) {
     throw error;
   }
   if (laneCount > capability.limits.maxLanes) return refuse('LANE_LIMIT_EXCEEDED');
-  if (capability.costObservation.basis === 'DECLARED_UNITS'
-    && capability.costObservation.remainingUnits < laneCount) {
-    return refuse('QUOTA_INSUFFICIENT');
-  }
-
   // --- election: exactly one actor may hold this generation in flight ----------------------
   const head = await store.read(identity.workKey);
   let expectedRevision = 'NONE';
@@ -822,6 +817,13 @@ async function executeLaneGeneration(manifest, ports, identity) {
     } else if (record.state !== 'COMPENSATED') {
       return refuse('CLAIM_HELD');
     }
+  }
+
+  // Launch units gate startup, not receipt replay or cleanup-only recovery.
+  if (resumed?.state !== 'COMPENSATING'
+    && capability.costObservation.basis === 'DECLARED_UNITS'
+    && capability.costObservation.remainingUnits < laneCount) {
+    return refuse('QUOTA_INSUFFICIENT');
   }
 
   const recordBody = (state, plan, receipt) => ({

@@ -119,8 +119,9 @@ topology exists before any process, and a lane is never `ACTIVE` until a durable
 published against one fresh structured observation. A refused launch compensates only the
 resources its own operation created. Cleanup persists `COMPENSATING` before effects, blocks
 successor generations while unresolved, and becomes `COMPENSATED` only after observed removal.
-Same-actor overlapping resumptions remain a known review blocker: CAS on the record does not
-fence every provider effect. No cross-host concurrency safety is claimed for this candidate. The
+One shared in-process store excludes overlapping executions per Work Identity before provider
+access; CAS alone does not fence provider effects. Launch quota gates startup, not owned
+cleanup-only recovery or existing receipt replay. No cross-host concurrency safety is claimed. The
 shipped adapters behind that seam are deterministic fixtures; a durable record store and a real
 terminal host remain planned.
 

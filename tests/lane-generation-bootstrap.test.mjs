@@ -887,12 +887,15 @@ observationFault('a host that cannot be observed', () => {
 });
 observationFault('an observation that is not an object', () => null);
 
-test('B15: bootstrapping a published generation twice returns the first receipt and spawns nothing', async () => {
+test('B15: a published generation replays without spawning even after launch quota is exhausted', async () => {
   const store = createMemoryLaneGenerationStore();
   const first = harness({ store });
   const one = await bootstrapLaneGeneration(manifest(), first.ports);
 
-  const second = harness({ store });
+  const second = harness({
+    store,
+    capability: { costObservation: { basis: 'DECLARED_UNITS', remainingUnits: 0 } },
+  });
   const two = await bootstrapLaneGeneration(manifest(), second.ports);
   assert.equal(two.outcome, 'LAUNCH_RECEIPT_REPLAYED');
   assert.equal(canonicalLaneJson(two.receipt), canonicalLaneJson(one.receipt));
