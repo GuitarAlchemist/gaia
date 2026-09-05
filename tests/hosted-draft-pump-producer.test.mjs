@@ -1,3 +1,4 @@
+import { MANAGED_CREATE } from './helpers/managed-draft-config.mjs';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -472,11 +473,7 @@ function intakeArgs(extra = []) {
 function intakeEnv() {
   return {
     GAIA_MANAGED_ROUND_JSON: JSON.stringify({
-      create: {
-        receipt: { schema: 'GaiaRoundReceiptV0', kind: 'OPEN' },
-        effectActor: 'github:app:gaia-draft-pump',
-        effectClaim: { schema: 'GaiaManagedRoundEffectClaimV0' },
-      },
+      create: MANAGED_CREATE,
       advance: null,
     }),
   };

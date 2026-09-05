@@ -1,3 +1,4 @@
+import { MANAGED_CREATE } from './helpers/managed-draft-config.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -128,11 +129,7 @@ test('the workflow argv and deterministic environment satisfy the real CLI parse
       '["Create or reuse one exact Draft pull request","Persist one terminal receipt"]',
     GAIA_ETA_MINUTES: '60:120',
     GAIA_MANAGED_ROUND_JSON: JSON.stringify({
-      create: {
-        receipt: { schema: 'GaiaRoundReceiptV0', kind: 'OPEN' },
-        effectActor: 'github:app:gaia-draft-pump',
-        effectClaim: { schema: 'GaiaManagedRoundEffectClaimV0' },
-      },
+      create: MANAGED_CREATE,
       advance: null,
     }),
   };
