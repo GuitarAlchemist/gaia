@@ -7,6 +7,38 @@ open, and the falsifiers the tests attempt.
 
 ## Operator problem
 
+### Execution exclusion repair decision — 2026-09-05
+
+The retained two-lane counterexample pauses one invocation after its first spawn effect.
+A same-actor invocation resumes the saved plan and publishes; the first then spawns a
+duplicate second lane before losing CAS. Publication CAS and cleanup-intent CAS are
+necessary but cannot fence provider effects which happened before the losing CAS.
+
+Keep the existing public bootstrap seam. Extend its store port with
+`execute(workKey, operation) -> { executed: true, result } | { executed: false }`.
+The enforcing adapter must admit at most one unsettled callback per Work Identity,
+across actors and generation ordinals. Reservation is atomic and precedes every provider
+call and record read. A contender is refused `EXECUTION_HELD` without invoking its
+callback. The reservation covers awaited admission, reconciliation, topology, spawn,
+verification, publication and compensation, and is released only when that callback
+settles. Nested attempts are refused rather than queued. Distinct work keys remain
+independent. CAS still detects unexpected writes and binds terminal receipts.
+
+The memory adapter implements this contract for callers sharing one store instance in
+one JavaScript process. It proves neither cross-host exclusion nor durable ownership
+after a process crash. No production adapter ships here. A future adapter must serialize
+the actual effect executor, retain unresolved execution ownership after transport loss,
+or fence external effects; a timer, actor name, local mutex across hosts, or expired
+lease is not a safe replacement. Provider effects with ambiguous responses still require
+reconciliation; releasing a callback is not proof of external quiescence.
+
+Rejected alternatives: another read-before-spawn check retains a TOCTOU window;
+fresh actor names break documented restart semantics; provider idempotency alone leaves
+topology and compensation concurrent and is not supported by the current provider port.
+Falsifiers: same/different actor overlap while a spawn response is pending; overlap at a
+newer ordinal; release after exception; independent work while another key is held;
+mechanism removal must expose duplicate effects. No new bus verb or runtime authority.
+
 ### Review repair decision — 2026-09-05
 
 Independent Standards and Spec reviews rejected the combined candidate `a8d120eb`.
