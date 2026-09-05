@@ -24,8 +24,8 @@ test('Gaia NOW keeps usable layouts live and recovers structural failures', {
   });
   t.after(() => browser.close());
 
-  async function openPage(t, { height, broken = false, now = new Date() }) {
-    const context = await browser.newContext({ viewport: { width: 1280, height } });
+  async function openPage(t, { height, broken = false, now = new Date(), timezoneId }) {
+    const context = await browser.newContext({ viewport: { width: 1280, height }, ...(timezoneId ? { timezoneId } : {}) });
     t.after(() => context.close());
     const page = await context.newPage();
     await page.clock.install({ time: now });
@@ -59,6 +59,75 @@ test('Gaia NOW keeps usable layouts live and recovers structural failures', {
   function draft(number) {
     return { ...fixture.drafts[0], number, title: `Viewport refresh witness ${number}`, mergeStateStatus: 'CLEAN' };
   }
+
+  await t.test('sprint dates roll over at local midnight without turning historical evidence into current proof', async t => {
+    for (const language of ['fr', 'en']) {
+      const { page } = await openPage(t, { height: 1400, now: new Date('2026-09-05T03:59:00Z'), timezoneId: 'America/Toronto' });
+      if (language === 'en') {
+        await page.locator('#langToggle').click();
+        await page.clock.runFor(1);
+      }
+      const trend = page.locator('#criticalSprintTrend');
+      const active = trend.locator('.sprint-dot.active');
+      const forecasts = trend.locator('.sprint-dot.forecast');
+      assert.match(await active.innerText(), /2026-09-04.*MS-288/s);
+      assert.match(await forecasts.nth(0).innerText(), /2026-09-05.*MS-1\b/s);
+      assert.match(await forecasts.nth(1).innerText(), /2026-09-05.*MS-2\b/s);
+      assert.match(await trend.locator('.score-pill').innerText(), /61\.5%.*8\/13/s);
+      assert.match(await trend.innerText(), language === 'fr' ? /Snapshot historique.*2026-09-04/s : /Historical snapshot.*2026-09-04/s);
+      assert.equal(await trend.locator('.sprint-dot.good').count(), 8);
+      assert.equal(await trend.locator('.sprint-dot.bad').count(), 5);
+      await active.focus();
+      assert.match(await page.locator('#timelinePopover').innerText(), /2026-09-04 23:55.*2026-09-05 00:00/s);
+      assert.doesNotMatch(await page.locator('#timelinePopover').innerText(), /DuckDB|slot_evidence_recorded = true/);
+      await page.clock.fastForward(61000);
+      await page.waitForLoadState('networkidle');
+      assert.match(await active.innerText(), /2026-09-05.*MS-1\b/s);
+      assert.match(await forecasts.nth(0).innerText(), /2026-09-05.*MS-2\b/s);
+      assert.match(await forecasts.nth(1).innerText(), /2026-09-05.*MS-3\b/s);
+      assert.match(await trend.locator('.sprint-dot.good').last().innerText(), /2026-09-04.*MS-183/s);
+      await active.focus();
+      assert.match(await page.locator('#timelinePopover').innerText(), /2026-09-05 00:00.*2026-09-05 00:05/s);
+      assert.doesNotMatch(await page.locator('#timelinePopover').innerText(), /DuckDB|slot_evidence_recorded = true/);
+      assert.notEqual(await page.locator('body').getAttribute('data-ui-qa'), 'RECOVERED');
+    }
+  });
+
+  await t.test('check pills distinguish neutral and unknown results from success in both languages', async t => {
+    const { page, setDrafts } = await openPage(t, { height: 1400 });
+    const cases = [
+      { checks: { neutral: 1, total: 1 }, tone: 'neutral', fr: '0/1 checks · 1 neutres/ignorés', en: '0/1 checks · 1 neutral/skipped' },
+      { checks: { success: 2, neutral: 1 }, tone: 'neutral', fr: '2/3 checks · 1 neutres/ignorés', en: '2/3 checks · 1 neutral/skipped' },
+      { checks: { total: 0 }, tone: 'pending', fr: 'non observé', en: 'not observed' },
+      { checks: undefined, tone: 'pending', fr: 'non observé', en: 'not observed' },
+      { checks: { success: 2, total: 2 }, tone: 'good', fr: '2/2 checks', en: '2/2 checks' },
+      { checks: { failure: 1, pending: 1, neutral: 1 }, tone: 'bad', fr: '1 échec', en: '1 failed' },
+      { checks: { pending: 1, neutral: 1 }, tone: 'warn', fr: '1 en attente', en: '1 pending' },
+    ];
+    setDrafts(cases.map(({ checks }, index) => ({ ...draft(960 + index), checks })));
+    await page.clock.fastForward(16000);
+    await page.waitForLoadState('networkidle');
+    const pills = page.locator('#draftPullRequests .ci-pill');
+    for (const language of ['fr', 'en']) {
+      if (language === 'en') {
+        await page.locator('#langToggle').click();
+        await page.clock.runFor(1);
+      }
+      for (const [index, expected] of cases.entries()) {
+        assert.equal(await pills.nth(index).innerText(), expected[language]);
+        assert.equal(await pills.nth(index).getAttribute('class'), `ci-pill ${expected.tone}`);
+      }
+      const colors = await pills.evaluateAll(elements => elements.map(element => getComputedStyle(element).color));
+      assert.notEqual(colors[0], colors[4], 'neutral checks must not use the success color');
+      assert.notEqual(colors[2], colors[4], 'no checks must not use the success color');
+    }
+    await page.clock.fastForward(61000);
+    await page.waitForLoadState('networkidle');
+    for (const [index, expected] of cases.entries()) {
+      assert.equal(await pills.nth(index).getAttribute('class'), 'ci-pill pending');
+      assert.equal(await pills.nth(index).innerText(), `NOT LIVE · last snapshot · ${expected.en}`);
+    }
+  });
 
   await t.test('short viewport cold load stays usable in French and English', async t => {
     const { page, errors } = await openPage(t, { height: 300 });

@@ -29,6 +29,7 @@
     .ci-pill.good { background: #103b2b; color: #58e6a8; }
     .ci-pill.bad { background: #421724; color: #ff9aad; }
     .ci-pill.warn { background: #3d3010; color: #ffd36a; }
+    .ci-pill.neutral { background: #243347; color: #b4c4d8; }
     .signal-button { position: relative; font-weight: 900; min-width: 150px; }
     .header-popover { display: none; position: absolute; z-index: 40; top: calc(100% + 8px); right: 0; width: 270px; padding: 12px; border: 1px solid #75baff; border-radius: 10px; background: #07111f; color: #dcecff; text-align: left; box-shadow: 0 8px 30px #000a; }
     .signal-button:hover .header-popover, .signal-button:focus .header-popover { display: block; }
@@ -141,6 +142,7 @@
     .sprint-dot.good::before { background: #58e6a8; } .sprint-dot.bad::before { background: #ff758c; } .sprint-dot.unobserved { background: #ffc8570d; } .sprint-dot.unobserved::before { background: #ffc857; opacity: .72; } .sprint-dot.active { color: #e6f4ff; background: #75baff18; outline: 1px solid #75baff; font-weight: 800; } .sprint-dot.active::before { background: #ffc857; animation: pulse 1.4s infinite; }
     .sprint-dot.forecast::before { box-sizing: border-box; background: transparent; border: 2px dashed #75baff; }
     .sprint-dot.forecast { opacity: .72; }
+    #criticalSprintTrend .sprint-dot { min-width: 76px; }
     .timeline-marker { cursor: help; }
     .timeline-marker:focus { outline: 2px solid #75baff; outline-offset: 3px; }
     .timeline-popover { display: none; position: fixed; z-index: 100; width: min(340px, calc(100vw - 28px)); padding: 12px 14px; border: 1px solid #75baff; border-radius: 10px; background: #07111f; color: #dcecff; box-shadow: 0 12px 36px #000c; pointer-events: none; }
@@ -578,7 +580,7 @@
     const state = {
       contentObservedAt: '2026-09-04T23:11:11.000Z',
       digest: '36cb1f1',
-      micro: { achieved: 9, total: 14 },
+      micro: { date: '2026-09-04', achieved: 8, total: 13 },
       providers: {
         codexShort: 100, codexLong: 83,
         claudeShort: 93, claudeLong: 34, fable: 0,
@@ -621,7 +623,7 @@
         deficits: 'DÉFICITS RACINE · FLUX ET PRÉDICATS', designAxis: 'DESIGN', designValue: 'OK', designReason: 'Architecture déclarée; gate PR PASS.', codeAxis: 'CODE', codeValue: 'OK', codeReason: '20/20 et 1 808/1 808 ×2.', planningAxis: 'PLANNING', planningValue: 'OK', planningReason: 'Reviews indépendantes déclenchées.', capacityAxis: 'CAPACITÉ', capacityValue: 'DÉGRADÉE', capacityReason: 'Relève suffisante; Fable épuisé.', publicationAxis: 'PUBLICATION', publicationValue: 'DRAFT', publicationReason: 'PR #114; preuve live après merge.', flowLabel: 'Flux courant', flowValue: 'issue #82 bloque → PR #114 isole → tick live attendu', predicateLabel: 'Prédicat faux', predicateValue: 'pump_live_postcondition = false.', pullPolicy: 'Collecte : Gaia tire les faits autoritatifs. SSE peut réveiller; aucun push de lane ne fait autorité.',
         sourceLine: 'Source : PR #114, SHA 36cb1f1, tests locaux et 8/8 checks GitHub.', now: 'maintenant', conditional: 'conditionnel',
         elapsed: 'écoulées', remaining: 'restantes', promptTitle: 'Voir le signal global', overdue: 'preuve stale', etaExpired: 'ETA expirée; confiance suspendue', reforecast: 'recalcul après preuve fraîche',
-        draftsTitle: 'PR DRAFT · TRAVAIL EFFECTIVEMENT PRIS', draftsRule: 'Contrat : une lane ne prend du code qu’après avoir créé une PR Draft liée à son issue.', draftsNone: 'Aucune PR Draft : la pompe n’a aucun travail matérialisé.', checks: 'checks', failed: 'échec', pending: 'en attente', updated: 'mise à jour', hostAfk: 'Hôte AFK',
+        draftsTitle: 'PR DRAFT · TRAVAIL EFFECTIVEMENT PRIS', draftsRule: 'Contrat : une lane ne prend du code qu’après avoir créé une PR Draft liée à son issue.', draftsNone: 'Aucune PR Draft : la pompe n’a aucun travail matérialisé.', checks: 'checks', failed: 'échec', pending: 'en attente', neutral: 'neutres/ignorés', updated: 'mise à jour', hostAfk: 'Hôte AFK',
         escalationsTitle: 'ESCALADES EN COURS', escalationRule: 'Seulement les prédicats faux qui exigent une action ou une décision.', conflictLabel: 'Conflit de branche', ciFailureLabel: 'CI en échec', systemOwner: 'Gaia · système', prUpdated: 'PR mise à jour', proofOverdue: 'PREUVE EN RETARD', proofOverdueDetail: 'Aucun receipt frais; replanification requise'
       },
       en: {
@@ -656,7 +658,7 @@
         deficits: 'ROOT DEFICITS · FLOW AND PREDICATES', designAxis: 'DESIGN', designValue: 'OK', designReason: 'Architecture declared; PR gate PASS.', codeAxis: 'CODE', codeValue: 'OK', codeReason: '32/32 and 1,803/1,803 ×2.', planningAxis: 'PLANNING', planningValue: 'OK', planningReason: 'Ten-minute pull/reconcile watchdog active.', capacityAxis: 'CAPACITY', capacityValue: 'DEGRADED', capacityReason: 'Fallback sufficient; Fable exhausted.', publicationAxis: 'PUBLICATION', publicationValue: 'MERGED', publicationReason: 'GitHub receipt 147bafe.', flowLabel: 'Current flow', flowValue: 'PR #112 drained → pull the next work item', predicateLabel: 'False predicate', predicateValue: 'next_work_admitted.', pullPolicy: 'Collection: Gaia pulls authoritative facts. SSE may wake it; no lane push grants authority.',
         sourceLine: 'Source: merged PR #112, commit 147bafe, GitHub CI, and 3 resolved threads.', now: 'now', conditional: 'conditional',
         elapsed: 'elapsed', remaining: 'remaining', promptTitle: 'View the global signal', overdue: 'stale evidence', etaExpired: 'ETA expired; confidence suspended', reforecast: 'recalculate after fresh evidence',
-        draftsTitle: 'DRAFT PRS · ACTUALLY CLAIMED WORK', draftsRule: 'Contract: a lane claims code only after creating a Draft PR linked to its issue.', draftsNone: 'No Draft PR: the pump has no materialized work.', checks: 'checks', failed: 'failed', pending: 'pending', updated: 'updated', hostAfk: 'Host AFK',
+        draftsTitle: 'DRAFT PRS · ACTUALLY CLAIMED WORK', draftsRule: 'Contract: a lane claims code only after creating a Draft PR linked to its issue.', draftsNone: 'No Draft PR: the pump has no materialized work.', checks: 'checks', failed: 'failed', pending: 'pending', neutral: 'neutral/skipped', updated: 'updated', hostAfk: 'Host AFK',
         escalationsTitle: 'ACTIVE ESCALATIONS', escalationRule: 'Only false predicates requiring an action or decision.', conflictLabel: 'Branch conflict', ciFailureLabel: 'CI failure', systemOwner: 'Gaia · system', prUpdated: 'PR updated', proofOverdue: 'EVIDENCE OVERDUE', proofOverdueDetail: 'No fresh receipt; replanning required'
       }
     };
@@ -692,7 +694,6 @@
       const elapsed = Math.max(0, Math.min(300, Math.floor((Date.now() - start.getTime()) / 1000)));
       const age = Math.max(0, Math.floor((Date.now() - Date.parse(state.contentObservedAt)) / 1000));
       const evidenceFresh = age <= 300;
-      const currentSlot = start.getHours() * 12 + Math.floor(start.getMinutes() / 5) + 1;
       const score = (100 * state.micro.achieved / state.micro.total).toFixed(1);
       const p = state.providers;
       const pad = value => String(value).padStart(2, '0');
@@ -730,9 +731,10 @@
         const failure = Number(checks.failure || 0);
         const pending = Number(checks.pending || 0);
         const success = Number(checks.success || 0);
-        const total = Number(checks.total || success + failure + pending);
-        const ciClass = failure > 0 ? 'bad' : pending > 0 ? 'warn' : 'good';
-        const ciText = failure > 0 ? `${failure} ${t.failed}` : pending > 0 ? `${pending} ${t.pending}` : `${success}/${total} ${t.checks}`;
+        const neutral = Number(checks.neutral || 0);
+        const total = Number(checks.total || success + failure + pending + neutral);
+        const ciClass = failure > 0 ? 'bad' : pending > 0 ? 'warn' : neutral > 0 ? 'neutral' : total > 0 ? 'good' : 'pending';
+        const ciText = failure > 0 ? `${failure} ${t.failed}` : pending > 0 ? `${pending} ${t.pending}` : neutral > 0 ? `${success}/${total} ${t.checks} · ${neutral} ${t.neutral}` : total > 0 ? `${success}/${total} ${t.checks}` : t.unknown;
         return `<div class="draft-row"><span class="tag warn">#${Number(draft.number)}</span><div><a href="${safeUrl(draft.url)}" target="_blank" rel="noreferrer">${escapeHtml(draft.title)}</a><div class="draft-meta">${escapeHtml(draft.branch)} · ${escapeHtml(draft.author || '—')} · ${t.updated} ${relativeAge(draft.updatedAt)}</div></div><span class="ci-pill ${collectionFresh ? ciClass : 'pending'}">${collectionFresh ? '' : `${liveCopy.stale} · `}${escapeHtml(ciText)}</span></div>`;
       }).join('') : `<div class="draft-empty"><strong>${t.draftsNone}</strong></div>`;
       const escalations = drafts.flatMap(draft => {
@@ -779,15 +781,24 @@
       unified.querySelector('#draftPullRequests').prepend(backlogPanel);
       const activeSprint = unified.querySelector('#criticalSprintTrend .sprint-dot.active');
       const projectedSprints = unified.querySelectorAll('#criticalSprintTrend .sprint-dot.forecast');
-      for (let slot = 184; slot < currentSlot; slot += 1) {
-        activeSprint.insertAdjacentHTML('beforebegin', `<span class="sprint-dot unobserved" title="MS-${slot} · ${t.noEvidence}">${slot}</span>`);
-      }
-      activeSprint.innerHTML = `<span class="slot-ping" title="${t.liveUpdate}" aria-label="${t.liveUpdate}"></span>${currentSlot}`;
-      activeSprint.title = `MS-${currentSlot} · ${evidenceFresh ? t.currentSprint : t.awaiting}`;
-      projectedSprints[0].textContent = currentSlot + 1;
-      projectedSprints[0].title = `MS-${currentSlot + 1} · ${t.projectedSprint}`;
-      projectedSprints[1].textContent = currentSlot + 2;
-      projectedSprints[1].title = `MS-${currentSlot + 2} · ${t.projectedSprint}`;
+      const localDate = date => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+      const localInstant = date => `${localDate(date)} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+      const setSprintWindow = (marker, windowStart) => {
+        const slot = windowStart.getHours() * 12 + Math.floor(windowStart.getMinutes() / 5) + 1;
+        const identifier = `${localDate(windowStart)} · MS-${slot}`;
+        marker.textContent = identifier;
+        marker.title = identifier;
+        marker.dataset.slotIdentity = identifier;
+        marker.dataset.slotWindow = `${localInstant(windowStart)}–${localInstant(new Date(windowStart.getTime() + 300000))}`;
+      };
+      unified.querySelectorAll('#criticalSprintTrend .sprint-dot.good, #criticalSprintTrend .sprint-dot.bad').forEach(marker => {
+        const slot = Number(marker.textContent);
+        const historicalStart = new Date(`${state.micro.date}T00:00:00`);
+        historicalStart.setMinutes((slot - 1) * 5);
+        setSprintWindow(marker, historicalStart);
+      });
+      setSprintWindow(activeSprint, start);
+      projectedSprints.forEach((marker, index) => setSprintWindow(marker, new Date(start.getTime() + (index + 1) * 300000)));
       const liveSprintStrip = unified.querySelector('#criticalSprintTrend .sprint-strip');
       if (liveSprintStrip) {
         const maxScroll = Math.max(0, liveSprintStrip.scrollWidth - liveSprintStrip.clientWidth);
@@ -798,7 +809,7 @@
         }
         sprintScrollInitialized = true;
       }
-      unified.querySelector('#criticalSprintTrend .state').insertAdjacentHTML('afterend', `<small class="muted">${t.trendSource}</small><div class="sprint-legend"><span class="legend-good">${t.legendSuccess}</span><span class="legend-bad">${t.legendMiss}</span><span class="legend-missing">${t.legendMissing}</span><span class="legend-current">${t.legendCurrent}</span></div>`);
+      unified.querySelector('#criticalSprintTrend .state').insertAdjacentHTML('afterend', `<small class="muted">${liveCopy.historical} · ${state.micro.date} · MS-171–183 · ${language === 'fr' ? 'Heure locale; slot courant et projections sans preuve observée.' : 'Local time; current slot and forecasts have no observed evidence.'}</small><div class="sprint-legend"><span class="legend-good">${t.legendSuccess}</span><span class="legend-bad">${t.legendMiss}</span><span class="legend-missing">${t.legendMissing}</span><span class="legend-current">${t.legendCurrent}</span></div>`);
       if (!evidenceFresh) {
         const activeTimelinePoint = unified.querySelector('#criticalTimeline .time-point.active');
         activeTimelinePoint.className = 'time-point bad';
@@ -822,27 +833,22 @@
         marker.dataset.eventAt = instant;
         time.insertAdjacentHTML('beforeend', `<span class="event-age">${escapeHtml(relativeAgo(instant))}</span>`);
       });
-      const formatSlotTime = slot => {
-        const minutes = slot * 5;
-        return `${pad(Math.floor(minutes / 60) % 24)}:${pad(minutes % 60)}`;
-      };
       unified.querySelectorAll('#criticalSprintTrend .sprint-dot').forEach(marker => {
-        const slot = Number(marker.textContent.match(/\d+/)?.[0]);
         const stateLabel = marker.classList.contains('forecast') ? t.projectedSprint : marker.classList.contains('active') ? t.currentSprint : marker.classList.contains('unobserved') ? t.noEvidence : marker.classList.contains('good') ? t.legendSuccess : t.legendMiss;
-        const evidenceLabel = marker.classList.contains('unobserved') ? t.noEvidence : marker.classList.contains('forecast') ? t.conditional : marker.classList.contains('active') ? (evidenceFresh ? t.legendSuccess : t.awaiting) : stateLabel;
+        const evidenceLabel = marker.classList.contains('unobserved') ? t.noEvidence : marker.classList.contains('forecast') ? t.conditional : marker.classList.contains('active') ? t.noEvidence : stateLabel;
         const isForecast = marker.classList.contains('forecast');
-        const hasProof = marker.classList.contains('good') || (marker.classList.contains('active') && evidenceFresh);
+        const hasProof = marker.classList.contains('good');
         const expected = isForecast ? t.conditional : marker.classList.contains('bad') || marker.classList.contains('unobserved') ? (language === 'fr' ? 'preuve bornée reportée au slot suivant' : 'bounded proof rolled into the next slot') : (language === 'fr' ? 'reçu terminal de la pompe' : 'terminal pump receipt');
         marker.classList.add('timeline-marker');
         marker.tabIndex = 0;
         marker.setAttribute('aria-describedby', timelinePopover.id);
-        marker.dataset.popoverTitle = `MS-${slot}`;
+        marker.dataset.popoverTitle = marker.dataset.slotIdentity;
         marker.dataset.popoverItems = JSON.stringify([
-          `${language === 'fr' ? 'Fenêtre' : 'Window'}: ${formatSlotTime(slot)}–${formatSlotTime(slot + 1)}`,
+          `${language === 'fr' ? 'Fenêtre' : 'Window'}: ${marker.dataset.slotWindow}`,
           `${language === 'fr' ? 'État' : 'State'}: ${stateLabel}`,
           `${t.proofProvided}: ${hasProof ? evidenceLabel : (language === 'fr' ? 'aucune' : 'none')}`,
           `${t.proofExpected}: ${expected}`,
-          `${t.proofSource}: ${isForecast ? (language === 'fr' ? 'projection conditionnelle' : 'conditional forecast') : 'DuckDB · micro_sprint_projection'}`,
+          `${t.proofSource}: ${isForecast ? (language === 'fr' ? 'projection conditionnelle' : 'conditional forecast') : marker.classList.contains('active') ? t.liveUpdate : `${liveCopy.historical} · ${state.micro.date}`}`,
           `${t.proofPredicate}: ${hasProof ? 'slot_evidence_recorded = true' : 'slot_evidence_recorded = false'}`,
           `${language === 'fr' ? 'Transition suivante' : 'Next transition'}: ${marker.classList.contains('forecast') ? t.conditional : marker.classList.contains('bad') || marker.classList.contains('unobserved') ? (language === 'fr' ? 'reporter ou réduire le scope' : 'roll over or reduce scope') : (language === 'fr' ? 'tirer le prochain prédicat faux' : 'pull the next false predicate')}`
         ]);

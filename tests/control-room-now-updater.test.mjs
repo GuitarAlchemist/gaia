@@ -86,3 +86,47 @@ function gh {
     rmSync(scratch, { recursive: true, force: true });
   }
 });
+
+test('Gaia NOW updater measures host idle time in wrapping tick units', {
+  skip: process.platform !== 'win32' && 'The updater observes Windows host idle state',
+}, () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-now-idle-'));
+  try {
+    const probePath = join(scratch, 'probe.ps1');
+    const scriptPath = fileURLToPath(new URL('../scripts/update-gaia-now-state.ps1', import.meta.url));
+    // The updater's public idle calculation is loaded by running the updater itself; the stubbed
+    // gh rejects the refresh so only the production idle type survives to answer the literal cases.
+    writeFileSync(probePath, `
+param($OutputPath, $ScriptPath)
+function gh { $global:LASTEXITCODE = 1 }
+try { & $ScriptPath -OutputPath $OutputPath } catch { }
+$wrap = 4294967296
+[ordered]@{
+  ordinary = [GaiaHostIdle]::ElapsedSeconds(10000000, 9995000)
+  wrapped = [GaiaHostIdle]::ElapsedSeconds($wrap + 2000, $wrap - 3000)
+  pastOneWrap = [GaiaHostIdle]::ElapsedSeconds((2 * $wrap) + 2000, $wrap - 3000)
+  threshold = [GaiaHostIdle]::ElapsedSeconds($wrap + 310000, 10000)
+  belowThreshold = [GaiaHostIdle]::ElapsedSeconds($wrap + 309999, 10000)
+  thresholdStatus = [GaiaHostIdle]::Status([GaiaHostIdle]::ElapsedSeconds($wrap + 310000, 10000))
+  belowThresholdStatus = [GaiaHostIdle]::Status([GaiaHostIdle]::ElapsedSeconds($wrap + 309999, 10000))
+  failedStatus = [GaiaHostIdle]::Status(-1)
+} | ConvertTo-Json -Compress
+`, 'utf8');
+
+    const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', probePath,
+      '-OutputPath', join(scratch, 'state.json'), '-ScriptPath', scriptPath], { encoding: 'utf8', timeout: 30000 });
+    assert.equal(result.status, 0, result.stderr || result.error?.message);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      ordinary: 5,
+      wrapped: 5,
+      pastOneWrap: 5,
+      threshold: 300,
+      belowThreshold: 299,
+      thresholdStatus: 'afk',
+      belowThresholdStatus: 'present',
+      failedStatus: 'unknown',
+    });
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});

@@ -16,15 +16,25 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class GaiaHostIdle {
+    private const long AwaySeconds = 300;
     [StructLayout(LayoutKind.Sequential)]
     private struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
     [DllImport("user32.dll")]
     private static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
+    public static long ElapsedSeconds(long tickCount, uint lastInputTick) {
+        // GetLastInputInfo reports a 32-bit tick that wraps every 49.7 days, so the elapsed
+        // milliseconds must be measured in the same unsigned 32-bit modular units.
+        unchecked { return ((uint)tickCount - lastInputTick) / 1000; }
+    }
+    public static string Status(long idleSeconds) {
+        if (idleSeconds < 0) return "unknown";
+        return idleSeconds >= AwaySeconds ? "afk" : "present";
+    }
     public static long Seconds() {
         var info = new LASTINPUTINFO();
         info.cbSize = (uint)Marshal.SizeOf(info);
         if (!GetLastInputInfo(ref info)) return -1;
-        return (Environment.TickCount64 - info.dwTime) / 1000;
+        return ElapsedSeconds(Environment.TickCount64, info.dwTime);
     }
 }
 '@
@@ -106,7 +116,7 @@ function Write-LiveState {
             updatedAt = $latestRun.updatedAt
         }} else { $null }
         afk = [ordered]@{
-            status = if ($idleSeconds -ge 300) { 'afk' } elseif ($idleSeconds -ge 0) { 'present' } else { 'unknown' }
+            status = [GaiaHostIdle]::Status($idleSeconds)
             idleSeconds = if ($idleSeconds -ge 0) { $idleSeconds } else { $null }
         }
     }
