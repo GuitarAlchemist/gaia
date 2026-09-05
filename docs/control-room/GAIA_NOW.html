@@ -154,6 +154,7 @@
     .pump-message strong { color: #dcecff; }
     .pump-message.warn { border-color: #ffc857; background: #251d0a; }
     @media (max-width: 700px) { .pump-message { grid-template-columns: 64px 1fr; } .pump-message span { grid-column: 1 / -1; } }
+    #pumpLedger .pump-message { grid-template-columns: minmax(0, 1fr); }
     .slot-ping { position: absolute; top: 3px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: #75baff; animation: pulse 1.4s infinite; }
     .sprint-legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 5px 0 2px; color: #8fabca; font-size: .68rem; }
     .sprint-legend span::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 4px; border-radius: 50%; vertical-align: 1px; background: currentColor; }
@@ -575,19 +576,18 @@
     };
 
     const state = {
-      observedAt: '2026-09-04T23:11:11.000Z',
       contentObservedAt: '2026-09-04T23:11:11.000Z',
       digest: '36cb1f1',
       micro: { achieved: 9, total: 14 },
-      drafts: [],
-      pump: null,
-      afk: { status: 'unknown', idleSeconds: null },
       providers: {
         codexShort: 100, codexLong: 83,
         claudeShort: 93, claudeLong: 34, fable: 0,
         auggieLong: 53
       }
     };
+    let liveState = { observedAt: null, digest: '', drafts: [], pump: null, afk: null };
+    let collectionFailed = true;
+    const collectionFreshSeconds = 60; // Four missed 15-second snapshots expire collection evidence.
     const copy = {
       fr: {
         subtitle: 'Un seul écran utile. Actualisation toutes les 15 secondes.', systemSignal: '🤖 IA · pompe bloquée', systemSignalStale: '🤖 IA · pompe stale', humanSignal: '👤 Humain · rien requis',
@@ -664,6 +664,23 @@
     const render = () => {
       const language = document.documentElement.lang === 'en' ? 'en' : 'fr';
       const t = copy[language];
+      const liveCopy = language === 'fr' ? {
+        fresh: 'COLLECTE FRAÎCHE', stale: 'NON ACTUEL · dernier snapshot', ageUnknown: 'âge inconnu',
+        collection: 'Collecte', freshness: 'seuil de fraîcheur : 60 s', run: 'POMPE · RUN OBSERVÉ',
+        runUpdated: 'Run mis à jour', noRun: 'Aucun run observé',
+        noDelivery: 'Le succès du run ne constitue pas une preuve de livraison; reçu terminal non observé.',
+        historical: 'Snapshot historique', transport: 'Source de collecte'
+      } : {
+        fresh: 'FRESH COLLECTION', stale: 'NOT LIVE · last snapshot', ageUnknown: 'unknown age',
+        collection: 'Collection', freshness: 'freshness threshold: 60 s', run: 'PUMP · OBSERVED RUN',
+        runUpdated: 'Run updated', noRun: 'No observed run',
+        noDelivery: 'Run success is not delivery proof; terminal receipt not observed.',
+        historical: 'Historical snapshot', transport: 'Collection source'
+      };
+      const collectionTime = Date.parse(liveState.observedAt);
+      const collectionAge = (Date.now() - collectionTime) / 1000;
+      const collectionFresh = !collectionFailed && Number.isFinite(collectionAge) && collectionAge >= 0 && collectionAge <= collectionFreshSeconds;
+      const collectionStatus = collectionFresh ? liveCopy.fresh : liveCopy.stale;
       const priorSprintStrip = unified.querySelector('#criticalSprintTrend .sprint-strip');
       const priorSprintScroll = priorSprintStrip ? {
         left: priorSprintStrip.scrollLeft,
@@ -684,6 +701,13 @@
         return (saved === null ? defaultOpen : saved === 'true') ? ' open' : '';
       };
       const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+      const safeUrl = value => {
+        try { const url = new URL(value); return ['https:', 'http:'].includes(url.protocol) ? escapeHtml(url.href) : '#'; }
+        catch { return '#'; }
+      };
+      const collectionLabel = `${collectionStatus} · ${Number.isFinite(collectionAge) && collectionAge >= 0 ? `${Math.floor(collectionAge)}s` : liveCopy.ageUnknown}`;
+      const collectionDetails = `${liveCopy.collection}: ${escapeHtml(liveState.observedAt || t.unknown)} · ${liveCopy.freshness} · ${liveCopy.transport}: GAIA_NOW_STATE.json · ${escapeHtml(liveState.digest || t.unknown)}`;
+      const collectionBadge = `<small class="${collectionFresh ? 'green' : 'amber'}">${collectionLabel}</small><br>`;
       const relativeAge = value => {
         const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000));
         if (seconds < 60) return `${seconds}s`;
@@ -700,7 +724,7 @@
         if (seconds < 172800) return language === 'fr' ? `il y a ~${Math.round(seconds / 3600)} h` : `~${Math.round(seconds / 3600)} h ago`;
         return language === 'fr' ? `il y a ~${Math.round(seconds / 86400)} j` : `~${Math.round(seconds / 86400)} d ago`;
       };
-      const drafts = Array.isArray(state.drafts) ? state.drafts : [];
+      const drafts = liveState.drafts;
       const draftRows = drafts.length ? drafts.map(draft => {
         const checks = draft.checks || {};
         const failure = Number(checks.failure || 0);
@@ -709,7 +733,7 @@
         const total = Number(checks.total || success + failure + pending);
         const ciClass = failure > 0 ? 'bad' : pending > 0 ? 'warn' : 'good';
         const ciText = failure > 0 ? `${failure} ${t.failed}` : pending > 0 ? `${pending} ${t.pending}` : `${success}/${total} ${t.checks}`;
-        return `<div class="draft-row"><span class="tag warn">#${Number(draft.number)}</span><div><a href="${escapeHtml(draft.url)}" target="_blank" rel="noreferrer">${escapeHtml(draft.title)}</a><div class="draft-meta">${escapeHtml(draft.branch)} · ${escapeHtml(draft.author || '—')} · ${t.updated} ${relativeAge(draft.updatedAt)}</div></div><span class="ci-pill ${ciClass}">${escapeHtml(ciText)}</span></div>`;
+        return `<div class="draft-row"><span class="tag warn">#${Number(draft.number)}</span><div><a href="${safeUrl(draft.url)}" target="_blank" rel="noreferrer">${escapeHtml(draft.title)}</a><div class="draft-meta">${escapeHtml(draft.branch)} · ${escapeHtml(draft.author || '—')} · ${t.updated} ${relativeAge(draft.updatedAt)}</div></div><span class="ci-pill ${collectionFresh ? ciClass : 'pending'}">${collectionFresh ? '' : `${liveCopy.stale} · `}${escapeHtml(ciText)}</span></div>`;
       }).join('') : `<div class="draft-empty"><strong>${t.draftsNone}</strong></div>`;
       const escalations = drafts.flatMap(draft => {
         const items = [];
@@ -717,7 +741,9 @@
         if (Number(draft.checks?.failure || 0) > 0) items.push({ number: draft.number, title: draft.title, url: draft.url, label: t.ciFailureLabel, predicate: `failed_checks = ${Number(draft.checks.failure)}`, updatedAt: draft.updatedAt });
         return items;
       });
-      const escalationCard = escalations.length ? `<article id="activeEscalations" class="card top-timeline"><div class="state red">${t.escalationsTitle} · ${escalations.length}</div><small class="muted">${t.escalationRule}</small><div class="escalation-grid">${escalations.map(item => `<div class="escalation-row"><span class="tag bad">#${Number(item.number)}</span><div><a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer"><strong>${escapeHtml(item.label)}</strong> · ${escapeHtml(item.title)}</a><small>${escapeHtml(item.predicate)}</small></div><span class="draft-meta">${escapeHtml(t.systemOwner)} · ${escapeHtml(t.prUpdated)} ${relativeAgo(item.updatedAt)}</span></div>`).join('')}</div></article>` : '';
+      const escalationCard = escalations.length ? `<article id="activeEscalations" class="card top-timeline"><div class="state ${collectionFresh ? 'red' : 'amber'}">${t.escalationsTitle} · ${escalations.length}</div>${collectionBadge}<small class="muted">${t.escalationRule}</small><div class="escalation-grid">${escalations.map(item => `<div class="escalation-row"><span class="tag bad">#${Number(item.number)}</span><div><a href="${safeUrl(item.url)}" target="_blank" rel="noreferrer"><strong>${escapeHtml(item.label)}</strong> · ${escapeHtml(item.title)}</a><small>${escapeHtml(item.predicate)}</small></div><span class="draft-meta">${escapeHtml(t.systemOwner)} · ${escapeHtml(t.prUpdated)} ${relativeAgo(item.updatedAt)}</span></div>`).join('')}</div></article>` : '';
+      const pump = liveState.pump;
+      const pumpSummary = pump ? `run ${escapeHtml(pump.runId)} · ${escapeHtml(pump.status || t.unknown)} · ${escapeHtml(pump.conclusion || t.unknown)}` : liveCopy.noRun;
       document.querySelector('header .sub').textContent = t.subtitle;
       const systemSignal = document.getElementById('systemSignal');
       systemSignal.innerHTML = `${evidenceFresh ? t.systemSignal : t.systemSignalStale}<svg class="header-trend" viewBox="0 0 48 18" aria-hidden="true"><path class="baseline" d="M0 16H48"/><path class="watch" d="M1 7L10 6L19 9L28 8L37 10L47 9"/></svg><span class="header-popover" aria-hidden="true"><svg class="mini-radar" viewBox="0 0 120 100"><path class="axis" d="M60 8L105 82L15 82Z M60 55L60 8 M60 55L105 82 M60 55L15 82"/><path class="shape" d="M60 17.7L75.3 63.5L36.2 69.3Z"/><text x="48" y="7">Codex ${p.codexLong}%</text><text x="82" y="92">Claude ${p.claudeLong}%</text><text x="2" y="92">Auggie ${p.auggieLong}%</text></svg><strong>${t.capacityHelp}</strong><ul><li>${t.capacityImpact}</li><li>${t.capacityMitigation}</li><li>${t.capacityDecision}</li></ul></span>`; systemSignal.title = t.systemTitle;
@@ -726,13 +752,13 @@
       humanSignal.innerHTML = `${t.humanSignal}<svg class="header-trend" viewBox="0 0 48 18" aria-hidden="true"><path class="baseline" d="M0 16H48"/><path class="up" d="M1 13L10 11L19 12L28 8L37 7L47 4"/></svg>`; humanSignal.title = t.humanTitle;
       humanSignal.className = 'signal-button good';
       unified.innerHTML = `
-        <article id="draftPullRequests" class="card top-timeline"><div class="timeline-toolbar"><div><div class="state ${drafts.length ? 'green' : 'red'}"><span class="live-ping" title="${t.liveUpdate}" aria-label="${t.liveUpdate}"></span>${t.draftsTitle} · ${drafts.length}</div><small class="muted">${t.draftsRule}</small></div><small class="muted">${state.afk?.status === 'afk' ? `${t.hostAfk} · ${Math.floor((state.afk.idleSeconds || 0) / 60)}m` : ''}</small></div><div class="draft-grid">${draftRows}</div></article>
+        <article id="draftPullRequests" class="card top-timeline"><div class="timeline-toolbar"><div><div class="state ${collectionFresh ? (drafts.length ? 'green' : 'red') : 'amber'}">${collectionFresh ? `<span class="live-ping" title="${liveCopy.collection}" aria-label="${liveCopy.collection}"></span>` : ''}${t.draftsTitle} · ${drafts.length}</div>${collectionBadge}<small class="muted">${t.draftsRule}</small></div><small class="muted">${liveState.afk?.status === 'afk' ? `${collectionStatus} · ${t.hostAfk} · ${Math.floor((Number(liveState.afk.idleSeconds) || 0) / 60)}m` : ''}</small></div><small class="muted">${collectionDetails}</small><div class="draft-grid">${draftRows}</div></article>
         <article id="criticalTimeline" class="card top-timeline"><div class="timeline-toolbar"><div><div class="state green">${t.timeline}</div><small class="muted">${t.observed}</small></div><small class="muted">${t.sourceLine}</small></div><div class="horizontal-time" style="grid-template-columns:repeat(7,minmax(135px,1fr))"><div class="time-point good"><time>14:11</time><strong>${t.terminal}</strong><small>${t.terminalProof}</small></div><div class="time-point bad"><time>15:19</time><strong>${t.r4}</strong><small>${t.r4Proof}</small></div><div class="time-point good"><time>17:28</time><strong>${t.r5}</strong><small>${t.r5Proof}</small></div><div class="time-point active"><time>${t.now}</time><strong>${t.ship}</strong><small>${t.shipProof}</small></div><div class="time-point forecast"><time>${t.futureProof}</time><strong>${t.future}</strong><small>65%</small></div><div class="time-point forecast"><time>${t.future2Proof}</time><strong>${t.future2}</strong><small>45%</small></div><div class="time-point forecast"><time>${t.future3Proof}</time><strong>${t.future3}</strong><small>30%</small></div></div><div id="criticalSprintTrend"><div class="state green" style="margin-top:12px">${t.trend}</div><div class="sprint-summary"><div class="sprint-strip"><span class="sprint-dot bad">171</span><span class="sprint-dot bad">172</span><span class="sprint-dot good">173</span><span class="sprint-dot good">174</span><span class="sprint-dot good">175</span><span class="sprint-dot good">176</span><span class="sprint-dot bad">177</span><span class="sprint-dot good">178</span><span class="sprint-dot bad">179</span><span class="sprint-dot good">180</span><span class="sprint-dot bad">181</span><span class="sprint-dot good">182</span><span class="sprint-dot good">183</span><span class="sprint-dot active">184<br>${t.currentSprint}</span><span class="sprint-dot forecast">185<br>${t.projectedSprint}</span><span class="sprint-dot forecast">186<br>${t.projectedSprint}</span></div><svg class="sparkline" viewBox="0 0 160 42" role="img" aria-label="trend"><path class="axis" d="M0 36H160"/><path class="area" d="M2 34 L28 23 L54 7 L80 18 L106 23 L132 18 L158 7 L158 36 L2 36 Z"/><path class="line" d="M2 34 L28 23 L54 7 L80 18 L106 23 L132 18 L158 7"/></svg><div class="score-pill"><strong class="green">${score}%</strong><small class="muted">${state.micro.achieved}/${state.micro.total} ${t.achieved}<br>↗</small></div></div><div id="nextProofEta" class="proof-forecast"><strong>${t.nextProofEtaLabel}</strong><span>${t.nextProofEta}</span></div></div></article>
         ${escalationCard}
         <div class="signal-pair"><article id="systemRootSignal" class="card signal-anchor"><div class="state red">${t.systemRoot}</div><div class="signal-facts"><div class="signal-fact"><strong>${t.systemHealth}:</strong> ${t.systemHealthValue}</div><div class="signal-fact"><strong>${t.providerHealth}</strong><div class="root-capacity"><div class="capacity-ring-item"><span class="progress-ring" style="--value:${p.codexLong};--ring:#58e6a8"><span>${p.codexLong}%</span></span><div><strong>Codex</strong><small>${t.week}</small></div></div><div class="capacity-ring-item"><span class="progress-ring" style="--value:${p.claudeLong};--ring:#ffc857"><span>${p.claudeLong}%</span></span><div><strong>Claude</strong><small>${t.week}</small></div></div><div class="capacity-ring-item"><span class="progress-ring" style="--value:${p.auggieLong};--ring:#58e6a8"><span>${p.auggieLong}%</span></span><div><strong>Auggie</strong><small>${t.month}</small></div></div></div></div><div class="signal-fact warn"><strong>${t.systemAlert}:</strong> ${t.systemAlertValue}<span class="info-badge" tabindex="0" aria-label="${t.capacityHelp}">i<span class="info-popover">${t.capacityHelp}</span></span></div><div class="signal-fact"><strong>${t.systemNext}:</strong> ${t.systemNextValue}</div></div></article><article id="humanRootSignal" class="card signal-anchor rule"><div class="state green">${t.humanRoot}</div><div class="signal-facts"><div class="signal-fact"><strong>${t.direction}:</strong> ${t.directionValue}</div><div class="signal-fact"><strong>${t.collaboration}:</strong> ${t.collaborationValue}</div><div class="signal-fact"><strong>${t.risk}:</strong> ${t.riskValue}</div><div class="signal-fact muted-action"><strong>${t.action}:</strong> ${t.actionValue}</div></div></article></div>
         <article id="r5Status" class="card wide"><div class="state green"><span class="live-ping" title="${t.liveUpdate}" aria-label="${t.liveUpdate}"></span>${t.r5Status}</div><ol><li>✅ ${t.stepImplementation}</li><li>✅ ${t.stepFocused}</li><li>✅ ${t.stepFull}</li><li>✅ ${t.stepArchitecture}</li><li>✅ ${t.stepReview}</li></ol><div class="signal-fact"><strong>✅ ${t.notPublished}</strong></div></article>
         <article id="rootDeficits" class="card wide"><div class="state amber">${t.deficits}</div><div class="efficiency-grid"><div class="metric"><small>${t.designAxis}</small><strong class="value green">${t.designValue}</strong><small>${t.designReason}</small></div><div class="metric"><small>${t.codeAxis}</small><strong class="value green">${t.codeValue}</strong><small>${t.codeReason}</small></div><div class="metric"><small>${t.planningAxis}</small><strong class="value amber">${t.planningValue}</strong><small>${t.planningReason}</small></div><div class="metric"><small>${t.capacityAxis}</small><strong class="value amber">${t.capacityValue}</strong><small>${t.capacityReason}</small></div><div class="metric"><small>${t.publicationAxis}</small><strong class="value amber">${t.publicationValue}</strong><small>${t.publicationReason}</small></div></div><div class="signal-facts"><div class="signal-fact"><strong>${t.flowLabel}:</strong> ${t.flowValue}</div><div class="signal-fact warn"><strong>${t.predicateLabel}:</strong> ${t.predicateValue}</div><div class="signal-fact"><strong>${t.pullPolicy}</strong></div></div></article>
-        <article id="pumpLedger" class="card wide"><div class="state red"><span class="live-ping" title="${t.liveUpdate}" aria-label="${t.liveUpdate}"></span>${t.pumpLedger}</div><ol class="pump-ledger"><li class="pump-message"><time>18:44</time><strong>${t.pumpReceived}</strong><span>SCHEDULED_RECOVERY · issue #82 · run 33917897845</span></li><li class="pump-message"><time>18:45</time><strong>${t.pumpValidated}</strong><span>identity + App token + ledger root</span></li><li class="pump-message"><time>18:49</time><strong>${t.pumpResumed}</strong><span>operation 12cacc5b… · revision 4bb2d243…</span></li><li class="pump-message warn"><time>18:49</time><strong>${t.pumpBlocked}</strong><span>${t.pumpBlockDetail}</span></li></ol></article>
+        <article id="pumpLedger" class="card wide"><div class="state amber">${liveCopy.run}</div>${collectionBadge}<small class="muted">${collectionDetails}</small><ol class="pump-ledger"><li class="pump-message"><strong>${pump ? `<a href="${safeUrl(pump.url)}" target="_blank" rel="noreferrer">${pumpSummary}</a>` : pumpSummary}</strong><span>${liveCopy.runUpdated}: ${escapeHtml(pump?.updatedAt || t.unknown)}${pump?.updatedAt ? ` · ${relativeAgo(pump.updatedAt)}` : ''}</span></li></ol><p>${liveCopy.noDelivery}</p></article>
         <article id="evidenceSlot" class="card wide"><div class="state green"><span class="live-ping" title="${t.liveUpdate}" aria-label="${t.liveUpdate}"></span>${t.slot} · ${pad(start.getHours())}:${pad(start.getMinutes())}–${pad(end.getHours())}:${pad(end.getMinutes())}</div><div class="dual-meter"><div><strong>${t.time}</strong><progress value="${elapsed}" max="300"></progress><small>${elapsed}s ${t.elapsed} · ${300 - elapsed}s ${t.remaining}</small></div><div><strong>${t.proven}</strong><progress value="5" max="5"></progress><small>5/5 · ${t.r5}</small></div></div><div class="gate-summary"><div class="gate-chip"><strong>✅ ${t.gateScope}</strong><small>${t.gateScopeProof}</small></div><div class="gate-chip"><strong>✅ ${t.gateTdd}</strong><small>${t.gateTddProof}</small></div><div class="gate-chip"><strong>✅ ${t.gateTests}</strong><small>${t.gateTestsProof}</small></div><div class="gate-chip"><strong>✅ ${t.gateSnapshot}</strong><small>${t.gateSnapshotProof}</small></div><div class="gate-chip"><strong>✅ ${t.gateReviews}</strong><small>${t.gateReviewsProof}</small></div></div><p>${t.evidence} ${t.nextProof}</p><details class="tree" data-details-key="gate-audit"${detailsOpen('gate-audit')}><summary>${t.gateAudit}</summary><div>${t.gateAuditBody}</div></details><small class="muted">evidence age ${Math.floor(age / 60)}m ${age % 60}s · ${state.digest}…</small></article>
         <article class="card history"><div class="state green">${t.checkpoints}</div><div class="checkpoint-rail" style="grid-template-columns:repeat(6,minmax(130px,1fr))"><div class="checkpoint good"><span class="tag good">${t.done}</span><strong>${t.terminal}</strong><small><time>14:11</time> · ${t.past}</small></div><div class="checkpoint good"><span class="tag good">R1–R3</span><strong>RED→GREEN</strong><small><time>14:23–15:10</time> · ${t.past}</small></div><div class="checkpoint bad"><span class="tag bad">R4</span><strong>${t.r4Proof}</strong><small><time>15:19</time> · ${t.past}</small></div><div class="checkpoint good"><span class="tag good">R5</span><strong>1800/1800 ×2</strong><small><time>17:27</time> · ${t.past}</small></div><div class="checkpoint good"><span class="tag good">8×</span><strong>CI PASS</strong><small><time>17:28</time> · ${t.past}</small></div><div class="checkpoint active"><span class="tag warn">${t.now}</span><strong>${t.ship}</strong><small>${t.present}</small></div></div></article>
         <article class="card wide user-action" data-action="false"><div class="state green"><span class="attention-icon">⚠</span>${t.human}</div><p>${t.humanNone}</p></article>
@@ -740,6 +766,10 @@
         <article class="card side"><div class="state green">${t.capacity}</div><div class="capacity-grid"><div class="capacity-cell"><strong>${t.reviewsDone}</strong><small>R5 Standards + Spec</small></div><div class="capacity-cell"><strong>${t.coordinator}</strong><small>${t.ship}</small></div><div class="capacity-cell"><strong>${t.reserve}</strong><small class="green">93% ${t.session} · 34% ${t.week}</small></div><div class="capacity-cell"><strong>${t.admission}</strong><small class="amber">${t.admissionValue}</small></div></div></article>
         <article class="card side"><div class="state green">${t.providers}</div><table class="provider-matrix"><thead><tr><th>${t.provider}</th><th>${t.short}</th><th>${t.long}</th><th>${t.source}</th></tr></thead><tbody><tr><td><strong>Codex</strong><small class="muted">Spark = model</small></td><td class="quota"><small>5 h · ${p.codexShort}% ${t.free}</small><progress value="${p.codexShort}" max="100"></progress></td><td class="quota"><small>${t.week} · ${p.codexLong}% ${t.free}</small><progress value="${p.codexLong}" max="100"></progress></td><td><small>Codex API</small></td></tr><tr><td><strong>Claude Code</strong></td><td class="quota"><small>5 h · ${p.claudeShort}% ${t.free}</small><progress value="${p.claudeShort}" max="100"></progress></td><td class="quota"><small>${t.week} · ${p.claudeLong}% ${t.free}</small><progress value="${p.claudeLong}" max="100"></progress><small class="red">Fable 0%</small></td><td><small>claude.ai/settings/usage</small></td></tr><tr><td><strong>Antigravity / AGY</strong></td><td><small>${t.unknown}</small></td><td><small>${t.unknown}</small></td><td><small>Settings / Models</small></td></tr><tr><td><strong>Auggie</strong></td><td>—</td><td class="quota"><small>${t.month} · ${p.auggieLong}% ${t.free}</small><progress value="${p.auggieLong}" max="100"></progress></td><td><small>21,199 / 40,000</small></td></tr><tr><td><strong>Junie</strong></td><td><small><code>/usage</code></small></td><td><small>${t.unknown}</small></td><td><small>${t.cycle}</small></td></tr></tbody></table></article>
         <article class="card side"><div class="state amber">${t.invariant}</div><ul><li>${t.inv1}</li><li>${t.inv2}</li><li>${t.inv3}</li></ul><div class="prompt-hint">${t.invRule}</div></article>`;
+      unified.querySelectorAll('#systemRootSignal, #humanRootSignal, #r5Status, #rootDeficits, #evidenceSlot, .card.side, .card.history').forEach(card => {
+        card.insertAdjacentHTML('afterbegin', `<small class="muted">${liveCopy.historical} · ${state.contentObservedAt} · SHA ${state.digest}</small>`);
+        card.querySelectorAll('.live-ping').forEach(ping => ping.remove());
+      });
       const activeSprint = unified.querySelector('#criticalSprintTrend .sprint-dot.active');
       const projectedSprints = unified.querySelectorAll('#criticalSprintTrend .sprint-dot.forecast');
       for (let slot = 184; slot < currentSlot; slot += 1) {
@@ -843,16 +873,18 @@
         `${t.siblingRelation}: ${t.noneDeclared}`,
         `${t.proofSource}: GitHub PR metadata · checked 2026-09-04 18:49 EDT`
       ]);
-      unified.querySelectorAll('#pumpLedger .pump-message').forEach((message, index) => {
+      unified.querySelectorAll('#pumpLedger .pump-message').forEach(message => {
         message.classList.add('timeline-marker');
         message.tabIndex = 0;
         message.setAttribute('aria-describedby', timelinePopover.id);
         message.dataset.popoverTitle = message.querySelector('strong')?.textContent || t.pumpLedger;
         message.dataset.popoverItems = JSON.stringify([
           `${t.proofProvided}: ${message.querySelector('span')?.textContent || '—'}`,
-          `${t.proofExpected}: ${index === 3 ? (language === 'fr' ? 'REUSED ou reçu terminal refusé avec cause' : 'REUSED or causally refused terminal receipt') : (language === 'fr' ? 'message suivant du ledger' : 'next ledger message')}`,
-          `${t.proofSource}: GitHub Actions run 33917897845 + receipt bd65dd2`,
-          `${t.proofPredicate}: ${index === 3 ? 'effect_acknowledged = false' : 'phase_observed = true'}`
+          `${t.proofExpected}: ${liveCopy.noDelivery}`,
+          `${t.proofSource}: GitHub Actions run ${pump?.runId ?? t.unknown} · ${pump?.url || t.unknown}`,
+          `${liveCopy.collection}: ${liveState.observedAt || t.unknown} · ${collectionLabel}`,
+          `${liveCopy.runUpdated}: ${pump?.updatedAt || t.unknown}`,
+          `${t.proofPredicate}: terminal_receipt = ${t.unknown}`
         ]);
       });
       const capabilityRows = unified.querySelectorAll('.provider-matrix tbody tr');
@@ -869,7 +901,7 @@
         language === 'fr' ? visibleText.includes('TIMELINE DE COORDINATION') : visibleText.includes('COORDINATION TIMELINE') && !/Aucune|approuvé|reste à prouver/.test(visibleText),
         [...unified.querySelectorAll('#criticalSprintTrend .sprint-dot')].every(marker => marker.classList.contains('timeline-marker') && marker.dataset.popoverItems),
         [...unified.querySelectorAll('#criticalTimeline .time-point')].every(marker => marker.classList.contains('timeline-marker') && marker.dataset.popoverItems) && Boolean(finalReview.dataset.popoverItems),
-        Boolean(document.getElementById('nextProofEta')?.textContent.includes(evidenceFresh ? t.nextProofEta : t.proofOverdue)) && unified.querySelectorAll('#pumpLedger .pump-message').length === 4
+        Boolean(document.getElementById('nextProofEta')?.textContent.includes(evidenceFresh ? t.nextProofEta : t.proofOverdue)) && unified.querySelectorAll('#pumpLedger .pump-message').length === 1
       ];
       // Viewport fit is diagnostic: short screens and growing live content remain usable.
       const layoutChecks = [
@@ -933,10 +965,20 @@
         const response = await fetch(`./GAIA_NOW_STATE.json?t=${Date.now()}`, { cache: 'no-store' });
         if (!response.ok) throw new Error(`live state HTTP ${response.status}`);
         const next = await response.json();
-        if (!next || !next.observedAt || !Array.isArray(next.drafts)) throw new Error('invalid live state payload');
-        Object.assign(state, next);
+        const observed = typeof next?.observedAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(next.observedAt) ? Date.parse(next.observedAt) : NaN;
+        if (!Number.isFinite(observed) || observed > Date.now() || !Array.isArray(next.drafts) || next.drafts.some(draft => !draft || typeof draft !== 'object')) throw new Error('invalid live state payload');
+        liveState = {
+          observedAt: next.observedAt,
+          digest: typeof next.digest === 'string' ? next.digest : '',
+          drafts: next.drafts,
+          pump: next.pump && typeof next.pump === 'object' && !Array.isArray(next.pump) ? next.pump : null,
+          afk: next.afk && typeof next.afk === 'object' && !Array.isArray(next.afk) ? next.afk : null
+        };
+        collectionFailed = false;
         safeRender();
       } catch (error) {
+        collectionFailed = true;
+        safeRender();
         console.warn('Gaia NOW live-state refresh failed', error);
       }
     };

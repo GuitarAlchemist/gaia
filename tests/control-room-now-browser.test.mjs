@@ -30,9 +30,11 @@ test('Gaia NOW keeps usable layouts live and recovers structural failures', {
     const page = await context.newPage();
     await page.clock.install();
     let liveState = { ...fixture, observedAt: new Date().toISOString(), drafts: [] };
+    let failRefresh = false;
     const errors = [];
     page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
     await page.route('http://gaia-now.test/**', route => route.fulfill({
+      status: failRefresh && route.request().url().includes('GAIA_NOW_STATE.json') ? 503 : 200,
       contentType: route.request().url().includes('GAIA_NOW_STATE.json') ? 'application/json' : 'text/html',
       body: route.request().url().includes('GAIA_NOW_STATE.json')
         ? JSON.stringify(liveState)
@@ -40,7 +42,12 @@ test('Gaia NOW keeps usable layouts live and recovers structural failures', {
     }));
     await page.goto('http://gaia-now.test/GAIA_NOW.html');
     await page.waitForLoadState('networkidle');
-    return { page, errors, setDrafts: drafts => { liveState = { ...liveState, drafts }; } };
+    return {
+      page, errors,
+      setDrafts: drafts => { liveState = { ...liveState, drafts }; },
+      setState: fields => { liveState = { ...liveState, ...fields }; },
+      failRefresh: () => { failRefresh = true; },
+    };
   }
 
   async function capture(page, name) {
@@ -97,4 +104,75 @@ test('Gaia NOW keeps usable layouts live and recovers structural failures', {
     assert.equal(await page.locator('body').getAttribute('data-ui-qa'), 'RECOVERED');
     assert.ok(errors.some(message => message.includes('Gaia NOW safe-render rollback')));
   });
+
+  await t.test('transport refresh cannot replace historical evidence and renders the actual pump run', async t => {
+    const { page, setState } = await openPage(t, { height: 1400 });
+    setState({ digest: 'transport-witness', contentObservedAt: new Date().toISOString(), providers: {},
+      pump: { runId: 999001, status: 'completed', conclusion: 'success', url: 'https://github.com/GuitarAlchemist/gaia/actions/runs/999001', updatedAt: '2026-01-01T00:00:00Z' } });
+    await page.clock.fastForward(16000);
+    await page.waitForLoadState('networkidle');
+    await capture(page, 'transport-pump');
+    assert.match(await page.locator('#evidenceSlot').innerText(), /36cb1f1/);
+    assert.doesNotMatch(await page.locator('#evidenceSlot').innerText(), /transport-witness/);
+    assert.match(await page.locator('#pumpLedger').innerText(), /999001.*completed.*success/s);
+    assert.match(await page.locator('#pumpLedger').innerText(), /2026-01-01T00:00:00Z/);
+    assert.match(await page.locator('#pumpLedger').innerText(), /COLLECTE FRAÎCHE/);
+    assert.match(await page.locator('#pumpLedger').innerText(), /preuve de livraison/i);
+    await page.locator('#pumpLedger .pump-message').focus();
+    assert.match(await page.locator('#timelinePopover').innerText(), /999001/);
+    assert.doesNotMatch(await page.locator('#timelinePopover').innerText(), /33917897845|bd65dd2/);
+    await page.locator('#langToggle').click();
+    await page.clock.runFor(1);
+    assert.match(await page.locator('#pumpLedger').innerText(), /delivery proof/i);
+    setState({ pump: { runId: 999002, status: 'in_progress', conclusion: null, url: 'javascript:alert(1)' } });
+    await page.clock.fastForward(16000);
+    await page.waitForLoadState('networkidle');
+    assert.match(await page.locator('#pumpLedger').innerText(), /999002.*in_progress/s);
+    assert.doesNotMatch(await page.locator('#pumpLedger').innerText(), /999001/);
+    assert.equal(await page.locator('#pumpLedger a').getAttribute('href'), '#');
+  });
+
+  await t.test('successful polling of unchanged JSON does not renew its source freshness', async t => {
+    const { page } = await openPage(t, { height: 1400 });
+    const observed = await page.locator('#draftPullRequests > small').innerText();
+    assert.match(await page.locator('#draftPullRequests').innerText(), /COLLECTE FRAÎCHE/);
+    await page.clock.fastForward(61000);
+    await page.waitForLoadState('networkidle');
+    await capture(page, 'unchanged-source-stale');
+    assert.match(await page.locator('#draftPullRequests').innerText(), /NON ACTUEL/);
+    assert.equal(await page.locator('#draftPullRequests > small').innerText(), observed);
+    assert.equal(await page.locator('#draftPullRequests .live-ping').count(), 0);
+  });
+
+  await t.test('collection failure retains drafts but labels all current observations stale', async t => {
+    const { page, setDrafts, failRefresh } = await openPage(t, { height: 1400 });
+    setDrafts([{ ...draft(940), mergeStateStatus: 'DIRTY', checks: { failure: 1 } }]);
+    await page.clock.fastForward(16000);
+    await page.waitForLoadState('networkidle');
+    assert.match(await page.locator('#draftPullRequests').innerText(), /COLLECTE FRAÎCHE/);
+    failRefresh();
+    await page.clock.fastForward(61000);
+    await page.waitForLoadState('networkidle');
+    await capture(page, 'stale-collection');
+    assert.match(await page.locator('#draftPullRequests').innerText(), /940/);
+    for (const id of ['draftPullRequests', 'activeEscalations', 'pumpLedger']) {
+      assert.match(await page.locator(`#${id}`).innerText(), /NON ACTUEL/);
+      assert.equal(await page.locator(`#${id} .live-ping`).count(), 0);
+    }
+    await page.locator('#langToggle').click();
+    await page.clock.runFor(1);
+    assert.match(await page.locator('#draftPullRequests').innerText(), /NOT LIVE/);
+  });
+
+  for (const observedAt of ['invalid-time', '2999-01-01T00:00:00Z']) {
+    await t.test(`invalid observation time cannot appear fresh: ${observedAt}`, async t => {
+      const { page, setState } = await openPage(t, { height: 1400 });
+      setState({ observedAt, drafts: [draft(941)] });
+      await page.clock.fastForward(16000);
+      await page.waitForLoadState('networkidle');
+      assert.match(await page.locator('#draftPullRequests').innerText(), /NON ACTUEL/);
+      assert.equal(await page.locator('#draftPullRequests .live-ping').count(), 0);
+      assert.notEqual(await page.locator('body').getAttribute('data-ui-qa'), 'RECOVERED');
+    });
+  }
 });
