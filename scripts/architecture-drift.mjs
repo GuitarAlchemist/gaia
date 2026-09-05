@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
@@ -52,30 +51,6 @@ function git(root, args) {
   return run.stdout.trim();
 }
 
-function architectureRevisions(root) {
-  let record;
-  try {
-    record = JSON.parse(readFileSync(`${root}/package.json`, 'utf8')).gaiaArchitectureVerification;
-  } catch {
-    throw new ArchitectureDriftRefusal('VERIFICATION_RECORD_INVALID');
-  }
-  if (record === null || typeof record !== 'object'
-    || typeof record.commit !== 'string' || !/^[0-9a-f]{40}$/.test(record.commit)) {
-    throw new ArchitectureDriftRefusal('VERIFICATION_RECORD_INVALID');
-  }
-  const run = spawnSync('git', [
-    '-c', `safe.directory=${root.replaceAll('\\', '/')}`,
-    'show', '--end-of-options', `${record.commit}:ARCHITECTURE.md`,
-  ], { cwd: root, windowsHide: true });
-  if (run.status !== 0 || !Buffer.isBuffer(run.stdout)) {
-    throw new ArchitectureDriftRefusal('REPOSITORY_READ_FAILED');
-  }
-  return [{
-    commit: record.commit,
-    contentRevision: `sha256:${createHash('sha256').update(run.stdout).digest('hex')}`,
-  }];
-}
-
 function impactFromEvent() {
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath) return { kind: 'UNDECLARED', evidence: null };
@@ -97,6 +72,9 @@ function main() {
   // Architecture impact is declared in the pull-request body. A push has no truthful
   // equivalent witness, so the post-merge invocation is intentionally a no-op.
   if (process.env.GITHUB_EVENT_NAME === 'push') return 0;
+  // The verification record is read from the working tree by the checker and bound to the
+  // ARCHITECTURE.md bytes there. The recorded commit is never resolved through Git: after a
+  // squash merge it names a commit of the merged head branch that a clone need not hold.
   const args = parseArgs(process.argv.slice(2));
   const root = pluginRoot();
   const revision = git(root, ['rev-parse', 'HEAD']);
@@ -107,7 +85,6 @@ function main() {
   const report = checkArchitectureDrift(createFilesystemArchitectureInventory({
     root,
     revision,
-    architectureRevisions: architectureRevisions(root),
     changedPaths,
     architectureImpact: impactFromEvent(),
   }));

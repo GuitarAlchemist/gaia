@@ -15,6 +15,17 @@ import {
 } from '../src/architecture-drift.mjs';
 
 const VERIFIED = '83516746a1f54fecc1b9e261df47f42f431a5642';
+// A well-formed commit identifier that no fixture history contains: the shape a squash merge
+// leaves behind when the record names a commit of the merged head branch.
+const ORPHANED = 'b37b37b37b37b37b37b37b37b37b37b37b37b37b';
+const MALFORMED_COMMITS = [
+  '65c48b4d',
+  '83516746A1F54FECC1B9E261DF47F42F431A5642',
+  '83516746a1f54fecc1b9e261df47f42f431a564',
+  '83516746a1f54fecc1b9e261df47f42f431a56420',
+  'g3516746a1f54fecc1b9e261df47f42f431a5642',
+  '',
+];
 const REQUIRED_HEADINGS = [
   'Purpose, scope, and non-goals',
   'System context and organization-neutral boundary',
@@ -79,15 +90,12 @@ function snapshot(overrides = {}) {
     ...overrides.files,
   };
   return {
-    schema: 'gaia-architecture-inventory/1',
+    schema: 'gaia-architecture-inventory/2',
     revision: '9e006fb3c03a3d097dd70f7f55b37273ec9d30e4',
-    architectureRevisions: [{ commit: verification.commit, contentRevision: digest(markdown) }],
     files,
     changedPaths: ['ARCHITECTURE.md'],
     architectureImpact: { kind: 'UPDATED', evidence: 'ARCHITECTURE.md' },
     ...overrides.inventory,
-    ...(overrides.architectureRevisions === undefined
-      ? {} : { architectureRevisions: overrides.architectureRevisions }),
   };
 }
 
@@ -108,7 +116,6 @@ function forEachAdapter(input, assertion) {
       ['filesystem', createFilesystemArchitectureInventory({
         root: scratch,
         revision: input.revision,
-        architectureRevisions: input.architectureRevisions,
         changedPaths: input.changedPaths,
         architectureImpact: input.architectureImpact,
       })],
@@ -152,7 +159,14 @@ function copyCliProduct(root, { checker = true, checkerSource = null, scriptSour
   }
 }
 
-function createCliGitFixture({ checker = true, scriptSource = null } = {}) {
+// Two-commit recipe: the reviewed ARCHITECTURE.md bytes land first, then a record that names
+// that commit. `recordCommit` and `attestedArchitecture` let a test shape the record alone.
+function createCliGitFixture({
+  checker = true,
+  scriptSource = null,
+  recordCommit = null,
+  attestedArchitecture = null,
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'gaia-architecture-cli-'));
   copyCliProduct(root, { checker, scriptSource });
   writeTree(root, {
@@ -165,30 +179,35 @@ function createCliGitFixture({ checker = true, scriptSource = null } = {}) {
   git(root, ['config', 'user.email', 'architecture-test@example.invalid']);
   git(root, ['add', '.']);
   git(root, ['commit', '--quiet', '-m', 'fixture: older architecture']);
-  const reviewedCommit = git(root, ['rev-parse', 'HEAD']);
+  const olderCommit = git(root, ['rev-parse', 'HEAD']);
 
   const currentArchitecture = architecture().replace(
     "This is Gaia's authoritative architecture map.",
     "This is Gaia's authoritative architecture map. Reviewed current bytes.",
   );
+  writeTree(root, { 'ARCHITECTURE.md': currentArchitecture });
+  git(root, ['add', '.']);
+  git(root, ['commit', '--quiet', '-m', 'fixture: current architecture']);
+  const reviewedCommit = git(root, ['rev-parse', 'HEAD']);
+
   writeTree(root, {
-    'ARCHITECTURE.md': currentArchitecture,
     'package.json': verificationPackage({
       schema: 'gaia-architecture-verification/1',
-      commit: reviewedCommit,
+      commit: recordCommit ?? reviewedCommit,
       date: '2026-09-01',
-      contentRevision: digest(currentArchitecture),
+      contentRevision: digest(attestedArchitecture ?? currentArchitecture),
     }),
   });
   git(root, ['add', '.']);
-  git(root, ['commit', '--quiet', '-m', 'fixture: current architecture']);
+  git(root, ['commit', '--quiet', '-m', 'fixture: attest current architecture']);
   git(root, ['branch', 'base-fixture', reviewedCommit]);
-  return { root, reviewedCommit };
+  return { root, olderCommit, reviewedCommit, currentArchitecture };
 }
 
 function createPolicyCliFixture({
   witnessArchitecture = architecture(),
   currentArchitecture = witnessArchitecture,
+  attestedArchitecture = currentArchitecture,
   changedFiles = { 'README.md': '# Current fixture\n' },
   eventBody = 'Architecture impact: none\nArchitecture evidence: Test-only fixture.',
   checkerSource = null,
@@ -213,7 +232,7 @@ function createPolicyCliFixture({
       schema: 'gaia-architecture-verification/1',
       commit: reviewedCommit,
       date: '2026-09-01',
-      contentRevision: digest(currentArchitecture),
+      contentRevision: digest(attestedArchitecture),
     }),
   });
   git(root, ['add', '.']);
@@ -231,7 +250,13 @@ function createPolicyCliFixture({
 }
 
 function runCli(root, args, env = {}) {
-  return run(root, process.execPath, ['scripts/architecture-drift.mjs', ...args], env);
+  // The fixture owns its event context. Do not let the parent GitHub job silently turn every
+  // child invocation into the production push no-op; tests that exercise that path opt in below.
+  return run(root, process.execPath, ['scripts/architecture-drift.mjs', ...args], {
+    GITHUB_EVENT_NAME: '',
+    GITHUB_EVENT_PATH: '',
+    ...env,
+  });
 }
 
 test('the public drift seam has the same closed report for filesystem and in-memory inventories', () => {
@@ -265,14 +290,27 @@ test('both adapters deterministically close broken links and missing required se
   }
 });
 
-test('both adapters reject a historical commit that does not contain the reviewed architecture bytes', () => {
-  const input = snapshot({
-    architectureRevisions: [{ commit: VERIFIED, contentRevision: digest('older architecture bytes\n') }],
-  });
+test('both adapters pass a record whose commit no history contains when its content revision matches', () => {
+  const input = snapshot({ verification: { commit: ORPHANED } });
   forEachAdapter(input, (adapter, name) => {
-    assert.deepEqual(checkArchitectureDrift(adapter).violations,
-      [{ code: 'STALE_VERIFIED_COMMIT', subject: VERIFIED }], name);
+    const report = checkArchitectureDrift(adapter);
+    assert.equal(report.verdict, 'PASS', name);
+    assert.equal(report.verifiedCommit, ORPHANED, name);
+    assert.deepEqual(report.violations, [], name);
   });
+});
+
+test('both adapters refuse a malformed record commit before producing a report', () => {
+  for (const commit of MALFORMED_COMMITS) {
+    const input = snapshot({ verification: { commit } });
+    forEachAdapter(input, (adapter, name) => {
+      assert.throws(
+        () => checkArchitectureDrift(adapter),
+        (error) => error instanceof ArchitectureDriftRefusal && error.code === 'VERIFICATION_RECORD_INVALID',
+        `${name}: ${JSON.stringify(commit)}`,
+      );
+    });
+  }
 });
 
 test('both adapters bind the attestation to the exact current ARCHITECTURE.md bytes', () => {
@@ -281,7 +319,6 @@ test('both adapters bind the attestation to the exact current ARCHITECTURE.md by
   const input = snapshot({
     architecture: after,
     verification: { contentRevision: digest(before) },
-    architectureRevisions: [{ commit: VERIFIED, contentRevision: digest(before) }],
   });
   forEachAdapter(input, (adapter, name) => {
     assert.deepEqual(checkArchitectureDrift(adapter).violations, [{
@@ -398,18 +435,92 @@ test('the public CLI rejects an option-shaped base before Git can create an outp
   }
 });
 
-test('the public CLI derives stale verification from Git bytes for commit and canonical-ref bases', () => {
+test('the public CLI derives changed paths from Git for commit and canonical-ref bases', () => {
   const fixture = createCliGitFixture();
   try {
+    const updated = runCli(fixture.root, ['--base', fixture.olderCommit]);
+    assert.equal(updated.status, 0, updated.stderr || updated.stdout);
+    assert.deepEqual(JSON.parse(updated.stdout).violations, []);
     for (const base of [fixture.reviewedCommit, 'refs/heads/base-fixture']) {
       const result = runCli(fixture.root, ['--base', base]);
       assert.equal(result.status, 1, result.stderr);
-      const report = JSON.parse(result.stdout);
-      assert.deepEqual(report.violations,
-        [{ code: 'STALE_VERIFIED_COMMIT', subject: fixture.reviewedCommit }]);
+      assert.deepEqual(JSON.parse(result.stdout).violations,
+        [{ code: 'ARCHITECTURE_IMPACT_UNDECLARED', subject: 'package.json' }], base);
     }
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('B37: the public CLI passes a record whose commit is unresolvable when the content revision matches', () => {
+  const fixture = createCliGitFixture({ recordCommit: ORPHANED });
+  try {
+    assert.notEqual(
+      run(fixture.root, 'git', ['cat-file', '-e', '--end-of-options', `${ORPHANED}^{commit}`]).status,
+      0,
+      'the recorded commit must be absent from the fixture history',
+    );
+    const result = runCli(fixture.root, ['--base', fixture.olderCommit]);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(result.stderr, '');
+    assert.deepEqual(JSON.parse(result.stdout), {
+      schema: 'gaia-architecture-drift-report/1',
+      verdict: 'PASS',
+      verifiedCommit: ORPHANED,
+      architectureContentRevision: digest(fixture.currentArchitecture),
+      advisories: [],
+      violations: [],
+    });
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('MECHANISM REVERT: requiring the recorded commit to resolve breaks the gate in a clone without that ref', () => {
+  const source = readFileSync(new URL('../scripts/architecture-drift.mjs', import.meta.url), 'utf8');
+  const marker = "const revision = git(root, ['rev-parse', 'HEAD']);";
+  const resolvability = "git(root, ['cat-file', '-e', '--end-of-options', "
+    + "JSON.parse(readFileSync(`${root}/package.json`, 'utf8')).gaiaArchitectureVerification.commit]);";
+  const mutant = source.replace(marker, `${marker}\n  ${resolvability}`);
+  assert.notEqual(mutant, source, 'the commit-resolvability mutation must be applied');
+  const fixture = createCliGitFixture({ recordCommit: ORPHANED, scriptSource: mutant });
+  try {
+    const result = runCli(fixture.root, ['--base', fixture.olderCommit]);
+    assert.equal(result.status, 2);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, 'REPOSITORY_READ_FAILED\n');
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('the public CLI fails a record whose content revision does not match the ARCHITECTURE.md bytes at HEAD', () => {
+  const fixture = createCliGitFixture({ attestedArchitecture: architecture() });
+  try {
+    const result = runCli(fixture.root, ['--base', fixture.olderCommit]);
+    assert.equal(result.status, 1, result.stderr);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.verdict, 'FAIL');
+    assert.deepEqual(report.violations, [{
+      code: 'ARCHITECTURE_CONTENT_REVISION_MISMATCH',
+      subject: digest(fixture.currentArchitecture),
+    }]);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('the public CLI refuses a malformed record commit without producing a report', () => {
+  for (const commit of ['65c48b4d', '83516746A1F54FECC1B9E261DF47F42F431A5642']) {
+    const fixture = createCliGitFixture({ recordCommit: commit });
+    try {
+      const result = runCli(fixture.root, ['--base', fixture.olderCommit]);
+      assert.equal(result.status, 2, commit);
+      assert.equal(result.stdout, '', commit);
+      assert.equal(result.stderr, 'VERIFICATION_RECORD_INVALID\n', commit);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -478,7 +589,8 @@ export function checkArchitectureDrift() {
       name: 'stale revision',
       witnessArchitecture: architecture(),
       currentArchitecture: architecture().replace('Implemented boundary.', 'Changed boundary.'),
-      expectedCode: 'STALE_VERIFIED_COMMIT',
+      attestedArchitecture: architecture(),
+      expectedCode: 'ARCHITECTURE_CONTENT_REVISION_MISMATCH',
     },
     {
       name: 'interface leak',
@@ -518,25 +630,50 @@ export function checkArchitectureDrift() {
   }
 });
 
-test('MECHANISM REVERT: removing the commit-content witness makes the stale-revision case escape', async () => {
-  const input = snapshot({
-    architectureRevisions: [{ commit: VERIFIED, contentRevision: digest('older architecture bytes\n') }],
-  });
+test('MECHANISM REVERT: removing the content-revision binding lets an un-attested ARCHITECTURE.md pass', async () => {
+  const before = architecture();
+  const input = snapshot({ architecture: `${before}\n`, verification: { contentRevision: digest(before) } });
   assert.equal(checkArchitectureDrift(createInMemoryArchitectureInventory(input)).verdict, 'FAIL');
 
   const source = readFileSync(new URL('../src/architecture-drift.mjs', import.meta.url), 'utf8');
-  const marker = 'if (witnessContentRevision !== verification.contentRevision) {';
-  const mutant = source.replace(marker, 'if (false && witnessContentRevision !== verification.contentRevision) {');
-  assert.notEqual(mutant, source, 'the commit-content witness mutation must be applied');
+  const marker = 'if (actualContentRevision !== verification.contentRevision) {';
+  const mutant = source.replace(marker, 'if (false && actualContentRevision !== verification.contentRevision) {');
+  assert.notEqual(mutant, source, 'the content-revision binding mutation must be applied');
   const scratch = mkdtempSync(join(tmpdir(), 'gaia-architecture-mutant-'));
   try {
     const mutantPath = join(scratch, 'architecture-drift.mjs');
     writeFileSync(mutantPath, mutant, 'utf8');
-    const mutatedModule = await import(`${pathToFileURL(mutantPath).href}?mutation=commit-content-witness`);
+    const mutatedModule = await import(`${pathToFileURL(mutantPath).href}?mutation=content-revision-binding`);
     const report = mutatedModule.checkArchitectureDrift(
       mutatedModule.createInMemoryArchitectureInventory(input),
     );
     assert.equal(report.verdict, 'PASS');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('MECHANISM REVERT: removing the commit-shape check lets a malformed record commit produce a report', async () => {
+  const input = snapshot({ verification: { commit: '65c48b4d' } });
+  assert.throws(
+    () => checkArchitectureDrift(createInMemoryArchitectureInventory(input)),
+    (error) => error instanceof ArchitectureDriftRefusal && error.code === 'VERIFICATION_RECORD_INVALID',
+  );
+
+  const source = readFileSync(new URL('../src/architecture-drift.mjs', import.meta.url), 'utf8');
+  const marker = "    || typeof record.commit !== 'string' || !COMMIT.test(record.commit)\n";
+  const mutant = source.replace(marker, '');
+  assert.notEqual(mutant, source, 'the commit-shape mutation must be applied');
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-architecture-commit-shape-mutant-'));
+  try {
+    const mutantPath = join(scratch, 'architecture-drift.mjs');
+    writeFileSync(mutantPath, mutant, 'utf8');
+    const mutatedModule = await import(`${pathToFileURL(mutantPath).href}?mutation=commit-shape`);
+    const report = mutatedModule.checkArchitectureDrift(
+      mutatedModule.createInMemoryArchitectureInventory(input),
+    );
+    assert.equal(report.verdict, 'PASS');
+    assert.equal(report.verifiedCommit, '65c48b4d');
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
