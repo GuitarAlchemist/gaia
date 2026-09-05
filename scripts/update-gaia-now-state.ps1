@@ -55,7 +55,14 @@ function Get-CheckSummary {
 }
 
 function Write-LiveState {
-    $drafts = Invoke-GhJson -Arguments @('pr', 'list', '--repo', $Repository, '--state', 'open', '--json', 'number,title,isDraft,url,headRefName,createdAt,updatedAt,author,mergeStateStatus,statusCheckRollup', '--limit', '50')
+    $pages = Invoke-GhJson -Arguments @('api', '--paginate', '--slurp', "repos/$Repository/pulls?state=open&per_page=100")
+    $drafts = @(foreach ($page in $pages) {
+        foreach ($pull in $page) {
+            if ($pull.draft) {
+                Invoke-GhJson -Arguments @('pr', 'view', [string] $pull.number, '--repo', $Repository, '--json', 'number,title,isDraft,url,headRefName,createdAt,updatedAt,author,mergeStateStatus,statusCheckRollup')
+            }
+        }
+    })
     $draftProjection = @($drafts | Where-Object isDraft | ForEach-Object {
         [ordered]@{
             number = $_.number
@@ -70,6 +77,17 @@ function Write-LiveState {
         }
     })
 
+    $repositoryParts = $Repository.Split('/')
+    if ($repositoryParts.Count -ne 2) { throw 'Expected owner/repository' }
+    $query = 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issues(states:OPEN){totalCount} ready:issues(states:OPEN,labels:["ready-for-agent"]){totalCount} pullRequests(states:OPEN){totalCount}}}'
+    $countsResponse = Invoke-GhJson -Arguments @('api', 'graphql', '-f', "query=$query", '-f', "owner=$($repositoryParts[0])", '-f', "name=$($repositoryParts[1])")
+    if ($countsResponse.errors -or -not $countsResponse.data.repository) { throw 'Backlog count query failed' }
+    $counts = $countsResponse.data.repository
+    $backlog = [ordered]@{ issuesOpen = $counts.issues.totalCount; issuesReady = $counts.ready.totalCount; prsOpen = $counts.pullRequests.totalCount }
+    foreach ($count in $backlog.Values) {
+        if (($count -isnot [long] -and $count -isnot [int]) -or $count -lt 0) { throw 'Invalid backlog count' }
+    }
+    if ($backlog.issuesReady -gt $backlog.issuesOpen) { throw 'Inconsistent issue counts' }
     $runs = Invoke-GhJson -Arguments @('run', 'list', '--repo', $Repository, '--workflow', 'Hosted Draft intake', '--json', 'databaseId,status,conclusion,url,createdAt,updatedAt', '--limit', '1')
     $latestRun = @($runs) | Select-Object -First 1
     $idleSeconds = [GaiaHostIdle]::Seconds()
@@ -78,6 +96,7 @@ function Write-LiveState {
         observedAt = [DateTimeOffset]::UtcNow.ToString('o')
         digest = 'live-github'
         drafts = $draftProjection
+        backlog = $backlog
         pump = if ($latestRun) { [ordered]@{
             runId = $latestRun.databaseId
             status = $latestRun.status

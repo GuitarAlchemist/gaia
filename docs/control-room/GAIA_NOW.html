@@ -770,6 +770,13 @@
         card.insertAdjacentHTML('afterbegin', `<small class="muted">${liveCopy.historical} · ${state.contentObservedAt} · SHA ${state.digest}</small>`);
         card.querySelectorAll('.live-ping').forEach(ping => ping.remove());
       });
+      const backlog = liveState.backlog;
+      const backlogValid = backlog && ['issuesOpen', 'issuesReady', 'prsOpen'].every(key => Number.isSafeInteger(backlog[key]) && backlog[key] >= 0) && backlog.issuesReady <= backlog.issuesOpen;
+      const backlogPanel = document.createElement('section');
+      backlogPanel.id = 'backlogCounts';
+      backlogPanel.style.cssText = 'padding:10px 0;margin-bottom:8px;border-bottom:1px solid #36506a';
+      backlogPanel.innerHTML = `<strong>${language === 'fr' ? 'À TRAITER · GITHUB' : 'WORK QUEUE · GITHUB'}</strong><div style="display:flex;gap:20px;flex-wrap:wrap;margin:8px 0">${backlogValid ? `<span><b>${backlog.issuesReady}</b> ${language === 'fr' ? 'issues prêtes' : 'ready issues'}</span><span><b>${backlog.issuesOpen - backlog.issuesReady}</b> ${language === 'fr' ? 'autres issues ouvertes' : 'other issues open'}</span><span><b>${backlog.prsOpen}</b> ${language === 'fr' ? 'PRs ouvertes à traiter' : 'open PRs to process'}</span>` : `<span>${language === 'fr' ? 'Non mesuré' : 'Not measured'}</span>`}</div><small class="muted">${collectionLabel} · ${escapeHtml(liveState.observedAt || t.unknown)}<br>${language === 'fr' ? 'Prêtes = label ready-for-agent, pas une admission acquise. Une PR peut correspondre à une issue : pas de total additionné.' : 'Ready = ready-for-agent label, not confirmed admission. A PR may implement an issue: counts are not added together.'}</small>`;
+      unified.querySelector('#draftPullRequests').prepend(backlogPanel);
       const activeSprint = unified.querySelector('#criticalSprintTrend .sprint-dot.active');
       const projectedSprints = unified.querySelectorAll('#criticalSprintTrend .sprint-dot.forecast');
       for (let slot = 184; slot < currentSlot; slot += 1) {
@@ -980,6 +987,7 @@
           observedAt: next.observedAt,
           digest: typeof next.digest === 'string' ? next.digest : '',
           drafts: next.drafts,
+          backlog: next.backlog && typeof next.backlog === 'object' && !Array.isArray(next.backlog) ? next.backlog : null,
           pump: next.pump && typeof next.pump === 'object' && !Array.isArray(next.pump) ? next.pump : null,
           afk: next.afk && typeof next.afk === 'object' && !Array.isArray(next.afk) ? next.afk : null
         };

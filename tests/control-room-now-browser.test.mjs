@@ -105,6 +105,26 @@ test('Gaia NOW keeps usable layouts live and recovers structural failures', {
     assert.ok(errors.some(message => message.includes('Gaia NOW safe-render rollback')));
   });
 
+  await t.test('backlog counts distinguish ready issues, other issues and open PRs without a double-counted total', async t => {
+    const { page, setState } = await openPage(t, { height: 1400 });
+    setState({ backlog: { issuesOpen: 38, issuesReady: 1, prsOpen: 2 } });
+    await page.clock.fastForward(16000);
+    await page.waitForLoadState('networkidle');
+    assert.match(await page.locator('#backlogCounts').innerText(), /1 issues prêtes/);
+    assert.match(await page.locator('#backlogCounts').innerText(), /37 autres issues/);
+    assert.match(await page.locator('#backlogCounts').innerText(), /2 PRs ouvertes/);
+    await page.locator('#langToggle').click();
+    await page.clock.runFor(1);
+    assert.match(await page.locator('#backlogCounts').innerText(), /1 ready issues/);
+    assert.match(await page.locator('#backlogCounts').innerText(), /37 other issues/);
+    await page.clock.fastForward(61000);
+    assert.match(await page.locator('#backlogCounts').innerText(), /NOT LIVE/);
+    setState({ backlog: { issuesOpen: 1, issuesReady: 2, prsOpen: -1 } });
+    await page.clock.fastForward(16000);
+    await page.waitForLoadState('networkidle');
+    assert.match(await page.locator('#backlogCounts').innerText(), /not measured/i);
+  });
+
   await t.test('transport refresh cannot replace historical evidence and renders the actual pump run', async t => {
     const { page, setState } = await openPage(t, { height: 1400 });
     setState({ digest: 'transport-witness', contentObservedAt: new Date().toISOString(), providers: {},
