@@ -155,6 +155,13 @@
     .sprint-legend .legend-good { color: #58e6a8; } .sprint-legend .legend-bad { color: #ff758c; } .sprint-legend .legend-missing { color: #ffc857; } .sprint-legend .legend-current { color: #75baff; }
     .proof-forecast { display: flex; gap: 9px; align-items: center; margin-top: 8px; padding: 8px 10px; border: 1px solid #ffc857; border-radius: 8px; background: #3b301422; color: #ffe4a3; }
     .proof-forecast strong { color: #ffc857; white-space: nowrap; }
+    .proof-forecast.overdue { border-color: #ff758c; background: #3a111a; color: #ffd7df; }
+    .proof-forecast.overdue strong { color: #ff758c; }
+    .event-age { display: block; margin-top: 2px; color: #75baff; font-size: .68rem; font-weight: 700; }
+    .escalation-grid { display: grid; gap: 8px; margin-top: 10px; }
+    .escalation-row { display: grid; grid-template-columns: auto minmax(0,1fr) auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid #ff758c; border-radius: 8px; background: #31121b; }
+    .escalation-row small { display: block; color: #b9d7ff; margin-top: 3px; }
+    @media (max-width: 700px) { .escalation-row { grid-template-columns: auto 1fr; } .escalation-row > :last-child { grid-column: 1 / -1; } }
     .live-ping { display: inline-block; width: 7px; height: 7px; margin: 0 6px 1px 0; border-radius: 50%; background: #75baff; box-shadow: 0 0 0 0 #75baff88; animation: pulse 1.4s infinite; vertical-align: middle; }
     .sparkline { width: 160px; height: 42px; overflow: visible; }
     .sparkline .axis { stroke: #294765; stroke-width: 1; } .sparkline .line { fill: none; stroke: #58e6a8; stroke-width: 3; } .sparkline .area { fill: #58e6a822; }
@@ -609,7 +616,8 @@
         deficits: 'DÉFICITS RACINE · FLUX ET PRÉDICATS', designAxis: 'DESIGN', designValue: 'OK', designReason: 'Architecture déclarée; gate PR PASS.', codeAxis: 'CODE', codeValue: 'OK', codeReason: '20/20 et 1 808/1 808 ×2.', planningAxis: 'PLANNING', planningValue: 'OK', planningReason: 'Reviews indépendantes déclenchées.', capacityAxis: 'CAPACITÉ', capacityValue: 'DÉGRADÉE', capacityReason: 'Relève suffisante; Fable épuisé.', publicationAxis: 'PUBLICATION', publicationValue: 'DRAFT', publicationReason: 'PR #114; preuve live après merge.', flowLabel: 'Flux courant', flowValue: 'issue #82 bloque → PR #114 isole → tick live attendu', predicateLabel: 'Prédicat faux', predicateValue: 'pump_live_postcondition = false.', pullPolicy: 'Collecte : Gaia tire les faits autoritatifs. SSE peut réveiller; aucun push de lane ne fait autorité.',
         sourceLine: 'Source : PR #114, SHA 36cb1f1, tests locaux et 8/8 checks GitHub.', now: 'maintenant', conditional: 'conditionnel',
         elapsed: 'écoulées', remaining: 'restantes', promptTitle: 'Voir le signal global', overdue: 'preuve stale', etaExpired: 'ETA expirée; confiance suspendue', reforecast: 'recalcul après preuve fraîche',
-        draftsTitle: 'PR DRAFT · TRAVAIL EFFECTIVEMENT PRIS', draftsRule: 'Contrat : une lane ne prend du code qu’après avoir créé une PR Draft liée à son issue.', draftsNone: 'Aucune PR Draft : la pompe n’a aucun travail matérialisé.', checks: 'checks', failed: 'échec', pending: 'en attente', updated: 'mise à jour', hostAfk: 'Hôte AFK'
+        draftsTitle: 'PR DRAFT · TRAVAIL EFFECTIVEMENT PRIS', draftsRule: 'Contrat : une lane ne prend du code qu’après avoir créé une PR Draft liée à son issue.', draftsNone: 'Aucune PR Draft : la pompe n’a aucun travail matérialisé.', checks: 'checks', failed: 'échec', pending: 'en attente', updated: 'mise à jour', hostAfk: 'Hôte AFK',
+        escalationsTitle: 'ESCALADES EN COURS', escalationRule: 'Seulement les prédicats faux qui exigent une action ou une décision.', conflictLabel: 'Conflit de branche', ciFailureLabel: 'CI en échec', systemOwner: 'Gaia · système', proofOverdue: 'PREUVE EN RETARD', proofOverdueDetail: 'Aucun receipt frais; replanification requise'
       },
       en: {
         subtitle: 'One useful screen. Refreshes every 15 seconds.', systemSignal: '🤖 AI · pump blocked', systemSignalStale: '🤖 AI · pump stale', humanSignal: '👤 Human · nothing required',
@@ -643,7 +651,8 @@
         deficits: 'ROOT DEFICITS · FLOW AND PREDICATES', designAxis: 'DESIGN', designValue: 'OK', designReason: 'Architecture declared; PR gate PASS.', codeAxis: 'CODE', codeValue: 'OK', codeReason: '32/32 and 1,803/1,803 ×2.', planningAxis: 'PLANNING', planningValue: 'OK', planningReason: 'Ten-minute pull/reconcile watchdog active.', capacityAxis: 'CAPACITY', capacityValue: 'DEGRADED', capacityReason: 'Fallback sufficient; Fable exhausted.', publicationAxis: 'PUBLICATION', publicationValue: 'MERGED', publicationReason: 'GitHub receipt 147bafe.', flowLabel: 'Current flow', flowValue: 'PR #112 drained → pull the next work item', predicateLabel: 'False predicate', predicateValue: 'next_work_admitted.', pullPolicy: 'Collection: Gaia pulls authoritative facts. SSE may wake it; no lane push grants authority.',
         sourceLine: 'Source: merged PR #112, commit 147bafe, GitHub CI, and 3 resolved threads.', now: 'now', conditional: 'conditional',
         elapsed: 'elapsed', remaining: 'remaining', promptTitle: 'View the global signal', overdue: 'stale evidence', etaExpired: 'ETA expired; confidence suspended', reforecast: 'recalculate after fresh evidence',
-        draftsTitle: 'DRAFT PRS · ACTUALLY CLAIMED WORK', draftsRule: 'Contract: a lane claims code only after creating a Draft PR linked to its issue.', draftsNone: 'No Draft PR: the pump has no materialized work.', checks: 'checks', failed: 'failed', pending: 'pending', updated: 'updated', hostAfk: 'Host AFK'
+        draftsTitle: 'DRAFT PRS · ACTUALLY CLAIMED WORK', draftsRule: 'Contract: a lane claims code only after creating a Draft PR linked to its issue.', draftsNone: 'No Draft PR: the pump has no materialized work.', checks: 'checks', failed: 'failed', pending: 'pending', updated: 'updated', hostAfk: 'Host AFK',
+        escalationsTitle: 'ACTIVE ESCALATIONS', escalationRule: 'Only false predicates requiring an action or decision.', conflictLabel: 'Branch conflict', ciFailureLabel: 'CI failure', systemOwner: 'Gaia · system', proofOverdue: 'EVIDENCE OVERDUE', proofOverdueDetail: 'No fresh receipt; replanning required'
       }
     };
     let sprintScrollInitialized = false;
@@ -677,6 +686,15 @@
         if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
         return `${Math.floor(seconds / 86400)}d`;
       };
+      const relativeAgo = value => {
+        const parsed = Date.parse(value);
+        if (!Number.isFinite(parsed)) return language === 'fr' ? 'âge inconnu' : 'unknown age';
+        const seconds = Math.max(0, Math.floor((Date.now() - parsed) / 1000));
+        if (seconds < 90) return language === 'fr' ? 'à l’instant' : 'just now';
+        if (seconds < 3600) return language === 'fr' ? `il y a ~${Math.max(1, Math.round(seconds / 60))} min` : `~${Math.max(1, Math.round(seconds / 60))} min ago`;
+        if (seconds < 172800) return language === 'fr' ? `il y a ~${Math.round(seconds / 3600)} h` : `~${Math.round(seconds / 3600)} h ago`;
+        return language === 'fr' ? `il y a ~${Math.round(seconds / 86400)} j` : `~${Math.round(seconds / 86400)} d ago`;
+      };
       const drafts = Array.isArray(state.drafts) ? state.drafts : [];
       const draftRows = drafts.length ? drafts.map(draft => {
         const checks = draft.checks || {};
@@ -688,6 +706,13 @@
         const ciText = failure > 0 ? `${failure} ${t.failed}` : pending > 0 ? `${pending} ${t.pending}` : `${success}/${total} ${t.checks}`;
         return `<div class="draft-row"><span class="tag warn">#${Number(draft.number)}</span><div><a href="${escapeHtml(draft.url)}" target="_blank" rel="noreferrer">${escapeHtml(draft.title)}</a><div class="draft-meta">${escapeHtml(draft.branch)} · ${escapeHtml(draft.author || '—')}</div></div><span class="ci-pill ${ciClass}">${escapeHtml(ciText)}</span><span class="draft-meta">${t.updated} ${relativeAge(draft.updatedAt)}</span></div>`;
       }).join('') : `<div class="draft-empty"><strong>${t.draftsNone}</strong></div>`;
+      const escalations = drafts.flatMap(draft => {
+        const items = [];
+        if (draft.mergeStateStatus === 'DIRTY') items.push({ number: draft.number, title: draft.title, url: draft.url, label: t.conflictLabel, predicate: 'merge_state = DIRTY', updatedAt: draft.updatedAt });
+        if (Number(draft.checks?.failure || 0) > 0) items.push({ number: draft.number, title: draft.title, url: draft.url, label: t.ciFailureLabel, predicate: `failed_checks = ${Number(draft.checks.failure)}`, updatedAt: draft.updatedAt });
+        return items;
+      });
+      const escalationCard = escalations.length ? `<article id="activeEscalations" class="card top-timeline"><div class="state red">${t.escalationsTitle} · ${escalations.length}</div><small class="muted">${t.escalationRule}</small><div class="escalation-grid">${escalations.map(item => `<div class="escalation-row"><span class="tag bad">#${Number(item.number)}</span><div><a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer"><strong>${escapeHtml(item.label)}</strong> · ${escapeHtml(item.title)}</a><small>${escapeHtml(item.predicate)}</small></div><span class="draft-meta">${escapeHtml(t.systemOwner)} · ${relativeAgo(item.updatedAt)}</span></div>`).join('')}</div></article>` : '';
       document.querySelector('header .sub').textContent = t.subtitle;
       const systemSignal = document.getElementById('systemSignal');
       systemSignal.innerHTML = `${evidenceFresh ? t.systemSignal : t.systemSignalStale}<svg class="header-trend" viewBox="0 0 48 18" aria-hidden="true"><path class="baseline" d="M0 16H48"/><path class="watch" d="M1 7L10 6L19 9L28 8L37 10L47 9"/></svg><span class="header-popover" aria-hidden="true"><svg class="mini-radar" viewBox="0 0 120 100"><path class="axis" d="M60 8L105 82L15 82Z M60 55L60 8 M60 55L105 82 M60 55L15 82"/><path class="shape" d="M60 17.7L75.3 63.5L36.2 69.3Z"/><text x="48" y="7">Codex ${p.codexLong}%</text><text x="82" y="92">Claude ${p.claudeLong}%</text><text x="2" y="92">Auggie ${p.auggieLong}%</text></svg><strong>${t.capacityHelp}</strong><ul><li>${t.capacityImpact}</li><li>${t.capacityMitigation}</li><li>${t.capacityDecision}</li></ul></span>`; systemSignal.title = t.systemTitle;
@@ -697,6 +722,7 @@
       humanSignal.className = 'signal-button good';
       unified.innerHTML = `
         <article id="draftPullRequests" class="card top-timeline"><div class="timeline-toolbar"><div><div class="state ${drafts.length ? 'green' : 'red'}"><span class="live-ping" title="${t.liveUpdate}" aria-label="${t.liveUpdate}"></span>${t.draftsTitle} · ${drafts.length}</div><small class="muted">${t.draftsRule}</small></div><small class="muted">${state.afk?.status === 'afk' ? `${t.hostAfk} · ${Math.floor((state.afk.idleSeconds || 0) / 60)}m` : ''}</small></div><div class="draft-grid">${draftRows}</div></article>
+        ${escalationCard}
         <article id="criticalTimeline" class="card top-timeline"><div class="timeline-toolbar"><div><div class="state green">${t.timeline}</div><small class="muted">${t.observed}</small></div><small class="muted">${t.sourceLine}</small></div><div class="horizontal-time" style="grid-template-columns:repeat(7,minmax(135px,1fr))"><div class="time-point good"><time>14:11</time><strong>${t.terminal}</strong><small>${t.terminalProof}</small></div><div class="time-point bad"><time>15:19</time><strong>${t.r4}</strong><small>${t.r4Proof}</small></div><div class="time-point good"><time>17:28</time><strong>${t.r5}</strong><small>${t.r5Proof}</small></div><div class="time-point active"><time>${t.now}</time><strong>${t.ship}</strong><small>${t.shipProof}</small></div><div class="time-point forecast"><time>${t.futureProof}</time><strong>${t.future}</strong><small>65%</small></div><div class="time-point forecast"><time>${t.future2Proof}</time><strong>${t.future2}</strong><small>45%</small></div><div class="time-point forecast"><time>${t.future3Proof}</time><strong>${t.future3}</strong><small>30%</small></div></div><div id="criticalSprintTrend"><div class="state green" style="margin-top:12px">${t.trend}</div><div class="sprint-summary"><div class="sprint-strip"><span class="sprint-dot bad">171</span><span class="sprint-dot bad">172</span><span class="sprint-dot good">173</span><span class="sprint-dot good">174</span><span class="sprint-dot good">175</span><span class="sprint-dot good">176</span><span class="sprint-dot bad">177</span><span class="sprint-dot good">178</span><span class="sprint-dot bad">179</span><span class="sprint-dot good">180</span><span class="sprint-dot bad">181</span><span class="sprint-dot good">182</span><span class="sprint-dot good">183</span><span class="sprint-dot active">184<br>${t.currentSprint}</span><span class="sprint-dot forecast">185<br>${t.projectedSprint}</span><span class="sprint-dot forecast">186<br>${t.projectedSprint}</span></div><svg class="sparkline" viewBox="0 0 160 42" role="img" aria-label="trend"><path class="axis" d="M0 36H160"/><path class="area" d="M2 34 L28 23 L54 7 L80 18 L106 23 L132 18 L158 7 L158 36 L2 36 Z"/><path class="line" d="M2 34 L28 23 L54 7 L80 18 L106 23 L132 18 L158 7"/></svg><div class="score-pill"><strong class="green">${score}%</strong><small class="muted">${state.micro.achieved}/${state.micro.total} ${t.achieved}<br>↗</small></div></div><div id="nextProofEta" class="proof-forecast"><strong>${t.nextProofEtaLabel}</strong><span>${t.nextProofEta}</span></div></div></article>
         <div class="signal-pair"><article id="systemRootSignal" class="card signal-anchor"><div class="state red">${t.systemRoot}</div><div class="signal-facts"><div class="signal-fact"><strong>${t.systemHealth}:</strong> ${t.systemHealthValue}</div><div class="signal-fact"><strong>${t.providerHealth}</strong><div class="root-capacity"><div class="capacity-ring-item"><span class="progress-ring" style="--value:${p.codexLong};--ring:#58e6a8"><span>${p.codexLong}%</span></span><div><strong>Codex</strong><small>${t.week}</small></div></div><div class="capacity-ring-item"><span class="progress-ring" style="--value:${p.claudeLong};--ring:#ffc857"><span>${p.claudeLong}%</span></span><div><strong>Claude</strong><small>${t.week}</small></div></div><div class="capacity-ring-item"><span class="progress-ring" style="--value:${p.auggieLong};--ring:#58e6a8"><span>${p.auggieLong}%</span></span><div><strong>Auggie</strong><small>${t.month}</small></div></div></div></div><div class="signal-fact warn"><strong>${t.systemAlert}:</strong> ${t.systemAlertValue}<span class="info-badge" tabindex="0" aria-label="${t.capacityHelp}">i<span class="info-popover">${t.capacityHelp}</span></span></div><div class="signal-fact"><strong>${t.systemNext}:</strong> ${t.systemNextValue}</div></div></article><article id="humanRootSignal" class="card signal-anchor rule"><div class="state green">${t.humanRoot}</div><div class="signal-facts"><div class="signal-fact"><strong>${t.direction}:</strong> ${t.directionValue}</div><div class="signal-fact"><strong>${t.collaboration}:</strong> ${t.collaborationValue}</div><div class="signal-fact"><strong>${t.risk}:</strong> ${t.riskValue}</div><div class="signal-fact muted-action"><strong>${t.action}:</strong> ${t.actionValue}</div></div></article></div>
         <article id="r5Status" class="card wide"><div class="state green"><span class="live-ping" title="${t.liveUpdate}" aria-label="${t.liveUpdate}"></span>${t.r5Status}</div><ol><li>✅ ${t.stepImplementation}</li><li>✅ ${t.stepFocused}</li><li>✅ ${t.stepFull}</li><li>✅ ${t.stepArchitecture}</li><li>✅ ${t.stepReview}</li></ol><div class="signal-fact"><strong>✅ ${t.notPublished}</strong></div></article>
@@ -736,11 +762,24 @@
         activeTimelinePoint.className = 'time-point bad';
         activeTimelinePoint.querySelector('time').textContent = `${Math.floor(age / 60)}m · ${t.overdue}`;
         activeTimelinePoint.querySelector('small').textContent = t.etaExpired;
+        const proofForecast = unified.querySelector('#nextProofEta');
+        const proofDeadline = new Date(Date.parse(state.contentObservedAt) + 10 * 60 * 1000).toISOString();
+        proofForecast.classList.add('overdue');
+        proofForecast.querySelector('strong').textContent = t.proofOverdue;
+        proofForecast.querySelector('span').textContent = `${relativeAgo(proofDeadline)} · ${t.proofOverdueDetail}`;
         unified.querySelectorAll('#criticalTimeline .time-point.forecast').forEach(point => {
           point.querySelector('time').textContent = t.reforecast;
           point.querySelector('small').textContent = '—';
         });
       }
+      const observedTimelineInstants = ['2026-09-04T14:11:00-04:00', '2026-09-04T15:19:00-04:00', '2026-09-04T17:28:00-04:00', state.contentObservedAt];
+      unified.querySelectorAll('#criticalTimeline .time-point:not(.forecast)').forEach((marker, index) => {
+        const instant = observedTimelineInstants[index];
+        const time = marker.querySelector('time');
+        if (!instant || !time) return;
+        marker.dataset.eventAt = instant;
+        time.insertAdjacentHTML('beforeend', `<span class="event-age">${escapeHtml(relativeAgo(instant))}</span>`);
+      });
       const formatSlotTime = slot => {
         const minutes = slot * 5;
         return `${pad(Math.floor(minutes / 60) % 24)}:${pad(minutes % 60)}`;
@@ -827,7 +866,7 @@
         language === 'fr' ? visibleText.includes('TIMELINE DE COORDINATION') : visibleText.includes('COORDINATION TIMELINE') && !/Aucune|approuvé|reste à prouver/.test(visibleText),
         [...unified.querySelectorAll('#criticalSprintTrend .sprint-dot')].every(marker => marker.classList.contains('timeline-marker') && marker.dataset.popoverItems),
         [...unified.querySelectorAll('#criticalTimeline .time-point')].every(marker => marker.classList.contains('timeline-marker') && marker.dataset.popoverItems) && Boolean(finalReview.dataset.popoverItems),
-        Boolean(document.getElementById('nextProofEta')?.textContent.includes(t.nextProofEta)) && unified.querySelectorAll('#pumpLedger .pump-message').length === 4
+        Boolean(document.getElementById('nextProofEta')?.textContent.includes(evidenceFresh ? t.nextProofEta : t.proofOverdue)) && unified.querySelectorAll('#pumpLedger .pump-message').length === 4
       ];
       const qaPassed = qaChecks.filter(Boolean).length;
       document.body.dataset.uiQa = `${qaPassed}/10`;

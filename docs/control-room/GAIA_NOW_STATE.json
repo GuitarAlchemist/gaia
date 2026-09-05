@@ -1,6 +1,6 @@
 {
   "schema": "GaiaNowLiveStateV0",
-  "observedAt": "2026-09-05T00:02:19.0561349+00:00",
+  "observedAt": "2026-09-05T00:33:46.5721673+00:00",
   "digest": "live-github",
   "drafts": [
     {
@@ -10,7 +10,8 @@
       "branch": "codex/gaia-now-checkpoint-r0",
       "author": "spareilleux",
       "createdAt": "2026-09-04T23:26:33Z",
-      "updatedAt": "2026-09-04T23:53:32Z",
+      "updatedAt": "2026-09-05T00:25:14Z",
+      "mergeStateStatus": "CLEAN",
       "checks": {
         "success": 8,
         "failure": 0,
@@ -27,6 +28,7 @@
       "author": "spareilleux",
       "createdAt": "2026-09-04T05:52:43Z",
       "updatedAt": "2026-09-04T05:52:43Z",
+      "mergeStateStatus": "DIRTY",
       "checks": {
         "success": 8,
         "failure": 0,
@@ -43,6 +45,7 @@
       "author": "spareilleux",
       "createdAt": "2026-09-03T23:43:31Z",
       "updatedAt": "2026-09-04T05:33:05Z",
+      "mergeStateStatus": "DIRTY",
       "checks": {
         "success": 8,
         "failure": 0,
@@ -59,6 +62,7 @@
       "author": "spareilleux",
       "createdAt": "2026-09-02T02:18:31Z",
       "updatedAt": "2026-09-04T05:33:22Z",
+      "mergeStateStatus": "DIRTY",
       "checks": {
         "success": 8,
         "failure": 0,
@@ -78,6 +82,6 @@
   },
   "afk": {
     "status": "afk",
-    "idleSeconds": 1275
+    "idleSeconds": 310
   }
 }

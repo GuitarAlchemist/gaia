@@ -55,7 +55,7 @@ function Get-CheckSummary {
 }
 
 function Write-LiveState {
-    $drafts = Invoke-GhJson -Arguments @('pr', 'list', '--repo', $Repository, '--state', 'open', '--json', 'number,title,isDraft,url,headRefName,createdAt,updatedAt,author,statusCheckRollup', '--limit', '50')
+    $drafts = Invoke-GhJson -Arguments @('pr', 'list', '--repo', $Repository, '--state', 'open', '--json', 'number,title,isDraft,url,headRefName,createdAt,updatedAt,author,mergeStateStatus,statusCheckRollup', '--limit', '50')
     $draftProjection = @($drafts | Where-Object isDraft | ForEach-Object {
         [ordered]@{
             number = $_.number
@@ -65,6 +65,7 @@ function Write-LiveState {
             author = $_.author.login
             createdAt = $_.createdAt
             updatedAt = $_.updatedAt
+            mergeStateStatus = $_.mergeStateStatus
             checks = Get-CheckSummary $_.statusCheckRollup
         }
     })
