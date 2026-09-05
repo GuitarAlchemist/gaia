@@ -95,3 +95,33 @@ is evidence of live integration.
   `Recommendation:` line prefix. No sentence is promoted into a kind by resembling one.
 - The ledger is an in-process value. Durable storage, multi-comment intake, and any transition
   driven by an observation are later slices.
+
+## Source-acceptance repair (2026-09-05)
+
+The first implementation of this slice refused its own source. Run against the real comment, the
+shipped public seam returned `AVAILABLE -> UNKNOWN SOURCE_MALFORMED` with no digest and zero
+claims, because it read only bare `Label:` lines while an automated observation writes Markdown
+list items (`- **Observation:** ...`). That was an acceptance failure of R0, not a missing R1
+feature: the approved seam has to consume the actual source.
+
+The repair is structural and minimal. It adds no dependency, no effect, no provider call, and no
+inference of meaning:
+
+- the labelled-field reader accepts the emphasised Markdown form as well as the bare form;
+- `observation`, `recommended next action` and `authority boundary` join the label vocabulary,
+  because those are the labels the source documents actually declare;
+- `AUTHORITY_ASSERTION` is a fourth claim kind: what a source says about its own limits is reported
+  as a statement, and `authority` remains the constant `NONE`;
+- every claim now carries `basis: SOURCE_ASSERTED`, and the projection row carries `claimBasis`, so
+  a `FACT` claim can never be read as a fact this repository verified;
+- `MAX_TEST_CLAIM_LENGTH` rises from 500 to 2,000 so the real 456-character observation field is
+  accepted whole. An over-long claim is still refused, never truncated;
+- a work identity is additionally read from the exact `owner/name issue #N` form of a subject line.
+  A bare `#117` still names nothing.
+
+Evidence: `tests/fixtures/test-observation/captured-issue-73-comment-5548750957.json` replays the
+coordinator's read-only capture byte for byte, and the suite asserts its digest equals the
+`59e82be5…2bc200e2` recorded in the source probe above. Its provenance is `CAPTURED_REPLAY`, a
+third value beside `LIVE` and `SYNTHETIC_FIXTURE`. **A replay is not a live read.** It shows the
+seam consumes these exact bytes; only a fresh live read shows the comment can be reached now, and
+this repository performed none.

@@ -293,3 +293,111 @@ test('the core carries no provider and the source carries no mutating capability
       `the source must not be able to spell the mutating token ${token}`);
   }
 });
+
+const CAPTURED_URL = new URL('./fixtures/test-observation/captured-issue-73-comment-5548750957.json', import.meta.url);
+const capturedReading = () => JSON.parse(readFileSync(CAPTURED_URL, 'utf8'));
+
+/**
+ * The digest `docs/test-observation-intake-r0.md` recorded from the live comment on 2026-09-05.
+ * The replayed fixture must hash to it, or the replay is not of that comment. Matching it proves
+ * byte-exactness of the replay and nothing at all about a live read having happened here.
+ */
+const CAPTURED_LIVE_DIGEST = 'sha256:59e82be521246420208b65d8860a9bb161c6da7f2728b1d6160dd3672bc200e2';
+
+test('the actual source comment normalizes through the same public seam', () => {
+  const input = capturedReading();
+  assert.equal(
+    `sha256:${createHash('sha256').update(input.body, 'utf8').digest('hex')}`,
+    CAPTURED_LIVE_DIGEST,
+    'the replayed bytes are the bytes the live probe recorded',
+  );
+
+  const observed = normalizeTestObservation(input);
+  assert.equal(observed.state, 'NORMALIZED',
+    `the approved seam must consume its own source: ${observed.unknownReason}`);
+  assert.equal(observed.unknownReason, null);
+
+  // The raw evidence is the whole comment, undigested and untruncated.
+  assert.equal(observed.rawDigest, CAPTURED_LIVE_DIGEST);
+  assert.equal(observed.rawByteLength, 1541);
+  assert.equal(observed.provenance, 'CAPTURED_REPLAY', 'a replay is never reported as a live read');
+  assert.equal(observed.observationKey, 'GuitarAlchemist/.github#73#comment-5548750957');
+
+  // Its four explicit Markdown fields become four claims, each one kept in its own kind.
+  const kinds = observed.claims.map((claim) => claim.kind);
+  assert.deepEqual(kinds.slice().sort(),
+    ['AUTHORITY_ASSERTION', 'FACT', 'INTERPRETATION', 'RECOMMENDATION']);
+  const of = (kind) => observed.claims.find((claim) => claim.kind === kind).text;
+  assert.match(of('FACT'), /^A new OPEN\+needs-triage P1 design slice was created/);
+  assert.match(of('INTERPRETATION'), /NEW GAIA CONFLICT-RECOVERY ROADMAP/);
+  assert.match(of('RECOMMENDATION'), /^Admit only after one exact owner/);
+  assert.match(of('AUTHORITY_ASSERTION'), /grants no merge, force-push/);
+
+  // Nothing is truncated on the way in: the longest field arrives whole.
+  assert.ok(of('FACT').endsWith('reconciliation after ambiguous dispatch.'), of('FACT').slice(-60));
+
+  // Every claim is the source speaking, never a fact Gaia verified, and none of it grants anything.
+  for (const claim of observed.claims) assert.equal(claim.basis, 'SOURCE_ASSERTED');
+  assert.equal(observed.effect, 'NONE');
+  assert.equal(observed.authority, 'NONE');
+  assert.equal(observed.severity, 'UNKNOWN', 'this comment declares no severity, so none is invented');
+  assert.equal(observed.severityBasis, 'ABSENT');
+
+  // The subject it names is preserved as a work identity, not paraphrased.
+  assert.deepEqual(observed.workReferences, ['GuitarAlchemist/gaia#117']);
+
+  const [row] = projectTestObservations(
+    admitTestObservation(emptyTestObservationLedger(), observed).ledger,
+  ).observations;
+  assert.equal(row.claimBasis, 'SOURCE_ASSERTED');
+  assert.equal(row.facts.length, 1);
+  assert.equal(row.interpretations.length, 1);
+  assert.equal(row.recommendations.length, 1);
+  assert.equal(row.authorityAssertions.length, 1);
+});
+
+test('the captured source still replays once, revises on edit, and reports an unavailable read', () => {
+  const held = admitTestObservation(emptyTestObservationLedger(), normalizeTestObservation(capturedReading()));
+  assert.equal(held.outcome, 'ADMITTED');
+
+  // Read twice, held once: the identity of these exact bytes is what decides, not the read count.
+  const replay = admitTestObservation(held.ledger, normalizeTestObservation({
+    ...capturedReading(), observedAt: '2026-09-05T18:00:00Z',
+  }));
+  assert.equal(replay.outcome, 'ALREADY_HELD');
+  assert.equal(replay.ledger.entries.length, 1);
+
+  // An edit to the real body is a linked revision, and the first digest is still the first digest.
+  const input = capturedReading();
+  const edited = admitTestObservation(replay.ledger, normalizeTestObservation({
+    ...input,
+    body: input.body.replace('- **Interpretation:**', '- **Interpretation:** REVISED —'),
+    updatedAt: '2026-09-05T11:00:00Z',
+    observedAt: '2026-09-05T18:00:00Z',
+  }));
+  assert.equal(edited.outcome, 'REVISED');
+  assert.equal(edited.ledger.entries[0].rawDigest, CAPTURED_LIVE_DIGEST);
+  assert.equal(edited.ledger.entries[1].previousRevisionId, held.ledger.entries[0].revisionId);
+  assert.match(edited.ledger.entries[1].claims.find((c) => c.kind === 'INTERPRETATION').text,
+    /^REVISED /);
+
+  // And a later unavailable read of the same comment is an explicit unknown that replaces nothing.
+  const gone = admitTestObservation(edited.ledger, normalizeTestObservation({
+    // Exactly what the read-only source emits when it cannot find the comment: no body and no
+    // source instants, because an unavailable read has none to report.
+    ...input,
+    availability: 'UNAVAILABLE',
+    body: null,
+    createdAt: null,
+    updatedAt: null,
+    observedAt: '2026-09-05T19:00:00Z',
+  }));
+  assert.equal(gone.ledger.entries.length, 3);
+  assert.equal(gone.ledger.entries[2].unknownReason, 'SOURCE_UNAVAILABLE');
+  assert.equal(gone.ledger.entries[0].rawDigest, CAPTURED_LIVE_DIGEST);
+
+  const [row] = projectTestObservations(gone.ledger).observations;
+  assert.equal(row.state, 'UNKNOWN', 'the current reading is unknown, not the last one that parsed');
+  assert.equal(row.revisions.length, 3);
+  assert.equal(row.revisions[0].rawDigest, CAPTURED_LIVE_DIGEST);
+});

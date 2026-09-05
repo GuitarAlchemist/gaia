@@ -29,10 +29,13 @@
  *    severity a comment declares is recorded as *declared by the source* — `severityBasis` is a
  *    separate field precisely so a reader never has to infer whether Gaia agreed.
  *
- * Facts, interpretations and recommendations are kept as three kinds because collapsing them is
- * how an operator ends up acting on somebody's guess. The classification is structural: it comes
- * from the source's own explicit line prefix, and a line with no recognized prefix is not silently
- * promoted into one of the three.
+ * Facts, interpretations, recommendations and the source's own statement of its authority boundary
+ * are kept as separate kinds because collapsing them is how an operator ends up acting on somebody's
+ * guess. The classification is structural: it comes from the source's own explicit field label —
+ * either a bare `Label:` or the Markdown list item `- **Label:**` that renders as one — and a line
+ * with no recognized label is not silently promoted into a kind. Nothing is classified by meaning,
+ * and every claim carries `basis: SOURCE_ASSERTED`, because what this module verified is who said
+ * it and which bytes said it, never whether it is true.
  */
 
 import { createHash } from 'node:crypto';
@@ -40,8 +43,16 @@ import { createHash } from 'node:crypto';
 export const TEST_COMMENT_READING_SCHEMA = 'gaia-test-comment-reading/1';
 export const TEST_OBSERVATION_SCHEMA = 'gaia-test-observation/1';
 
-/** Where the bytes came from. A fixture is never allowed to be mistaken for a live read. */
-export const TEST_OBSERVATION_PROVENANCES = Object.freeze(['LIVE', 'SYNTHETIC_FIXTURE']);
+/**
+ * Where the bytes came from. A fixture is never allowed to be mistaken for a live read.
+ *
+ * `CAPTURED_REPLAY` is a third answer rather than a shade of the other two: bytes that really were
+ * read from the source once and are being replayed offline are neither invented nor live, and a
+ * reader deciding how much to trust an observation needs to be told which of the three it holds.
+ */
+export const TEST_OBSERVATION_PROVENANCES = Object.freeze([
+  'LIVE', 'CAPTURED_REPLAY', 'SYNTHETIC_FIXTURE',
+]);
 
 /** What the source adapter found. Three answers, and no fourth that means "probably fine". */
 export const TEST_COMMENT_AVAILABILITIES = Object.freeze(['AVAILABLE', 'DELETED', 'UNAVAILABLE']);
@@ -58,10 +69,25 @@ export const TEST_OBSERVATION_UNKNOWN_REASONS = Object.freeze([
   'SOURCE_TIME_REGRESSED',
 ]);
 
-/** The three kinds of sentence, kept apart so none of them has to be inferred by a reader. */
+/**
+ * The kinds of sentence, kept apart so none of them has to be inferred by a reader.
+ *
+ * `AUTHORITY_ASSERTION` is what the observed source says about its own limits. It is a fourth kind
+ * and not a recommendation because the two read differently to an operator: "no merge authority was
+ * granted" is a boundary being reported, not an action being proposed. Recording it changes nothing
+ * about what anything is allowed to do — `authority` is the constant `NONE` either way, and a
+ * comment asserting a wider boundary would simply be a comment asserting it.
+ */
 export const TEST_OBSERVATION_CLAIM_KINDS = Object.freeze([
-  'FACT', 'INTERPRETATION', 'RECOMMENDATION',
+  'FACT', 'INTERPRETATION', 'RECOMMENDATION', 'AUTHORITY_ASSERTION',
 ]);
+
+/**
+ * Every claim in an observation is the source speaking. Publishing that as a field, rather than
+ * leaving it implied by the word "observation", is what keeps a `FACT` claim from being read as a
+ * fact Gaia verified: this module verified who said it and what bytes said it, and nothing else.
+ */
+export const TEST_OBSERVATION_CLAIM_BASIS = 'SOURCE_ASSERTED';
 
 /** Severity is a closed vocabulary; `UNKNOWN` is what an unstated severity is. */
 export const TEST_OBSERVATION_SEVERITIES = Object.freeze([
@@ -89,22 +115,42 @@ export const MAX_TEST_COMMENT_BYTES = 64 * 1024;
 /** Bounds on what one comment may contribute, so one source cannot flood a projection. */
 export const MAX_TEST_OBSERVATION_CLAIMS = 64;
 export const MAX_TEST_OBSERVATION_WORK_REFERENCES = 32;
-export const MAX_TEST_CLAIM_LENGTH = 500;
+/**
+ * Long enough for the fields real automated observations actually carry — the source comment this
+ * slice was built for has a 600-character observation field — and short enough that one comment
+ * cannot fill a projection. A claim past the bound is refused, never shortened: a truncated claim
+ * is a claim the source did not make.
+ */
+export const MAX_TEST_CLAIM_LENGTH = 2_000;
 
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u;
 const SOURCE_REPOSITORY = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/u;
 const WORK_REFERENCE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+#[1-9]\d*$/u;
 
 /**
- * The claim prefixes, singular and exact. A body that wants to be read as a fact must say `Fact:`;
- * nothing is promoted into a kind by resembling one. Null-prototype, so `constructor` is not a
- * claim kind.
+ * The claim labels, singular and exact. A body that wants to be read as a fact must carry one of
+ * these labels; nothing is promoted into a kind by resembling one, and no text is classified by
+ * meaning. Null-prototype, so `constructor` is not a claim kind.
+ *
+ * `observation`, `recommended next action` and `authority boundary` are the labels the automated
+ * observations this slice consumes actually write. They are listed because those documents declare
+ * their own structure, not because a reader guessed what the paragraphs were about.
  */
-const CLAIM_PREFIXES = Object.freeze(Object.assign(Object.create(null), {
-  fact: 'FACT',
-  interpretation: 'INTERPRETATION',
-  recommendation: 'RECOMMENDATION',
+const CLAIM_LABELS = Object.freeze(Object.assign(Object.create(null), {
+  'fact': 'FACT',
+  'observation': 'FACT',
+  'interpretation': 'INTERPRETATION',
+  'recommendation': 'RECOMMENDATION',
+  'recommended next action': 'RECOMMENDATION',
+  'authority boundary': 'AUTHORITY_ASSERTION',
 }));
+
+/**
+ * The subject line of an automated observation names its work in prose: `owner/name issue #117`.
+ * Reading it is a structural match on that exact form, so a sentence that merely mentions a
+ * repository never becomes a reference, and `#117` alone never becomes one either.
+ */
+const SUBJECT_WORK_REFERENCE = /^([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+) issue #([1-9]\d*)(?![0-9])/u;
 
 export class TestObservationError extends Error {
   constructor(message) {
@@ -177,15 +223,14 @@ function readClaims(body) {
   let severity = 'UNKNOWN';
   let severityBasis = 'ABSENT';
   for (const line of body.split(/\r?\n/u)) {
-    const match = line.match(/^\s*([A-Za-z]+)\s*:\s*(.+?)\s*$/u);
-    if (!match) continue;
-    const label = match[1].toLowerCase();
-    const text = match[2];
-    const kind = CLAIM_PREFIXES[label];
+    const field = readLabelledField(line);
+    if (field === null) continue;
+    const { label, text } = field;
+    const kind = CLAIM_LABELS[label];
     if (kind !== undefined) {
       if (claims.length >= MAX_TEST_OBSERVATION_CLAIMS) refuse('too many claims in one comment');
       if (text.length > MAX_TEST_CLAIM_LENGTH) refuse('a single claim is too long to project');
-      claims.push(Object.freeze({ kind, text }));
+      claims.push(Object.freeze({ kind, text, basis: TEST_OBSERVATION_CLAIM_BASIS }));
       continue;
     }
     if (label === 'severity') {
@@ -197,11 +242,11 @@ function readClaims(body) {
       }
       continue;
     }
-    if (label === 'work' && WORK_REFERENCE.test(text)) {
+    for (const reference of readWorkReferences(label, text)) {
       if (references.length >= MAX_TEST_OBSERVATION_WORK_REFERENCES) {
         refuse('too many work references');
       }
-      references.push(text);
+      references.push(reference);
     }
   }
   return {
@@ -210,6 +255,46 @@ function readClaims(body) {
     severityBasis,
     workReferences: Object.freeze([...new Set(references)].sort(ordinal)),
   };
+}
+
+/**
+ * One labelled line, in either of the two forms an observing writer actually emits: a bare
+ * `Label: value`, or the Markdown list item `- **Label:** value` that renders as one.
+ *
+ * The two are the same structure with different decoration, so they are read by one function and
+ * the decoration is removed rather than interpreted. Everything else in a body — headings, prose,
+ * blank lines — is passed over untouched; the digest above is what preserves it.
+ */
+function readLabelledField(line) {
+  // Two forms, read separately because their colon sits in different places: a bold label carries
+  // its own colon inside the emphasis (`**Observed at:**`) and needs none after it, while a bare
+  // label is defined by the colon that follows it.
+  const emphasised = line.match(/^\s*(?:[-*]\s+)?\*\*\s*([^*:]{1,60}?)\s*:?\s*\*\*\s*:?\s*(.+?)\s*$/u);
+  const match = emphasised
+    ?? line.match(/^\s*(?:[-*]\s+)?([A-Za-z][A-Za-z /]{0,59}?)\s*:\s*(.+?)\s*$/u);
+  if (match === null) return null;
+  const raw = match[1];
+  if (raw === undefined) return null;
+  // One canonical spelling of a label: case-folded and internally single-spaced. Nothing else about
+  // the line is normalized, and the value is never rewritten.
+  return { label: raw.trim().toLowerCase().replace(/\s+/gu, ' '), text: match[2] };
+}
+
+/**
+ * Work identities, read only where a source declares one and only in a declared form.
+ *
+ * Two forms, both exact: the `Work:` line this module has always read, and the leading
+ * `owner/name issue #N` of an automated observation's subject line. A bare `#119` in free text is
+ * deliberately not a work identity — it names nothing without a repository, and guessing which
+ * repository was meant is how an observation about one project ends up filed against another.
+ */
+function readWorkReferences(label, text) {
+  if (label === 'work' && WORK_REFERENCE.test(text)) return [text];
+  if (label === 'repository / subject') {
+    const match = text.match(SUBJECT_WORK_REFERENCE);
+    if (match !== null) return [`${match[1]}#${match[2]}`];
+  }
+  return [];
 }
 
 /**
@@ -428,8 +513,8 @@ export const TEST_OBSERVATION_PROJECTION_ROW_FIELDS = Object.freeze([
   'observationKey', 'repository', 'issueNumber', 'commentId', 'sourceUrl', 'provenance',
   'state', 'unknownReason', 'severity', 'severityBasis', 'rawDigest',
   'sourceCreatedAt', 'sourceUpdatedAt', 'observedAt',
-  'currentRevisionId', 'revisions', 'facts', 'interpretations', 'recommendations',
-  'workReferences',
+  'currentRevisionId', 'revisions', 'claimBasis', 'facts', 'interpretations', 'recommendations',
+  'authorityAssertions', 'workReferences',
 ]);
 
 function claimTexts(observation, kind) {
@@ -486,9 +571,13 @@ export function projectTestObservations(ledgerInput) {
           sourceUpdatedAt: entry.sourceUpdatedAt,
           observedAt: entry.observedAt,
         }))),
+        // Named on every row rather than explained in a caption: everything in the four lists
+        // below is what the source said, and a reader must never have to assume otherwise.
+        claimBasis: TEST_OBSERVATION_CLAIM_BASIS,
         facts: claimTexts(current, 'FACT'),
         interpretations: claimTexts(current, 'INTERPRETATION'),
         recommendations: claimTexts(current, 'RECOMMENDATION'),
+        authorityAssertions: claimTexts(current, 'AUTHORITY_ASSERTION'),
         workReferences: current.workReferences,
       });
     });
