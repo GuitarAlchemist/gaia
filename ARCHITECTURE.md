@@ -74,6 +74,7 @@ only in the final column and must not escape in a result or refusal.
 | Runner capability probe | `probe(mandate, lease, adapter) -> receipt or blocker` | Read-only capability question decided by identity, generation, lease, admission and reconciliation before any adapter is consulted | synthetic-fixture probe; deterministic in-memory fixtures |
 | Publication and operator | `prepare(intent)`; `authorize(grant)`; `execute(intent) -> receipt` | Human-mediated privileged effect | GitHub publication/operator adapters; owned in-memory broker tests |
 | Factory telemetry | `record(phase)`; `replay(events) -> lifecycle or refusal` | Closed evidence events and freshness projection | local evidence log; wmux/Claude sensor; deterministic fixtures |
+| Lane generation bootstrap | `bootstrapLaneGeneration(manifest, ports) -> receipt or refusal`; `verifyLaneLaunchReceipt(receipt) -> receipt or refusal` | Work-scoped execution exclusion, topology before spawn, verified launch receipt, and recoverable CAS cleanup intent | deterministic shared-instance in-memory generation store; deterministic lane-adapter fixture; production exclusion not shipped |
 | Control room | `render(snapshot, observed instant) -> read model` | Authority-free operator projection | static HTML/dashboard; in-memory snapshots |
 | Hybrid search | `index(corpus)`; `query(request) -> matches or refusal` | Advisory retrieval with provenance | local JavaScript engine; optional IX embedding input |
 | Architecture drift | `checkArchitectureDrift(inventory) -> report or refusal` | Normalized repository inventory | filesystem inventory; deterministic in-memory inventory |
@@ -111,6 +112,18 @@ observed by a read-only sensor. Four live lanes per workspace is the supported d
 future validation target and limits above four are experimental. Lane heartbeats establish only
 sensor freshness. They do not enter backlog truth, acceptance, completion, cost, percentage, or
 ETA.
+
+One declared generation of lanes is bootstrapped from an authoritative content-addressed manifest.
+Identity is derived from that document rather than from a remembered pane, the complete empty
+topology exists before any process, and a lane is never `ACTIVE` until a durable launch receipt is
+published against one fresh structured observation. A refused launch compensates only the
+resources its own operation created. Cleanup persists `COMPENSATING` before effects, blocks
+successor generations while unresolved, and becomes `COMPENSATED` only after observed removal.
+One shared in-process store excludes overlapping executions per Work Identity before provider
+access; CAS alone does not fence provider effects. Launch quota gates startup, not owned
+cleanup-only recovery or existing receipt replay. No cross-host concurrency safety is claimed. The
+shipped adapters behind that seam are deterministic fixtures; a durable record store and a real
+terminal host remain planned.
 
 The principal operation lifecycle is observation -> eligible claim -> intent -> effect started ->
 reconciliation -> terminal receipt. Draft operations preserve `ENQUEUED`, `CLAIMED`, `INTENT`,
@@ -317,6 +330,9 @@ are linked here.
   [control room](docs/factory-control-room.md) — lifecycle evidence, freshness, and projections.
 - [Scale and lanes](docs/scale-and-lanes.md) and
   [local wmux lanes](docs/local-wmux-lanes.md) — measured concurrency and lane semantics.
+- [Lane generation bootstrap](docs/lane-generation-bootstrap.md) — manifest-derived generation
+  identity, topology-before-spawn ordering, the launch receipt as linearization point, and exact
+  compensation.
 - [Ecosystem adapters](docs/ecosystem-adapters.md) and
   [hybrid semantic search](docs/hybrid-semantic-search.md) — bounded external and offline inputs.
 - [Pull-request conflict classifier](docs/pr-conflict-reconciler.md) — exact-generation read-only
