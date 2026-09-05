@@ -79,6 +79,7 @@ only in the final column and must not escape in a result or refusal.
 | Hybrid search | `index(corpus)`; `query(request) -> matches or refusal` | Advisory retrieval with provenance | local JavaScript engine; optional IX embedding input |
 | Architecture drift | `checkArchitectureDrift(inventory) -> report or refusal` | Normalized repository inventory | filesystem inventory; deterministic in-memory inventory |
 | Managed PR delivery rounds | `createInitialManagedRound(input) -> round or refusal`; `executeManagedRoundUpdate(input) -> receipt or blocker` | One evidence-bound managed-section transition with read-after-write proof | GitHub pull-request body CAS and conditional-write adapter; memory evidence and effect adapters |
+| Test observation intake | `normalizeTestObservation(reading) -> observation`; `admitTestObservation(ledger, observation) -> admission`; `projectTestObservations(ledger) -> read model` | One untrusted comment becomes one digest-bound, append-only observation revision and one authority-free read model; an unreadable, deleted, malformed or backwards-moving source is an explicit unknown beside the evidence it cannot replace | injected read-only comment source; sanitized synthetic fixture |
 
 The architecture-drift verification seam is the only seam introduced by this map itself. One
 black-box contract suite runs against both adapters and includes broken-link, missing-section, stale
@@ -339,6 +340,8 @@ are linked here.
   classification and the deliberately empty automation registry.
 - [Managed PR delivery rounds](docs/pr-delivery-round-history.md) — bounded R0/R1 history,
   single-owner conditional effect, durable intent, and read-after-write reconciliation.
+- [Test observation intake R0](docs/test-observation-intake-r0.md) — comment identity, raw-source
+  digest, append-only revisions, and the fact/interpretation/recommendation distinction.
 - [Crash recovery](docs/crash-recovery.md),
   [artifact completion signals](docs/artifact-completion-signals.md), and
   [holdout-safe reporting](docs/holdout-safe-reporting.md) — recovery, terminal evidence, and

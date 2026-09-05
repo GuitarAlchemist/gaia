@@ -56,3 +56,42 @@ for the ready-label occurrence of 2026-09-05 at 14:33:52 UTC.
 Preparing this branch is operator-assisted recovery. A subsequent Draft receipt would prove
 admission only, not implementation, delivery, or automatic admission of the next issue.
 The missing automated owner/branch preparation remains a separate orchestration gap.
+
+## Implemented R0 slice
+
+Shipped modules and gates, added after the source probe above.
+
+- `src/test-observation-intake.mjs` — the pure core. It imports `node:crypto` and nothing else:
+  no provider, no sibling repository, no clock, no filesystem, no process. It owns the reading
+  verifier, the normalizer, the append-only ledger and the read model.
+- `src/gh-test-observation-source.mjs` — the injected read-only input adapter. Its published
+  surface is one verb, its invocation is a plain read of one comment resource with no request body
+  and no verb override, and the suite asserts the shipped file cannot spell a mutating flag.
+- `tests/test-observation-intake.test.mjs` and
+  `tests/fixtures/test-observation/sanitized-issue-73-comment.json`.
+
+### What the gates prove, and what they do not
+
+Proven: identity and raw-source digest are deterministic and exact; the digest is of the UTF-8
+body string, not of the transporting document; a replayed unchanged comment is admitted once; an
+edit appends a revision linked to the one it followed and leaves the earlier revision byte-equal;
+a backwards-moving source is recorded as `SOURCE_TIME_REGRESSED` without content and cannot
+replace the newer evidence; unavailable, deleted, malformed, unstructured and invalid-timestamp
+sources each produce their own explicit unknown reason; `effect` and `authority` are the constant
+`NONE` regardless of what the body asserts; a source-declared severity is marked
+`SOURCE_DECLARED`; facts, interpretations and recommendations project as three separate lists;
+and the source's argument list contains no mutating token.
+
+Not proven: any live read. The fixture is synthetic — see
+`tests/fixtures/test-observation/PROVENANCE.md` — so its digest is deliberately not the digest
+this document records for the live body. `node --test` performs no network call, and nothing here
+is evidence of live integration.
+
+### Deliberate limits of this slice
+
+- A not-found comment reads as `UNAVAILABLE`, never `DELETED`: deletion and invisibility are
+  indistinguishable at that seam, and `DELETED` is reserved for a source that can prove it.
+- Claim kinds come only from a source's own explicit `Fact:` / `Interpretation:` /
+  `Recommendation:` line prefix. No sentence is promoted into a kind by resembling one.
+- The ledger is an in-process value. Durable storage, multi-comment intake, and any transition
+  driven by an observation are later slices.

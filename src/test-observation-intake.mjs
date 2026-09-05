@@ -1,0 +1,501 @@
+/**
+ * test-observation-intake.mjs — `gaia-test-observation/1`, R0 of issue #53: the one pure conversion
+ * from a comment somebody wrote into an observation Gaia can replay, and the one read-only
+ * projection of what has been observed.
+ *
+ * WHAT THIS MODULE IS NOT
+ * -----------------------
+ * It is not a GitHub client. It opens nothing, spawns nothing, holds no clock and carries no
+ * credential; the only import is `node:crypto` for the digests, which is pure. The comment arrives
+ * as an already-verified reading produced by an injected read-only source, so the core has no
+ * dependency on the sibling repository the comment happens to live in — swapping the source for a
+ * fixture changes nothing about what an observation means.
+ *
+ * THE FOUR RULES
+ * --------------
+ * 1. **The source's identity and bytes survive.** Repository, issue number, comment id, link, the
+ *    two source instants and a digest of the exact UTF-8 body are republished as read, never
+ *    re-derived, re-encoded or summarized. The digest is of the body string, not of the document
+ *    that transported it, because those are two different byte sequences.
+ * 2. **Evidence is appended, never overwritten.** An edited comment is a new revision linked to
+ *    the one it followed. A replay of a revision already held changes nothing at all. Nothing in
+ *    this module can shorten, rewrite or drop a revision that was admitted.
+ * 3. **An absent, deleted, malformed or backwards-moving source is said out loud.** Every one of
+ *    those produces an `UNKNOWN` observation carrying the reason, positioned in the same ledger
+ *    beside the evidence it could not replace. None of them is allowed to look like a success, and
+ *    none of them erases what was already known.
+ * 4. **Untrusted text grants no authority.** A comment is data. `effect` and `authority` are the
+ *    constants `NONE` on every observation this module can produce, whatever the body asks for. A
+ *    severity a comment declares is recorded as *declared by the source* — `severityBasis` is a
+ *    separate field precisely so a reader never has to infer whether Gaia agreed.
+ *
+ * Facts, interpretations and recommendations are kept as three kinds because collapsing them is
+ * how an operator ends up acting on somebody's guess. The classification is structural: it comes
+ * from the source's own explicit line prefix, and a line with no recognized prefix is not silently
+ * promoted into one of the three.
+ */
+
+import { createHash } from 'node:crypto';
+
+export const TEST_COMMENT_READING_SCHEMA = 'gaia-test-comment-reading/1';
+export const TEST_OBSERVATION_SCHEMA = 'gaia-test-observation/1';
+
+/** Where the bytes came from. A fixture is never allowed to be mistaken for a live read. */
+export const TEST_OBSERVATION_PROVENANCES = Object.freeze(['LIVE', 'SYNTHETIC_FIXTURE']);
+
+/** What the source adapter found. Three answers, and no fourth that means "probably fine". */
+export const TEST_COMMENT_AVAILABILITIES = Object.freeze(['AVAILABLE', 'DELETED', 'UNAVAILABLE']);
+
+/** Two states: it normalized, or it did not and says why. */
+export const TEST_OBSERVATION_STATES = Object.freeze(['NORMALIZED', 'UNKNOWN']);
+
+/** Every way an observation can fail to carry content. Closed, and each one names one cause. */
+export const TEST_OBSERVATION_UNKNOWN_REASONS = Object.freeze([
+  'SOURCE_UNAVAILABLE',
+  'SOURCE_DELETED',
+  'SOURCE_MALFORMED',
+  'SOURCE_TIMESTAMP_INVALID',
+  'SOURCE_TIME_REGRESSED',
+]);
+
+/** The three kinds of sentence, kept apart so none of them has to be inferred by a reader. */
+export const TEST_OBSERVATION_CLAIM_KINDS = Object.freeze([
+  'FACT', 'INTERPRETATION', 'RECOMMENDATION',
+]);
+
+/** Severity is a closed vocabulary; `UNKNOWN` is what an unstated severity is. */
+export const TEST_OBSERVATION_SEVERITIES = Object.freeze([
+  'INFO', 'WARNING', 'CRITICAL', 'UNKNOWN',
+]);
+
+/** Whether the severity was asserted by the source or simply absent. Never "agreed by Gaia". */
+export const TEST_OBSERVATION_SEVERITY_BASES = Object.freeze(['SOURCE_DECLARED', 'ABSENT']);
+
+export const TEST_COMMENT_READING_FIELDS = Object.freeze([
+  'schema', 'provenance', 'availability', 'repository', 'issueNumber', 'commentId',
+  'sourceUrl', 'body', 'createdAt', 'updatedAt', 'observedAt',
+]);
+
+export const TEST_OBSERVATION_FIELDS = Object.freeze([
+  'schema', 'effect', 'authority', 'observationKey', 'revisionId', 'previousRevisionId',
+  'state', 'unknownReason', 'provenance', 'repository', 'issueNumber', 'commentId', 'sourceUrl',
+  'rawDigest', 'rawByteLength', 'sourceCreatedAt', 'sourceUpdatedAt', 'observedAt',
+  'severity', 'severityBasis', 'claims', 'workReferences',
+]);
+
+/** A comment body larger than this is refused rather than parsed. Real ones are kilobytes. */
+export const MAX_TEST_COMMENT_BYTES = 64 * 1024;
+
+/** Bounds on what one comment may contribute, so one source cannot flood a projection. */
+export const MAX_TEST_OBSERVATION_CLAIMS = 64;
+export const MAX_TEST_OBSERVATION_WORK_REFERENCES = 32;
+export const MAX_TEST_CLAIM_LENGTH = 500;
+
+const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u;
+const SOURCE_REPOSITORY = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/u;
+const WORK_REFERENCE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+#[1-9]\d*$/u;
+
+/**
+ * The claim prefixes, singular and exact. A body that wants to be read as a fact must say `Fact:`;
+ * nothing is promoted into a kind by resembling one. Null-prototype, so `constructor` is not a
+ * claim kind.
+ */
+const CLAIM_PREFIXES = Object.freeze(Object.assign(Object.create(null), {
+  fact: 'FACT',
+  interpretation: 'INTERPRETATION',
+  recommendation: 'RECOMMENDATION',
+}));
+
+export class TestObservationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'TestObservationError';
+  }
+}
+
+function refuse(message) {
+  throw new TestObservationError(message);
+}
+
+const ordinal = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+const isInstant = (value) => typeof value === 'string' && INSTANT.test(value)
+  && Number.isFinite(Date.parse(value));
+
+function digestOf(text) {
+  return `sha256:${createHash('sha256').update(text, 'utf8').digest('hex')}`;
+}
+
+/**
+ * The total verifier of what an input source may hand in.
+ *
+ * It is exported because the source adapter and this normalizer must agree on exactly one
+ * definition of a reading, and neither of them gets to hold that definition privately.
+ */
+export function requireTestCommentReading(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    refuse('a comment reading must be an object');
+  }
+  const keys = Object.keys(value).sort();
+  if (JSON.stringify(keys) !== JSON.stringify([...TEST_COMMENT_READING_FIELDS].sort())) {
+    refuse('a comment reading carries exactly its declared fields');
+  }
+  if (value.schema !== TEST_COMMENT_READING_SCHEMA) refuse('unsupported comment reading schema');
+  if (!TEST_OBSERVATION_PROVENANCES.includes(value.provenance)) {
+    refuse('unknown reading provenance');
+  }
+  if (!TEST_COMMENT_AVAILABILITIES.includes(value.availability)) {
+    refuse('unknown reading availability');
+  }
+  if (typeof value.repository !== 'string' || !SOURCE_REPOSITORY.test(value.repository)) {
+    refuse('a reading names one owner/name source repository');
+  }
+  if (!Number.isSafeInteger(value.issueNumber) || value.issueNumber < 1) {
+    refuse('invalid issue number');
+  }
+  if (!Number.isSafeInteger(value.commentId) || value.commentId < 1) {
+    refuse('invalid comment identity');
+  }
+  if (typeof value.sourceUrl !== 'string' || !value.sourceUrl.startsWith('https://')) {
+    refuse('a reading carries one https source link');
+  }
+  if (!isInstant(value.observedAt)) refuse('a reading carries the instant it was observed');
+  if (value.body !== null && typeof value.body !== 'string') refuse('a body is text or absent');
+  return Object.freeze({ ...value });
+}
+
+/**
+ * Read the three kinds of sentence out of a body, and only where the source said which is which.
+ *
+ * Bounded on every axis: claim count, claim length and reference count. The body is never
+ * rewritten — the digest is what preserves it — so the trimming here affects the projection's
+ * rendering only, and the evidence stays exact.
+ */
+function readClaims(body) {
+  const claims = [];
+  const references = [];
+  let severity = 'UNKNOWN';
+  let severityBasis = 'ABSENT';
+  for (const line of body.split(/\r?\n/u)) {
+    const match = line.match(/^\s*([A-Za-z]+)\s*:\s*(.+?)\s*$/u);
+    if (!match) continue;
+    const label = match[1].toLowerCase();
+    const text = match[2];
+    const kind = CLAIM_PREFIXES[label];
+    if (kind !== undefined) {
+      if (claims.length >= MAX_TEST_OBSERVATION_CLAIMS) refuse('too many claims in one comment');
+      if (text.length > MAX_TEST_CLAIM_LENGTH) refuse('a single claim is too long to project');
+      claims.push(Object.freeze({ kind, text }));
+      continue;
+    }
+    if (label === 'severity') {
+      const declared = text.toUpperCase();
+      // A severity the source spelled wrong is an unstated severity, not an escalation.
+      if (TEST_OBSERVATION_SEVERITIES.includes(declared) && declared !== 'UNKNOWN') {
+        severity = declared;
+        severityBasis = 'SOURCE_DECLARED';
+      }
+      continue;
+    }
+    if (label === 'work' && WORK_REFERENCE.test(text)) {
+      if (references.length >= MAX_TEST_OBSERVATION_WORK_REFERENCES) {
+        refuse('too many work references');
+      }
+      references.push(text);
+    }
+  }
+  return {
+    claims: Object.freeze(claims),
+    severity,
+    severityBasis,
+    workReferences: Object.freeze([...new Set(references)].sort(ordinal)),
+  };
+}
+
+/**
+ * The revision identity: a content address over exactly what makes one revision different from
+ * another. Two readings of an unchanged comment collapse to one revision; an edit does not.
+ *
+ * `previousRevisionId` is deliberately excluded, so replaying the same revision behind a different
+ * history cannot mint a second identity for the same evidence.
+ */
+export function testObservationRevisionId(parts) {
+  return digestOf(JSON.stringify([
+    TEST_OBSERVATION_SCHEMA,
+    parts.observationKey,
+    parts.state,
+    parts.unknownReason ?? null,
+    parts.rawDigest ?? null,
+    parts.sourceUpdatedAt ?? null,
+  ]));
+}
+
+/** The stable identity of one commented-on piece of evidence, across every revision of it. */
+export function testObservationKey({ repository, issueNumber, commentId }) {
+  return `${repository}#${issueNumber}#comment-${commentId}`;
+}
+
+function observation(reading, observationKey, fields) {
+  return Object.freeze({
+    schema: TEST_OBSERVATION_SCHEMA,
+    // Constants, not inputs. No comment can raise them and no caller can pass them in.
+    effect: 'NONE',
+    authority: 'NONE',
+    observationKey,
+    revisionId: testObservationRevisionId({ observationKey, ...fields }),
+    previousRevisionId: null,
+    provenance: reading.provenance,
+    repository: reading.repository,
+    issueNumber: reading.issueNumber,
+    commentId: reading.commentId,
+    sourceUrl: reading.sourceUrl,
+    observedAt: reading.observedAt,
+    ...fields,
+  });
+}
+
+function unknownObservation(reading, observationKey, unknownReason) {
+  return observation(reading, observationKey, {
+    state: 'UNKNOWN',
+    unknownReason,
+    rawDigest: null,
+    rawByteLength: 0,
+    sourceCreatedAt: isInstant(reading.createdAt) ? reading.createdAt : null,
+    sourceUpdatedAt: isInstant(reading.updatedAt) ? reading.updatedAt : null,
+    severity: 'UNKNOWN',
+    severityBasis: 'ABSENT',
+    claims: Object.freeze([]),
+    workReferences: Object.freeze([]),
+  });
+}
+
+/**
+ * One reading becomes one observation. Total: it either returns an observation or refuses the
+ * reading's shape, and it never returns something that looks normalized when it is not.
+ */
+export function normalizeTestObservation(input) {
+  const reading = requireTestCommentReading(input);
+  const observationKey = testObservationKey(reading);
+
+  if (reading.availability === 'DELETED') {
+    return unknownObservation(reading, observationKey, 'SOURCE_DELETED');
+  }
+  if (reading.availability === 'UNAVAILABLE') {
+    return unknownObservation(reading, observationKey, 'SOURCE_UNAVAILABLE');
+  }
+  if (typeof reading.body !== 'string' || reading.body.trim().length === 0
+    || Buffer.byteLength(reading.body, 'utf8') > MAX_TEST_COMMENT_BYTES) {
+    return unknownObservation(reading, observationKey, 'SOURCE_MALFORMED');
+  }
+  if (!isInstant(reading.createdAt) || !isInstant(reading.updatedAt)) {
+    return unknownObservation(reading, observationKey, 'SOURCE_TIMESTAMP_INVALID');
+  }
+  if (Date.parse(reading.updatedAt) < Date.parse(reading.createdAt)) {
+    // The source contradicts itself before any history is consulted: an edit that precedes the
+    // comment it edits is not a timeline Gaia can place.
+    return unknownObservation(reading, observationKey, 'SOURCE_TIME_REGRESSED');
+  }
+
+  const read = readClaims(reading.body);
+  if (read.claims.length === 0) {
+    // Nothing in the body said which sentences are facts. Guessing is the one thing this module
+    // exists not to do, so the evidence is kept and the content is UNKNOWN.
+    return unknownObservation(reading, observationKey, 'SOURCE_MALFORMED');
+  }
+  return observation(reading, observationKey, {
+    state: 'NORMALIZED',
+    unknownReason: null,
+    rawDigest: digestOf(reading.body),
+    rawByteLength: Buffer.byteLength(reading.body, 'utf8'),
+    sourceCreatedAt: reading.createdAt,
+    sourceUpdatedAt: reading.updatedAt,
+    severity: read.severity,
+    severityBasis: read.severityBasis,
+    claims: read.claims,
+    workReferences: read.workReferences,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The append-only ledger: the only structure that decides duplicate from revision
+// ---------------------------------------------------------------------------
+
+export const TEST_OBSERVATION_LEDGER_SCHEMA = 'gaia-test-observation-ledger/1';
+export const TEST_OBSERVATION_ADMISSION_SCHEMA = 'gaia-test-observation-admission/1';
+
+/**
+ * Four outcomes, and each names one thing that happened to the evidence.
+ *
+ * `ALREADY_HELD` is not a failure and `REGRESSED` is not a success. Both are separated from
+ * `ADMITTED` because an operator reading a projection has to be able to tell a first sighting from
+ * a replay from a source that went backwards, and a single boolean cannot say that.
+ */
+export const TEST_OBSERVATION_ADMISSION_OUTCOMES = Object.freeze([
+  'ADMITTED', 'ALREADY_HELD', 'REVISED', 'REGRESSED',
+]);
+
+/** A ledger holds one comment's whole observed history; this bounds one process's memory. */
+export const MAX_TEST_OBSERVATION_ENTRIES = 512;
+
+export function emptyTestObservationLedger() {
+  return Object.freeze({
+    schema: TEST_OBSERVATION_LEDGER_SCHEMA,
+    effect: 'NONE',
+    authority: 'NONE',
+    entries: Object.freeze([]),
+  });
+}
+
+function requireLedger(value) {
+  if (value === null || typeof value !== 'object' || value.schema !== TEST_OBSERVATION_LEDGER_SCHEMA
+    || !Array.isArray(value.entries)) {
+    refuse('an admission needs one observation ledger');
+  }
+  return value;
+}
+
+function admission(outcome, ledger) {
+  return Object.freeze({ schema: TEST_OBSERVATION_ADMISSION_SCHEMA, outcome, ledger });
+}
+
+function appended(ledger, entry) {
+  if (ledger.entries.length >= MAX_TEST_OBSERVATION_ENTRIES) refuse('the observation ledger is full');
+  return Object.freeze({ ...ledger, entries: Object.freeze([...ledger.entries, entry]) });
+}
+
+/**
+ * Admit one observation into the ledger. Pure, append-only, and total.
+ *
+ * The decision order is the contract. A revision already held is answered before any timestamp is
+ * compared, so re-reading an unchanged comment can never be mistaken for a source that went
+ * backwards; and a backwards source is recorded rather than admitted, so a stale mirror cannot
+ * overwrite the newer evidence it disagrees with. Nothing here can remove or edit an entry.
+ */
+export function admitTestObservation(ledgerInput, observationInput) {
+  const ledger = requireLedger(ledgerInput);
+  const candidate = observationInput;
+  if (candidate === null || typeof candidate !== 'object'
+    || candidate.schema !== TEST_OBSERVATION_SCHEMA) {
+    refuse('only a normalized observation can be admitted');
+  }
+  const history = ledger.entries.filter((entry) => entry.observationKey === candidate.observationKey);
+  if (history.some((entry) => entry.revisionId === candidate.revisionId)) {
+    // Byte-identical evidence already held. Returning the same ledger object, not a copy, is what
+    // makes replay observably free of effect.
+    return admission('ALREADY_HELD', ledger);
+  }
+  const latest = history.at(-1) ?? null;
+  if (latest === null) return admission('ADMITTED', appended(ledger, candidate));
+
+  const previousInstant = latest.sourceUpdatedAt;
+  const candidateInstant = candidate.sourceUpdatedAt;
+  if (previousInstant !== null && candidateInstant !== null
+    && Date.parse(candidateInstant) < Date.parse(previousInstant)) {
+    const regressive = Object.freeze({
+      ...candidate,
+      state: 'UNKNOWN',
+      unknownReason: 'SOURCE_TIME_REGRESSED',
+      // The content of a read that cannot be placed in the timeline is not republished as
+      // evidence; the digest would otherwise read as a competing version of the truth.
+      rawDigest: null,
+      rawByteLength: 0,
+      severity: 'UNKNOWN',
+      severityBasis: 'ABSENT',
+      claims: Object.freeze([]),
+      workReferences: Object.freeze([]),
+      previousRevisionId: latest.revisionId,
+      revisionId: testObservationRevisionId({
+        observationKey: candidate.observationKey,
+        state: 'UNKNOWN',
+        unknownReason: 'SOURCE_TIME_REGRESSED',
+        rawDigest: null,
+        sourceUpdatedAt: candidateInstant,
+      }),
+    });
+    return admission('REGRESSED', appended(ledger, regressive));
+  }
+  const revision = Object.freeze({ ...candidate, previousRevisionId: latest.revisionId });
+  return admission('REVISED', appended(ledger, revision));
+}
+
+// ---------------------------------------------------------------------------
+// The read model: what an operator is allowed to see, and nothing that acts
+// ---------------------------------------------------------------------------
+
+export const TEST_OBSERVATION_PROJECTION_SCHEMA = 'gaia-test-observation-projection/1';
+
+export const TEST_OBSERVATION_PROJECTION_ROW_FIELDS = Object.freeze([
+  'observationKey', 'repository', 'issueNumber', 'commentId', 'sourceUrl', 'provenance',
+  'state', 'unknownReason', 'severity', 'severityBasis', 'rawDigest',
+  'sourceCreatedAt', 'sourceUpdatedAt', 'observedAt',
+  'currentRevisionId', 'revisions', 'facts', 'interpretations', 'recommendations',
+  'workReferences',
+]);
+
+function claimTexts(observation, kind) {
+  return Object.freeze(observation.claims
+    .filter((claim) => claim.kind === kind)
+    .map((claim) => claim.text));
+}
+
+/**
+ * Project the ledger into the one read model a caller may display. Pure, and effect-free by
+ * construction: it returns strings, and it never returns a function, a source, or a way back to
+ * one. A reader of this projection cannot reach the input source it describes.
+ *
+ * The current reading is the latest revision only — an operator looking at a comment is looking at
+ * what it says now — and the full revision list travels beside it so that "now" never silently
+ * replaces what was previously observed. An `UNKNOWN` current revision is reported as unknown; the
+ * projection does not fall back to the last revision that happened to parse, because presenting
+ * superseded content as current is exactly the fabricated success this slice exists to prevent.
+ */
+export function projectTestObservations(ledgerInput) {
+  const ledger = requireLedger(ledgerInput);
+  const byKey = new Map();
+  for (const entry of ledger.entries) {
+    if (!byKey.has(entry.observationKey)) byKey.set(entry.observationKey, []);
+    byKey.get(entry.observationKey).push(entry);
+  }
+  const observations = [...byKey.entries()]
+    .sort(([a], [b]) => ordinal(a, b))
+    .map(([observationKey, history]) => {
+      const current = history.at(-1);
+      return Object.freeze({
+        observationKey,
+        repository: current.repository,
+        issueNumber: current.issueNumber,
+        commentId: current.commentId,
+        sourceUrl: current.sourceUrl,
+        provenance: current.provenance,
+        state: current.state,
+        unknownReason: current.unknownReason,
+        severity: current.severity,
+        severityBasis: current.severityBasis,
+        rawDigest: current.rawDigest,
+        sourceCreatedAt: current.sourceCreatedAt,
+        sourceUpdatedAt: current.sourceUpdatedAt,
+        observedAt: current.observedAt,
+        currentRevisionId: current.revisionId,
+        revisions: Object.freeze(history.map((entry) => Object.freeze({
+          revisionId: entry.revisionId,
+          previousRevisionId: entry.previousRevisionId,
+          state: entry.state,
+          unknownReason: entry.unknownReason,
+          rawDigest: entry.rawDigest,
+          rawByteLength: entry.rawByteLength,
+          sourceUpdatedAt: entry.sourceUpdatedAt,
+          observedAt: entry.observedAt,
+        }))),
+        facts: claimTexts(current, 'FACT'),
+        interpretations: claimTexts(current, 'INTERPRETATION'),
+        recommendations: claimTexts(current, 'RECOMMENDATION'),
+        workReferences: current.workReferences,
+      });
+    });
+  return Object.freeze({
+    schema: TEST_OBSERVATION_PROJECTION_SCHEMA,
+    effect: 'NONE',
+    authority: 'NONE',
+    observations: Object.freeze(observations),
+  });
+}
