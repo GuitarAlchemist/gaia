@@ -29,7 +29,7 @@ function intake() {
   return workflow;
 }
 
-test('intake triggers on issues:labeled and a bounded schedule only', () => {
+test('intake triggers on manual dispatch, issues:labeled, and a bounded schedule only', () => {
   const workflow = intake();
   assert.match(workflow, /^on:\s*$/mu);
   assert.match(workflow, /^ {2}issues:\s*$/mu);
@@ -109,8 +109,9 @@ test('the ordered pump observation is bound to the serialized recovery lane only
   );
 });
 
-test('intake claims no dispatch authority and no GITHUB_TOKEN authority', () => {
+test('manual recovery dispatch claims no write authority and no GITHUB_TOKEN authority', () => {
   const workflow = intake();
+  assert.match(workflow, /^ {2}workflow_dispatch:\s*$/mu);
   assert.match(workflow, /^permissions:\s*$/mu);
   assert.match(workflow, /^ {2}actions: read\s*$/mu);
   assert.match(workflow, /^ {2}contents: read\s*$/mu);
@@ -119,7 +120,6 @@ test('intake claims no dispatch authority and no GITHUB_TOKEN authority', () => 
   assert.doesNotMatch(workflow, /(?:issues|pull-requests|id-token): write/u);
   assert.doesNotMatch(workflow, /secrets\.GITHUB_TOKEN/u);
   assert.doesNotMatch(workflow, /github\.token/u);
-  assert.doesNotMatch(workflow, /workflow_dispatch/u);
 });
 
 test('intake reuses the pump identity and carries one data-only managed-round configuration', () => {

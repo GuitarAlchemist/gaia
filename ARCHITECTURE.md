@@ -67,8 +67,9 @@ only in the final column and must not escape in a result or refusal.
 | Coordination kernel | `decide(state, command) -> events`; `apply(state, event) -> state` | Six coordination verbs and replay | stdio MCP edge; deterministic tests |
 | Durable event log | `load() -> events`; `commit(expected revision, events) -> receipt or refusal` | Single-writer append and compare-and-set | local append-only JSONL; in-memory test fixtures |
 | Draft operation | `enqueue(selector)`; `reconcile(identity, expected revision) -> projection or refusal` | One canonical Operation Envelope | protected GitHub Git Data ledger and effect adapter; memory ledger |
-| Hosted Draft intake | `runHostedDraftIntake(trigger, observations) -> receipt or refusal`; `produceHostedDraftPumpObservation(receipt) -> observation or refusal` | Resume one unsettled operation before admitting at most one candidate; authority-free sealed observation | GitHub Actions intake, one recovery group plus one group per labeled issue; existing Draft ledger/admission/effect adapters; deterministic fixtures |
+| Hosted Draft intake | `runHostedDraftIntake(trigger, observations) -> receipt or refusal`; `produceHostedDraftPumpObservation(receipt) -> observation or refusal` | Bounded unsettled recovery before admitting at most one candidate; unchanged ambiguous records are quarantined for the scheduled tick without being settled; authority-free sealed observation | GitHub Actions intake, one recovery group plus one group per labeled issue; existing Draft ledger/admission/effect adapters; deterministic fixtures |
 | Portfolio survey and drain | `survey(observations) -> revision`; `advance(revision) -> intent or refusal` | Read-only inventory to one bounded next transition | GitHub read adapter; deterministic fixtures; append-only drain ledger |
+| Drain Petri net | `buildNet(definition) -> net`; `replay(net, events) -> run`; `collectDrainFacts(input) -> facts or refusal` | Bounded pull-request drain and lane lifecycle with exact-source evidence | JSONL artifact adapter; optional DuckDB read projection; read-only CLI |
 | Pull-request conflict classification | `classifyPrConflict(observation, claim) -> reading or refusal` | Exact-generation, read-only classification under a closed empty strategy registry | normalized GitHub observation; deterministic fixtures |
 | Runner capability probe | `probe(mandate, lease, adapter) -> receipt or blocker` | Read-only capability question decided by identity, generation, lease, admission and reconciliation before any adapter is consulted | synthetic-fixture probe; deterministic in-memory fixtures |
 | Publication and operator | `prepare(intent)`; `authorize(grant)`; `execute(intent) -> receipt` | Human-mediated privileged effect | GitHub publication/operator adapters; owned in-memory broker tests |
@@ -125,12 +126,17 @@ reconciliation -> terminal receipt. Draft operations preserve `ENQUEUED`, `CLAIM
 `EFFECT_STARTED`, and `EFFECT_AMBIGUOUS` as nonterminal distinctions. `CREATED`, `REUSED`,
 `REFUSED`, and `CANCELLED` are terminal only when exact evidence supports them. Ambiguous remote
 effects remain nonterminal until reconciled; elapsed time and retries cannot manufacture truth.
-The Hosted Draft intake is one concrete pump: each run resumes the first deterministically
-ordered unsettled operation before it may admit one eligible issue. Scheduled recovery runs in one
-serialized group; issue-triggered runs are partitioned per issue and may execute concurrently. Only
-the recovery group publishes the sealed observation, and its unsettled count is read again after the
-run acts so that work a concurrent lane committed meanwhile is counted. That observation is a read
-model with no authority and cannot replace the durable Draft receipt chain.
+The Hosted Draft intake is one concrete pump. An issue-triggered run remains bound to its issue and
+fails closed on its unsettled operation. A scheduled run probes a bounded, deterministic prefix of
+the unsettled queue before it may admit one eligible issue. When reconciliation returns the same
+`EFFECT_AMBIGUOUS` result at the exact committed revision, the run performed no new effect and
+quarantines that record for this tick so a poison message cannot block every later message. A
+changed revision or any other result stops the tick for observation. Quarantine never settles,
+deletes, or rewrites the durable operation. Scheduled recovery runs in one serialized group;
+issue-triggered runs are partitioned per issue and may execute concurrently. Only the recovery group
+publishes the sealed observation, and its unsettled count is read again after the run acts so that
+work a concurrent lane committed meanwhile is counted. That observation is a read model with no
+authority and cannot replace the durable Draft receipt chain.
 
 Pull-request conflict classification is read-only at this revision. It binds the observed base and
 head generation and can report clean, unknown, superseded, or escalation-required. Its automation
@@ -194,6 +200,17 @@ projections. Their absence or corruption cannot be treated as loss of hosted aut
 optional and never decides acceptance, readiness, or an effect. A projection may accelerate or
 explain observation; it may not become a second writer of canonical state.
 
+The drain Petri-net core and fact collector are pure replay modules. Their CLI composes JSONL and
+artifact observations at the edge, and their optional DuckDB adapter rebuilds analytical tables
+from the same deterministic run. Neither the CLI nor the projection may fire a transition or turn
+an observation, actor kind, completion marker, or elapsed time into authority.
+
+Durable bus records are ordered by their causal instant and retain append order when instants tie;
+canonical content never reorders same-instant events. Each edge fact may fire once during the
+stable evolution of its event, remains available until consumed, then expires before the next
+event. DuckDB records ordinal `-1` as the initial marking, including nets with no fact event,
+without inventing an instant.
+
 ## Providers and offline artifacts
 
 Provider adapters translate a closed intent into a concrete effect and normalize the observation
@@ -218,9 +235,12 @@ auto-breaks it. A damaged log is preserved for diagnosis and is never silently t
 
 Hosted operations reload their sealed envelope and durable receipt chain. Reconciliation reads
 the authoritative provider again and either proves the exact terminal state or remains unsettled.
-Each scheduled Hosted Draft intake first lists and resumes one unsettled operation; a resuming run
-does not admit new work. A crash after enqueue therefore leaves durable work for the next intake,
-while a lost compare-and-set performs no effect and is reported as a typed stale-revision refusal.
+Each scheduled Hosted Draft intake first lists and probes a bounded deterministic prefix of
+unsettled operations. A terminal result, changed revision, or newly observed state stops the run; an
+unchanged ambiguous result is recorded as a per-tick quarantine and the next message is tried. Only
+when every probed record was unchanged and ambiguous may that run continue to candidate admission.
+A crash after enqueue therefore leaves durable work for the next intake, while a lost
+compare-and-set performs no effect and is reported as a typed stale-revision refusal.
 Retries repeat a bounded request under the same identity and idempotency boundary; they do not
 skip revision checks. Repeated independently reproduced failures at one seam trip the
 Boundary redesign circuit breaker and preserve immutable Failure Evidence.
@@ -297,7 +317,8 @@ are linked here.
   reconciliation ownership.
 - [Hosted Draft intake](docs/hosted-draft-intake.md) and
   [Hosted Draft observation producer](docs/hosted-draft-pump-producer.md) — scheduled admission,
-  resume-first recovery, receipt-derived observation, and authority boundaries.
+  bounded recovery with poison-message quarantine, receipt-derived observation, and authority
+  boundaries.
 - [Portfolio factory](docs/github-portfolio-factory.md),
   [portfolio drain pump](docs/portfolio-drain-pump.md), and
   [hosted operator](docs/github-portfolio-operator.md) — observation, funnel, intent, and approval.
@@ -327,15 +348,22 @@ to the SHA-256 revision of the exact `ARCHITECTURE.md` bytes. The named commit m
 same bytes and the behavior this map marks implemented; a design-only commit is not a final
 attestation merely because its tree contains the prose. Keeping the attestation outside this file
 avoids a self-referential content hash while leaving this map byte-stable after review. The record
-is therefore written only after the behavior-bearing commit exists and names that commit.
+is therefore written only after the behavior-bearing commit exists and names that commit. That
+commit is provenance for readers: a squash merge leaves it naming a commit of the merged head
+branch, which main does not contain and a clone need not hold, so the gate never resolves it.
 
 Verification inspects the root README, the pure coordination kernel, append-only event log,
 operation envelope, portfolio/drain, telemetry/control-room, lane, ecosystem, recovery, security,
 and runtime contracts at the attested commit. `npm run architecture:verify` checks this document's
-required sections, internal links, exact content revision and commit witness, declared interface
-contracts, and architecture-sensitive change declaration. The production CLI derives the commit
-witness from raw `git show --end-of-options <commit>:ARCHITECTURE.md` bytes; callers cannot inject
-revision evidence. An explicit base is limited to a full commit identifier or canonical
+required sections, internal links, exact content revision, declared interface contracts, and
+architecture-sensitive change declaration. The content check is the attestation: the record's
+`contentRevision` must equal the SHA-256 of the `ARCHITECTURE.md` bytes in the checked tree, so an
+edit without re-attestation fails as `ARCHITECTURE_CONTENT_REVISION_MISMATCH` in every clone, and a
+record copied from another tree passes only when that tree's bytes are identical. The record's
+`commit` must be a full lowercase commit identifier (`VERIFICATION_RECORD_INVALID` otherwise) and is
+not resolved, so the verdict does not depend on which branch refs a clone has fetched. Callers
+cannot inject revision evidence; the CLI reads the tree and `git diff` for changed paths only. An
+explicit base is limited to a full commit identifier or canonical
 `refs/heads/`, `refs/tags/`, or `refs/remotes/` name and is passed after Git's
 `--end-of-options` delimiter. Detailed subsystem claims remain owned by the linked documents and
 their black-box tests. The CI architecture-impact gate is intentionally pull-request-only because

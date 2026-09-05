@@ -17,4 +17,5 @@ node_modules/
 
 # Bus data belongs in a data directory outside the tree, never inside it.
 events.jsonl
+!tests/fixtures/drain-petri-net/events.jsonl
 events.lock/

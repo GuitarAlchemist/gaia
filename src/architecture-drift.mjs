@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
 
-const INVENTORY_SCHEMA = 'gaia-architecture-inventory/1';
+const INVENTORY_SCHEMA = 'gaia-architecture-inventory/2';
 const ADAPTER_SCHEMA = 'gaia-architecture-inventory-adapter/1';
 const REPORT_SCHEMA = 'gaia-architecture-drift-report/1';
 const VERIFICATION_SCHEMA = 'gaia-architecture-verification/1';
@@ -25,10 +25,9 @@ const REQUIRED_SECTIONS = Object.freeze([
 ]);
 
 const INVENTORY_FIELDS = Object.freeze([
-  'architectureImpact', 'architectureRevisions', 'changedPaths', 'files', 'revision', 'schema',
+  'architectureImpact', 'changedPaths', 'files', 'revision', 'schema',
 ]);
 const IMPACT_FIELDS = Object.freeze(['evidence', 'kind']);
-const ARCHITECTURE_REVISION_FIELDS = Object.freeze(['commit', 'contentRevision']);
 const VERIFICATION_FIELDS = Object.freeze(['commit', 'contentRevision', 'date', 'schema']);
 const IMPACT_KINDS = new Set(['UPDATED', 'NO_IMPACT', 'UNDECLARED']);
 const EXCLUDED_DIRECTORIES = new Set(['.git', 'node_modules']);
@@ -119,24 +118,6 @@ function normalizeInventory(input) {
   if (typeof input.revision !== 'string' || !COMMIT.test(input.revision)) {
     refuse('INVENTORY_REVISION_INVALID');
   }
-  if (!Array.isArray(input.architectureRevisions)) {
-    refuse('INVENTORY_ARCHITECTURE_REVISIONS_INVALID');
-  }
-  const architectureRevisions = input.architectureRevisions.map((entry) => {
-    try {
-      assertFields(entry, ARCHITECTURE_REVISION_FIELDS, 'INVENTORY_ARCHITECTURE_REVISIONS_INVALID');
-    } catch {
-      refuse('INVENTORY_ARCHITECTURE_REVISIONS_INVALID');
-    }
-    if (typeof entry.commit !== 'string' || !COMMIT.test(entry.commit)
-      || typeof entry.contentRevision !== 'string' || !CONTENT_REVISION.test(entry.contentRevision)) {
-      refuse('INVENTORY_ARCHITECTURE_REVISIONS_INVALID');
-    }
-    return Object.freeze({ ...entry });
-  }).sort((a, b) => ordinal(a.commit, b.commit));
-  if (new Set(architectureRevisions.map((entry) => entry.commit)).size !== architectureRevisions.length) {
-    refuse('INVENTORY_ARCHITECTURE_REVISIONS_INVALID');
-  }
   if (!Array.isArray(input.changedPaths)) refuse('INVENTORY_CHANGES_INVALID');
   assertFields(input.architectureImpact, IMPACT_FIELDS, 'INVENTORY_IMPACT_INVALID');
   if (!IMPACT_KINDS.has(input.architectureImpact.kind)) refuse('INVENTORY_IMPACT_INVALID');
@@ -158,7 +139,6 @@ function normalizeInventory(input) {
   return Object.freeze({
     schema: INVENTORY_SCHEMA,
     revision: input.revision,
-    architectureRevisions: Object.freeze(architectureRevisions),
     files: Object.freeze(files),
     changedPaths: Object.freeze(changedPaths),
     architectureImpact: Object.freeze({ ...input.architectureImpact }),
@@ -196,12 +176,11 @@ function readTree(root) {
 
 export function createFilesystemArchitectureInventory(options) {
   if (options === null || typeof options !== 'object' || Array.isArray(options)) refuse('ADAPTER_OPTIONS_INVALID');
-  const fields = ['architectureImpact', 'architectureRevisions', 'changedPaths', 'revision', 'root'];
+  const fields = ['architectureImpact', 'changedPaths', 'revision', 'root'];
   if (JSON.stringify(Object.keys(options).sort()) !== JSON.stringify(fields.sort())) refuse('ADAPTER_OPTIONS_INVALID');
   return adapter(() => ({
     schema: INVENTORY_SCHEMA,
     revision: options.revision,
-    architectureRevisions: options.architectureRevisions,
     files: readTree(options.root),
     changedPaths: options.changedPaths,
     architectureImpact: options.architectureImpact,
@@ -347,13 +326,12 @@ export function checkArchitectureDrift(inventoryAdapter) {
     if (!(target in inventory.files)) violations.push(violation('BROKEN_INTERNAL_LINK', target));
   }
 
+  // The attestation binds to the ARCHITECTURE.md bytes at the checked revision, never to the
+  // reachability of the recorded commit: a squash merge leaves the record naming a commit of the
+  // merged head branch, which a clone need not hold. The commit is provenance for readers and is
+  // only required to be well-formed (see verificationRecord).
   if (actualContentRevision !== verification.contentRevision) {
     violations.push(violation('ARCHITECTURE_CONTENT_REVISION_MISMATCH', actualContentRevision));
-  }
-  const witnessContentRevision = inventory.architectureRevisions
-    .find((entry) => entry.commit === verification.commit)?.contentRevision ?? null;
-  if (witnessContentRevision !== verification.contentRevision) {
-    violations.push(violation('STALE_VERIFIED_COMMIT', verification.commit));
   }
 
   for (const row of interfaceRows(markdown)) {
