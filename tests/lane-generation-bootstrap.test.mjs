@@ -104,6 +104,7 @@ function harness(options = {}) {
 function losingStore(inner, { loseCommitToState }) {
   let lost = false;
   return {
+    execute: (workKey, operation) => inner.execute(workKey, operation),
     read: (workKey) => inner.read(workKey),
     commit: async (workKey, expectedRevision, record) => {
       if (!lost && record.state === loseCommitToState) {
@@ -119,6 +120,7 @@ function losingStore(inner, { loseCommitToState }) {
 function racingStore(inner, competitor) {
   let raced = false;
   return {
+    execute: (workKey, operation) => inner.execute(workKey, operation),
     read: (workKey) => inner.read(workKey),
     commit: async (workKey, expectedRevision, record) => {
       if (!raced) {
@@ -134,6 +136,7 @@ function racingStore(inner, competitor) {
 function lostResponseStore(inner, { loseResponseToState }) {
   let lost = false;
   return {
+    execute: (workKey, operation) => inner.execute(workKey, operation),
     read: (workKey) => inner.read(workKey),
     commit: async (workKey, expectedRevision, record) => {
       const committed = await inner.commit(workKey, expectedRevision, record);
@@ -459,6 +462,45 @@ test('B5: a second actor meeting a held claim performs no effect at all', async 
   assert.equal(result.outcome, 'REFUSED');
   assert.equal(result.refusal, 'CLAIM_HELD');
   assert.deepEqual(beta.fake.mutations(), []);
+});
+
+test('B5: admission exclusion spans actors and ordinals but not unrelated work', async () => {
+  const { fake, store, ports } = harness();
+  let entered;
+  let release;
+  const reached = new Promise(resolve => { entered = resolve; });
+  const barrier = new Promise(resolve => { release = resolve; });
+  const provider = {
+    ...fake.provider,
+    async describe() { entered(); await barrier; return fake.provider.describe(); },
+  };
+  const owner = bootstrapLaneGeneration(manifest(), { ...ports, provider });
+  await reached;
+  const outcomes = [];
+  const before = fake.operations();
+  let independent;
+  try {
+    outcomes.push(await bootstrapLaneGeneration(manifest(), { ...ports, actor: 'actor-beta' }));
+    outcomes.push(await bootstrapLaneGeneration(manifest({ generationOrdinal: 2 }), ports));
+    const other = harness({ store, workspaceId: 'ws-independent' });
+    independent = await bootstrapLaneGeneration(manifest({ workspaceId: 'ws-independent' }), other.ports);
+  } finally { release(); }
+  const first = await owner;
+  assert.deepEqual(outcomes.map(result => result.refusal), ['EXECUTION_HELD', 'EXECUTION_HELD']);
+  assert.equal(independent.outcome, 'LAUNCH_RECEIPT_PUBLISHED');
+  assert.deepEqual(before, [], 'owner is paused before its first provider observation');
+  assert.equal(first.outcome, 'LAUNCH_RECEIPT_PUBLISHED');
+  assert.equal(fake.operations().filter(operation => operation === 'spawn').length, 2);
+});
+
+test('B5: a store without an execution boundary fails closed before provider access', async () => {
+  const { fake, store, ports } = harness();
+  const { execute, ...unprotectedStore } = store;
+  await assert.rejects(
+    () => bootstrapLaneGeneration(manifest(), { ...ports, store: unprotectedStore }),
+    { code: 'PORTS_STORE_INVALID' },
+  );
+  assert.deepEqual(fake.operations(), []);
 });
 
 test('B5: losing the claim compare-and-set performs no effect', async () => {

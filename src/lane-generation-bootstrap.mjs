@@ -1,7 +1,7 @@
 /**
  * lane-generation-bootstrap.mjs — `gaia-lane-launch-receipt/1`, R0 of issue #93: the one
  * transition that turns an authoritative generation manifest into either a complete, verified,
- * durably receipted set of lanes, or into nothing at all.
+ * durably receipted set of lanes, or a refused transition with recoverable cleanup intent.
  *
  * WHY THIS EXISTS
  * ---------------
@@ -15,7 +15,7 @@
  *
  * So this module owns the whole transition and none of the mechanism. It creates no pane, runs no
  * process, opens no file, reads no environment and holds no clock. Two injected ports do the
- * work: a compare-and-set store over one durable record per stable work identity, and a lane
+ * work: an execution boundary and compare-and-set store per stable work identity, and a lane
  * adapter that speaks seven structural operations. Everything this module decides, it decides
  * from closed documents and structured observations.
  *
@@ -30,9 +30,10 @@
  * 3. **Identity is content, never memory.** Work identity, generation identity and operation
  *    identity are digests of the authoritative manifest. A remembered pane identity is never an
  *    input, so a crashed host reconstructs the same generation from the same document.
- * 4. **One winner, and the losers do nothing.** The claim is a compare-and-set. A concurrent
- *    actor meeting a held claim, or losing the compare-and-set, performs no adapter operation at
- *    all — not a pane, not a process, not a cleanup.
+ * 4. **One executor per work identity.** The store admits one callback at a time, including
+ *    same-actor resumption, before provider access. A contender returns EXECUTION_HELD without
+ *    provider calls. Record CAS separately detects unexpected revisions; a stale claimant
+ *    performs no provider mutation. The bundled adapter proves only same-instance exclusion.
  * 5. **Compensation is bounded by the operation, never by the workspace.** Every created resource
  *    carries this operation's marker, and cleanup addresses marked resources only. There is no
  *    code path here that enumerates a workspace and closes what it finds, which is why an
@@ -179,6 +180,7 @@ export const LANE_BOOTSTRAP_REFUSALS = Object.freeze([
   'ACTIVE_GENERATION_PRESENT',
   'CAPABILITY_INSUFFICIENT',
   'CLAIM_HELD',
+  'EXECUTION_HELD',
   'GENERATION_COMPENSATED',
   'CLEANUP_INCOMPLETE',
   'LANE_LIMIT_EXCEEDED',
@@ -533,7 +535,20 @@ function requireGenerationRecord(record) {
  */
 export function createMemoryLaneGenerationStore() {
   const heads = new Map();
+  // This reservation covers one shared in-process adapter, not independent hosts.
+  const executing = new Set();
   return {
+    async execute(workKey, operation) {
+      if (typeof workKey !== 'string' || !DIGEST.test(workKey)) invalid('STORE_KEY_INVALID');
+      if (typeof operation !== 'function') invalid('STORE_OPERATION_INVALID');
+      if (executing.has(workKey)) return Object.freeze({ executed: false });
+      executing.add(workKey);
+      try {
+        return Object.freeze({ executed: true, result: await operation() });
+      } finally {
+        executing.delete(workKey);
+      }
+    },
     async read(workKey) {
       if (typeof workKey !== 'string' || !DIGEST.test(workKey)) invalid('STORE_KEY_INVALID');
       const head = heads.get(workKey);
@@ -580,7 +595,8 @@ function requireBootstrapPorts(input) {
   if (typeof input.now !== 'function' || !isExactInstant(input.now())) {
     invalid('PORTS_CLOCK_INVALID');
   }
-  if (typeof input.store?.read !== 'function' || typeof input.store?.commit !== 'function') {
+  if (typeof input.store?.read !== 'function' || typeof input.store?.commit !== 'function'
+    || typeof input.store?.execute !== 'function') {
     invalid('PORTS_STORE_INVALID');
   }
   for (const operation of PROVIDER_OPERATIONS) {
@@ -738,6 +754,15 @@ export async function bootstrapLaneGeneration(manifestInput, portsInput) {
   const manifest = requireLaneGenerationManifest(manifestInput);
   const ports = requireBootstrapPorts(portsInput);
   const identity = laneGenerationIdentity(manifest);
+  const execution = await ports.store.execute(
+    identity.workKey, () => executeLaneGeneration(manifest, ports, identity),
+  );
+  if (execution?.executed === false) return refuse('EXECUTION_HELD');
+  if (execution?.executed !== true) invalid('STORE_EXECUTION_INVALID');
+  return execution.result;
+}
+
+async function executeLaneGeneration(manifest, ports, identity) {
   const { provider, store } = ports;
   const { workspaceId } = manifest;
   const laneCount = manifest.lanes.length;

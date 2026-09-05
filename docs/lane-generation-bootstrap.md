@@ -39,12 +39,13 @@ Falsifiers: same/different actor overlap while a spawn response is pending; over
 newer ordinal; release after exception; independent work while another key is held;
 mechanism removal must expose duplicate effects. No new bus verb or runtime authority.
 
-### Review repair decision — 2026-09-05
+### Prior cleanup repair decision — 2026-09-05
 
 Independent Standards and Spec reviews rejected the combined candidate `a8d120eb`.
 Two counterexamples are retained in PR #95 comment `5548856272`. This bounded repair
-addresses incomplete cleanup only; overlapping same-actor resumptions remain a P1
-blocker and no concurrency-complete claim or merge is permitted from this slice.
+addressed incomplete cleanup only; overlapping same-actor resumptions remained a P1
+blocker at that checkpoint. The execution exclusion decision above addresses that
+counterexample at the declared port, subject to fresh independent review.
 
 At the existing `bootstrapLaneGeneration(manifest, ports)` seam, a cleanup attempt must
 first persist `COMPENSATING` by CAS against its last accepted revision. A stale loser
@@ -63,9 +64,9 @@ The narrower alternative (leave `IN_FLIGHT`) is rejected: it can restart failed 
 instead of finishing cleanup. Marking failure terminal is rejected because it admits
 orphan overlap. No new bus verb, provider authority, dependency or production adapter.
 
-This is not an execution fence: same-actor overlapping resumptions can still perform
-concurrent provider effects. That separate counterexample must be closed before review
-approval. A read-before-effect check or process-local mutex is not a cross-host repair.
+Cleanup CAS alone is not an execution fence. The separate counterexample motivates the
+execution boundary above. A read-before-effect check or process-local mutex is not a
+cross-host repair; production exclusion remains an unimplemented adapter obligation.
 
 Two reproduced failures, both recorded in issue #93, say the same thing about the same seam.
 
@@ -99,8 +100,9 @@ reporting edge after its own restart.
 1. One published launch receipt means: every declared lane has exactly one visible pane, exactly
    one terminal surface, one process bound to the returned agent identity, and a persisted
    reporting edge — all proven against one fresh structured snapshot before publication.
-2. Any failure before that point leaves the visible terminal count and the live agent count
-   exactly as they were, having stopped, reaped and closed only what this operation created.
+2. Failure before that point compensates only this operation's resources. Verified complete
+   cleanup restores baseline counts; incomplete cleanup remains durably nonterminal and
+   refuses successor generations rather than pretending the resources disappeared.
 3. The same manifest bootstrapped twice produces one generation, one set of panes and one set of
    processes; the second call returns the first receipt.
 4. A generation is identified by content, not by remembered pane identities, so it can be
@@ -174,7 +176,8 @@ One module owns the whole transition: closed manifest validation, generation ide
 election, ordering, verification, receipt publication and compensation. It owns no mechanism. Two
 injected ports supply everything it cannot compute:
 
-- **store** — `read(workKey)` and `commit(workKey, expectedRevision, record)`, a single-writer
+- **store** — `execute(workKey, operation)`, `read(workKey)` and
+  `commit(workKey, expectedRevision, record)`: execution exclusion and a single-writer
   compare-and-set over one durable record per stable work identity. An in-memory adapter ships for
   tests and deterministic replay; the durable local and hosted adapters are named in the omissions.
 - **provider** — `describe`, `createTopology`, `spawn`, `snapshot`, `stopAgent`, `reapSurface`,
@@ -277,7 +280,8 @@ publication is refused by its own reader.
 
 1. validate the manifest; derive the work identity, generation identity and operation identity by
    content;
-2. admit the provider capability against the manifest and the measured lane limit;
+2. reserve execution for this work identity, then admit the provider capability against the
+   manifest and measured lane limit; retain execution through all remaining steps;
 3. read the durable record and decide: replay, resume, refuse, or claim;
 4. compare-and-set the claim — exactly one actor may hold a generation in flight;
 5. **create the complete empty topology for the whole generation**, tagged with the operation
@@ -301,19 +305,22 @@ any provider process exists, so a generation is never expanded around live surfa
 
 ## Concurrency, replay and staleness
 
-- **One winner.** The claim is a compare-and-set against the durable revision. The loser observes
-  a held claim, performs no provider call at all, and returns `CLAIM_HELD`.
+- **One executor.** A concurrent callback is refused `EXECUTION_HELD` before any provider
+  call, regardless of actor or generation ordinal. A settled but persisted claim owned by
+  another actor is refused `CLAIM_HELD` after capability admission, without mutation.
+  CAS on record revisions separately refuses a stale claim without provider mutation.
 - **Stable operation identity.** The operation identity is derived from the generation, so a retry
   is the same operation. A retry by the same actor reconciles: it adopts marked resources, fills
   only what is missing, and cannot create a second pane, tab or process.
 - **A lost response is not a lost effect.** A crash or dropped reply leaves `IN_FLIGHT`; the next
   attempt reads the durable plan, re-observes, and either completes the same generation or
   compensates it. Elapsed time never converts an unverified launch into a receipt.
-- **Stale generations have no effect.** A manifest whose `generationOrdinal` is not greater than
-  the ordinal already recorded for that work identity is refused with `STALE_GENERATION` before
-  any effect, including when its content differs.
-- **Cleanup is bounded by construction.** Compensation iterates the recorded plan of this
-  operation. It has no code path that enumerates a workspace and closes what it finds.
+- **Stale generations have no effect.** An older ordinal, or changed content at the same
+  ordinal, is refused `STALE_GENERATION` before mutation. An identical active generation
+  replays its receipt; an identical unfinished generation follows the ownership checks.
+- **Cleanup is bounded by construction.** Compensation targets only operation-marked
+  resources from a structured observation, with the recorded plan as a fallback. It
+  does not close unrelated resources just because they share a workspace.
 
 ## What R0 does not close, stated against issue #93
 
