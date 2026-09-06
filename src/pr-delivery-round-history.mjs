@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { independentAgentReviewers } from './agent-review-identity.mjs';
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const GIT_OID = /^[a-f0-9]{40}$/u;
@@ -111,12 +112,13 @@ function evidence(value) {
   });
 }
 
-function responsibility(value) {
+function responsibility(value, ai = false) {
   const code = 'ResponsibilityMalformed';
   try {
     keys(value, [
       'ownershipRevision', 'accountableOwner', 'supervisor', 'executionOwner', 'reportsTo',
       'reviewOwners', 'effectOwner', 'escalatesTo',
+      ...(ai ? ['writerIdentity'] : []),
     ], code);
     keys(value.reviewOwners, ['standards', 'spec'], code);
   } catch (error) {
@@ -132,7 +134,8 @@ function responsibility(value) {
   }
   const standards = value.reviewOwners.standards;
   const spec = value.reviewOwners.spec;
-  if (!GITHUB_OWNER.test(standards) || !GITHUB_OWNER.test(spec) || standards === spec
+  if ((ai ? !independentAgentReviewers(value.writerIdentity, value.reviewOwners)
+    : !GITHUB_OWNER.test(standards) || !GITHUB_OWNER.test(spec) || standards === spec)
     || standards === value.effectOwner || spec === value.effectOwner
     || standards === value.executionOwner || spec === value.executionOwner) {
     fail('ReviewOwnerConflict');
@@ -147,6 +150,7 @@ function responsibility(value) {
     executionOwner: value.executionOwner,
     reportsTo: value.reportsTo,
     reviewOwners: Object.freeze({ standards, spec }),
+    ...(ai ? { writerIdentity: value.writerIdentity } : {}),
     effectOwner: value.effectOwner,
     escalatesTo: value.escalatesTo,
   });
@@ -191,12 +195,13 @@ function openReceipt(value, headRevision) {
     'schema', 'kind', 'revision', 'ordinal', 'predecessorRoundKey', 'trigger', 'roundBudget',
     'responsibility', 'command', 'evidence',
   ]);
-  if (value.schema !== 'GaiaRoundReceiptV0' || value.kind !== 'OPEN' || value.ordinal !== 0
+  if (!['GaiaRoundReceiptV0', 'GaiaRoundReceiptV1'].includes(value.schema)
+    || value.kind !== 'OPEN' || value.ordinal !== 0
     || value.predecessorRoundKey !== 'NONE' || value.trigger !== 'DRAFT_CREATED'
     || !Number.isSafeInteger(value.roundBudget) || value.roundBudget < 1 || value.roundBudget > 8) {
     fail('InvalidReceipt');
   }
-  const assignment = responsibility(value.responsibility);
+  const assignment = responsibility(value.responsibility, value.schema === 'GaiaRoundReceiptV1');
   return Object.freeze({
     ...value, revision: sha256(value.revision), responsibility: assignment,
     command: command(value.command, assignment, headRevision), evidence: evidence(value.evidence),
@@ -261,6 +266,8 @@ function renderRound(round) {
     `- Supervisor: \`${round.responsibility.supervisor}\``,
     `- Execution owner: \`${round.responsibility.executionOwner}\``,
     `- Reports to: \`${round.responsibility.reportsTo}\``,
+    ...(round.responsibility.writerIdentity
+      ? [`- Writer identity: \`${round.responsibility.writerIdentity}\``] : []),
     `- Standards review owner: \`${round.responsibility.reviewOwners.standards}\``,
     `- Spec review owner: \`${round.responsibility.reviewOwners.spec}\``,
     `- Effect owner: \`${round.responsibility.effectOwner}\``,
@@ -395,7 +402,9 @@ function parseManaged(body, workKey, headRevision) {
         },
         effectOwner: parseField(block, 'Effect owner'),
         escalatesTo: parseField(block, 'Escalates to'),
-      });
+        ...(roundLines.some(line => line.startsWith('- Writer identity: '))
+          ? { writerIdentity: parseField(block, 'Writer identity') } : {}),
+      }, roundLines.some(line => line.startsWith('- Writer identity: ')));
       const commandContract = command({
         commandRevision: parseField(block, 'Command revision'),
         commandOwner: parseField(block, 'Command owner'),

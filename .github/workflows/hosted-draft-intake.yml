@@ -2,6 +2,15 @@ name: Hosted Draft intake
 
 on:
   workflow_dispatch:
+    inputs:
+      one_canary:
+        description: Select the single reviewed canary policy from the sealed checkout
+        type: boolean
+        default: false
+      prepare_issue:
+        description: Prepare one ready issue in the ledger only; no Draft or agent execution
+        type: string
+        default: ''
   issues:
     types: [labeled]
   schedule:
@@ -29,14 +38,21 @@ jobs:
           GAIA_PUMP_ACTOR_ID: ${{ vars.GAIA_PUMP_ACTOR_ID }}
           GAIA_REPOSITORY_NODE_ID: ${{ vars.GAIA_REPOSITORY_NODE_ID }}
           GAIA_MANAGED_ROUND_JSON: ${{ vars.GAIA_MANAGED_ROUND_JSON }}
+          GAIA_ONE_CANARY: ${{ github.event_name == 'workflow_dispatch' && inputs.one_canary }}
+          GAIA_PREPARE_ISSUE: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare_issue || '' }}
         run: |
+          if ($env:GAIA_ONE_CANARY -eq 'true' -and $env:GAIA_PREPARE_ISSUE) {
+            throw 'Preparation and canary execution are mutually exclusive.'
+          }
           $required = @(
             $env:GAIA_PUMP_APP_ID,
             $env:GAIA_PUMP_APP_PRIVATE_KEY,
             $env:GAIA_PUMP_ACTOR_ID,
             $env:GAIA_REPOSITORY_NODE_ID
-            $env:GAIA_MANAGED_ROUND_JSON
           )
+          if ($env:GAIA_ONE_CANARY -ne 'true' -and !$env:GAIA_PREPARE_ISSUE) {
+            $required += $env:GAIA_MANAGED_ROUND_JSON
+          }
           if ($required.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
             throw 'Dedicated Gaia pump identity is not configured.'
           }
@@ -69,7 +85,33 @@ jobs:
           "oid=$($policy.ledgerRegistryRootOid)" | Out-File $env:GITHUB_OUTPUT -Append
           "revision=$($policy.ledgerRegistryRootRevision)" | Out-File $env:GITHUB_OUTPUT -Append
 
+      - name: Prepare one operation without a Draft effect
+        if: github.event_name == 'workflow_dispatch' && inputs.prepare_issue
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ steps.pump-token.outputs.token }}
+          GAIA_PUMP_ACTOR_ID: ${{ vars.GAIA_PUMP_ACTOR_ID }}
+          GAIA_ISSUE_NUMBER: ${{ inputs.prepare_issue }}
+          GAIA_LEDGER_ROOT_OID: ${{ steps.policy.outputs.oid }}
+          GAIA_LEDGER_ROOT_REVISION: ${{ steps.policy.outputs.revision }}
+          GAIA_RECEIPT_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-receipt.json
+          GAIA_ERROR_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-error.json
+        run: |
+          & node scripts/hosted-draft-pump.mjs enqueue `
+            --repository $env:GITHUB_REPOSITORY `
+            --pump-actor-id $env:GAIA_PUMP_ACTOR_ID `
+            --ledger-root-oid $env:GAIA_LEDGER_ROOT_OID `
+            --ledger-root-revision $env:GAIA_LEDGER_ROOT_REVISION `
+            --issue $env:GAIA_ISSUE_NUMBER `
+            1> $env:GAIA_RECEIPT_PATH 2> $env:GAIA_ERROR_PATH
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+            Move-Item -LiteralPath $env:GAIA_ERROR_PATH -Destination $env:GAIA_RECEIPT_PATH -Force
+            exit $exitCode
+          }
+
       - name: Resume or admit exactly one Draft operation
+        if: github.event_name != 'workflow_dispatch' || !inputs.prepare_issue
         shell: pwsh
         # GAIA_OBSERVATION_PATH below is empty for a labeled issue run, which the CLI reads as an
         # absent value. `sequence` on a published reading is the Actions run id, and run ids
@@ -84,10 +126,11 @@ jobs:
           GAIA_REPOSITORY_NODE_ID: ${{ vars.GAIA_REPOSITORY_NODE_ID }}
           GAIA_MANAGED_ROUND_JSON: ${{ vars.GAIA_MANAGED_ROUND_JSON }}
           GAIA_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GAIA_CANARY_POLICY: ${{ github.event_name == 'workflow_dispatch' && inputs.one_canary && '.github/gaia/canary-policy.json' || '' }}
           GAIA_LEDGER_ROOT_OID: ${{ steps.policy.outputs.oid }}
           GAIA_LEDGER_ROOT_REVISION: ${{ steps.policy.outputs.revision }}
           GAIA_RECEIPT_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-receipt.json
-          GAIA_OBSERVATION_PATH: ${{ github.event_name != 'issues' && format('{0}/gaia-hosted-draft-pump-observation.json', runner.temp) || '' }}
+          GAIA_OBSERVATION_PATH: ${{ github.event_name != 'issues' && !inputs.one_canary && format('{0}/gaia-hosted-draft-pump-observation.json', runner.temp) || '' }}
           GAIA_ERROR_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-error.json
         run: |
           & node scripts/hosted-draft-pump.mjs intake `

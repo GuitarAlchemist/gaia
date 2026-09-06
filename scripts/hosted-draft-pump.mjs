@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -30,6 +30,8 @@ import {
 import { createGitHubActionsDraftAdmission } from '../src/github-actions-draft-admission.mjs';
 import { runHostedDraftIntake } from '../src/hosted-draft-pump.mjs';
 import { produceHostedDraftPumpObservation } from '../src/hosted-draft-pump-producer.mjs';
+import { createCanaryDraftAdmission,
+  validateCanaryAdmissionPolicy } from '../src/canary-admission-policy.mjs';
 
 const execFileAsync = promisify(execFile);
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -64,7 +66,7 @@ const COMMAND_FLAGS = Object.freeze({
   'list-unsettled': COMMON_FLAGS,
   intake: new Set([
     ...COMMON_FLAGS, 'issue', 'repository-node-id', 'owner', 'gate', 'check', 'eta-minutes',
-    'observation-out', 'run-id',
+    'observation-out', 'run-id', 'canary-policy',
   ]),
 });
 
@@ -258,9 +260,22 @@ function parseConfiguration(argv, env) {
       checklist: suppliedChecklist ? checklist(flags, env) : INTAKE_PRESENTATION.checklist,
       eta: suppliedEta === undefined ? INTAKE_PRESENTATION.eta : eta(suppliedEta),
     };
-    configuration.managedRound = managedRound(flagOrEnv(
-      flags, 'managed-round', env, 'GAIA_MANAGED_ROUND_JSON', 64 * 1024,
-    ));
+    const canaryPath = optionalFlagOrEnv(flags, 'canary-policy', env, 'GAIA_CANARY_POLICY');
+    if (canaryPath !== undefined) {
+      configuration.canaryPolicyPath = configuredText(canaryPath);
+      configuration.canaryPolicy = validateCanaryAdmissionPolicy(JSON.parse(readFileSync(canaryPath, 'utf8')));
+      const policy = configuration.canaryPolicy;
+      if (policy.repository.owner !== repository.owner || policy.repository.name !== repository.name
+        || policy.repository.nodeId !== configuration.repositoryNodeId
+        || policy.effectActorId !== configuration.pumpActorId
+        || (configuration.issue !== undefined && configuration.issue !== policy.issue)) fail();
+      configuration.issue = policy.issue;
+      configuration.managedRound = { advance: null };
+    } else {
+      configuration.managedRound = managedRound(flagOrEnv(
+        flags, 'managed-round', env, 'GAIA_MANAGED_ROUND_JSON', 64 * 1024,
+      ));
+    }
     const observationOut = optionalFlagOrEnv(
       flags, 'observation-out', env, 'GAIA_OBSERVATION_PATH',
     );
@@ -323,6 +338,7 @@ const DEFAULT_DEPENDENCIES = Object.freeze({
   executeManagedRoundUpdate,
   listUnsettledDrafts,
   readWorkflowAdmission,
+  now: () => new Date().toISOString(),
 });
 
 export function createHostedDraftPumpRuntime(
@@ -358,6 +374,7 @@ export function createHostedDraftPumpRuntime(
   });
   return Object.freeze({
     async enqueue(selector) {
+      if (configuration.canaryPolicy) fail('CanaryOperationNotEnqueued');
       return dependencies.enqueueDraft(selector, 'NONE', enqueuePorts);
     },
     async reconcile({ operationId, workKey, expectedRevision }) {
@@ -374,10 +391,13 @@ export function createHostedDraftPumpRuntime(
         name: configuration.repository.name,
       });
       const evidencePort = dependencies.createGitHubManagedRoundEvidencePort({ gitData });
-      const provider = dependencies.createGhDraftOperationProvider({
+      const providerOptions = {
         expectedRepository,
         presentation: configuration.presentation,
-        managedRound: {
+      };
+      const lookupProvider = dependencies.createGhDraftOperationProvider({
+        ...providerOptions,
+        managedRound: configuration.canaryPolicy ? undefined : {
           workKey, ...configuration.managedRound.create, evidencePort,
         },
       });
@@ -390,6 +410,22 @@ export function createHostedDraftPumpRuntime(
           configuration, identity,
         ),
       });
+      let provider = lookupProvider;
+      if (configuration.canaryPolicy) {
+        provider = createCanaryDraftAdmission({
+          policy: configuration.canaryPolicy, snapshot,
+          pumpActorId: configuration.pumpActorId,
+          executorEpoch: admission.executorEpoch,
+          readPolicy: () => JSON.parse(readFileSync(configuration.canaryPolicyPath, 'utf8')),
+          readOperation: operation => store.inspectByOperation(operation),
+          reserveEffect: claim => admission.reserveEffect(claim),
+          now: dependencies.now,
+          lookupExact: request => lookupProvider.lookupExact(request),
+          createDraft: (request, managed) => dependencies.createGhDraftOperationProvider({
+            ...providerOptions, managedRound: { workKey, ...managed, evidencePort },
+          }).createDraft(request),
+        });
+      }
       const operationPorts = dependencies.createDraftOperationPorts({
         collector,
         provider,
@@ -415,6 +451,8 @@ export function createHostedDraftPumpRuntime(
       return Object.freeze({ ...result, managedRoundUpdate });
     },
     async listUnsettled() {
+      // Intake selects the policy's issue; retain the complete list for its global count.
+      // The policy binding in reconcile rejects any other operation before mutation.
       return dependencies.listUnsettledDrafts({ store });
     },
     async listReadyIssues() {

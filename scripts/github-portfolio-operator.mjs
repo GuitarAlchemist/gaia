@@ -24,6 +24,7 @@ import {
   summarizeOperatorReceipt,
 } from '../src/github-portfolio-operator.mjs';
 import { createFileEd25519AuthorityAdapter } from '../src/github-portfolio-authority.mjs';
+import { createGitHubDraftAdmissionAdapter } from '../src/github-draft-admission.mjs';
 import { createAgentFactoryExecutionAdapter } from '../src/github-portfolio-execution.mjs';
 import { createGitHubReadAdapter } from '../src/github-read-adapter.mjs';
 import {
@@ -32,6 +33,7 @@ import {
   runCodexReviewer,
 } from '../src/factory-agent.mjs';
 import { createCliProgress, instrumentFactoryAdapters } from '../src/cli-progress.mjs';
+import { createVisibleClaudeAdapters } from '../src/factory-visible-claude.mjs';
 
 class UsageError extends Error {
   constructor(message) {
@@ -45,12 +47,17 @@ const USAGE = `usage:
 
   github-portfolio-operator.mjs run --portfolio FILE --repository OWNER/NAME
       --private-key FILE --public-key FILE --ledger DIR --worktree DIR
-      --evidence-root DIR --out NEW_FILE [--ttl-seconds 120] [--timeout-ms 600000]
-      [--progress-format human|jsonl]
+      --evidence-root DIR --draft-receipt FILE --out NEW_FILE [--ttl-seconds 120]
+      [--timeout-ms 600000] [--progress-format human|jsonl]
+      [--execution-profile default|claude-visible-restricted]
 
 Both commands require an interactive session. Windows reads the passphrase from a masked
 OS dialog; other platforms use the terminal. Run reads its confirmation from the
-terminal. There is no option, environment variable, or file that supplies either.`;
+terminal. There is no option, environment variable, or file that supplies either.
+
+--draft-receipt is the hosted pump intake receipt for the issue. The Draft it names is
+read back from GitHub and must still be the exact OPEN draft on the same head before any
+grant is minted; there is no option that runs without that admission.`;
 
 // The option list is closed. An option this command does not know is refused rather than
 // ignored, which is what keeps `--passphrase` from being a thing someone can try.
@@ -58,7 +65,7 @@ const OPTIONS = {
   init: ['private-key', 'public-key'],
   run: [
     'portfolio', 'repository', 'private-key', 'public-key', 'ledger', 'worktree',
-    'evidence-root', 'out', 'ttl-seconds', 'timeout-ms', 'progress-format',
+    'evidence-root', 'draft-receipt', 'out', 'ttl-seconds', 'timeout-ms', 'progress-format', 'execution-profile',
   ],
 };
 
@@ -124,10 +131,12 @@ export async function runPortfolioOperatorCli(argv, {
   summarize = summarizeOperatorReceipt,
   createAuthority = createFileEd25519AuthorityAdapter,
   createExecution = createAgentFactoryExecutionAdapter,
+  createDraftAdmission = createGitHubDraftAdmissionAdapter,
   createGithubRead = createGitHubReadAdapter,
   runWorker = runClaudeWorker,
   runReviewer = runCodexReviewer,
   runRepair = runClaudeRepair,
+  visibleProviderLaunch,
   readPassphraseFn = readPassphrase,
   confirmFn = confirmAtTerminal,
   isInteractive = () => process.stdin.isTTY,
@@ -160,6 +169,9 @@ export async function runPortfolioOperatorCli(argv, {
   const ledgerDir = required(args, 'ledger');
   const worktree = required(args, 'worktree');
   const evidenceRoot = required(args, 'evidence-root');
+  // Mandatory here, on the shipped path. The module seam keeps admission optional so
+  // other compositions are unchanged; this command is the one that must not run without it.
+  const draftReceiptPath = required(args, 'draft-receipt');
   const outPath = required(args, 'out');
   // The numeric bound is checked here, ahead of the terminal precondition below, so a
   // value outside it is refused for being outside it and says so. A gate that could only
@@ -174,7 +186,18 @@ export async function runPortfolioOperatorCli(argv, {
   if (!['human', 'jsonl'].includes(progressFormat)) {
     throw new UsageError('--progress-format must be human or jsonl');
   }
+  const executionProfile = args['execution-profile'] ?? 'default';
+  if (!['default', 'claude-visible-restricted'].includes(executionProfile)) {
+    throw new UsageError('--execution-profile must be default or claude-visible-restricted');
+  }
   assertInteractive(isInteractive);
+  const providerAdapters = executionProfile === 'claude-visible-restricted'
+    ? createVisibleClaudeAdapters({
+      // Production additionally requires stdout to be an actual terminal; tests supply
+      // a controlled external process boundary rather than launching a paid provider.
+      ...(visibleProviderLaunch ? { launch: visibleProviderLaunch, isInteractive } : {}),
+    })
+    : { runWorker, runReviewer, runRepair };
   const progress = createCliProgress({
     timeoutMs,
     format: progressFormat,
@@ -188,9 +211,9 @@ export async function runPortfolioOperatorCli(argv, {
   let receipt;
   try {
     const adapters = instrumentFactoryAdapters({
-      runWorker: (context) => runWorker(context, { timeoutMs }),
-      runReviewer: (context) => runReviewer(context, { timeoutMs }),
-      runRepair: (context) => runRepair(context, { timeoutMs }),
+      runWorker: (context) => providerAdapters.runWorker(context, { timeoutMs }),
+      runReviewer: (context) => providerAdapters.runReviewer(context, { timeoutMs }),
+      runRepair: (context) => providerAdapters.runRepair(context, { timeoutMs }),
       progress,
     });
     const baseExecution = createExecution({
@@ -214,6 +237,12 @@ export async function runPortfolioOperatorCli(argv, {
         publicKey: readFileSync(publicKeyPath, 'utf8'), ledgerDir,
       }),
       execution,
+      // The receipt file is untrusted input; the adapter validates it and reads GitHub
+      // again for every admission. No option runs this command without it.
+      draftAdmission: createDraftAdmission({
+        expectedRepository: repository,
+        receiptText: readFileSync(draftReceiptPath, 'utf8'),
+      }),
       readPassphrase: readPassphraseFn,
       confirm: confirmFn,
       ttlSeconds,

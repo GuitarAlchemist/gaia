@@ -196,6 +196,12 @@ function confirmationPrompt(intent) {
     `  action          ${shown(intent.action)}`,
     `  intent revision ${shown(intent.intentRevision)}`,
     `  snapshot        ${shown(intent.snapshotRevision)}`,
+    // Present only when the factory admitted a Draft: the operator then confirms the exact
+    // pull request and head revision that the typed intent revision binds.
+    ...(intent.draft === undefined ? [] : [
+      `  draft           #${shown(intent.draft.number)} ${shown(intent.draft.headRef)} `
+        + `@ ${shown(intent.draft.headRevision)}`,
+    ]),
     '',
     'The next line is untrusted GitHub-controlled data, shown for your judgement only.',
     `  ${shown(intent.task)}`,
@@ -242,6 +248,7 @@ export async function runOperatorFactory({
   githubRead,
   authority,
   execution,
+  draftAdmission,
   readPassphrase,
   confirm,
   now = () => new Date(),
@@ -264,6 +271,12 @@ export async function runOperatorFactory({
   }
   if (!execution || typeof execution.execute !== 'function') {
     throw new PortfolioOperatorError('InvalidArgument', 'execution.execute is required');
+  }
+  // Optional at this seam so existing compositions are unchanged; the shipped CLI makes
+  // it mandatory. When present it is consulted by the factory before any grant is spent.
+  if (draftAdmission !== undefined
+      && (!draftAdmission || typeof draftAdmission.read !== 'function')) {
+    throw new PortfolioOperatorError('InvalidArgument', 'draftAdmission.read must be a function');
   }
   if (typeof confirm !== 'function') {
     throw new PortfolioOperatorError('InvalidArgument', 'confirm must be a function');
@@ -319,7 +332,7 @@ export async function runOperatorFactory({
   const portfolioRevision = portfolio.revision;
 
   const factory = createPortfolioFactory({
-    githubRead, authority, factoryExecution: execution,
+    githubRead, authority, factoryExecution: execution, draftAdmission,
   });
 
   // GitHub is re-read here. The pinned file supplies a revision to hold the world to,

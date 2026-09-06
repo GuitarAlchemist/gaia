@@ -68,7 +68,7 @@ only in the final column and must not escape in a result or refusal.
 | Durable event log | `load() -> events`; `commit(expected revision, events) -> receipt or refusal` | Single-writer append and compare-and-set | local append-only JSONL; in-memory test fixtures |
 | Draft operation | `enqueue(selector)`; `reconcile(identity, expected revision) -> projection or refusal` | One canonical Operation Envelope; effect-free historical adoption requires a uniquely marked merged PR with exact generation inclusion and merge evidence | protected GitHub Git Data ledger and effect adapter; memory ledger |
 | Hosted Draft intake | `runHostedDraftIntake(trigger, observations) -> receipt or refusal`; `produceHostedDraftPumpObservation(receipt) -> observation or refusal` | Bounded unsettled recovery before admitting at most one candidate; unchanged ambiguous records are quarantined for the scheduled tick without being settled; authority-free sealed observation | GitHub Actions intake, one recovery group plus one group per labeled issue; existing Draft ledger/admission/effect adapters; deterministic fixtures |
-| Portfolio survey and drain | `survey(observations) -> revision`; `advance(revision) -> intent or refusal` | Read-only inventory to one bounded next transition | GitHub read adapter; deterministic fixtures; append-only drain ledger |
+| Portfolio survey and drain | `survey(observations) -> revision`; `advance(revision) -> intent or refusal` | Read-only inventory to one bounded next transition; optional Draft `target()` selects only exact ready work from the full fresh inventory; restrictive Draft readback before authority consumption | GitHub inventory and exact Draft read adapters; deterministic fixtures; append-only drain ledger |
 | Drain Petri net | `buildNet(definition) -> net`; `replay(net, events) -> run`; `collectDrainFacts(input) -> facts or refusal` | Bounded pull-request drain and lane lifecycle with exact-source evidence | JSONL artifact adapter; optional DuckDB read projection; read-only CLI |
 | Pull-request conflict classification | `classifyPrConflict(observation, claim) -> reading or refusal` | Exact-generation, read-only classification under a closed empty strategy registry | normalized GitHub observation; deterministic fixtures |
 | Runner capability probe | `probe(mandate, lease, adapter) -> receipt or blocker` | Read-only capability question decided by identity, generation, lease, admission and reconciliation before any adapter is consulted | synthetic-fixture probe; deterministic in-memory fixtures |
@@ -148,6 +148,30 @@ domain validators before constructing its runtime. Invalid configuration creates
 an admission record nor a provider effect; the CLI returns a closed argument error. This
 preflight does not authorize an effect or settle an existing ambiguous operation. Exact
 head binding and durable claim enforcement remain execution-time responsibilities.
+
+The shipped portfolio operator requires an intake receipt as an untrusted expectation for
+one issue. Its targeted decision snapshot binds the whole normalized selected repository,
+organization, complete inventory scope and policy, not changes in unrelated repositories.
+Untargeted scheduling retains organization-wide freshness. The full inventory identity
+remains in the transition; the scoped snapshot identity is signed in the intent/grant.
+Its read-only Draft adapter re-reads the provider and checks the repository,
+operation marker, exact pull-request number, base, head, and OPEN Draft state. Preview and
+authorized advance both repeat that read; admitted evidence enters the intent revision
+before grant consumption. Missing, moved, foreign, ambiguous, or unavailable evidence
+refuses admission without starting an agent. The module-level port remains optional for
+existing compositions; the operator CLI has no admission opt-out. This narrows the
+existing human-mediated grant and creates no new authority. It does not close the interval
+between readback and process start or prove cross-process execution exclusion. A safe live
+worker profile is selectable with `--execution-profile claude-visible-restricted`.
+The provider adapter in `src/factory-visible-claude.mjs` implements the existing worker,
+reviewer and repair ports through an inherited interactive terminal. It restricts Claude
+to file tools and working directories, removes API-key fallback through the existing
+subscription environment, and binds bounded provider results to fresh attempt identities.
+The owned process must stop before output acceptance; timeout, mismatch and cleanup
+failure refuse. Results remain untrusted provider evidence; factory candidate validation
+and human-mediated authority are unchanged. This is not an OS sandbox guarantee.
+Real operator authorization and an operation-linked canary remain unproven; controlled
+provider tests alone do not establish autonomous draining.
 
 Pull-request conflict classification is read-only at this revision. It binds the observed base and
 head generation and can report clean, unknown, superseded, or escalation-required. Its automation
@@ -282,6 +306,45 @@ work merely because capacity appears available. Production multi-tenancy, billin
 remote authority broker are not implemented.
 
 ## Observability, provenance, freshness, ETA, and delivery metrics
+
+The opt-in hosted intake `--canary-policy` composition uses
+`src/canary-admission-policy.mjs` to validate a versioned, one-operation policy and
+derive managed Draft input from an actual `EFFECT_STARTED` ledger snapshot. The
+policy pins repository, issue, generation, source head, actor and responsibility
+assignments; it is not a live claim or an agent-execution grant. Its operation seam,
+`createCanaryDraftAdmission`, owns policy rereading, expiry, Actions re-admission
+and ledger revision checks at effect time, then passes closed managed input to
+the existing effect adapter. That adapter acquires the managed evidence CAS claim
+and verifies Draft readback. The CLI injects filesystem, store, admission, clock
+and effect ports; it does not sequence the admission decision.
+Legacy intake retains its static configuration validation. The full unsettled list
+remains visible to the intake count even when selection is limited to one issue.
+
+Explicit `GaiaCanaryAdmissionPolicyV1` produces `GaiaRoundReceiptV1` with a
+writer identity and independent AI reviewer assignments; V0 keeps its GitHub-only
+review principals. Shared pure `src/agent-review-identity.mjs` validates the
+provider/session/agent shape and refuses shared writer/reviewer actor contexts,
+including provider aliases. This is assignment validation, not authentication:
+the operator must verify actual harness provenance. Managed rendering/readback
+preserves these identities and UNKNOWN review verdicts; the change grants neither
+review approval nor execution authority. The canary still permits one round only.
+An optional `one_canary` boolean dispatch selects the fixed trusted-checkout policy
+through `GAIA_CANARY_POLICY`. It defaults false; issue/schedule runs keep legacy
+inputs. Selection omits only legacy managed JSON and the optional ordered
+observation. App identity, sealed workflow SHA, admission and claim CAS remain
+mandatory. A policy file does not activate dispatch; absent policy refuses before runtime entry.
+
+The mutually exclusive `prepare_issue` dispatch invokes only the existing enqueue
+command under the same App identity and sealed checkout. It registers one ready
+issue through the production collector and ledger CAS, without reconciliation,
+Draft creation or execution authority. Policy-mode intake still cannot enqueue.
+
+These are local candidate capabilities, not proof of live activation or autonomy.
+The selected file must come from the trusted hosted checkout; no workflow activation
+is included. Review principals and separate human execution authorization must be
+real. Production expiry/positive-absence recovery remains unqualified, and the final
+read-to-effect interval is not a cross-system atomic revocation guarantee.
+See [the bounded canary design](docs/canary-admission-policy-r0.md).
 
 Every decision-bearing artifact binds stable identities, content revisions, producer/method
 context, and derivation links. Raw agent output is untrusted evidence and never becomes an

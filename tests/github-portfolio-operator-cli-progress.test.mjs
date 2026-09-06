@@ -9,7 +9,52 @@ import { tmpdir } from 'node:os';
 import { runPortfolioOperatorCli } from '../scripts/github-portfolio-operator.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-operator-progress-'));
+// The shipped CLI refuses to run without a Draft receipt. These gates are about progress
+// reporting, so the admission adapter is injected and the receipt file is a placeholder
+// the injected adapter never reads.
+const draftReceiptPath = join(scratch, 'intake-receipt.json');
+writeFileSync(draftReceiptPath, '{}', 'utf8');
+const injectedAdmission = () => ({ read: async () => null });
 test.after(() => rmSync(scratch, { recursive: true, force: true }));
+
+test('operator explicitly selects visible restricted execution without replacing admission or authority', async () => {
+  const key = join(scratch, 'visible.pub');
+  writeFileSync(key, 'fixture public key');
+  let executed = false;
+  const code = await runPortfolioOperatorCli([
+    'run', '--portfolio', join(scratch, 'p.json'), '--repository', 'GuitarAlchemist/gaia',
+    '--private-key', join(scratch, 'private'), '--public-key', key,
+    '--ledger', join(scratch, 'ledger-visible'), '--worktree', scratch,
+    '--evidence-root', join(scratch, 'evidence-visible'), '--draft-receipt', draftReceiptPath,
+    '--out', join(scratch, 'visible-receipt'), '--execution-profile', 'claude-visible-restricted',
+  ], {
+    isInteractive: () => true,
+    visibleProviderLaunch: (request) => {
+      let close;
+      const closed = new Promise((resolve) => { close = resolve; });
+      writeFileSync(request.resultPath, JSON.stringify({ schema: 'gaia-visible-agent-result/1',
+        binding: request.binding, status: 'completed', summary: 'Visible fixture completed.' }));
+      return { closed, stop: async () => close() };
+    },
+    createAuthority: () => ({ marker: 'authority-kept' }),
+    createDraftAdmission: () => ({ marker: 'admission-kept' }),
+    createGithubRead: () => ({}),
+    createExecution: ({ runWorker }) => ({ execute: () => runWorker({ cwd: scratch, task: 'fixture', baseHead: 'a'.repeat(40) }) }),
+    runWorker: () => { assert.fail('must not use headless fallback'); },
+    runOperator: async ({ authority, draftAdmission, execution }) => {
+      assert.equal(authority.marker, 'authority-kept');
+      assert.equal(draftAdmission.marker, 'admission-kept');
+      const result = await execution.execute({});
+      assert.equal(JSON.parse(result.output).summary, 'Visible fixture completed.');
+      executed = true;
+      return { status: 'AUTHORIZED', transition: { status: 'CANDIDATE_READY' } };
+    },
+    summarize: () => ({ text: 'fixture', exitCode: 0 }),
+    writeStdout: () => {}, writeProgress: () => {},
+  });
+  assert.equal(code, 0);
+  assert.equal(executed, true);
+});
 
 function parseProgress(chunks) {
   return chunks.join('').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
@@ -33,6 +78,7 @@ test('operator run keeps its final result on stdout and reports authorized repai
     '--ledger', join(scratch, 'ledger'),
     '--worktree', join(scratch, 'worktree'),
     '--evidence-root', join(scratch, 'evidence'),
+    '--draft-receipt', draftReceiptPath,
     '--out', join(scratch, 'receipt.json'),
     '--timeout-ms', '2000',
     '--progress-format', 'jsonl',
@@ -46,6 +92,7 @@ test('operator run keeps its final result on stdout and reports authorized repai
     writeProgress: (chunk) => stderr.push(chunk),
     createGithubRead: () => ({ read: async () => ({}) }),
     createAuthority: () => ({ consume: async () => ({}) }),
+    createDraftAdmission: injectedAdmission,
     createExecution: ({ runWorker, runReviewer, runRepair }) => ({
       execute: async () => {
         authorityExecutions += 1;
@@ -122,6 +169,7 @@ test('operator progress writer failure cannot prevent the authorized result', as
     '--ledger', join(scratch, 'broken-ledger'),
     '--worktree', join(scratch, 'broken-worktree'),
     '--evidence-root', join(scratch, 'broken-evidence'),
+    '--draft-receipt', draftReceiptPath,
     '--out', join(scratch, 'broken-receipt.json'),
   ], {
     isInteractive: () => true,
@@ -129,6 +177,7 @@ test('operator progress writer failure cannot prevent the authorized result', as
     writeProgress: async () => { throw new Error('stderr unavailable'); },
     createGithubRead: () => ({}),
     createAuthority: () => ({}),
+    createDraftAdmission: injectedAdmission,
     createExecution: () => ({ execute: async () => { executed += 1; } }),
     runOperator: async ({ execution }) => {
       await execution.execute({});
@@ -156,6 +205,7 @@ test('operator defaults to human progress and reserves authorized wording for gr
     '--ledger', join(scratch, 'human-ledger'),
     '--worktree', join(scratch, 'human-worktree'),
     '--evidence-root', join(scratch, 'human-evidence'),
+    '--draft-receipt', draftReceiptPath,
     '--out', join(scratch, 'human-receipt.json'),
   ], {
     isInteractive: () => true,
@@ -163,6 +213,7 @@ test('operator defaults to human progress and reserves authorized wording for gr
     writeProgress: (chunk) => stderr.push(chunk),
     createGithubRead: () => ({}),
     createAuthority: () => ({}),
+    createDraftAdmission: injectedAdmission,
     createExecution: ({ runWorker, runReviewer }) => ({
       execute: async () => {
         await runWorker({});
@@ -200,6 +251,7 @@ test('operator progress format refuses every value outside the closed pair', asy
     '--ledger', join(scratch, 'invalid-format-ledger'),
     '--worktree', join(scratch, 'invalid-format-worktree'),
     '--evidence-root', join(scratch, 'invalid-format-evidence'),
+    '--draft-receipt', draftReceiptPath,
     '--out', join(scratch, 'invalid-format-receipt.json'),
     '--progress-format', 'none',
   ], {
