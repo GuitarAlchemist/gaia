@@ -2,7 +2,8 @@ gaia-interagent
 Copyright (c) 2026 Gaia Wayfinder
 
 This product bundles no third-party code and has no runtime dependencies. It
-requires only Node.js (developed and tested on v24.12.0).
+requires only Node.js (current supported release pinned in .node-version;
+original development and historical testing used v24.12.0).
 
 Adapted, not reimplemented
 --------------------------

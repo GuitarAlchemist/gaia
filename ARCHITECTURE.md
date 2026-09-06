@@ -379,7 +379,8 @@ accepted transitions and receipts, not tokens, lane activity, or prose completio
 ## Runtime topology and operating modes
 
 - **Local plugin candidate:** Node.js over stdio MCP, append-only local state, no listener, no
-  remote execution, and no shell transport. Windows with Node 20 and 24 is the supported CI path;
+  remote execution, and no shell transport. Windows with the single current Node release
+  pinned in `.node-version` is the supported CI path;
   Ubuntu remains portability discovery.
 - **Local factory/operator:** bounded Claude/Codex/wmux processes, offline artifacts, explicit
   worktrees, read-only dashboards, and an interactive authority boundary for privileged effects.
