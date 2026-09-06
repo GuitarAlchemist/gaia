@@ -242,6 +242,11 @@ export function createGitHubDraftAdmissionAdapter({
   };
 
   return Object.freeze({
+    async target() {
+      const { expectation } = expectationAndProvider();
+      return Object.freeze({ repository: expectation.repositoryName,
+        itemKind: expectation.workItem.kind, itemNumber: expectation.workItem.number });
+    },
     async read({ repository, itemKind, itemNumber } = {}) {
       const { expectation, provider } = expectationAndProvider();
       if (itemKind !== 'ISSUE' || typeof repository !== 'string'

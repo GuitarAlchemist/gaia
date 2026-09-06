@@ -326,6 +326,40 @@ const githubSnapshot = () => ({
   }],
 });
 
+test('receipt-bound selection refuses absent, non-ready, malformed and stale work before authority', async () => {
+  const request = { organization: 'GuitarAlchemist', policyRevision: 'selection-r0' };
+  const target = { repository: 'GuitarAlchemist/ga', itemKind: 'ISSUE', itemNumber: 7 };
+  for (const scenario of ['missing', 'blocked', 'extra', 'symbol', 'wrong-kind', 'unavailable', 'stale']) {
+    let snapshot = githubSnapshot();
+    if (scenario === 'missing') snapshot.repositories[0].issues = [];
+    if (scenario === 'blocked') snapshot.repositories[0].issues[0].labels = ['ready-for-human'];
+    let consumed = 0;
+    let admitted = 0;
+    const factory = createPortfolioFactory({
+      githubRead: { read: async () => structuredClone(snapshot) },
+      authority: { consume: async () => { consumed += 1; throw new Error('must not consume'); } },
+      draftAdmission: {
+        target: async () => {
+          if (scenario === 'unavailable') throw new Error('provider unavailable');
+          if (scenario === 'extra') return { ...target, ignoreReadiness: true };
+          if (scenario === 'symbol') return { ...target, [Symbol('hidden')]: true };
+          if (scenario === 'wrong-kind') return { ...target, itemKind: 'UNKNOWN' };
+          return target;
+        },
+        read: async () => { admitted += 1; throw new Error('must not admit'); },
+      },
+    });
+    const portfolio = await factory.survey(request);
+    if (scenario === 'stale') snapshot.repositories[0].issues[0].labels = ['ready-for-human'];
+    const code = scenario === 'stale' ? 'SnapshotStale'
+      : scenario === 'unavailable' ? 'DraftAdmissionUnavailable'
+        : ['missing', 'blocked'].includes(scenario) ? 'DraftTargetNotReady' : 'DraftTargetInvalid';
+    await assert.rejects(factory.advance({ portfolio, grant: {} }), { code }, scenario);
+    assert.equal(consumed, 0, scenario);
+    assert.equal(admitted, 0, scenario);
+  }
+});
+
 test('the operator CLI admits the Draft through the shipped composition before any grant is spent', async () => {
   const dir = join(scratch, 'cli');
   mkdirSync(dir);
@@ -336,7 +370,16 @@ test('the operator CLI admits the Draft through the shipped composition before a
   await initOperatorKeypair({
     privateKeyPath, publicKeyPath, readPassphrase: scripted(['pass phrase', 'pass phrase']).read,
   });
-  const githubRead = { read: async () => githubSnapshot() };
+  const githubRead = { read: async () => {
+    const snapshot = githubSnapshot();
+    const repository = snapshot.repositories[0];
+    repository.issues.unshift({ ...repository.issues[0], id: 'earlier-ga-issue', number: 3 });
+    snapshot.repositories.unshift({ ...structuredClone(repository),
+      id: 'R_earlier', nameWithOwner: 'GuitarAlchemist/earlier',
+      issues: [{ ...repository.issues[0], id: 'foreign-issue', number: 1 }],
+    });
+    return snapshot;
+  } };
   const portfolio = await createPortfolioFactory({ githubRead }).survey({
     organization: 'GuitarAlchemist', policyRevision: 'sha256:portfolio-policy-v1',
   });
@@ -398,6 +441,8 @@ test('the operator CLI admits the Draft through the shipped composition before a
   assert.equal(await run(['--draft-receipt', receiptPath], 'admitted.json'), 0);
   const admitted = receiptAt('admitted.json');
   assert.equal(admitted.status, 'AUTHORIZED');
+  assert.equal(admitted.intent.repository, 'GuitarAlchemist/ga');
+  assert.equal(admitted.intent.itemNumber, 7);
   assert.equal(admitted.transition.status, 'CANDIDATE_READY');
   assert.deepEqual(admitted.transition.intent.draft, {
     number: 121, headRef: GENERATION.headRef, headRevision: GENERATION.headRevision,

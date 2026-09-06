@@ -176,7 +176,11 @@ OPEN draft on the same head before any grant is minted. There is no option that 
 without that admission. The rule and its refusal codes are recorded in
 [Pump canary R0](pump-canary-r0.md), Decisions C and C.1. The pinned `--portfolio` file is a revision, not a plan: GitHub is
 re-read and the portfolio rebuilt, and a revision mismatch is a refusal, never a fresh
-selection.
+selection. The shipped Draft adapter now provides a receipt-bound `target()`:
+the exact issue is selected from the full fresh inventory only while ready, rather
+than implicitly taking the first organization-wide lane. Missing or non-ready
+targets refuse without falling back to unrelated work. Existing callers without
+this optional port method retain their schedule. Target selection is not authority.
 
 The confirmation prompt shows the repository, item kind, item number, item id, action, the
 full intent revision, the snapshot revision, and last, on its own labelled line, the

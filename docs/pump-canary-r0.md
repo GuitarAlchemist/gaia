@@ -1,5 +1,26 @@
 # Pump canary R0: admission and evidence contract
 
+## Receipt-bound worker selection (2026-09-06, local candidate)
+
+Live evidence: intake run 34000957531 created Draft #123 for issue #122. The
+fresh portfolio instead schedules Demerzel #401 first, and Gaia #53 for its Gaia
+lane. Passing the Draft receipt to the operator therefore cannot select its task.
+
+Bounded repair: the existing Draft admission port may expose a read-only
+`target()` returning repository, item kind and number from its validated receipt.
+The factory selects that exact item from the full fresh portfolio, only if it
+is READY or READY_WITH_UNKNOWN. Missing, blocked or malformed targets refuse;
+there is no fallback to unrelated work. Without this optional method the existing
+schedule remains unchanged. No labels or global priorities are rewritten.
+
+The receipt selects work but grants nothing. Fresh Draft readback, snapshot
+comparison, typed intent, encrypted-key unlock and atomic grant consumption
+remain required. The same selection runs before preview and execution; a changed
+snapshot refuses before consuming authority. Public proof seams: factory
+`advance()` and the shipped operator composition. Cover a different repository
+and earlier issue ahead of the target, non-ready/missing targets and malformed
+selection. No new executor, grant, bus verb, or cross-host guarantee is introduced.
+
 Related: #40
 
 Status: work admitted for design; implementation and autonomous execution are not proven.

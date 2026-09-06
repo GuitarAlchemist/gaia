@@ -240,6 +240,33 @@ function buildSchedule(workItems) {
   return schedule;
 }
 
+// A receipt-bound admission target narrows selection, never readiness or authority.
+async function selectNext(portfolio, draftAdmission) {
+  if (draftAdmission?.target === undefined) return portfolio.schedule[0];
+  let target;
+  try {
+    target = await draftAdmission.target();
+  } catch {
+    throw new PortfolioFactoryError('DraftAdmissionUnavailable', 'draft target unavailable');
+  }
+  if (!target || Object.getPrototypeOf(target) !== Object.prototype
+      || Reflect.ownKeys(target).some(key => typeof key !== 'string')
+      || Reflect.ownKeys(target).sort().join(',') !== 'itemKind,itemNumber,repository'
+      || Object.values(Object.getOwnPropertyDescriptors(target)).some(
+        descriptor => !descriptor.enumerable || !Object.hasOwn(descriptor, 'value'),
+      )
+      || typeof target.repository !== 'string'
+      || !['ISSUE', 'PULL_REQUEST'].includes(target.itemKind)
+      || !Number.isSafeInteger(target.itemNumber) || target.itemNumber < 1) {
+    throw new PortfolioFactoryError('DraftTargetInvalid', 'draft target must name exact work');
+  }
+  const candidates = portfolio.workItems.filter(item => item.repository === target.repository
+    && item.itemKind === target.itemKind && item.itemNumber === target.itemNumber);
+  const next = buildSchedule(candidates)[0];
+  if (!next) throw new PortfolioFactoryError('DraftTargetNotReady', 'draft target is absent or not ready');
+  return next;
+}
+
 function assertUnique(values, field) {
   const observed = new Set();
   for (const value of values) {
@@ -628,7 +655,7 @@ export function createPortfolioFactory({
           'SnapshotStale', 'GitHub changed after the portfolio revision was materialized',
         );
       }
-      const next = freshPortfolio.schedule[0];
+      const next = await selectNext(freshPortfolio, draftAdmission);
       if (!next) {
         const receiptBody = {
           schema: 'gaia-github-portfolio-transition/1',
