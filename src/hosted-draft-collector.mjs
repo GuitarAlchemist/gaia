@@ -313,6 +313,9 @@ async function selectHead(github, repository, issueNumber, queueReceiptRevision)
     if (exactTrailer(commit.message, 'Gaia-Issue', String(issueNumber))
         && exactTrailer(commit.message, 'Gaia-Ready-Receipt', queueReceiptRevision)) matching.push(head);
   }
+  if (matching.some((head) => head.name === repository.defaultBranch)) {
+    fail('DefaultBranchSourceRejected', 'the repository default branch cannot be a Draft source');
+  }
   if (matching.length !== 1) fail('HeadIdentityAmbiguous', 'exactly one evidence head is required');
   return matching[0];
 }
