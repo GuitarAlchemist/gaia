@@ -61,7 +61,7 @@ test('a normal-policy file that mismatches the bound repository/actor is refused
   assert.equal(runtimeStarted, false);
   assert.equal(exitCode, 2);
   assert.equal(output.text(), '');
-  assert.deepEqual(errors.json(), { schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'InvalidArguments' });
+  assert.deepEqual(errors.json(), { schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'NormalPolicyScopeMismatch' });
 });
 
 test('a missing normal-policy file refuses precisely, never falling back to a fixture claim', async () => {
@@ -74,7 +74,26 @@ test('a missing normal-policy file refuses precisely, never falling back to a fi
   assert.equal(runtimeStarted, false);
   assert.equal(exitCode, 2);
   assert.equal(output.text(), '');
-  assert.deepEqual(errors.json(), { schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'InvalidArguments' });
+  assert.deepEqual(errors.json(), { schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'NormalPolicyUnavailable' });
+});
+
+test('malformed normal policy returns only a closed non-secret diagnostic', async t => {
+  for (const [content, expected] of [
+    ['{"private":"secret-sentinel",', 'InvalidNormalPolicyJson'],
+    [JSON.stringify(policyFixture({ accountableOwner: 'secret-sentinel' })), 'InvalidNormalPolicy'],
+    [JSON.stringify(policyFixture({ validFrom: 'secret-sentinel' })), 'InvalidNormalTime'],
+  ]) {
+    const path = await withPolicyFile(t, {});
+    writeFileSync(path, content);
+    const output = sink(); const errors = sink(); let calls = 0;
+    const code = await main({ argv: [...commonArgs(), '--normal-policy', path], env: {},
+      stdout: output.stream, stderr: errors.stream, runtimeFactory: () => { calls++; } });
+    assert.equal(code, 2);
+    assert.equal(calls, 0);
+    assert.equal(output.text(), '');
+    assert.deepEqual(errors.json(), { schema: 'GaiaHostedDraftPumpCliErrorV0', error: expected });
+    assert.doesNotMatch(errors.text(), /secret-sentinel|policy\.json|stack/);
+  }
 });
 
 test('canary-policy and normal-policy are mutually exclusive', async (t) => {

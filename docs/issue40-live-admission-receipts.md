@@ -47,7 +47,9 @@ multi-repository survey/advance contracts; do not rebuild a scheduler to fix thi
 - Preserve exact repository, operation, generation, lease and verified Actions execution bindings.
 - Never fill placeholder claim fields, replay a consumed canary policy, or fabricate authorization.
 - Missing/malformed configuration produces a precise non-secret diagnostic before any effect.
-- Negative tests reject stale/mismatched evidence and leave the durable operation unchanged.
+- Preflight refusal starts no runtime; stale CAS losers cannot rewrite a winning revision.
+- Refusal after durable EFFECT_STARTED preserves the existing lookup-only ambiguity rule;
+  zero provider creation is not permission to erase intent or retry an uncertain effect.
 - A current-main run must reconcile its exact receipt and resulting Draft before success is claimed.
 - Existing human-only execution, merge, credentials and billing boundaries remain unchanged.
 
@@ -124,3 +126,12 @@ canary path, normal creation without a static claim, and zero effects after chan
 ledger, expiry or stopped Actions. These use injected provider fixtures and do not establish
 live GitHub admission. The first full run passed 2008, failed one README count check and skipped
 one platform case; the count was corrected and the full rerun is reported in the PR.
+
+Independent Spec review found an overbroad original acceptance statement promising that
+every negative case left the entire operation unchanged. The existing reconciler persists
+EFFECT_STARTED before entering the provider; a later policy/Actions refusal records
+EFFECT_AMBIGUOUS even when the fixture proves zero creation. Tests now assert that durable
+disposition and lookup-only replay. This is a known liveness limit, not automatic recovery:
+scheduled quarantine can skip the unchanged ambiguous item but does not settle it. Resolving
+positive evidence of no attempt needs a separately reviewed durable protocol; this slice
+does not weaken ambiguity protection or manufacture a safe-to-retry grant.

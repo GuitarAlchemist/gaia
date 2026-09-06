@@ -33,11 +33,23 @@ import { runHostedDraftIntake } from '../src/hosted-draft-pump.mjs';
 import { produceHostedDraftPumpObservation } from '../src/hosted-draft-pump-producer.mjs';
 import { createCanaryDraftAdmission,
   validateCanaryAdmissionPolicy } from '../src/canary-admission-policy.mjs';
-import { createNormalDraftAdmission,
+import { createNormalDraftAdmission, NormalAdmissionError,
   validateNormalAdmissionPolicy } from '../src/normal-admission-policy.mjs';
 
 const execFileAsync = promisify(execFile);
 const SHA256 = /^[a-f0-9]{64}$/u;
+const NORMAL_CONFIGURATION_ERRORS = new Set(['NormalPolicyUnavailable', 'InvalidNormalPolicyJson',
+  'InvalidNormalPolicy', 'InvalidNormalTime', 'NormalPolicyScopeMismatch']);
+
+function readNormalPolicy(path) {
+  let text;
+  try { text = readFileSync(path, 'utf8'); }
+  catch { throw new NormalAdmissionError('NormalPolicyUnavailable'); }
+  let policy;
+  try { policy = JSON.parse(text); }
+  catch { throw new NormalAdmissionError('InvalidNormalPolicyJson'); }
+  return validateNormalAdmissionPolicy(policy);
+}
 const GIT_OID = /^[a-f0-9]{40}$/u;
 const REPOSITORY = /^([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)$/u;
 const COMMANDS = new Set(['enqueue', 'reconcile', 'list-unsettled', 'intake']);
@@ -280,11 +292,13 @@ function parseConfiguration(argv, env) {
       // Repository-scoped: unlike canary this never pins one issue, so any issue selection
       // (explicit or the scheduled candidate) is left to the existing collector/funnel.
       configuration.normalPolicyPath = configuredText(normalPath);
-      configuration.normalPolicy = validateNormalAdmissionPolicy(JSON.parse(readFileSync(normalPath, 'utf8')));
+      configuration.normalPolicy = readNormalPolicy(normalPath);
       const policy = configuration.normalPolicy;
       if (policy.repository.owner !== repository.owner || policy.repository.name !== repository.name
         || policy.repository.nodeId !== configuration.repositoryNodeId
-        || policy.effectActorId !== configuration.pumpActorId) fail();
+        || policy.effectActorId !== configuration.pumpActorId) {
+        throw new NormalAdmissionError('NormalPolicyScopeMismatch');
+      }
       configuration.managedRound = { advance: null };
     } else {
       configuration.managedRound = managedRound(flagOrEnv(
@@ -555,7 +569,9 @@ export async function main({
     // Only a closed validator code crosses the CLI boundary, never input, messages or stacks.
     // A malformed claim needs its producer repaired; retrying argument syntax cannot fix it.
     const code = error instanceof DeliveryRoundError && error.code === 'InvalidEffectClaim'
-      ? 'InvalidEffectClaim' : 'InvalidArguments';
+      ? 'InvalidEffectClaim'
+      : error instanceof NormalAdmissionError && NORMAL_CONFIGURATION_ERRORS.has(error.code)
+        ? error.code : 'InvalidArguments';
     writeJson(stderr, { schema: 'GaiaHostedDraftPumpCliErrorV0', error: code });
     return 2;
   }
