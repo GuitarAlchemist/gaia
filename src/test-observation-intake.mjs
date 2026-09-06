@@ -634,6 +634,60 @@ function regressionEntry(candidate, frontier) {
 }
 
 // ---------------------------------------------------------------------------
+// Bounded batch intake: many comment readings through the one existing seam
+// ---------------------------------------------------------------------------
+
+export const TEST_OBSERVATION_BATCH_SCHEMA = 'gaia-test-observation-batch/1';
+
+/**
+ * One page of readings admitted per call. Real pages are far smaller; this exists so nothing about
+ * the shape of an injected page can turn one call into unbounded work. A page over the bound is
+ * refused, never silently truncated — a truncated page is a page that quietly claimed to be smaller
+ * than it is.
+ */
+export const MAX_TEST_OBSERVATION_BATCH_SIZE = 25;
+
+/**
+ * Admit one bounded page of distinct comment readings into a ledger, issue #53's R1 slice.
+ *
+ * This adds no normalization, no admission rule and no read model beyond the three already
+ * published: each reading in the page is normalized by `normalizeTestObservation` and admitted by
+ * `admitTestObservation`, exactly as a caller doing that once already could. The only thing this
+ * function owns is sequencing many readings through that same seam and reporting one outcome per
+ * reading, in the page's order, against the ledger produced by every entry before it.
+ *
+ * A page is not a claim of completeness. Absence of a comment from one page says nothing about that
+ * comment; it is not visited, not admitted, and not reported as deleted or regressed. `effect` and
+ * `authority` are the constant `NONE` on the batch result itself, matching every observation inside
+ * it, so a caller cannot read admitting a page as having done anything beyond recording evidence.
+ */
+export function admitTestObservationBatch(ledgerInput, readings) {
+  let ledger = requireLedger(ledgerInput);
+  if (!Array.isArray(readings)) refuse('a batch is an array of comment readings');
+  if (readings.length > MAX_TEST_OBSERVATION_BATCH_SIZE) refuse('a batch exceeds its bounded page size');
+
+  const outcomes = [];
+  for (const reading of readings) {
+    const candidate = normalizeTestObservation(reading);
+    const admitted = admitTestObservation(ledger, candidate);
+    ledger = admitted.ledger;
+    outcomes.push(Object.freeze({
+      observationKey: candidate.observationKey,
+      sourceUrl: candidate.sourceUrl,
+      state: candidate.state,
+      outcome: admitted.outcome,
+    }));
+  }
+  return Object.freeze({
+    schema: TEST_OBSERVATION_BATCH_SCHEMA,
+    effect: 'NONE',
+    authority: 'NONE',
+    ledger,
+    outcomes: Object.freeze(outcomes),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // The read model: what an operator is allowed to see, and nothing that acts
 // ---------------------------------------------------------------------------
 
