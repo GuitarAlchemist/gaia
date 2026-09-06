@@ -8,8 +8,17 @@ Gaia owns one deep portfolio module with two operations:
   explicit evidence, and emits a content-addressed `PortfolioRevision` plus a
   deterministic advisory schedule.
 - `advance(request)` re-reads the complete GitHub snapshot, rebuilds the portfolio,
-  requires the fresh revision to equal the caller's pinned revision, and emits at most
+  requires the decision snapshot to match the caller's pinned observations, and emits at most
   one transition intent. Without a grant it stops at `AWAITING_AUTHORITY`.
+
+With an explicit receipt-bound `target()`, the decision snapshot hashes the complete
+normalized selected repository, organization, inventory scope/completeness and policy
+revision (`gaia-repository-decision-snapshot/1`). Unrelated repository changes cannot
+invalidate this intent. All selected-repository changes remain conservative refusals;
+missing/non-ready targets refuse before authority. Without `target()`, the original
+organization-wide revision comparison is unchanged. The transition's `fromRevision`
+retains the original full inventory identity; the intent's `snapshotRevision` binds the
+decision scope and is what the existing grant signs. Exact Draft readback is unchanged.
 
 R2 may consume one exact, expiring Ed25519-signed `FACTORY_RUN` grant and execute the
 existing local agent factory for that intent. The grant is atomically claimed in a
@@ -55,7 +64,7 @@ would expose mechanisms, widen authority, or make replay depend on hidden state.
    dependency evidence, and duplicate evidence; omitted fields are invalid rather than
    interpreted as negative facts.
 5. Draft, archived, human-gated, unknown-check, and unknown-review work remains distinct.
-6. Every transition binds the organization snapshot revision, repository, item identity,
+6. Every transition records the full inventory revision and binds the decision snapshot, repository, item identity,
    action, evidence state, and required external authority.
 7. R1 and R2 perform no create, update, comment, close, publish, merge, or push operation.
 8. The Gaia bus remains exactly `register/send/inbox/ack/heartbeat/handoff`; bus text is

@@ -150,7 +150,11 @@ preflight does not authorize an effect or settle an existing ambiguous operation
 head binding and durable claim enforcement remain execution-time responsibilities.
 
 The shipped portfolio operator requires an intake receipt as an untrusted expectation for
-one issue. Its read-only Draft adapter re-reads the provider and checks the repository,
+one issue. Its targeted decision snapshot binds the whole normalized selected repository,
+organization, complete inventory scope and policy, not changes in unrelated repositories.
+Untargeted scheduling retains organization-wide freshness. The full inventory identity
+remains in the transition; the scoped snapshot identity is signed in the intent/grant.
+Its read-only Draft adapter re-reads the provider and checks the repository,
 operation marker, exact pull-request number, base, head, and OPEN Draft state. Preview and
 authorized advance both repeat that read; admitted evidence enters the intent revision
 before grant consumption. Missing, moved, foreign, ambiguous, or unavailable evidence

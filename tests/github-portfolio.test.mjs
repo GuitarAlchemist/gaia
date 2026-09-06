@@ -66,6 +66,55 @@ const ix = {
   }],
 };
 
+test('receipt-bound advance survives unrelated repository movement without changing its intent', async () => {
+  let snapshot = completeSnapshot(structuredClone([ga, ix]));
+  const factory = createPortfolioFactory({
+    githubRead: { read: async () => snapshot },
+    draftAdmission: {
+      target: async () => ({ repository: ga.nameWithOwner, itemKind: 'ISSUE', itemNumber: 1 }),
+      read: async () => ({ number: 123, state: 'OPEN', isDraft: true,
+        headRef: 'canary', headRevision: 'c'.repeat(40) }),
+    },
+  });
+  const portfolio = await factory.survey({ organization: 'GuitarAlchemist', policyRevision: 'policy-1' });
+  const before = await factory.advance({ portfolio });
+  snapshot.repositories[1].defaultBranchOid = 'd'.repeat(40);
+  const after = await factory.advance({ portfolio });
+  assert.equal(after.status, 'AWAITING_AUTHORITY');
+  assert.deepEqual(after.intent, before.intent);
+});
+
+test('receipt-bound freshness still fences relevant changes before authority consumption', async () => {
+  for (const mutation of [
+    snapshot => { snapshot.repositories[0].defaultBranchOid = 'e'.repeat(40); },
+    snapshot => { snapshot.repositories[0].issues[0].title = 'Changed task'; },
+    snapshot => { snapshot.repositories[0].issues[0].labels = ['ready-for-human']; },
+    snapshot => { snapshot.repositories[0].archived = true; },
+    snapshot => { snapshot.complete = false; },
+    snapshot => { snapshot.repositories = [snapshot.repositories[1]]; },
+  ]) {
+    const snapshot = completeSnapshot(structuredClone([ga, ix]));
+    let consumed = 0;
+    let executed = 0;
+    const factory = createPortfolioFactory({
+      githubRead: { read: async () => snapshot },
+      draftAdmission: {
+        target: async () => ({ repository: ga.nameWithOwner, itemKind: 'ISSUE', itemNumber: 1 }),
+        read: async () => ({ number: 123, state: 'OPEN', isDraft: true,
+          headRef: 'canary', headRevision: 'c'.repeat(40) }),
+      },
+      authority: { consume: async () => { consumed += 1; } },
+      factoryExecution: { execute: async () => { executed += 1; } },
+    });
+    const portfolio = await factory.survey({ organization: 'GuitarAlchemist', policyRevision: 'policy-1' });
+    mutation(snapshot);
+    await assert.rejects(factory.advance({ portfolio, grant: {} }), error =>
+      ['SnapshotStale', 'DraftTargetNotReady', 'PortfolioIncomplete'].includes(error.code));
+    assert.equal(consumed, 0);
+    assert.equal(executed, 0);
+  }
+});
+
 test('survey is deterministic across adapter ordering and performs no write', async () => {
   let writes = 0;
   const first = createPortfolioFactory({

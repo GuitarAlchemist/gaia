@@ -175,8 +175,9 @@ Draft it describes is read back from GitHub on every advance and must still be t
 OPEN draft on the same head before any grant is minted. There is no option that runs
 without that admission. The rule and its refusal codes are recorded in
 [Pump canary R0](pump-canary-r0.md), Decisions C and C.1. The pinned `--portfolio` file is a revision, not a plan: GitHub is
-re-read and the portfolio rebuilt, and a revision mismatch is a refusal, never a fresh
-selection. The shipped Draft adapter now provides a receipt-bound `target()`:
+re-read and the portfolio rebuilt. A mismatch in the selected repository or policy is
+a refusal, never a fresh selection; unrelated repositories cannot invalidate a targeted
+operation. The shipped Draft adapter provides a receipt-bound `target()`:
 the exact issue is selected from the full fresh inventory only while ready, rather
 than implicitly taking the first organization-wide lane. Missing or non-ready
 targets refuse without falling back to unrelated work. Existing callers without

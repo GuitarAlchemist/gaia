@@ -351,7 +351,7 @@ test('receipt-bound selection refuses absent, non-ready, malformed and stale wor
     });
     const portfolio = await factory.survey(request);
     if (scenario === 'stale') snapshot.repositories[0].issues[0].labels = ['ready-for-human'];
-    const code = scenario === 'stale' ? 'SnapshotStale'
+    const code = scenario === 'stale' ? 'DraftTargetNotReady'
       : scenario === 'unavailable' ? 'DraftAdmissionUnavailable'
         : ['missing', 'blocked'].includes(scenario) ? 'DraftTargetNotReady' : 'DraftTargetInvalid';
     await assert.rejects(factory.advance({ portfolio, grant: {} }), { code }, scenario);
@@ -370,12 +370,14 @@ test('the operator CLI admits the Draft through the shipped composition before a
   await initOperatorKeypair({
     privateKeyPath, publicKeyPath, readPassphrase: scripted(['pass phrase', 'pass phrase']).read,
   });
+  let unrelatedRevision = 'a'.repeat(40);
   const githubRead = { read: async () => {
     const snapshot = githubSnapshot();
     const repository = snapshot.repositories[0];
     repository.issues.unshift({ ...repository.issues[0], id: 'earlier-ga-issue', number: 3 });
     snapshot.repositories.unshift({ ...structuredClone(repository),
       id: 'R_earlier', nameWithOwner: 'GuitarAlchemist/earlier',
+      defaultBranchOid: unrelatedRevision,
       issues: [{ ...repository.issues[0], id: 'foreign-issue', number: 1 }],
     });
     return snapshot;
@@ -419,6 +421,9 @@ test('the operator CLI admits the Draft through the shipped composition before a
       readPassphraseFn: async () => 'pass phrase',
       confirmFn: async ({ prompt, intent }) => {
         confirmations.push(prompt);
+        // Another repository advances while the human is confirming. The real signed
+        // grant must still match the selected repository on the authorized pass.
+        unrelatedRevision = 'b'.repeat(40);
         return intent.intentRevision;
       },
     },
