@@ -248,7 +248,9 @@ test('explicit canary dispatch selects only the fixed policy and refuses its abs
   const { argv, environment } = invocation(workflow, 'canary', temp);
   assert.equal(environment.GAIA_CANARY_POLICY, '.github/gaia/canary-policy.json');
   assert.equal(environment.GAIA_OBSERVATION_PATH, '');
-  assert.equal(existsSync(environment.GAIA_CANARY_POLICY), false, 'no live policy is shipped by this slice');
+  // Keep missing-policy refusal testable even when an explicitly admitted policy is installed.
+  environment.GAIA_CANARY_POLICY = join(temp, 'absent-policy.json');
+  assert.equal(existsSync(environment.GAIA_CANARY_POLICY), false);
   const errors = sink(); let entered = false;
   const code = await main({ argv, env: environment, stdout: sink().stream, stderr: errors.stream,
     runtimeFactory: () => { entered = true; throw Error('must not enter runtime'); } });

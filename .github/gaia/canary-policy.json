@@ -1,0 +1,25 @@
+{
+  "schema": "GaiaCanaryAdmissionPolicyV1",
+  "version": 1,
+  "repository": {
+    "nodeId": "R_kgDOT3lpUg",
+    "owner": "GuitarAlchemist",
+    "name": "gaia"
+  },
+  "issue": 122,
+  "operationId": "d0dbd35a644b476f8d3d003555663f94d939b5200c181729236415192e529a51",
+  "generationKey": "952683b0606a6bdd474d3e3c8eedb66cad27514731279b8d5e30c17b749b094a",
+  "headRevision": "c566afcf369304477641e24d4d6890474fdeb114",
+  "effectActorId": 4788836,
+  "validFrom": "2026-09-06T00:15:00.000Z",
+  "validUntil": "2026-09-06T01:15:00.000Z",
+  "accountableOwner": "github:user:spareilleux",
+  "effectOwner": "github:app:gaia-draft-pump",
+  "writerIdentity": "gaia:agent:v1:codex:01a04b30-bd3a-7530-8f4f-185954d433c9:root",
+  "reviewOwners": {
+    "standards": "gaia:agent:v1:codex:01a04b30-bd3a-7530-8f4f-185954d433c9:canary_standards_review",
+    "spec": "gaia:agent:v1:codex:01a04b30-bd3a-7530-8f4f-185954d433c9:canary_spec_review"
+  },
+  "allowedEffect": "CREATE_DRAFT",
+  "roundBudget": 1
+}

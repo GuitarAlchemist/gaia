@@ -328,7 +328,7 @@ An optional `one_canary` boolean dispatch selects the fixed trusted-checkout pol
 through `GAIA_CANARY_POLICY`. It defaults false; issue/schedule runs keep legacy
 inputs. Selection omits only legacy managed JSON and the optional ordered
 observation. App identity, sealed workflow SHA, admission and claim CAS remain
-mandatory. No live policy is shipped; absent policy refuses before runtime entry.
+mandatory. A policy file does not activate dispatch; absent policy refuses before runtime entry.
 
 The mutually exclusive `prepare_issue` dispatch invokes only the existing enqueue
 command under the same App identity and sealed checkout. It registers one ready
