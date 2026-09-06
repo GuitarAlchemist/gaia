@@ -660,6 +660,16 @@ test('a batch has an explicit bound and malformed/unknown input inside it cannot
   assert.equal(malformedRow.state, 'UNKNOWN');
   assert.equal(malformedRow.unknownReason, 'SOURCE_MALFORMED');
   assert.deepEqual(malformedRow.facts, []);
+  const held = admitTestObservationBatch(emptyTestObservationLedger(), [reading()]).ledger;
+  const original = JSON.stringify(held);
+  const newReading = editedReading({
+    commentId: 5548750958,
+    sourceUrl: 'https://github.com/GuitarAlchemist/.github/issues/73#issuecomment-5548750958',
+  });
+  assert.throws(() => admitTestObservationBatch(held, [newReading, null]), TestObservationError);
+  assert.equal(JSON.stringify(held), original, 'invalid structure rejects atomically, preserving prior evidence');
+  const retried = admitTestObservationBatch(held, [newReading]);
+  assert.equal(retried.ledger.entries.length, 2, 'absence of the held comment from this page is not deletion');
 });
 
 test('a cancelled read and a programmer error are raised, never reported as an absent source', async () => {

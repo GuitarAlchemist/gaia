@@ -640,10 +640,8 @@ function regressionEntry(candidate, frontier) {
 export const TEST_OBSERVATION_BATCH_SCHEMA = 'gaia-test-observation-batch/1';
 
 /**
- * One page of readings admitted per call. Real pages are far smaller; this exists so nothing about
- * the shape of an injected page can turn one call into unbounded work. A page over the bound is
- * refused, never silently truncated — a truncated page is a page that quietly claimed to be smaller
- * than it is.
+ * Maximum readings per invocation; existing reading and ledger bounds also apply.
+ * An oversized page is refused rather than silently truncated.
  */
 export const MAX_TEST_OBSERVATION_BATCH_SIZE = 25;
 
@@ -660,6 +658,8 @@ export const MAX_TEST_OBSERVATION_BATCH_SIZE = 25;
  * comment; it is not visited, not admitted, and not reported as deleted or regressed. `effect` and
  * `authority` are the constant `NONE` on the batch result itself, matching every observation inside
  * it, so a caller cannot read admitting a page as having done anything beyond recording evidence.
+ * Structural reading errors or ledger capacity refusal reject the whole batch without changing
+ * the caller's ledger. No partial result or fabricated source identity is returned.
  */
 export function admitTestObservationBatch(ledgerInput, readings) {
   let ledger = requireLedger(ledgerInput);

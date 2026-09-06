@@ -33,7 +33,7 @@ rule, provider, transport or storage:
   `normalizeTestObservation` and admitted by the existing `admitTestObservation`, exactly as a
   caller doing that once already could; every admission, dedup, revision, and regression rule is
   the one R0 already proved.
-- `MAX_TEST_OBSERVATION_BATCH_SIZE` (25) bounds work per call; a page over the bound is refused,
+- `MAX_TEST_OBSERVATION_BATCH_SIZE` (25) bounds readings per call; a page over the bound is refused,
   never silently truncated.
 - The result carries `effect: NONE` and `authority: NONE`, matching every observation inside it,
   plus one `{ observationKey, sourceUrl, state, outcome }` entry per reading in page order.
@@ -44,9 +44,12 @@ Tests added in `tests/test-observation-intake.test.mjs` cover: two distinct comm
 each admitting once; the same comment repeated within one page and across repeated pages
 deduplicating to one entry; an edit and a fresh unavailable reading inside one page both
 preserving prior history without resurrecting stale content; the explicit page-size bound refusing
-an oversized or non-array page; and a malformed/hostile reading inside a page normalizing to an
-explicit `UNKNOWN`/`NONE`-authority entry beside a normal one, never granting authority or
-aborting the rest of the page.
+an oversized or non-array page; and structurally valid readings with malformed source content
+normalizing to an explicit `UNKNOWN`/`NONE`-authority entry. Invalid reading structure or ledger
+capacity exhaustion refuses the entire batch: no partial ledger is returned and the caller's
+input ledger remains unchanged. This preserves the existing R0 validation boundary rather than
+fabricating source identity or silently skipping invalid input. Partial-page absence is not deletion;
+it is distinct from partial success within a rejected batch.
 
 Not run by the worker: `node --test` execution is the coordinator's responsibility per the
 execution note above.
