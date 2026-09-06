@@ -320,6 +320,20 @@ and effect ports; it does not sequence the admission decision.
 Legacy intake retains its static configuration validation. The full unsettled list
 remains visible to the intake count even when selection is limited to one issue.
 
+The opt-in `--normal-policy` composition uses `src/normal-admission-policy.mjs`
+to derive the same managed input from a repository-scoped explicit policy rather
+than a static claim. `createNormalDraftAdmission` pins the selected operation's
+immutable identity and envelope, then owns policy, epoch, lease and ledger
+rereads around existing Actions admission. The existing managed evidence CAS and
+Draft readback remain the effect boundary. V0 carries GitHub reviewer principals;
+V1 carries separately validated writer and independent agent assignments, never
+review approvals. The policy permits CREATE_DRAFT only for at most a one-hour
+window; claim leases last at most five minutes within that window. Runtime and
+provider fixtures cover substitution and stale-loser refusal, not a cross-host
+atomic revocation guarantee. This local candidate has no workflow activation or
+automatic policy renewal and does not grant agent execution, merge or multirepo
+effects. See [normal admission repair](docs/issue40-live-admission-receipts.md).
+
 Explicit `GaiaCanaryAdmissionPolicyV1` produces `GaiaRoundReceiptV1` with a
 writer identity and independent AI reviewer assignments; V0 keeps its GitHub-only
 review principals. Shared pure `src/agent-review-identity.mjs` validates the

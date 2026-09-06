@@ -1,6 +1,6 @@
 # Restore normal pump admission before multi-repository drain
 
-Status: admitted investigation/repair seed; no fix or autonomy claimed.
+Status: diagnostic repair pushed; normal producer integrated locally, not activated.
 Base: main `987e500273853b68a965834d870a0d2b480eac9a`.
 
 ## Evidence
@@ -70,3 +70,57 @@ Codex owns integration in `codex/issue40-live-admission-receipts`. One writer pe
 independent review before delivery. Subscription agents only; no paid API, installation or
 credential change. Report every five minutes while active, with readback and a compact sourced
 mini-Gantt. Local/runtime/remote delivery and unattended continuation remain distinct claims.
+
+## Repository-scoped normal-admission producer (implementation slice, unactivated)
+
+`src/normal-admission-policy.mjs` adds a normal-admission analogue of the canary producer named
+in the frontier above: `validateNormalAdmissionPolicy`, `bindNormalAdmissionPolicy`,
+`prepareNormalManagedRound`, and `createNormalDraftAdmission`. It uses deterministic
+canonical/digest helpers and the unchanged `GaiaRoundReceiptV0`/`GaiaRoundReceiptV1` shapes, the unchanged
+`GaiaManagedRoundEffectClaimV0` shape, and `validateManagedDraftConfiguration` without
+modification. It also reuses the existing effect-agnostic gates unchanged: the collector's
+authorized ready-label event, `createGitHubActionsDraftAdmission`'s sealed-workflow/run
+verification, and the durable operation store's live `EFFECT_STARTED` snapshot.
+
+A `GaiaNormalAdmissionPolicyV0` differs from the canary policy in exactly the way this
+document's frontier required: it pins repository (`nodeId`/`owner`/`name`), `effectActorId`,
+`accountableOwner`, `effectOwner`, `reviewOwners.{standards,spec}`, `allowedEffect`
+(`CREATE_DRAFT` only) and `roundBudget` (fixed at `1`), but never an issue, `operationId`,
+`generationKey` or `headRevision` — those are read from the live operation snapshot at bind
+time, once per candidate, so one policy can admit any eligible operation in its declared
+repository instead of being a renamed one-issue canary grant. `reviewOwners` are required and
+validated exactly as `pr-delivery-round-history.mjs`'s existing `responsibility()` validator
+requires for V0; omitting them, as an earlier read-only advisory pass floated, was
+checked against that validator and would fail closed, not merely be unsafe in principle.
+V1 adds a writer identity and the existing independent-agent reviewer validation,
+including provider-alias rejection. These are assignments, not approvals or authentication.
+
+The CLI gained one new opt-in flag pair, `--normal-policy` / `GAIA_NORMAL_POLICY`, parallel to
+`--canary-policy` / `GAIA_CANARY_POLICY` and mutually exclusive with it. Supplying it derives
+`create.receipt` / `create.effectClaim` from {policy, live snapshot, verified Actions epoch}
+instead of trusting an externally supplied static `GAIA_MANAGED_ROUND_JSON` blob for those
+fields. The prior static-blob legacy path is completely unchanged for callers who do not pass
+either flag, and gains no new privilege from this change. No workflow, `.github/gaia` policy
+file, or dispatch input activates this path; a policy file must still be supplied explicitly
+to a local/CI invocation, and no such file is checked in by this change.
+
+This is an implementation slice for review, not an authorization to run it against the
+production repository, and not proof of an actual normal pump tick. Tests cover: missing/
+malformed policy, bad owner/reviewer shapes, repository/operation/head/epoch mismatch,
+stale/future/expired policy windows, a changed claim or policy between the two live rereads
+(zero effects on refusal), a valid generation passing the unmodified managed validator, and no
+extra effect on lookup/reuse. Per this document's acceptance bar, a current-main `intake` run
+that presents a real policy plus a live operation snapshot and verified Actions epoch, and
+reconciles its resulting Draft/receipt readback, remains the only accepted proof of normal
+admission — a green test run alone is not that proof.
+
+The architecture map now names this opt-in candidate and its residual boundaries.
+Coordinator integration reproduced two defects before repair: V1 assignments were unsupported,
+and a different valid operation returned by the ledger could replace the selected identity.
+The seam now pins immutable identity and envelope across rereads, while permitting legitimate
+state/revision transitions. Both discriminating tests failed before the corresponding fixes.
+Focused verification passed 50 cases; runtime integration passed 21 including the unchanged
+canary path, normal creation without a static claim, and zero effects after changed policy,
+ledger, expiry or stopped Actions. These use injected provider fixtures and do not establish
+live GitHub admission. The first full run passed 2008, failed one README count check and skipped
+one platform case; the count was corrected and the full rerun is reported in the PR.

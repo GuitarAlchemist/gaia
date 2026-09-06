@@ -20,7 +20,7 @@ const hash = v => createHash('sha256').update(canonical(v)).digest('hex');
 
 async function fixture(t, { stopped = false, expired = false, unrelated = false,
   replay = false, expiredRecovery = false, changeDuringAdmission = null,
-  mutatePolicy = () => {}, policyEnvironment = false } = {}) {
+  mutatePolicy = () => {}, policyEnvironment = false, normal = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'gaia-canary-contract-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const repository = { nodeId: 'R_test', owner: 'test-org', name: 'test-repo' };
@@ -66,6 +66,10 @@ async function fixture(t, { stopped = false, expired = false, unrelated = false,
     reviewOwners: { standards: 'github:user:test-standards', spec: 'github:user:test-spec' },
     allowedEffect: 'CREATE_DRAFT', roundBudget: 1 };
   mutatePolicy(policy);
+  if (normal) {
+    policy.schema = policy.schema.replace('Canary', 'Normal');
+    for (const field of ['issue', 'operationId', 'generationKey', 'headRevision']) delete policy[field];
+  }
   const path = join(dir, 'policy.json'); writeFileSync(path, JSON.stringify(policy));
   let candidate = null; let creates = 0; let reads = 0;
   const run = async (_command, args) => {
@@ -108,7 +112,7 @@ async function fixture(t, { stopped = false, expired = false, unrelated = false,
   let output = ''; let errors = '';
   const invocation = { argv: ['intake', '--repository', 'test-org/test-repo',
     '--pump-actor-id', '123', '--repository-node-id', 'R_test',
-    '--ledger-root-oid', 'f'.repeat(40), '--ledger-root-revision', 'f'.repeat(64), '--canary-policy', path],
+    '--ledger-root-oid', 'f'.repeat(40), '--ledger-root-revision', 'f'.repeat(64), normal ? '--normal-policy' : '--canary-policy', path],
     env: { GITHUB_REPOSITORY: 'test-org/test-repo', GITHUB_RUN_ID: '50', GITHUB_RUN_ATTEMPT: '1',
       GITHUB_WORKFLOW_SHA: 'e'.repeat(40),
       GITHUB_WORKFLOW_REF: 'test-org/test-repo/.github/workflows/hosted-draft-intake.yml@refs/heads/main' },
@@ -119,7 +123,7 @@ async function fixture(t, { stopped = false, expired = false, unrelated = false,
     stdout: { write: v => { output += v; } }, stderr: { write: v => { errors += v; } } };
   if (policyEnvironment) {
     invocation.argv.splice(-2);
-    invocation.env.GAIA_CANARY_POLICY = path;
+    invocation.env[normal ? 'GAIA_NORMAL_POLICY' : 'GAIA_CANARY_POLICY'] = path;
   }
   const code = await main(invocation);
   const firstOutput = output;
@@ -256,4 +260,26 @@ test('ambiguous canary recovery remains lookup-only without renewing managed aut
   assert.equal(result.creates, 0);
   assert.deepEqual(result.managedEvidence, { state: 'UNSEEN' });
   assert.equal(result.reads, 2, 'the retry must not request fresh create authority');
+});
+
+test('normal intake crosses the real runtime and managed receipt seam without a static claim', async t => {
+  const result = await fixture(t, { normal: true, policyEnvironment: true, expiredRecovery: true });
+  assert.equal(result.code, 0, result.errors);
+  assert.equal(JSON.parse(result.output).result.outcome, 'CREATED', result.output);
+  assert.equal(result.creates, 1);
+  assert.equal(result.reads, 2);
+  assert.equal(result.recovery.kind, 'Terminal');
+  assert.match(result.candidate.body, /normal admission policy/);
+});
+
+test('normal intake refuses changed policy, ledger, expiry or stopped Actions before creation', async t => {
+  for (const fault of ['policy', 'ledger', 'expiry', 'stopped']) {
+    await t.test(fault, async subtest => {
+      const result = await fixture(subtest, { normal: true, stopped: fault === 'stopped',
+        changeDuringAdmission: fault === 'stopped' ? null : fault });
+      assert.equal(result.creates, 0);
+      assert.deepEqual(result.managedEvidence, { state: 'UNSEEN' });
+      assert.notEqual(JSON.parse(result.output).result.outcome, 'CREATED');
+    });
+  }
 });
