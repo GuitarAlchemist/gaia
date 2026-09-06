@@ -1,5 +1,21 @@
 # One-operation canary admission policy
 
+## Effect-free preparation — 2026-09-05
+
+The sealed intake can select a policy but cannot prepare its prerequisite ledger
+operation with the dedicated App identity. Add an optional `prepare_issue` dispatch
+input (empty by default), mutually exclusive with `one_canary`. It invokes only the
+existing `enqueue` CLI for one positive issue number, using the sealed checkout,
+trusted ledger root and existing bounded App token. It skips legacy managed JSON
+and the intake/reconcile step; it cannot create a Draft or authorize an agent.
+The production collector remains responsible for ready-label/source provenance,
+and the existing ledger CAS provides idempotent registration. A prepared operation
+is not a delivered result or proof of autonomy. No alternate effect executor,
+credential, permission, default policy or synthetic receipt is introduced.
+Validate at the already agreed workflow-to-CLI seam: exact issue routing without
+managed data, invalid issue refusal before runtime, no reconcile on preparation,
+and unchanged issue/schedule/canary paths. Rollback removes this optional input.
+
 ## Sealed workflow selection — 2026-09-05
 
 The approved intake policy path was unreachable from the shipped workflow.

@@ -51,6 +51,7 @@ function workflowText() {
  */
 function expressions(event, temp) {
   return new Map([
+    ['inputs.prepare_issue', event === 'prepare' ? String(LABELLED_ISSUE) : ''],
     ['github.event.issue.number', event === 'issues' ? String(LABELLED_ISSUE) : ''],
     ['steps.pump-token.outputs.token', 'ghs_fixture_installation_token'],
     ['vars.GAIA_PUMP_ACTOR_ID', '1234'],
@@ -102,7 +103,7 @@ function resolveExpressions(value, table) {
 }
 
 /** The lines of the one step that invokes the pump CLI, found by its invocation, not its name. */
-function intakeStepLines(workflow) {
+function intakeStepLines(workflow, command = 'intake') {
   const lines = workflow.split(/\r?\n/u);
   const starts = lines.reduce((found, line, index) => (
     /^ {6}- (?:name|uses|run|shell):/u.test(line) ? [...found, index] : found
@@ -110,7 +111,7 @@ function intakeStepLines(workflow) {
   for (let at = 0; at < starts.length; at += 1) {
     const end = at + 1 < starts.length ? starts[at + 1] : lines.length;
     const block = lines.slice(starts[at], end);
-    if (block.some((line) => line.includes(SCRIPT_PATH))) return block;
+    if (block.some((line) => line.includes(`${SCRIPT_PATH} ${command}`))) return block;
   }
   return assert.fail(`no intake step invokes ${SCRIPT_PATH}`);
 }
@@ -156,7 +157,7 @@ function runCommands(block) {
 /** The exact argv the runner would hand the CLI, with `$env:` reads resolved against `env`. */
 function invocation(workflow, event, temp) {
   const table = expressions(event, temp);
-  const block = intakeStepLines(workflow);
+  const block = intakeStepLines(workflow, event === 'prepare' ? 'enqueue' : 'intake');
   const environment = { ...runnerEnvironment(), ...stepEnvironment(block, table) };
   const command = runCommands(block).find((line) => line.includes(SCRIPT_PATH));
   assert.ok(command, `the run: block must invoke ${SCRIPT_PATH}`);
@@ -253,6 +254,35 @@ test('explicit canary dispatch selects only the fixed policy and refuses its abs
     runtimeFactory: () => { entered = true; throw Error('must not enter runtime'); } });
   assert.notEqual(code, 0);
   assert.equal(entered, false);
+});
+
+test('preparation dispatch enqueues the exact issue without managed data or reconciliation', async () => {
+  const workflow = workflowText();
+  const { argv, environment } = invocation(workflow, 'prepare', tmpdir());
+  assert.equal(argv[0], 'enqueue');
+  assert.equal(environment.GAIA_ISSUE_NUMBER, String(LABELLED_ISSUE));
+  assert.equal(environment.GAIA_MANAGED_ROUND_JSON, undefined);
+  assert.equal(environment.GAIA_CANARY_POLICY, undefined);
+  const output = sink(); const errors = sink(); let enqueued = 0;
+  const code = await main({ argv, env: environment, stdout: output.stream, stderr: errors.stream,
+    runtimeFactory: configuration => {
+      assert.equal(configuration.command, 'enqueue');
+      return {
+        async enqueue(selector) {
+          assert.equal(selector.workItem.number, LABELLED_ISSUE); enqueued += 1;
+          return { kind: 'Enqueued', operationId: OPERATION_ID, workKey: WORK_KEY,
+            committedRevision: COMMITTED };
+        },
+        async reconcile() { assert.fail('preparation must not reconcile'); },
+      };
+    } });
+  assert.equal(code, 0); assert.equal(enqueued, 1);
+  assert.equal(output.json().command, 'enqueue');
+  const bad = [...argv]; bad[bad.indexOf('--issue') + 1] = '0';
+  assert.equal(await main({ argv: bad, env: environment, stdout: sink().stream,
+    stderr: sink().stream, runtimeFactory: () => assert.fail('invalid input entered runtime') }), 2);
+  assert.match(workflow, /if: github.event_name != 'workflow_dispatch' \|\| !inputs.prepare_issue/u);
+  assert.match(workflow, /GAIA_ONE_CANARY -eq 'true'.*GAIA_PREPARE_ISSUE/u);
 });
 
 test('a scheduled recovery tick reaches the CLI and is admitted as a schedule, not refused', async () => {
@@ -357,7 +387,7 @@ test('revert control: deleting the issue-number binding loses the labelled issue
 });
 
 test('revert control: a flag left without its value refuses the whole invocation', async () => {
-  const mutated = workflowText().replace(
+  const mutated = workflowText().replaceAll(
     '--ledger-root-oid $env:GAIA_LEDGER_ROOT_OID', '--ledger-root-oid',
   );
   assert.notEqual(mutated, workflowText(), 'the mutation must actually drop a flag value');

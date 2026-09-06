@@ -330,6 +330,11 @@ inputs. Selection omits only legacy managed JSON and the optional ordered
 observation. App identity, sealed workflow SHA, admission and claim CAS remain
 mandatory. No live policy is shipped; absent policy refuses before runtime entry.
 
+The mutually exclusive `prepare_issue` dispatch invokes only the existing enqueue
+command under the same App identity and sealed checkout. It registers one ready
+issue through the production collector and ledger CAS, without reconciliation,
+Draft creation or execution authority. Policy-mode intake still cannot enqueue.
+
 These are local candidate capabilities, not proof of live activation or autonomy.
 The selected file must come from the trusted hosted checkout; no workflow activation
 is included. Review principals and separate human execution authorization must be
