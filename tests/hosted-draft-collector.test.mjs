@@ -213,6 +213,41 @@ test('R1 hosted GitHub facts become one canonical Operation Envelope', async () 
   assertDeepFrozen(envelope);
 });
 
+test('R1 a matching default branch head is a typed refusal, not a Draft source', async () => {
+  const { createHostedDraftCollector, HostedDraftCollectorError } = await api();
+  const stable = githubBoundary();
+  const collector = createHostedDraftCollector({
+    github: {
+      ...stable,
+      async listHeadRefs() {
+        return [{ name: 'main', revision: 'b'.repeat(40) }];
+      },
+    },
+  });
+
+  await assert.rejects(
+    collector.collect({
+      repository: { owner: 'old-owner', name: 'old-name' },
+      workItem: { kind: 'ISSUE', number: 60 },
+    }),
+    (error) => error instanceof HostedDraftCollectorError
+      && error.code === 'DefaultBranchSourceRejected'
+      && error.message === 'the repository default branch cannot be a Draft source',
+  );
+});
+
+test('R1 a unique distinct matching branch remains accepted as a Draft source', async () => {
+  const { createHostedDraftCollector } = await api();
+  const collector = createHostedDraftCollector({ github: githubBoundary() });
+
+  const envelope = await collector.collect({
+    repository: { owner: 'old-owner', name: 'old-name' },
+    workItem: { kind: 'ISSUE', number: 60 },
+  });
+
+  assert.equal(envelope.generation.headRef, 'codex/hosted-draft-pump-r0');
+});
+
 test('R1 concrete gh observations feed the same collector seam', async () => {
   const { createGhDraftCollectorApi, createHostedDraftCollector } = await api();
   assert.equal(typeof createGhDraftCollectorApi, 'function');
