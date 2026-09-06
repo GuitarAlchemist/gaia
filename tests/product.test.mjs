@@ -32,6 +32,21 @@ function shippedFiles(dir = ROOT, acc = []) {
 
 // ---------------------------------------------------------------------------
 
+test('runtime requirements and every setup-node step use the single release pin', () => {
+  const pin = readFileSync(join(ROOT, '.node-version'), 'utf8').trim();
+  assert.match(pin, /^\d+\.\d+\.\d+$/);
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  assert.equal(pkg.engines.node, pin);
+  for (const name of readdirSync(join(ROOT, '.github', 'workflows'))) {
+    const body = readFileSync(join(ROOT, '.github', 'workflows', name), 'utf8');
+    const setups = body.match(/uses:\s*actions\/setup-node@/g) ?? [];
+    if (setups.length === 0) continue;
+    assert.equal((body.match(/node-version-file:\s*['"]\.node-version['"]/g) ?? []).length,
+      setups.length, `${name} must consume the shared pin at every setup step`);
+    assert.doesNotMatch(body, /node-version:\s|matrix\.node/);
+  }
+});
+
 test('the plugin manifest is present and names this plugin', () => {
   assert.equal(manifest.name, 'gaia-interagent');
   assert.match(manifest.version, /^\d+\.\d+\.\d+/, 'strict semver');

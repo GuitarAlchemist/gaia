@@ -20,6 +20,7 @@ import { createGhGitDataApi } from '../src/gh-git-data-adapter.mjs';
 import {
   createGitHubManagedRoundAdapter,
   createGitHubManagedRoundEvidencePort,
+  DeliveryRoundError,
   executeManagedRoundUpdate,
   validateManagedDraftConfiguration,
 } from '../src/pr-delivery-round-history.mjs';
@@ -32,9 +33,23 @@ import { runHostedDraftIntake } from '../src/hosted-draft-pump.mjs';
 import { produceHostedDraftPumpObservation } from '../src/hosted-draft-pump-producer.mjs';
 import { createCanaryDraftAdmission,
   validateCanaryAdmissionPolicy } from '../src/canary-admission-policy.mjs';
+import { createNormalDraftAdmission, NormalAdmissionError,
+  validateNormalAdmissionPolicy } from '../src/normal-admission-policy.mjs';
 
 const execFileAsync = promisify(execFile);
 const SHA256 = /^[a-f0-9]{64}$/u;
+const NORMAL_CONFIGURATION_ERRORS = new Set(['NormalPolicyUnavailable', 'InvalidNormalPolicyJson',
+  'InvalidNormalPolicy', 'InvalidNormalTime', 'NormalPolicyScopeMismatch']);
+
+function readNormalPolicy(path) {
+  let text;
+  try { text = readFileSync(path, 'utf8'); }
+  catch { throw new NormalAdmissionError('NormalPolicyUnavailable'); }
+  let policy;
+  try { policy = JSON.parse(text); }
+  catch { throw new NormalAdmissionError('InvalidNormalPolicyJson'); }
+  return validateNormalAdmissionPolicy(policy);
+}
 const GIT_OID = /^[a-f0-9]{40}$/u;
 const REPOSITORY = /^([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)$/u;
 const COMMANDS = new Set(['enqueue', 'reconcile', 'list-unsettled', 'intake']);
@@ -66,7 +81,7 @@ const COMMAND_FLAGS = Object.freeze({
   'list-unsettled': COMMON_FLAGS,
   intake: new Set([
     ...COMMON_FLAGS, 'issue', 'repository-node-id', 'owner', 'gate', 'check', 'eta-minutes',
-    'observation-out', 'run-id', 'canary-policy',
+    'observation-out', 'run-id', 'canary-policy', 'normal-policy',
   ]),
 });
 
@@ -261,6 +276,8 @@ function parseConfiguration(argv, env) {
       eta: suppliedEta === undefined ? INTAKE_PRESENTATION.eta : eta(suppliedEta),
     };
     const canaryPath = optionalFlagOrEnv(flags, 'canary-policy', env, 'GAIA_CANARY_POLICY');
+    const normalPath = optionalFlagOrEnv(flags, 'normal-policy', env, 'GAIA_NORMAL_POLICY');
+    if (canaryPath !== undefined && normalPath !== undefined) fail();
     if (canaryPath !== undefined) {
       configuration.canaryPolicyPath = configuredText(canaryPath);
       configuration.canaryPolicy = validateCanaryAdmissionPolicy(JSON.parse(readFileSync(canaryPath, 'utf8')));
@@ -270,6 +287,18 @@ function parseConfiguration(argv, env) {
         || policy.effectActorId !== configuration.pumpActorId
         || (configuration.issue !== undefined && configuration.issue !== policy.issue)) fail();
       configuration.issue = policy.issue;
+      configuration.managedRound = { advance: null };
+    } else if (normalPath !== undefined) {
+      // Repository-scoped: unlike canary this never pins one issue, so any issue selection
+      // (explicit or the scheduled candidate) is left to the existing collector/funnel.
+      configuration.normalPolicyPath = configuredText(normalPath);
+      configuration.normalPolicy = readNormalPolicy(normalPath);
+      const policy = configuration.normalPolicy;
+      if (policy.repository.owner !== repository.owner || policy.repository.name !== repository.name
+        || policy.repository.nodeId !== configuration.repositoryNodeId
+        || policy.effectActorId !== configuration.pumpActorId) {
+        throw new NormalAdmissionError('NormalPolicyScopeMismatch');
+      }
       configuration.managedRound = { advance: null };
     } else {
       configuration.managedRound = managedRound(flagOrEnv(
@@ -397,7 +426,7 @@ export function createHostedDraftPumpRuntime(
       };
       const lookupProvider = dependencies.createGhDraftOperationProvider({
         ...providerOptions,
-        managedRound: configuration.canaryPolicy ? undefined : {
+        managedRound: (configuration.canaryPolicy || configuration.normalPolicy) ? undefined : {
           workKey, ...configuration.managedRound.create, evidencePort,
         },
       });
@@ -417,6 +446,20 @@ export function createHostedDraftPumpRuntime(
           pumpActorId: configuration.pumpActorId,
           executorEpoch: admission.executorEpoch,
           readPolicy: () => JSON.parse(readFileSync(configuration.canaryPolicyPath, 'utf8')),
+          readOperation: operation => store.inspectByOperation(operation),
+          reserveEffect: claim => admission.reserveEffect(claim),
+          now: dependencies.now,
+          lookupExact: request => lookupProvider.lookupExact(request),
+          createDraft: (request, managed) => dependencies.createGhDraftOperationProvider({
+            ...providerOptions, managedRound: { workKey, ...managed, evidencePort },
+          }).createDraft(request),
+        });
+      } else if (configuration.normalPolicy) {
+        provider = createNormalDraftAdmission({
+          policy: configuration.normalPolicy, snapshot,
+          pumpActorId: configuration.pumpActorId,
+          executorEpoch: admission.executorEpoch,
+          readPolicy: () => JSON.parse(readFileSync(configuration.normalPolicyPath, 'utf8')),
           readOperation: operation => store.inspectByOperation(operation),
           reserveEffect: claim => admission.reserveEffect(claim),
           now: dependencies.now,
@@ -522,8 +565,14 @@ export async function main({
   let configuration;
   try {
     configuration = parseConfiguration(argv, env);
-  } catch {
-    writeJson(stderr, { schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'InvalidArguments' });
+  } catch (error) {
+    // Only a closed validator code crosses the CLI boundary, never input, messages or stacks.
+    // A malformed claim needs its producer repaired; retrying argument syntax cannot fix it.
+    const code = error instanceof DeliveryRoundError && error.code === 'InvalidEffectClaim'
+      ? 'InvalidEffectClaim'
+      : error instanceof NormalAdmissionError && NORMAL_CONFIGURATION_ERRORS.has(error.code)
+        ? error.code : 'InvalidArguments';
+    writeJson(stderr, { schema: 'GaiaHostedDraftPumpCliErrorV0', error: code });
     return 2;
   }
   try {

@@ -32,7 +32,7 @@ test('intake rejects the production schema-only claim before any runtime or ledg
   assert.equal(runtimeStarted,false);
   assert.equal(exitCode,2);
   assert.equal(output.text(),'');
-  assert.deepEqual(errors.json(),{schema:'GaiaHostedDraftPumpCliErrorV0',error:'InvalidArguments'});
+  assert.deepEqual(errors.json(),{schema:'GaiaHostedDraftPumpCliErrorV0',error:'InvalidEffectClaim'});
 });
 
 test('intake rejects malformed receipts and claims with redacted errors before effects', async (context) => {
@@ -55,7 +55,10 @@ test('intake rejects malformed receipts and claims with redacted errors before e
       assert.equal(runtimeStarted,false);
       assert.equal(exitCode,2);
       assert.equal(output.text(),'');
-      assert.deepEqual(errors.json(),{schema:'GaiaHostedDraftPumpCliErrorV0',error:'InvalidArguments'});
+      const expected = ['lease exceeds ten minutes', 'unknown claim field'].includes(name)
+        ? 'InvalidEffectClaim' : 'InvalidArguments';
+      assert.deepEqual(errors.json(),{schema:'GaiaHostedDraftPumpCliErrorV0',error:expected});
+      assert.ok(!errors.text().includes('never-publish-this'));
     });
   }
 });
