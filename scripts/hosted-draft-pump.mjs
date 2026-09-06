@@ -20,6 +20,7 @@ import { createGhGitDataApi } from '../src/gh-git-data-adapter.mjs';
 import {
   createGitHubManagedRoundAdapter,
   createGitHubManagedRoundEvidencePort,
+  DeliveryRoundError,
   executeManagedRoundUpdate,
   validateManagedDraftConfiguration,
 } from '../src/pr-delivery-round-history.mjs';
@@ -522,8 +523,12 @@ export async function main({
   let configuration;
   try {
     configuration = parseConfiguration(argv, env);
-  } catch {
-    writeJson(stderr, { schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'InvalidArguments' });
+  } catch (error) {
+    // Only a closed validator code crosses the CLI boundary, never input, messages or stacks.
+    // A malformed claim needs its producer repaired; retrying argument syntax cannot fix it.
+    const code = error instanceof DeliveryRoundError && error.code === 'InvalidEffectClaim'
+      ? 'InvalidEffectClaim' : 'InvalidArguments';
+    writeJson(stderr, { schema: 'GaiaHostedDraftPumpCliErrorV0', error: code });
     return 2;
   }
   try {

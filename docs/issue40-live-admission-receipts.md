@@ -12,6 +12,35 @@ Parser-only reproduction with actual non-secret repository variables reached no 
 The canary path derives managed-round evidence from an explicit policy plus live operation/Actions
 observations. Normal intake instead expects static externally supplied managed-round evidence.
 
+## Verified diagnostic repair
+
+The CLI now distinguishes the closed `InvalidEffectClaim` preflight refusal from
+`InvalidArguments`. It exports neither the input value nor an exception message/stack.
+The existing validator and refusal-before-runtime behavior are unchanged. A schema-only
+claim, an excessive lease, or an unknown claim field remains refused; this change does
+not create a claim or authorize an effect.
+
+Focused verification: `node --test tests/hosted-draft-pump-cli.test.mjs
+tests/hosted-draft-intake-cli-seam.test.mjs` passed 30 tests. The discriminating tests
+first failed against the old generic diagnostic. Read-only preflight against the actual
+repository configuration also returned `InvalidEffectClaim`, with zero runtime effects.
+This is diagnostic progress only, not successful normal intake.
+
+## Producer decision frontier
+
+Existing Actions admission verifies the sealed workflow/run; the collector independently
+checks the authorized ready-label event and evidence branch. These are reusable gates,
+not missing runtime implementations. The missing normal seam is production of the
+managed-round responsibility/command/claim from those gates and the current durable
+operation. A static repository variable cannot remain a fresh per-operation lease.
+
+The current canary producer is bounded to an explicit issue/generation and one-hour
+policy. Do not replay or rename that policy as a normal authorization. The next bounded
+change must separate repository-scoped ownership policy from derived operation evidence,
+preserve independent reviewer identities required by the managed-round contract, and
+leave agent execution and merge authorization separate. The portfolio already has
+multi-repository survey/advance contracts; do not rebuild a scheduler to fix this seam.
+
 ## Bounded outcome and acceptance
 
 - Identify and reuse the legitimate operation-bound evidence producer for normal admission.
