@@ -197,6 +197,114 @@ function assertDeepFrozen(value, path = 'snapshot') {
   for (const key of Reflect.ownKeys(value)) assertDeepFrozen(value[key], `${path}.${String(key)}`);
 }
 
+test('normal policy expiring during admission produces a proven refusal, not ambiguity', async () => {
+  const mod = await api('normal expiry');
+  const { createNormalDraftAdmission } = await import('../src/normal-admission-policy.mjs');
+  const h = await harness(mod);
+  const operation = await enqueue(mod, h);
+  const snapshot = await h.store.inspectByOperation(operation.operationId);
+  const policy = {
+    schema: 'GaiaNormalAdmissionPolicyV0', version: 1, repository: snapshot.envelope.repository,
+    effectActorId: 123, validFrom: '2026-09-07T17:00:00.000Z', validUntil: '2026-09-07T17:10:00.000Z',
+    accountableOwner: 'github:user:test-owner', effectOwner: 'github:app:test-pump',
+    reviewOwners: { standards: 'github:user:test-standards', spec: 'github:user:test-spec' },
+    allowedEffect: 'CREATE_DRAFT', roundBudget: 1,
+  };
+  let currentTime = '2026-09-07T17:09:00.000Z';
+  let creates = 0;
+  const provider = createNormalDraftAdmission({ policy, snapshot, pumpActorId: 123, executorEpoch: EPOCH,
+    readPolicy: async () => policy, readOperation: id => h.store.inspectByOperation(id),
+    reserveEffect: async () => 'AVAILABLE', now: () => currentTime,
+    lookupExact: async () => null, createDraft: async request => { creates++; return exactDraft(request); },
+  });
+  const ports = mod.createMemoryDraftOperationPorts({ collector: h.collector.port, provider,
+    admission: h.admission.port, executorEpoch: EPOCH, telemetry: h.telemetry.port, store: h.store });
+  currentTime = policy.validUntil;
+  const result = await mod.reconcileDraft(operation.operationId, operation.committedRevision, ports);
+  assert.equal(creates, 0);
+  assertTerminal(result, 'REFUSED');
+  assert.equal(result.refusal, 'BeforeProvider:NormalPolicyExpired');
+});
+
+test('pre-provider refusal terminates with no effect and replays without creation', async () => {
+  const mod = await api('pre-provider refusal');
+  let creates = 0;
+  const provider = fakeProvider({ create: mod.guardDraftCreation({
+    prepare: async () => { throw Object.assign(new Error('expired'), { code: 'NormalPolicyExpired' }); },
+    invoke: async request => { creates++; return exactDraft(request); },
+  }) });
+  const h = await harness(mod, { provider });
+  const operation = await enqueue(mod, h);
+  const result = await mod.reconcileDraft(operation.operationId, operation.committedRevision, h.ports);
+  assertTerminal(result, 'REFUSED');
+  assert.equal(result.effect, 'NONE');
+  assert.equal(result.refusal, 'BeforeProvider:NormalPolicyExpired');
+  assert.equal(creates, 0);
+  const replay = await mod.reconcileDraft(operation.operationId, result.committedRevision, h.ports);
+  assert.deepEqual(replay, result);
+  assert.equal(creates, 0);
+});
+
+test('provider errors cannot impersonate a no-invocation witness', async () => {
+  const mod = await api('pre-provider impersonation');
+  for (const forged of [false, true]) {
+    let creates = 0;
+    const provider = fakeProvider({ create: mod.guardDraftCreation({
+      prepare: async () => ({}),
+      invoke: async request => {
+        creates++;
+        if (forged) {
+          // Even a genuine nested witness is invalid after the outer invocation starts.
+          return mod.guardDraftCreation({ prepare: async () => { throw new Error('expired'); },
+            invoke: async () => assert.fail('nested effect') })(request);
+        }
+        throw Object.assign(new Error('provider failed after writing'),
+          { code: 'NormalPolicyExpired', effectBoundary: 'NOT_INVOKED' });
+      },
+    }) });
+    const h = await harness(mod, { provider });
+    const operation = await enqueue(mod, h);
+    const result = await mod.reconcileDraft(operation.operationId, operation.committedRevision, h.ports);
+    assert.equal(result.state, 'EFFECT_AMBIGUOUS');
+    assert.equal(result.effect, 'UNKNOWN');
+    await mod.reconcileDraft(operation.operationId, result.committedRevision, h.ports);
+    assert.equal(creates, 1, 'an ambiguous result is never retried');
+  }
+});
+
+test('a refusal witness cannot be replayed for another request', async () => {
+  const mod = await api('witness replay');
+  let witness;
+  try {
+    await mod.guardDraftCreation({ prepare: async () => { throw new Error('expired'); },
+      invoke: async () => assert.fail('unexpected invocation') })({});
+  } catch (error) { witness = error; }
+  const h = await harness(mod, { provider: fakeProvider({ create: async () => { throw witness; } }) });
+  const op = await enqueue(mod, h);
+  const result = await mod.reconcileDraft(op.operationId, op.committedRevision, h.ports);
+  assert.equal(result.state, 'EFFECT_AMBIGUOUS');
+});
+
+test('concurrent refusal has one durable winner and zero provider invocations', async () => {
+  const mod = await api('concurrent refusal');
+  const entered = deferred(); const release = deferred();
+  let preparations = 0;
+  const provider = fakeProvider({ create: mod.guardDraftCreation({
+    prepare: async () => { preparations++; entered.resolve(); await release.promise; throw new Error('refused'); },
+    invoke: async () => assert.fail('unexpected invocation'),
+  }) });
+  const h = await harness(mod, { provider });
+  const op = await enqueue(mod, h);
+  const first = mod.reconcileDraft(op.operationId, op.committedRevision, h.ports);
+  await entered.promise;
+  const second = mod.reconcileDraft(op.operationId, op.committedRevision, h.ports);
+  release.resolve();
+  const results = await Promise.all([first, second]);
+  assert.equal(results[0].outcome, 'REFUSED');
+  assert.equal(preparations, 1);
+  assert.equal(h.telemetry.events.filter(event => event.kind === 'REFUSED').length, 1);
+});
+
 test('R01 canonical repository aliases converge to one node-id work identity', async () => {
   const mod = await api('R01 canonical aliases');
   const canonicalCollector = fakeCollector();

@@ -6,6 +6,8 @@ import {
   createDraftOperationPorts,
   createGitDataDraftOperationStore,
   enqueueDraft,
+  guardDraftCreation,
+  listUnsettledDrafts,
   reconcileDraft,
 } from '../src/draft-operation-envelope.mjs';
 
@@ -149,6 +151,40 @@ test('R2 durable enqueue survives restart and NONE cannot bootstrap it twice', a
     git.kinds(`refs/heads/gaia-ledger/draft-operations-v0/${accepted.workKey}`),
     ['WORK_ROOT', 'ENQUEUED'],
   );
+});
+
+test('pre-provider refusal survives durable replay; lost refusal evidence fails closed', async () => {
+  for (const crash of [false, true]) {
+    const git = fakeGitData({ failOnceOnKind: crash ? 'REFUSED' : null });
+    const config = { ledgerRegistryRootOid: OID_A, ledgerRegistryRootRevision: git.registryRootRevision };
+    const store = createGitDataDraftOperationStore({ gitData: git.port, config });
+    const envelope = observedEnvelope();
+    const selector = { repository: { owner: 'GuitarAlchemist', name: 'gaia' }, workItem: envelope.workItem };
+    const accepted = await enqueueDraft(selector, 'NONE', ports(store, envelope));
+    let calls = 0;
+    const overrides = { admission: { async reserveEffect() { return 'AVAILABLE'; } }, provider: {
+      async lookupExact() { return null; },
+      createDraft: guardDraftCreation({ prepare: async () => { throw new Error('refused'); },
+        invoke: async () => { calls++; assert.fail('provider must not run'); } }),
+    } };
+    const attempt = reconcileDraft(accepted.operationId, accepted.committedRevision, ports(store, envelope, overrides));
+    if (crash) await assert.rejects(attempt);
+    else assert.equal((await attempt).outcome, 'REFUSED');
+    const restarted = createGitDataDraftOperationStore({ gitData: git.port, config });
+    const snapshot = await restarted.inspectByOperation(accepted.operationId);
+    const result = await reconcileDraft(accepted.operationId, snapshot.committedRevision,
+      ports(restarted, envelope, overrides));
+    assert.equal(calls, 0);
+    if (crash) {
+      assert.equal(result.state, 'EFFECT_AMBIGUOUS', 'no durable witness means no inferred refusal');
+    } else {
+      assert.equal(result.outcome, 'REFUSED');
+      assert.equal(result.effect, 'NONE');
+      assert.deepEqual(await listUnsettledDrafts({ store: restarted }), []);
+      const receipt = git.records(`refs/heads/gaia-ledger/draft-operations-v0/${accepted.workKey}`).at(-1);
+      assert.equal(receipt.body.effectBoundary, 'NOT_INVOKED');
+    }
+  }
 });
 
 test('R3 successor epochs fence CLAIMED and INTENT before issuing commands', async () => {

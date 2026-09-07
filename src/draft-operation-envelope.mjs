@@ -4,6 +4,33 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const GIT_OID = /^[a-f0-9]{40}$/u;
 const TERMINAL = new Set(['CREATED', 'REUSED', 'REFUSED', 'CANCELLED']);
 const EPOCH_STATES = new Set(['CLAIMED', 'INTENT', 'EFFECT_STARTED']);
+const notInvokedWitnesses = new WeakMap();
+
+/** Trusted preparation must be effect-free; invocation errors never attest non-invocation. */
+export function guardDraftCreation({ prepare, invoke }) {
+  if (typeof prepare !== 'function' || typeof invoke !== 'function') {
+    throw new DraftOperationError('InvalidEffectBoundary');
+  }
+  return async request => {
+    let prepared;
+    try {
+      prepared = await prepare(request);
+    } catch (cause) {
+      const code = typeof cause?.code === 'string' && /^[A-Za-z]{1,64}$/u.test(cause.code)
+        ? cause.code : 'PreparationFailed';
+      const error = new DraftOperationError(code);
+      notInvokedWitnesses.set(error, { request, refusal: `BeforeProvider:${code}` });
+      throw error;
+    }
+    try {
+      return await invoke(request, prepared);
+    } catch (error) {
+      // A nested or replayed witness cannot escape a callback already invoked.
+      notInvokedWitnesses.delete(error);
+      throw error;
+    }
+  };
+}
 
 export class DraftOperationError extends Error {
   constructor(code, message = code) {
@@ -381,7 +408,7 @@ function validateLedgerTransition(previous, next) {
     ENQUEUED: new Set(['CLAIMED', 'REUSED', 'REFUSED', 'CANCELLED']),
     CLAIMED: new Set(['CLAIMED', 'INTENT', 'REUSED', 'REFUSED', 'CANCELLED']),
     INTENT: new Set(['CLAIMED', 'INTENT', 'EFFECT_STARTED', 'REUSED', 'REFUSED', 'CANCELLED']),
-    EFFECT_STARTED: new Set(['EFFECT_AMBIGUOUS', 'CREATED', 'REUSED']),
+    EFFECT_STARTED: new Set(['EFFECT_AMBIGUOUS', 'CREATED', 'REUSED', 'REFUSED']),
     EFFECT_AMBIGUOUS: new Set(['REUSED']),
   };
   if (!allowed[previous]?.has(next)) throw new DraftOperationError('LedgerCorrupt');
@@ -433,7 +460,13 @@ function validateOperationRecord(record, identity, envelope, previous) {
     return { outcome: body.kind, pullRequest, committedRevision: record.committedRevision };
   }
   if (body.kind === 'REFUSED') {
-    requireExactKeys(body, [...common, 'refusal'], 'LedgerCorrupt');
+    requireExactKeys(body, [...common, 'refusal',
+      ...(previous === 'EFFECT_STARTED' ? ['effectBoundary'] : [])], 'LedgerCorrupt');
+    if (previous === 'EFFECT_STARTED'
+      && (body.effectBoundary !== 'NOT_INVOKED'
+        || !/^BeforeProvider:[A-Za-z]{1,64}$/u.test(body.refusal))) {
+      throw new DraftOperationError('LedgerCorrupt');
+    }
     return {
       outcome: 'REFUSED', refusal: requireString(body.refusal, 'LedgerCorrupt'),
       committedRevision: record.committedRevision,
@@ -1245,7 +1278,16 @@ export async function reconcileDraft(operationId, expectedCommittedRevision, por
       const created = sanitizeExactDraft(await ports.provider.createDraft(request), request);
       if (!created) return pendingAfterAmbiguity(ports, snapshot);
       return adopt(ports, snapshot, created, 'CREATED');
-    } catch {
+    } catch (error) {
+      const witness = notInvokedWitnesses.get(error);
+      notInvokedWitnesses.delete(error);
+      if (witness?.request === request) {
+        const appended = await appendOrCurrent(ports, operationId, snapshot.committedRevision,
+          'REFUSED', { refusal: witness.refusal, effectBoundary: 'NOT_INVOKED' });
+        if (!appended.ok) return appended.result;
+        await emit(ports, { kind: 'REFUSED', operationId, refusal: witness.refusal });
+        return terminalResult(appended.snapshot);
+      }
       return pendingAfterAmbiguity(ports, snapshot);
     }
   });
