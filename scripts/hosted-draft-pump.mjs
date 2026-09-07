@@ -659,12 +659,8 @@ export async function main({
     }
     writeJson(stdout, receipt);
     return 0;
-  } catch (error) {
-    writeJson(stderr, {
-      schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'OperationFailed',
-      debugName: error?.constructor?.name, debugCode: error?.code,
-      debugMessage: String(error?.message ?? error),
-    });
+  } catch {
+    writeJson(stderr, { schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'OperationFailed' });
     return 1;
   }
 }
