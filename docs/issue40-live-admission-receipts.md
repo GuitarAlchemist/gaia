@@ -1,6 +1,7 @@
 # Restore normal pump admission before multi-repository drain
 
-Status: diagnostic repair pushed; normal producer integrated locally, not activated.
+Status: diagnostic repair and normal producer merged in PR125; workflow connection
+is a separate opt-in follow-up, not yet live activated.
 Base: main `987e500273853b68a965834d870a0d2b480eac9a`.
 
 ## Evidence
@@ -102,9 +103,9 @@ The CLI gained one new opt-in flag pair, `--normal-policy` / `GAIA_NORMAL_POLICY
 `create.receipt` / `create.effectClaim` from {policy, live snapshot, verified Actions epoch}
 instead of trusting an externally supplied static `GAIA_MANAGED_ROUND_JSON` blob for those
 fields. The prior static-blob legacy path is completely unchanged for callers who do not pass
-either flag, and gains no new privilege from this change. No workflow, `.github/gaia` policy
-file, or dispatch input activates this path; a policy file must still be supplied explicitly
-to a local/CI invocation, and no such file is checked in by this change.
+either flag, and gains no new privilege from this change. The original PR125 slice supplied
+no workflow selection or policy file. The follow-up connection below exposes selection;
+a policy file must still be supplied explicitly, and no such file is checked in here.
 
 This is an implementation slice for review, not an authorization to run it against the
 production repository, and not proof of an actual normal pump tick. Tests cover: missing/
@@ -135,3 +136,22 @@ disposition and lookup-only replay. This is a known liveness limit, not automati
 scheduled quarantine can skip the unchanged ambiguous item but does not settle it. Resolving
 positive evidence of no attempt needs a separately reviewed durable protocol; this slice
 does not weaken ambiguity protection or manufacture a safe-to-retry grant.
+
+## Opt-in workflow connection follow-up
+
+The manual `normal_policy` input defaults to false. Scheduled/labeled runs can select
+normal admission through `GAIA_NORMAL_POLICY_ENABLED`; manual runs use their own input.
+The identity step computes one selection, rejects canary/preparation conflicts, retains
+all four required identity credentials, and only requires the old managed-round blob
+for legacy effect intake. Its output binds the canonical sealed-checkout policy path
+to `GAIA_NORMAL_POLICY`. The CLI keeps enforcing schema, scope and runtime expiry.
+
+No policy file, credential change, variable enablement or live dispatch is included.
+Positive parser fixtures are not authorization or evidence of a successful normal tick.
+The existing Actions, ledger and external-effect reconciliation boundaries are unchanged.
+
+Acceptance: execute the actual identity PowerShell body under synthetic resolved inputs;
+prove normal/legacy selection and conflict refusal; reconstruct the real workflow-to-CLI
+environment; prove missing policy starts no runtime despite valid legacy data; prove a
+normal policy reaches configuration despite a stale blob; and show removing its binding
+breaks that proof. Keep canary, preparation and single-writer observation behavior intact.

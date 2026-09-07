@@ -15,7 +15,7 @@ import { MANAGED_CREATE } from './helpers/managed-draft-config.mjs';
  */
 
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -52,13 +52,15 @@ function workflowText() {
 function expressions(event, temp) {
   return new Map([
     ['inputs.prepare_issue', event === 'prepare' ? String(LABELLED_ISSUE) : ''],
-    ['github.event.issue.number', event === 'issues' ? String(LABELLED_ISSUE) : ''],
+    ['github.event.issue.number', event.endsWith('issues') ? String(LABELLED_ISSUE) : ''],
     ['steps.pump-token.outputs.token', 'ghs_fixture_installation_token'],
     ['vars.GAIA_PUMP_ACTOR_ID', '1234'],
     ['vars.GAIA_REPOSITORY_NODE_ID', 'R_kgDOGaia'],
     ['vars.GAIA_MANAGED_ROUND_JSON', MANAGED_ROUND_JSON],
     ["github.event_name == 'workflow_dispatch' && inputs.one_canary && '.github/gaia/canary-policy.json' || ''",
       event === 'canary' ? '.github/gaia/canary-policy.json' : ''],
+    ["steps.identity.outputs.normal_policy == 'true' && '.github/gaia/normal-policy.json' || ''",
+      event.startsWith('normal-') ? '.github/gaia/normal-policy.json' : ''],
     ['vars.GAIA_PUMP_APP_ID', '424242'],
     ['secrets.GAIA_PUMP_APP_PRIVATE_KEY', 'fixture-private-key'],
     ['steps.policy.outputs.oid', ROOT_OID],
@@ -70,7 +72,7 @@ function expressions(event, temp) {
     [
       "github.event_name != 'issues' && !inputs.one_canary"
       + " && format('{0}/gaia-hosted-draft-pump-observation.json', runner.temp) || ''",
-      event === 'issues' || event === 'canary' ? '' : `${temp}/gaia-hosted-draft-pump-observation.json`,
+      event.endsWith('issues') || event === 'canary' ? '' : `${temp}/gaia-hosted-draft-pump-observation.json`,
     ],
     ['github.run_id', '9001'],
     ['github.run_attempt', '1'],
@@ -285,6 +287,64 @@ test('preparation dispatch enqueues the exact issue without managed data or reco
     stderr: sink().stream, runtimeFactory: () => assert.fail('invalid input entered runtime') }), 2);
   assert.match(workflow, /if: github.event_name != 'workflow_dispatch' \|\| !inputs.prepare_issue/u);
   assert.match(workflow, /GAIA_ONE_CANARY -eq 'true'.*GAIA_PREPARE_ISSUE/u);
+});
+
+test('normal workflow selection reaches the CLI and a missing policy cannot fall back to legacy claims', async t => {
+  const temp = mkdtempSync(join(tmpdir(), 'gaia-normal-workflow-seam-'));
+  t.after(() => rmSync(temp, { recursive: true, force: true }));
+  for (const event of ['normal-dispatch', 'normal-schedule', 'normal-issues']) {
+    const { argv, environment } = invocation(workflowText(), event, temp);
+    assert.equal(environment.GAIA_NORMAL_POLICY, '.github/gaia/normal-policy.json');
+    assert.equal(environment.GAIA_CANARY_POLICY, '');
+    assert.equal(environment.GAIA_OBSERVATION_PATH === '', event === 'normal-issues');
+    // Keep refusal deterministic even after a real canonical policy is installed.
+    environment.GAIA_NORMAL_POLICY = join(temp, 'missing.json');
+    const errors = sink(); let entered = false;
+    const code = await main({ argv, env: environment, stdout: sink().stream, stderr: errors.stream,
+      runtimeFactory: () => { entered = true; } });
+    assert.equal(code, 2);
+    assert.equal(entered, false);
+    assert.equal(errors.json().error, 'NormalPolicyUnavailable');
+  }
+});
+
+test('normal workflow configuration uses policy instead of the stale blob; removing the binding fails', async t => {
+  const temp = mkdtempSync(join(tmpdir(), 'gaia-normal-workflow-policy-'));
+  t.after(() => rmSync(temp, { recursive: true, force: true }));
+  const policy = {
+    schema: 'GaiaNormalAdmissionPolicyV0', version: 1,
+    repository: { nodeId: 'R_kgDOGaia', owner: 'GuitarAlchemist', name: 'gaia' },
+    effectActorId: 1234, allowedEffect: 'CREATE_DRAFT', roundBudget: 1,
+    validFrom: '2026-09-05T21:00:00.000Z', validUntil: '2026-09-05T22:00:00.000Z',
+    accountableOwner: 'github:user:test-owner', effectOwner: 'github:app:test-pump',
+    reviewOwners: { standards: 'github:user:test-standards', spec: 'github:user:test-spec' },
+  };
+  const path = join(temp, 'policy.json');
+  writeFileSync(path, JSON.stringify(policy));
+  for (const removed of [false, true]) {
+    const workflow = removed ? withoutLines(workflowText(), line => line.includes('GAIA_NORMAL_POLICY:')) : workflowText();
+    const { argv, environment } = invocation(workflow, 'normal-schedule', temp);
+    if (!removed) {
+      assert.equal(environment.GAIA_NORMAL_POLICY, '.github/gaia/normal-policy.json');
+      environment.GAIA_NORMAL_POLICY = path;
+    }
+    environment.GAIA_MANAGED_ROUND_JSON = JSON.stringify({ create: { receipt: {}, effectClaim: {} } });
+    const errors = sink(); let configuration;
+    const code = await main({ argv, env: environment, stdout: sink().stream, stderr: errors.stream,
+      runtimeFactory: config => {
+        configuration = config;
+        return { async listUnsettled() { return []; }, async listReadyIssues() { return []; } };
+      } });
+    if (removed) {
+      assert.equal(code, 2);
+      assert.equal(configuration, undefined);
+    } else {
+      assert.equal(code, 0, errors.text());
+      assert.deepEqual(configuration.normalPolicy, policy);
+      assert.deepEqual(configuration.managedRound, { advance: null });
+    }
+  }
+  // This proves parser wiring only. Runtime expiry and provider effects are covered separately.
 });
 
 test('a scheduled recovery tick reaches the CLI and is admitted as a schedule, not refused', async () => {
