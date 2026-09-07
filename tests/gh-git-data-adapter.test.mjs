@@ -543,10 +543,21 @@ test('mutable protection is never served from the immutable object cache', async
 test('concurrent reads coalesce one immutable object request', async () => {
   const { createGhGitDataApi } = await import(MODULE_URL);
   let calls = 0;
+  let matchingRefs = 0;
+  let release;
+  const refsArrived = new Promise(resolve => { release = resolve; });
   const fixture = readFixtureRun();
   const api = createGhGitDataApi({
     repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
-    run: async args => { if (/\/git\/(?:commits|trees|blobs)\//u.test(args[1])) { calls += 1; await new Promise(r => setTimeout(r, 5)); } return fixture(args); },
+    run: async args => {
+      if (args[1].includes('matching-refs')) {
+        matchingRefs += 1;
+        if (matchingRefs === 2) release();
+      }
+      if (/\/git\/commits\//u.test(args[1])) await refsArrived;
+      if (/\/git\/(?:commits|trees|blobs)\//u.test(args[1])) calls += 1;
+      return fixture(args);
+    },
   });
   await Promise.all([
     api.read('refs/heads/gaia-ledger/registry-v0'),
@@ -582,6 +593,7 @@ test('immutable object cache evicts the oldest OID at its bound', async () => {
     repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
     run: async args => { calls.push(args[1]); return readFixtureRun({ head })(args); },
   });
+  await api.read('refs/heads/gaia-ledger/registry-v0');
   for (let i = 0; i < 257; i += 1) {
     head = i.toString(16).padStart(40, '0');
     await api.read('refs/heads/gaia-ledger/registry-v0');
