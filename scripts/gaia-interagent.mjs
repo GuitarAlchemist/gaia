@@ -309,6 +309,10 @@ function status(flags) {
     staleActors: snap.actors.length - live,
     supportedMaxLiveLanes: DEFAULT_MAX_LIVE_LANES,
     overSupportedLaneLimit: live > DEFAULT_MAX_LIVE_LANES,
+    // Lifted out of `result` because a caller that greps the top level for trouble
+    // should not have to walk the actor list to find the one thing that means two
+    // sessions are standing in the same working tree.
+    workspaceCollisions: snap.workspaceCollisions,
     result: snap,
   }, flags);
   return 0;
