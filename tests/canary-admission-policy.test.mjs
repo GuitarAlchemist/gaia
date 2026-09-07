@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { prepareCanaryManagedRound, validateCanaryAdmissionPolicy } from '../src/canary-admission-policy.mjs';
+import { prepareCanaryManagedRound, validateCanaryAdmissionPolicy,
+  createCanaryDraftAdmission } from '../src/canary-admission-policy.mjs';
 import { validateManagedDraftConfiguration, createInitialManagedRound,
   planManagedRoundUpdate } from '../src/pr-delivery-round-history.mjs';
 import { createHash } from 'node:crypto';
@@ -122,4 +123,28 @@ test('canary producer refuses foreign, expired, unclaimed and conflicting inputs
     const value = input(); mutate(value);
     assert.throws(() => prepareCanaryManagedRound(value), { code }, name);
   }
+});
+
+test('canary producer refuses an expired policy before touching any effect-time port', () => {
+  // Pins the load-bearing behavior of createCanaryDraftAdmission's own expiry guard,
+  // not just the refusal code: a prior mutation experiment found that deleting this
+  // guard alone still refuses with CanaryPolicyExpired via the downstream lease
+  // validator inside prepareCanaryManagedRound, only after readPolicy/readOperation/
+  // reserveEffect/createDraft would already have been called in production. A test
+  // that only asserts the refusal code cannot see that difference; this one can.
+  const value = input();
+  value.snapshot.state = 'CLAIMED'; // not EFFECT_STARTED/EFFECT_AMBIGUOUS: the guard applies here
+  value.observedAt = policy.validUntil; // already expired at the observed instant
+  const calls = { readPolicy: 0, readOperation: 0, reserveEffect: 0, lookupExact: 0, createDraft: 0 };
+  const ports = {
+    policy: value.policy, snapshot: value.snapshot, pumpActorId: value.pumpActorId,
+    executorEpoch: value.executorEpoch, now: () => value.observedAt,
+    readPolicy: async () => { calls.readPolicy += 1; return value.policy; },
+    readOperation: async () => { calls.readOperation += 1; return value.snapshot; },
+    reserveEffect: async () => { calls.reserveEffect += 1; return 'AVAILABLE'; },
+    lookupExact: async () => { calls.lookupExact += 1; return null; },
+    createDraft: async () => { calls.createDraft += 1; return {}; },
+  };
+  assert.throws(() => createCanaryDraftAdmission(ports), { code: 'CanaryPolicyExpired' });
+  assert.deepEqual(calls, { readPolicy: 0, readOperation: 0, reserveEffect: 0, lookupExact: 0, createDraft: 0 });
 });
