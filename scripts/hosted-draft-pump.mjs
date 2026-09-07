@@ -659,14 +659,8 @@ export async function main({
     }
     writeJson(stdout, receipt);
     return 0;
-  } catch (error) {
-    // Temporary typed-only diagnosis: closed constructor name and closed error code only,
-    // never the free-text message (which could carry provider payload/path detail).
-    writeJson(stderr, {
-      schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'OperationFailed',
-      debugName: typeof error?.constructor?.name === 'string' ? error.constructor.name : null,
-      debugCode: typeof error?.code === 'string' ? error.code : null,
-    });
+  } catch {
+    writeJson(stderr, { schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'OperationFailed' });
     return 1;
   }
 }
