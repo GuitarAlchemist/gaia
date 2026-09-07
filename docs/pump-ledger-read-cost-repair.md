@@ -29,15 +29,20 @@ its contribution to live wall time still needs qualification.
 ## Implemented scope
 
 The adapter now holds at most 256 immutable object responses per instance,
-coalesces concurrent reads, and returns cloned values. Mutable refs and
+shares concurrent reads while their entry remains cached, and returns cloned values. Mutable refs and
 rulesets are still fetched. Rejected reads and parser-invalid chains do not
 remain pinned in the cache.
 
 The repeated single-record fixture now performs five requests for two reads
 instead of eight: two fresh ref queries and one request per immutable object.
 This is a fixture request-count improvement, not a live latency claim.
-The focused suite passes 18 assertions, including ref movement, protection
+The focused suite passes 18 tests, including ref movement, protection
 revocation, concurrent reads, eviction, failed-read retry and value isolation.
+
+The 256-entry bound takes precedence over request coalescing. Evicting an
+in-flight entry may cause an additional read of the same immutable object.
+This affects request count only, not state freshness or write authority;
+there is no unbounded secondary map of in-flight requests.
 
 This repair Draft is coordinator-created, not evidence of successful pump
 admission. No policy renewal or new admission attempt is included.

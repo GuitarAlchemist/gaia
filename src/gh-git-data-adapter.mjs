@@ -174,7 +174,8 @@ export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run 
   if (typeof run !== 'function') fail('InvalidGitDataAdapter');
   const repo = repositoryPath(canonicalRepository);
   // Git objects are immutable by OID. Refs, rulesets, and writes deliberately remain uncached.
-  // Promises coalesce concurrent reads; rejected or parser-invalid reads are evicted by readRef.
+  // Resident promises share concurrent reads. At capacity, eviction can cause a duplicate GET.
+  // Rejected or parser-invalid reads are evicted by readRef.
   const immutableObjectCache = new Map();
   const IMMUTABLE_OBJECT_CACHE_LIMIT = 256;
   const immutableObjectPath = /^git\/(?:commits|trees|blobs)\/[a-f0-9]{40}$/u;
