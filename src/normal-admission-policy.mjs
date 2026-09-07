@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { validateManagedDraftConfiguration } from './pr-delivery-round-history.mjs';
 import { independentAgentReviewers } from './agent-review-identity.mjs';
+import { guardDraftCreation } from './draft-operation-envelope.mjs';
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const PRINCIPAL = /^github:(?:user|team):[A-Za-z0-9][A-Za-z0-9-]{0,63}$/u;
@@ -158,7 +159,7 @@ export function createNormalDraftAdmission({ policy: supplied, snapshot, pumpAct
   };
   return Object.freeze({
     lookupExact,
-    async createDraft(request) {
+    createDraft: guardDraftCreation({ prepare: async () => {
       await unchangedPolicy();
       const current = await readOperation(operationId);
       verifyBinding(current);
@@ -174,7 +175,7 @@ export function createNormalDraftAdmission({ policy: supplied, snapshot, pumpAct
       const managed = prepareNormalManagedRound({ policy, snapshot: confirmed,
         executorEpoch, pumpActorId, observedAt: now() });
       if (managed.receipt.revision !== prepared.receipt.revision) refuse('NormalClaimChanged');
-      return createDraft(request, managed);
-    },
+      return managed;
+    }, invoke: (request, managed) => createDraft(request, managed) }),
   });
 }

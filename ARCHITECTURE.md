@@ -131,6 +131,14 @@ reconciliation -> terminal receipt. Draft operations preserve `ENQUEUED`, `CLAIM
 `EFFECT_STARTED`, and `EFFECT_AMBIGUOUS` as nonterminal distinctions. `CREATED`, `REUSED`,
 `REFUSED`, and `CANCELLED` are terminal only when exact evidence supports them. Ambiguous remote
 effects remain nonterminal until reconciled; elapsed time and retries cannot manufacture truth.
+The application can attest that preparation refused before provider invocation through
+`guardDraftCreation`. Its in-process witness is bound to the exact request and consumed
+once. Only that witness permits `EFFECT_STARTED` to append `REFUSED` with
+`effectBoundary: NOT_INVOKED`. Errors after invocation, copied errors and old ambiguous
+receipts do not qualify. The normal-admission composition uses this boundary so an expired
+policy is not mistaken for an ambiguous provider write. A crash before the refusal receipt
+is durable still fails closed. New receipts require the compatible reader; old executor
+revisions must not resume against them. No policy or effect authority is added.
 The Hosted Draft intake is one concrete pump. An issue-triggered run remains bound to its issue and
 fails closed on its unsettled operation. A scheduled run probes a bounded, deterministic prefix of
 the unsettled queue before it may admit one eligible issue. When reconciliation returns the same
