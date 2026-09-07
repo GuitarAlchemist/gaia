@@ -26,6 +26,18 @@ its contribution to live wall time still needs qualification.
 - Preserve CAS, operation identity, authority and ambiguity semantics.
 - Run focused tests and independent review before qualification.
 
-This initial commit records scope only. No performance fix or autonomous
-delivery is claimed. This repair Draft is coordinator-created, not evidence
-of successful pump admission. No policy renewal is included.
+## Implemented scope
+
+The adapter now holds at most 256 immutable object responses per instance,
+coalesces concurrent reads, and returns cloned values. Mutable refs and
+rulesets are still fetched. Rejected reads and parser-invalid chains do not
+remain pinned in the cache.
+
+The repeated single-record fixture now performs five requests for two reads
+instead of eight: two fresh ref queries and one request per immutable object.
+This is a fixture request-count improvement, not a live latency claim.
+The focused suite passes 18 assertions, including ref movement, protection
+revocation, concurrent reads, eviction, failed-read retry and value isolation.
+
+This repair Draft is coordinator-created, not evidence of successful pump
+admission. No policy renewal or new admission attempt is included.
