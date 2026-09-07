@@ -22,6 +22,22 @@ function ledgerRuleset(overrides = {}) {
 
 const protectionResponses = (ruleset = ledgerRuleset()) => [[{ id: 42 }], ruleset];
 
+function readFixtureRun({ head = '1'.repeat(40), body = {
+  schema: 'GaiaDraftRegistryRootV0', priorCommittedRevision: 'NONE', kind: 'REGISTRY_ROOT',
+} } = {}) {
+  const tree = '2'.repeat(40);
+  const blob = '3'.repeat(40);
+  const wrapper = { body, committedRevision: revision(body) };
+  return async (args) => {
+    const path = args[1];
+    if (path.includes('matching-refs')) return [{ ref: 'refs/heads/gaia-ledger/registry-v0', object: { sha: head } }];
+    if (path.endsWith(`/git/commits/${head}`)) return { sha: head, tree: { sha: tree }, parents: [] };
+    if (path.endsWith(`/git/trees/${tree}`)) return { truncated: false, tree: [{ path: 'receipt.json', mode: '100644', type: 'blob', sha: blob }] };
+    if (path.endsWith(`/git/blobs/${blob}`)) return { encoding: 'base64', content: Buffer.from(canonical(wrapper)).toString('base64') };
+    throw new Error(`unexpected fixture path: ${path}`);
+  };
+}
+
 function canonical(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -467,4 +483,124 @@ test('R3 closed transport metadata still refuses accessors without evaluating th
     ),
     (error) => error?.code === 'InvalidTransportMetadata',
   );
+});
+
+test('immutable Git object responses are cached while mutable refs are reread', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  let head = '1'.repeat(40);
+  const calls = [];
+  const run = async (args) => {
+    calls.push(args[1]);
+    return readFixtureRun({ head }) (args);
+  };
+  const api = createGhGitDataApi({ repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR, run });
+  await api.read('refs/heads/gaia-ledger/registry-v0');
+  await api.read('refs/heads/gaia-ledger/registry-v0');
+  assert.equal(calls.filter(path => path.includes('/git/commits/')).length, 1);
+  assert.equal(calls.filter(path => path.includes('/git/trees/')).length, 1);
+  assert.equal(calls.filter(path => path.includes('/git/blobs/')).length, 1);
+  assert.equal(calls.filter(path => path.includes('matching-refs')).length, 2);
+  head = '4'.repeat(40);
+  const changed = await api.read('refs/heads/gaia-ledger/registry-v0');
+  assert.equal(changed.records[0].oid, head);
+});
+
+test('object-cache failures are retryable and cache values are isolated', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  let failBlob = true;
+  const calls = [];
+  const fixture = readFixtureRun();
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+    run: async args => {
+      calls.push(args[1]);
+      if (args[1].includes('/git/blobs/') && failBlob) { failBlob = false; throw new Error('transient'); }
+      return fixture(args);
+    },
+  });
+  await assert.rejects(api.read('refs/heads/gaia-ledger/registry-v0'));
+  const first = await api.read('refs/heads/gaia-ledger/registry-v0');
+  first.records[0].body.kind = 'MUTATED';
+  const second = await api.read('refs/heads/gaia-ledger/registry-v0');
+  assert.equal(second.records[0].body.kind, 'REGISTRY_ROOT');
+  assert.equal(calls.filter(path => path.includes('/git/blobs/')).length, 2);
+});
+
+test('mutable protection is never served from the immutable object cache', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  let active = true;
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+    run: async args => args[1].endsWith('rulesets?includes_parents=false')
+      ? [{ id: 42 }]
+      : ledgerRuleset(active ? {} : { bypass_actors: [] }),
+  });
+  assert.equal(await api.verifyProtection({ prefix: 'refs/heads/gaia-ledger/', registryRootOid: '1'.repeat(40) }), true);
+  active = false;
+  assert.equal(await api.verifyProtection({ prefix: 'refs/heads/gaia-ledger/', registryRootOid: '1'.repeat(40) }), false);
+});
+
+test('concurrent reads coalesce one immutable object request', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  let calls = 0;
+  let matchingRefs = 0;
+  let release;
+  const refsArrived = new Promise(resolve => { release = resolve; });
+  const fixture = readFixtureRun();
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+    run: async args => {
+      if (args[1].includes('matching-refs')) {
+        matchingRefs += 1;
+        if (matchingRefs === 2) release();
+      }
+      if (/\/git\/commits\//u.test(args[1])) await refsArrived;
+      if (/\/git\/(?:commits|trees|blobs)\//u.test(args[1])) calls += 1;
+      return fixture(args);
+    },
+  });
+  await Promise.all([
+    api.read('refs/heads/gaia-ledger/registry-v0'),
+    api.read('refs/heads/gaia-ledger/registry-v0'),
+  ]);
+  assert.equal(calls, 3, 'commit, tree, and blob each have one in-flight request');
+});
+
+test('parser-invalid cached objects are evicted so a repaired response retries', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  let repaired = false;
+  const valid = readFixtureRun();
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+    run: async args => {
+      const response = await valid(args);
+      if (args[1].includes('/git/blobs/') && !repaired) {
+        return { ...response, content: Buffer.from('{"bad":true}').toString('base64') };
+      }
+      return response;
+    },
+  });
+  await assert.rejects(api.read('refs/heads/gaia-ledger/registry-v0'));
+  repaired = true;
+  assert.equal((await api.read('refs/heads/gaia-ledger/registry-v0')).state, 'PRESENT');
+});
+
+test('immutable object cache evicts the oldest OID at its bound', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  let head = '1'.repeat(40);
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+    run: async args => { calls.push(args[1]); return readFixtureRun({ head })(args); },
+  });
+  await api.read('refs/heads/gaia-ledger/registry-v0');
+  for (let i = 0; i < 257; i += 1) {
+    head = i.toString(16).padStart(40, '0');
+    await api.read('refs/heads/gaia-ledger/registry-v0');
+  }
+  const firstCommitPath = `/git/commits/${'1'.repeat(40)}`;
+  const before = calls.filter(path => path.endsWith(firstCommitPath)).length;
+  head = '1'.repeat(40);
+  await api.read('refs/heads/gaia-ledger/registry-v0');
+  assert.equal(calls.filter(path => path.endsWith(firstCommitPath)).length, before + 1);
 });

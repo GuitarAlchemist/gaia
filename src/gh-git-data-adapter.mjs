@@ -173,6 +173,12 @@ export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run 
   const pumpActor = configuredPumpActor(pumpActorInput);
   if (typeof run !== 'function') fail('InvalidGitDataAdapter');
   const repo = repositoryPath(canonicalRepository);
+  // Git objects are immutable by OID. Refs, rulesets, and writes deliberately remain uncached.
+  // Resident promises share concurrent reads. At capacity, eviction can cause a duplicate GET.
+  // Rejected or parser-invalid reads are evicted by readRef.
+  const immutableObjectCache = new Map();
+  const IMMUTABLE_OBJECT_CACHE_LIMIT = 256;
+  const immutableObjectPath = /^git\/(?:commits|trees|blobs)\/[a-f0-9]{40}$/u;
   const call = async (method, path, input) => {
     const args = ['api', `repos/${repo}/${path}`, '--method', method];
     if (input !== undefined) args.push('--input', '-');
@@ -180,6 +186,23 @@ export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run 
       return await run(args, input);
     } catch {
       fail('GitHubGitDataUnavailable');
+    }
+  };
+
+  const immutableObject = async (path) => {
+    if (!immutableObjectPath.test(path)) fail('GitDataProtocolViolation');
+    const existing = immutableObjectCache.get(path);
+    if (existing !== undefined) return structuredClone(await existing);
+    const pending = call('GET', path).then((value) => structuredClone(value));
+    if (immutableObjectCache.size >= IMMUTABLE_OBJECT_CACHE_LIMIT) {
+      immutableObjectCache.delete(immutableObjectCache.keys().next().value);
+    }
+    immutableObjectCache.set(path, pending);
+    try {
+      return structuredClone(await pending);
+    } catch (error) {
+      if (immutableObjectCache.get(path) === pending) immutableObjectCache.delete(path);
+      throw error;
     }
   };
 
@@ -210,17 +233,17 @@ export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run 
   }
 
   async function readRecord(commitOid, ref) {
-    const commit = ownData(await call('GET', `git/commits/${oid(commitOid)}`));
+    const commit = ownData(await immutableObject(`git/commits/${oid(commitOid)}`));
     if (commit.sha !== commitOid || !Array.isArray(commit.parents)
         || commit.parents.length > 1) fail('GitDataProtocolViolation');
     const treeOid = oid(commit.tree?.sha);
-    const tree = ownData(await call('GET', `git/trees/${treeOid}`));
+    const tree = ownData(await immutableObject(`git/trees/${treeOid}`));
     if (tree.truncated !== false || !Array.isArray(tree.tree) || tree.tree.length !== 1
         || tree.tree[0]?.path !== RECEIPT_PATH || tree.tree[0]?.mode !== '100644'
         || tree.tree[0]?.type !== 'blob') {
       fail('GitDataProtocolViolation');
     }
-    const blob = ownData(await call('GET', `git/blobs/${oid(tree.tree[0].sha)}`));
+    const blob = ownData(await immutableObject(`git/blobs/${oid(tree.tree[0].sha)}`));
     if (blob.encoding !== 'base64' || typeof blob.content !== 'string') {
       fail('GitDataProtocolViolation');
     }
@@ -294,7 +317,16 @@ export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run 
     while (cursor !== 'NONE') {
       if (visited.has(cursor)) fail('GitDataProtocolViolation');
       visited.add(cursor);
-      const { record, parent } = await readRecord(cursor, ref);
+      let read;
+      try {
+        read = await readRecord(cursor, ref);
+      } catch (error) {
+        // A syntactically valid Git response can still fail receipt validation. Do not retain
+        // that parser-invalid object forever; the next attempt must be able to retry it.
+        immutableObjectCache.clear();
+        throw error;
+      }
+      const { record, parent } = read;
       records.push(record);
       cursor = parent;
     }
