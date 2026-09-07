@@ -3,6 +3,10 @@ name: Hosted Draft intake
 on:
   workflow_dispatch:
     inputs:
+      inspect_ready:
+        description: Read-only candidate visibility diagnostic; disables intake
+        type: boolean
+        default: false
       one_canary:
         description: Select the single reviewed canary policy from the sealed checkout
         type: boolean
@@ -29,9 +33,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  inspect-ready:
+    if: github.event_name == 'workflow_dispatch' && inputs.inspect_ready
+    runs-on: windows-latest
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: pump-token
+        with:
+          app-id: ${{ vars.GAIA_PUMP_APP_ID }}
+          private-key: ${{ secrets.GAIA_PUMP_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.node-version'
+      - name: Compare raw and collected ready issues without effects
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ steps.pump-token.outputs.token }}
+        run: node scripts/diagnose-ready-list.mjs
   intake:
     name: Admit or resume one hosted Draft operation
-    if: github.event_name != 'issues' || github.event.label.name == 'ready-for-agent'
+    if: "!(github.event_name == 'workflow_dispatch' && inputs.inspect_ready) && (github.event_name != 'issues' || github.event.label.name == 'ready-for-agent')"
     runs-on: windows-latest
     steps:
       - name: Require the dedicated pump identity
