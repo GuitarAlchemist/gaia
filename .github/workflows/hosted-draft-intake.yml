@@ -7,6 +7,10 @@ on:
         description: Select the single reviewed canary policy from the sealed checkout
         type: boolean
         default: false
+      normal_policy:
+        description: Select the repository-scoped normal admission policy from the sealed checkout
+        type: boolean
+        default: false
       prepare_issue:
         description: Prepare one ready issue in the ledger only; no Draft or agent execution
         type: string
@@ -31,6 +35,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Require the dedicated pump identity
+        id: identity
         shell: pwsh
         env:
           GAIA_PUMP_APP_ID: ${{ vars.GAIA_PUMP_APP_ID }}
@@ -40,9 +45,20 @@ jobs:
           GAIA_MANAGED_ROUND_JSON: ${{ vars.GAIA_MANAGED_ROUND_JSON }}
           GAIA_ONE_CANARY: ${{ github.event_name == 'workflow_dispatch' && inputs.one_canary }}
           GAIA_PREPARE_ISSUE: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare_issue || '' }}
+          GAIA_NORMAL_POLICY_DISPATCH: ${{ github.event_name == 'workflow_dispatch' && inputs.normal_policy }}
+          GAIA_NORMAL_POLICY_VAR: ${{ github.event_name != 'workflow_dispatch' && vars.GAIA_NORMAL_POLICY_ENABLED == 'true' }}
         run: |
+          # Normal selection is computed once, here, and published as this step's only output so
+          # every later step reads the same decision instead of re-deriving it from inputs/vars.
+          $normalSelected = ($env:GAIA_NORMAL_POLICY_DISPATCH -eq 'true') -or ($env:GAIA_NORMAL_POLICY_VAR -eq 'true')
+          if ($env:GAIA_ONE_CANARY -eq 'true' -and $normalSelected) {
+            throw 'Canary and normal admission are mutually exclusive.'
+          }
           if ($env:GAIA_ONE_CANARY -eq 'true' -and $env:GAIA_PREPARE_ISSUE) {
             throw 'Preparation and canary execution are mutually exclusive.'
+          }
+          if ($normalSelected -and $env:GAIA_PREPARE_ISSUE) {
+            throw 'Preparation and normal admission execution are mutually exclusive.'
           }
           $required = @(
             $env:GAIA_PUMP_APP_ID,
@@ -50,12 +66,13 @@ jobs:
             $env:GAIA_PUMP_ACTOR_ID,
             $env:GAIA_REPOSITORY_NODE_ID
           )
-          if ($env:GAIA_ONE_CANARY -ne 'true' -and !$env:GAIA_PREPARE_ISSUE) {
+          if ($env:GAIA_ONE_CANARY -ne 'true' -and !$normalSelected -and !$env:GAIA_PREPARE_ISSUE) {
             $required += $env:GAIA_MANAGED_ROUND_JSON
           }
           if ($required.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
             throw 'Dedicated Gaia pump identity is not configured.'
           }
+          "normal_policy=$(if ($normalSelected) { 'true' } else { 'false' })" | Out-File $env:GITHUB_OUTPUT -Append
 
       - name: Mint a bounded pump App token
         id: pump-token
@@ -127,6 +144,7 @@ jobs:
           GAIA_MANAGED_ROUND_JSON: ${{ vars.GAIA_MANAGED_ROUND_JSON }}
           GAIA_ISSUE_NUMBER: ${{ github.event.issue.number }}
           GAIA_CANARY_POLICY: ${{ github.event_name == 'workflow_dispatch' && inputs.one_canary && '.github/gaia/canary-policy.json' || '' }}
+          GAIA_NORMAL_POLICY: ${{ steps.identity.outputs.normal_policy == 'true' && '.github/gaia/normal-policy.json' || '' }}
           GAIA_LEDGER_ROOT_OID: ${{ steps.policy.outputs.oid }}
           GAIA_LEDGER_ROOT_REVISION: ${{ steps.policy.outputs.revision }}
           GAIA_RECEIPT_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-receipt.json

@@ -330,9 +330,13 @@ V1 carries separately validated writer and independent agent assignments, never
 review approvals. The policy permits CREATE_DRAFT only for at most a one-hour
 window; claim leases last at most five minutes within that window. Runtime and
 provider fixtures cover substitution and stale-loser refusal, not a cross-host
-atomic revocation guarantee. This local candidate has no workflow activation or
-automatic policy renewal and does not grant agent execution, merge or multirepo
-effects. See [normal admission repair](docs/issue40-live-admission-receipts.md).
+atomic revocation guarantee. The intake workflow can now explicitly select the
+sealed-checkout `.github/gaia/normal-policy.json` using the default-off manual
+`normal_policy` input, or `GAIA_NORMAL_POLICY_ENABLED` for scheduled/labeled runs.
+The identity step publishes one selection consumed by the existing CLI environment
+port; incompatible modes refuse. No policy is installed or enablement variable set
+by this wiring. There is no automatic policy renewal, agent execution, merge or
+multirepo grant. See [normal admission repair](docs/issue40-live-admission-receipts.md).
 
 Explicit `GaiaCanaryAdmissionPolicyV1` produces `GaiaRoundReceiptV1` with a
 writer identity and independent AI reviewer assignments; V0 keeps its GitHub-only

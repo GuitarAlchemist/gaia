@@ -1,0 +1,244 @@
+/**
+ * PR125: the opt-in normal admission connection through `.github/workflows/hosted-draft-intake.yml`.
+ *
+ * The identity-check step's `run: |` body is extracted verbatim from the shipped workflow and
+ * executed under real `pwsh`, with the GitHub-expression-resolved env values it would actually
+ * receive supplied directly. That exercises the true gating logic (conflict refusal, which
+ * credentials are required, and the published `normal_policy` selection) rather than a copy of it.
+ * Static regex assertions cover what only exists as a workflow expression (event/vars scoping,
+ * literal path selection) and the byte-for-byte preservation of expressions this change must not
+ * touch (canary selection, observation ordering).
+ */
+
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+
+const INTAKE_URL = new URL('../.github/workflows/hosted-draft-intake.yml', import.meta.url);
+
+function workflowText() {
+  return readFileSync(INTAKE_URL, 'utf8');
+}
+
+/** The lines of one named step, found by its `- name:` line, up to the next 6-space step start. */
+function stepBlock(workflow, stepName) {
+  const lines = workflow.split(/\r?\n/u);
+  const start = lines.findIndex((line) => line.trim() === `- name: ${stepName}`);
+  assert.notEqual(start, -1, `step "${stepName}" must exist`);
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^ {6}- /u.test(lines[index])) { end = index; break; }
+  }
+  return lines.slice(start, end);
+}
+
+/** The literal `run: |` body of a step, dedented by the block's own indentation. */
+function runBody(block) {
+  const at = block.findIndex((line) => /^ {8}run: \|\s*$/u.test(line));
+  assert.notEqual(at, -1, 'the step must carry a literal run: block');
+  const body = [];
+  for (const line of block.slice(at + 1)) {
+    if (/^\s*$/u.test(line)) { body.push(''); continue; }
+    if (!/^ {10}/u.test(line)) break;
+    body.push(line.slice(10));
+  }
+  return body.join('\n');
+}
+
+const PWSH = { skip: process.platform !== 'win32' && 'the identity gate is a pwsh script' };
+
+/** Runs a pwsh script body with exactly the given env (plus what pwsh itself needs), and reads
+ * back whatever it appended to GITHUB_OUTPUT. */
+function runIdentityScript(scriptBody, env) {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-normal-admission-'));
+  try {
+    const scriptPath = join(scratch, 'identity.ps1');
+    const outputPath = join(scratch, 'output.txt');
+    writeFileSync(scriptPath, scriptBody, 'utf8');
+    const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', scriptPath], {
+      encoding: 'utf8',
+      timeout: 30000,
+      env: { ...process.env,
+        GAIA_PUMP_APP_ID: '', GAIA_PUMP_APP_PRIVATE_KEY: '', GAIA_PUMP_ACTOR_ID: '',
+        GAIA_REPOSITORY_NODE_ID: '', GAIA_MANAGED_ROUND_JSON: '', GAIA_ONE_CANARY: '',
+        GAIA_PREPARE_ISSUE: '', GAIA_NORMAL_POLICY_DISPATCH: '', GAIA_NORMAL_POLICY_VAR: '',
+        GITHUB_OUTPUT: outputPath, ...env },
+    });
+    let outputs = {};
+    try {
+      outputs = Object.fromEntries(
+        readFileSync(outputPath, 'utf8').split(/\r?\n/u).filter(Boolean)
+          .map((line) => line.split('=')),
+      );
+    } catch { /* no output file: treated as no outputs below */ }
+    return { status: result.status, stderr: result.stderr, outputs };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+const REQUIRED_IDENTITY = Object.freeze({
+  GAIA_PUMP_APP_ID: '424242',
+  GAIA_PUMP_APP_PRIVATE_KEY: 'fixture-private-key',
+  GAIA_PUMP_ACTOR_ID: '1234',
+  GAIA_REPOSITORY_NODE_ID: 'R_kgDOGaia',
+});
+
+function identityScript() {
+  return runBody(stepBlock(workflowText(), 'Require the dedicated pump identity'));
+}
+
+// Positive control: the real step's body is found, extracted, and runs to completion with every
+// credential present and nothing selected. A failure below is the mechanism, not a broken fixture.
+test('positive control: the identity step body is extracted and runs clean on the legacy path', PWSH, () => {
+  const { status, stderr, outputs } = runIdentityScript(identityScript(), {
+    ...REQUIRED_IDENTITY,
+    GAIA_MANAGED_ROUND_JSON: '{"fixture":true}',
+  });
+  assert.equal(status, 0, stderr);
+  assert.equal(outputs.normal_policy, 'false');
+});
+
+test('legacy effect intake still requires GAIA_MANAGED_ROUND_JSON', PWSH, () => {
+  const { status } = runIdentityScript(identityScript(), { ...REQUIRED_IDENTITY });
+  assert.notEqual(status, 0, 'the legacy path must fail closed without managed-round data');
+});
+
+test('an explicit workflow_dispatch normal selection is admitted without managed-round data', PWSH, () => {
+  const { status, stderr, outputs } = runIdentityScript(identityScript(), {
+    ...REQUIRED_IDENTITY,
+    GAIA_NORMAL_POLICY_DISPATCH: 'true',
+  });
+  assert.equal(status, 0, stderr);
+  assert.equal(outputs.normal_policy, 'true');
+});
+
+test('a scheduled/labeled run selects normal only through the vars-gated flag, also without managed-round data', PWSH, () => {
+  const { status, stderr, outputs } = runIdentityScript(identityScript(), {
+    ...REQUIRED_IDENTITY,
+    GAIA_NORMAL_POLICY_VAR: 'true',
+  });
+  assert.equal(status, 0, stderr);
+  assert.equal(outputs.normal_policy, 'true');
+});
+
+test('normal_policy is not selected when the dispatch input is simply absent (default false)', PWSH, () => {
+  const { status, stderr, outputs } = runIdentityScript(identityScript(), {
+    ...REQUIRED_IDENTITY,
+    GAIA_MANAGED_ROUND_JSON: '{"fixture":true}',
+    GAIA_NORMAL_POLICY_DISPATCH: 'false',
+    GAIA_NORMAL_POLICY_VAR: 'false',
+  });
+  assert.equal(status, 0, stderr);
+  assert.equal(outputs.normal_policy, 'false');
+});
+
+test('explicit one_canary and normal_policy dispatch together are refused before any credential check', PWSH, () => {
+  const { status } = runIdentityScript(identityScript(), {
+    ...REQUIRED_IDENTITY,
+    GAIA_ONE_CANARY: 'true',
+    GAIA_NORMAL_POLICY_DISPATCH: 'true',
+  });
+  assert.notEqual(status, 0, 'canary and normal must not silently combine');
+});
+
+test('prepare_issue and normal admission together are refused, keeping preparation unambiguous', PWSH, () => {
+  const { status } = runIdentityScript(identityScript(), {
+    ...REQUIRED_IDENTITY,
+    GAIA_PREPARE_ISSUE: '5',
+    GAIA_NORMAL_POLICY_DISPATCH: 'true',
+  });
+  assert.notEqual(status, 0, 'preparation must stay effect-free and unambiguous');
+});
+
+test('normal selection does not relax any of the four core identity credentials', PWSH, () => {
+  for (const missing of Object.keys(REQUIRED_IDENTITY)) {
+    const env = { ...REQUIRED_IDENTITY, GAIA_NORMAL_POLICY_DISPATCH: 'true' };
+    delete env[missing];
+    const { status } = runIdentityScript(identityScript(), env);
+    assert.notEqual(status, 0, `${missing} must still be required when normal admission is selected`);
+  }
+});
+
+// Revert control: with the publication line removed, the script still exits clean (nothing else
+// depends on it), but the downstream `steps.identity.outputs.normal_policy` read the workflow relies
+// on would see nothing at all — proving the emission line, not just the boolean it computes, is load
+// bearing for every step after this one.
+test('revert control: removing the GITHUB_OUTPUT publication silently loses the selection downstream', PWSH, () => {
+  const withoutPublication = identityScript().replace(
+    /^"normal_policy=.*$/mu, '',
+  );
+  assert.notEqual(withoutPublication, identityScript(), 'the mutation must actually remove the line');
+  const { status, stderr, outputs } = runIdentityScript(withoutPublication, {
+    ...REQUIRED_IDENTITY,
+    GAIA_NORMAL_POLICY_DISPATCH: 'true',
+  });
+  assert.equal(status, 0, stderr);
+  assert.equal(
+    outputs.normal_policy, undefined,
+    'without the emission, a downstream `steps.identity.outputs.normal_policy` read resolves to nothing',
+  );
+});
+
+test('the manual normal_policy input is declared boolean, opt-in, off by default', () => {
+  const workflow = workflowText();
+  assert.match(
+    workflow,
+    /normal_policy:\s*\n\s+description:.*\n\s+type: boolean\s*\n\s+default: false/u,
+  );
+});
+
+test('the identity step publishes its selection through an id every later step can bind to', () => {
+  const block = stepBlock(workflowText(), 'Require the dedicated pump identity');
+  assert.ok(
+    block.some((line) => /^ {8}id: identity\s*$/u.test(line)),
+    'the identity step must carry a stable id',
+  );
+});
+
+test('normal selection is scoped by event exactly, never by simple truthiness', () => {
+  const workflow = workflowText();
+  assert.match(
+    workflow,
+    /GAIA_NORMAL_POLICY_DISPATCH: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.normal_policy \}\}/u,
+  );
+  assert.match(
+    workflow,
+    /GAIA_NORMAL_POLICY_VAR: \$\{\{ github\.event_name != 'workflow_dispatch' && vars\.GAIA_NORMAL_POLICY_ENABLED == 'true' \}\}/u,
+  );
+});
+
+test('the bound normal policy path is the one sealed literal, never a caller-supplied value', () => {
+  const workflow = workflowText();
+  assert.match(
+    workflow,
+    /GAIA_NORMAL_POLICY: \$\{\{ steps\.identity\.outputs\.normal_policy == 'true' && '\.github\/gaia\/normal-policy\.json' \|\| '' \}\}/u,
+  );
+  assert.doesNotMatch(
+    workflow,
+    /normal[-_]policy[-_]?path/iu,
+    'no input or variable may name an arbitrary policy path',
+  );
+});
+
+test('canary selection and observation ordering are byte-for-byte unchanged by this change', () => {
+  const workflow = workflowText();
+  assert.match(
+    workflow,
+    /GAIA_CANARY_POLICY: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.one_canary && '\.github\/gaia\/canary-policy\.json' \|\| '' \}\}/u,
+  );
+  assert.match(
+    workflow,
+    /GAIA_OBSERVATION_PATH: \$\{\{ github\.event_name != 'issues' && !inputs\.one_canary && format\('\{0\}\/gaia-hosted-draft-pump-observation\.json', runner\.temp\) \|\| '' \}\}/u,
+  );
+});
+
+test('GAIA_MANAGED_ROUND_JSON remains bound exactly once in the resume/admit step', () => {
+  const block = stepBlock(workflowText(), 'Resume or admit exactly one Draft operation');
+  const bindings = block.filter((line) => /^ {10}GAIA_MANAGED_ROUND_JSON: /u.test(line));
+  assert.equal(bindings.length, 1);
+  assert.match(bindings[0], /\$\{\{ vars\.GAIA_MANAGED_ROUND_JSON \}\}/u);
+});
