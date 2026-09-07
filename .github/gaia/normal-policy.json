@@ -1,0 +1,21 @@
+{
+  "schema": "GaiaNormalAdmissionPolicyV1",
+  "version": 1,
+  "repository": {
+    "nodeId": "R_kgDOT3lpUg",
+    "owner": "GuitarAlchemist",
+    "name": "gaia"
+  },
+  "effectActorId": 4788836,
+  "validFrom": "2026-09-07T22:40:58.000Z",
+  "validUntil": "2026-09-07T23:40:58.000Z",
+  "accountableOwner": "github:user:spareilleux",
+  "effectOwner": "github:app:gaia-draft-pump",
+  "writerIdentity": "gaia:agent:v1:codex:01a04b30-bd3a-7530-8f4f-185954d433c9:root",
+  "reviewOwners": {
+    "standards": "gaia:agent:v1:claude:ecfc9b0f-9600-4734-9a4f-b30b2ae20511:normal_standards_review",
+    "spec": "gaia:agent:v1:claude:ecfc9b0f-9600-4734-9a4f-b30b2ae20511:normal_spec_review"
+  },
+  "allowedEffect": "CREATE_DRAFT",
+  "roundBudget": 1
+}
