@@ -125,26 +125,37 @@ test('canary producer refuses foreign, expired, unclaimed and conflicting inputs
   }
 });
 
-test('canary producer refuses an expired policy before touching any effect-time port', () => {
-  // Pins the load-bearing behavior of createCanaryDraftAdmission's own expiry guard,
-  // not just the refusal code: a prior mutation experiment found that deleting this
-  // guard alone still refuses with CanaryPolicyExpired via the downstream lease
-  // validator inside prepareCanaryManagedRound, only after readPolicy/readOperation/
-  // reserveEffect/createDraft would already have been called in production. A test
-  // that only asserts the refusal code cannot see that difference; this one can.
+test('the admission seam refuses an expired policy at construction, before a seam exists', () => {
+  // What this pins, stated as measured rather than as hoped.
+  //
+  // createCanaryDraftAdmission carries its own expiry guard, applied only when the
+  // snapshot is neither terminal nor EFFECT_STARTED/EFFECT_AMBIGUOUS. Deleting that
+  // guard does NOT let an expired policy through: prepareCanaryManagedRound refuses
+  // with the same CanaryPolicyExpired code. What changes is WHERE the refusal lands
+  // — with the guard, construction throws and no seam object is ever handed out;
+  // without it, construction succeeds and the refusal only arrives inside
+  // createDraft(), after readPolicy and readOperation have already run.
+  //
+  // That mutant is not undetected. tests/canary-hosted-intake.test.mjs, in
+  // 'hosted intake creates no Draft for an expired canary policy', drives the real
+  // CLI fixture and asserts reads === 0, so the two leaked reads fail it. This test
+  // is a faster, unit-level second kill of an already-covered mutant — useful for
+  // diagnosis because it names the seam and fails in milliseconds, not new coverage.
   const value = input();
   value.snapshot.state = 'CLAIMED'; // not EFFECT_STARTED/EFFECT_AMBIGUOUS: the guard applies here
   value.observedAt = policy.validUntil; // already expired at the observed instant
-  const calls = { readPolicy: 0, readOperation: 0, reserveEffect: 0, lookupExact: 0, createDraft: 0 };
   const ports = {
     policy: value.policy, snapshot: value.snapshot, pumpActorId: value.pumpActorId,
     executorEpoch: value.executorEpoch, now: () => value.observedAt,
-    readPolicy: async () => { calls.readPolicy += 1; return value.policy; },
-    readOperation: async () => { calls.readOperation += 1; return value.snapshot; },
-    reserveEffect: async () => { calls.reserveEffect += 1; return 'AVAILABLE'; },
-    lookupExact: async () => { calls.lookupExact += 1; return null; },
-    createDraft: async () => { calls.createDraft += 1; return {}; },
+    readPolicy: async () => value.policy,
+    readOperation: async () => value.snapshot,
+    reserveEffect: async () => 'AVAILABLE',
+    lookupExact: async () => null,
+    createDraft: async () => ({}),
   };
+  // Counting port calls here would assert nothing: the ports are reachable only
+  // through the seam this call refuses to return, so every counter stays at zero
+  // whether or not the guard exists. The load-bearing claim is that construction
+  // itself throws, and that is what is asserted.
   assert.throws(() => createCanaryDraftAdmission(ports), { code: 'CanaryPolicyExpired' });
-  assert.deepEqual(calls, { readPolicy: 0, readOperation: 0, reserveEffect: 0, lookupExact: 0, createDraft: 0 });
 });

@@ -142,8 +142,14 @@ Mutation experiment: remove the policy-revision guard, run the public test named
 `changes during admission`, and the policy case fails (one create instead of
 zero). Removing the committed-revision guard instead fails the ledger case in
 the same way. Both guards were restored and the controls pass again. Removing
-only the explicit producer expiry guard does not escape the downstream lease
-validator; that mutant survived the effect assertion and is not reported killed.
+only the explicit admission-seam expiry guard does not escape the downstream lease
+validator: `prepareCanaryManagedRound` still refuses with `CanaryPolicyExpired`,
+but only after `readPolicy` and `readOperation` have run. That mutant survived the
+effect assertion in this experiment, which is what the sentence above recorded; it
+is nonetheless killed by `tests/canary-hosted-intake.test.mjs` in
+`hosted intake creates no Draft for an expired canary policy`, which drives the CLI
+fixture and asserts `reads === 0`. It was never an uncovered mutant, and any claim
+that it survives the suite is false.
 These observations establish only the named invariants, not complete mutation
 coverage or live autonomy. The existing reconciler conservatively classifies an
 exception after EFFECT_STARTED as ambiguous, even when this admission seam refused
