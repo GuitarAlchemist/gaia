@@ -6,19 +6,19 @@
     "owner": "GuitarAlchemist",
     "name": "gaia"
   },
-  "issue": 122,
-  "operationId": "d0dbd35a644b476f8d3d003555663f94d939b5200c181729236415192e529a51",
-  "generationKey": "952683b0606a6bdd474d3e3c8eedb66cad27514731279b8d5e30c17b749b094a",
-  "headRevision": "c566afcf369304477641e24d4d6890474fdeb114",
+  "issue": 130,
+  "operationId": "81c461f72aea2a51ad3c29f46f8212e5b6beb06cbc2fce73648f295843194b90",
+  "generationKey": "9ab1f6b980e4650d60754485b3cc32475384e1e1b74c4e69552c6b42af7168e7",
+  "headRevision": "3ff06349229b45156c9b65e0b1dab5b0e6b60fb9",
   "effectActorId": 4788836,
-  "validFrom": "2026-09-06T00:15:00.000Z",
-  "validUntil": "2026-09-06T01:15:00.000Z",
+  "validFrom": "2026-09-07T19:34:38.000Z",
+  "validUntil": "2026-09-07T20:34:38.000Z",
   "accountableOwner": "github:user:spareilleux",
   "effectOwner": "github:app:gaia-draft-pump",
   "writerIdentity": "gaia:agent:v1:codex:01a04b30-bd3a-7530-8f4f-185954d433c9:root",
   "reviewOwners": {
-    "standards": "gaia:agent:v1:codex:01a04b30-bd3a-7530-8f4f-185954d433c9:canary_standards_review",
-    "spec": "gaia:agent:v1:codex:01a04b30-bd3a-7530-8f4f-185954d433c9:canary_spec_review"
+    "standards": "gaia:agent:v1:claude:ecfc9b0f-9600-4734-9a4f-b30b2ae20511:standards_review",
+    "spec": "gaia:agent:v1:claude:ecfc9b0f-9600-4734-9a4f-b30b2ae20511:spec_review"
   },
   "allowedEffect": "CREATE_DRAFT",
   "roundBudget": 1
