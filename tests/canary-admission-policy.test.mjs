@@ -126,21 +126,30 @@ test('canary producer refuses foreign, expired, unclaimed and conflicting inputs
 });
 
 test('the admission seam refuses an expired policy at construction, before a seam exists', () => {
-  // What this pins, stated as measured rather than as hoped.
+  // What this pins, limited to what two mutation runs actually showed.
   //
-  // createCanaryDraftAdmission carries its own expiry guard, applied only when the
-  // snapshot is neither terminal nor EFFECT_STARTED/EFFECT_AMBIGUOUS. Deleting that
-  // guard does NOT let an expired policy through: prepareCanaryManagedRound refuses
-  // with the same CanaryPolicyExpired code. What changes is WHERE the refusal lands
-  // — with the guard, construction throws and no seam object is ever handed out;
-  // without it, construction succeeds and the refusal only arrives inside
-  // createDraft(), after readPolicy and readOperation have already run.
+  // There are two expiry guards, and they are covered by disjoint tests. Deleting
+  // either one alone was run, and the failures recorded:
   //
-  // That mutant is not undetected. tests/canary-hosted-intake.test.mjs, in
-  // 'hosted intake creates no Draft for an expired canary policy', drives the real
-  // CLI fixture and asserts reads === 0, so the two leaked reads fail it. This test
-  // is a faster, unit-level second kill of an already-covered mutant — useful for
-  // diagnosis because it names the seam and fails in milliseconds, not new coverage.
+  //   createCanaryDraftAdmission's own guard  -> this test fails, and
+  //                                              'hosted intake creates no Draft
+  //                                              for an expired canary policy'
+  //                                              in canary-hosted-intake.test.mjs
+  //                                              fails with it.
+  //   the guard inside prepareCanaryManagedRound
+  //                                           -> 'canary producer refuses foreign,
+  //                                              expired, unclaimed and conflicting
+  //                                              inputs' fails. THIS TEST STILL
+  //                                              PASSES; it does not reach that line.
+  //
+  // So neither guard is uncovered, and this test covers exactly one of them. It is a
+  // faster, unit-level second kill of an already-covered mutant — worth keeping
+  // because it names the seam and fails in milliseconds rather than through a CLI
+  // fixture, not because it closes a gap.
+  //
+  // Deliberately unclaimed: which ports the mutant reaches before refusing. That is
+  // a port-level assertion nothing here measures, and an earlier version of this
+  // comment asserted it anyway.
   const value = input();
   value.snapshot.state = 'CLAIMED'; // not EFFECT_STARTED/EFFECT_AMBIGUOUS: the guard applies here
   value.observedAt = policy.validUntil; // already expired at the observed instant
