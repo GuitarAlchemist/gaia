@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 1954 gates
+node --test                                   # 1956 gates
 ```
 
 Use the single Node.js version in `.node-version` (26.8.1, the latest Current release
@@ -674,7 +674,7 @@ authoritative for their named contracts.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 1954 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 1956 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
@@ -726,6 +726,17 @@ enforcement: no shipped check reads prose. The machine-checkable part of it is
   sender.
 - **Stale, not deleted.** Unseen for 30s is `stale` — still registered, still
   addressable. Partial reachability is normal.
+- **Occupancy is reported, never locked.** An actor that registers with
+  `cwd=…` and `branch=…` capabilities is grouped with the other **live** actors
+  declaring the same working tree, and `status` reports them as
+  `workspaceCollisions` — the failure being caught is two sessions editing one
+  checkout, each believing the uncommitted work in it is its own. This is a
+  different collision from a shared display name, and it happens between actors
+  whose names differ. Comparison is Windows-first: separators and drive case are
+  normalised, branch names are not. It is a **report, not a claim** — nothing is
+  refused, no verb releases a tree, and an actor that stops heartbeating drops out
+  of the group on its own. Declaring no `cwd=` claims no tree and collides with
+  nobody; the bus still does not act on what capabilities say.
 - **Fail closed.** A lock timeout or a damaged record makes a call write nothing and
   report `failClosed: true`; the CLIs exit **3**, never 1. `1` is reserved for "the
   bus answered and said no". That distinction is the difference between *retry with a

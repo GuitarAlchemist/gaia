@@ -793,8 +793,77 @@ export function pendingFor(state, ref) {
     .filter((m) => m && m.ackedBy === null);
 }
 
+/**
+ * The workspace an actor DECLARED it occupies, or null if it declared none.
+ *
+ * Capabilities are self-declared free text and the bus does not act on them. This
+ * reads two conventional keys out of that text — `cwd=` and `branch=` — and it still
+ * does not act on them: the result is reported, never enforced. An actor that
+ * declares no `cwd=` has claimed no workspace and therefore collides with nobody.
+ * Silence is not evidence of solitude, and the report says so by omitting it rather
+ * than by guessing.
+ *
+ * Normalisation is Windows-first because the tree is: `D:\Work\repo` and
+ * `D:/WORK/repo/` are one directory, and a comparison that missed that would
+ * report two sessions as safely separate at the exact moment they are not. Branch
+ * names are NOT case-folded — git treats `main` and `Main` as two refs.
+ */
+export function declaredWorkspace(actor) {
+  const read = (key) => {
+    const hit = (actor.declaredCapabilities ?? []).find((c) => c.startsWith(`${key}=`));
+    return hit === undefined ? null : hit.slice(key.length + 1).trim();
+  };
+  const cwd = read('cwd');
+  if (cwd === null || cwd === '') return null;
+  const branch = read('branch');
+  return {
+    cwd: cwd.replace(/\\/gu, '/').replace(/\/+$/u, '').toLowerCase(),
+    branch: branch === null || branch === '' ? null : branch,
+  };
+}
+
+const workspaceKey = (w) => `${w.cwd}\u0000${w.branch ?? ''}`;
+
+/**
+ * Which LIVE actors declare the same workspace as each other.
+ *
+ * The failure this exists to make visible: two sessions editing one working tree,
+ * each believing the uncommitted work in it is its own. Nothing in the bus could see
+ * that before — `nameSharedWith` catches two actors wearing one name, which is a
+ * naming collision, while this is an occupancy collision, and an actor collides with
+ * a peer it shares no name with at all.
+ *
+ * Only `online` actors are grouped. This repository's log holds 27 stale lane actors
+ * from one batch run, and a report that counted them would fire constantly on
+ * workspaces nobody is holding — a signal that always fires has stopped
+ * discriminating, which is the same drift this codebase's issue audit grades as
+ * `drift` rather than noise. Staleness is already a pure function of last-seen
+ * (`ageActors`), so an actor that stops heartbeating drops out of the report on its
+ * own, with no verb to release a claim and no way to hold one forever.
+ *
+ * This is a REPORT, not a lock. It grants nothing, refuses nothing, and blocks no
+ * command: two actors may legitimately share a tree as long as they both know it.
+ * Being told is the whole remedy — the bus has no authority to impose another.
+ */
+export function workspaceCollisions(state) {
+  const groups = new Map();
+  for (const actor of Object.values(state.actors)) {
+    if (actor.status !== 'online') continue;
+    const workspace = declaredWorkspace(actor);
+    if (workspace === null) continue;
+    const key = workspaceKey(workspace);
+    const group = groups.get(key) ?? { workspace, refs: [] };
+    group.refs.push(actor.ref);
+    groups.set(key, group);
+  }
+  return [...groups.values()]
+    .filter((g) => g.refs.length > 1)
+    .map((g) => ({ cwd: g.workspace.cwd, branch: g.workspace.branch, refs: g.refs }));
+}
+
 /** Compact, printable view of the whole bus. */
 export function snapshot(state) {
+  const collisions = workspaceCollisions(state);
   return {
     protocol: state.protocol,
     eventsApplied: state.counters.event,
@@ -808,8 +877,12 @@ export function snapshot(state) {
       declaredCapabilities: a.declaredCapabilities,
       busAuthority: a.busAuthority,
       nameSharedWith: (own(state.nameIndex, a.name) ?? []).filter((r) => r !== a.ref),
+      workspaceSharedWith: collisions
+        .filter((c) => c.refs.includes(a.ref))
+        .flatMap((c) => c.refs.filter((r) => r !== a.ref)),
       pending: pendingFor(state, a.ref).length,
     })),
+    workspaceCollisions: collisions,
     messages: Object.values(state.messages).map((m) => ({
       messageId: m.messageId,
       correlationId: m.correlationId,
