@@ -281,12 +281,14 @@ test('normal intake refuses changed policy, ledger, expiry or stopped Actions be
       assert.deepEqual(result.managedEvidence, { state: 'UNSEEN' });
       assert.notEqual(JSON.parse(result.output).result.outcome, 'CREATED');
       const durable = await result.seed.store.inspectByOperation(result.enqueued.operationId);
-      assert.equal(durable.state, 'EFFECT_AMBIGUOUS');
+      assert.equal(durable.state, 'REFUSED');
+      assert.equal(JSON.parse(result.output).result.effect, 'NONE');
+      assert.match(JSON.parse(result.output).result.refusal, /^BeforeProvider:/);
       assert.notEqual(durable.committedRevision, result.enqueued.committedRevision);
-      // A corrupt readback still loses CAS; a stable replay remains lookup-only.
+      // A corrupt readback still loses CAS; a stable replay returns the proved refusal.
       const replay = await reconcileDraft(result.enqueued.operationId, durable.committedRevision, result.seed);
       if (fault === 'ledger') assert.equal(replay.kind, 'StaleRevision');
-      else assert.equal(replay.state, 'EFFECT_AMBIGUOUS');
+      else assert.equal(replay.outcome, 'REFUSED');
       assert.equal(result.creates, 0);
     });
   }
