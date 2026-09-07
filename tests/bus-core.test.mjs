@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import {
   EMPTY_STATE, commit, replay, snapshot, apply, authoritySnapshot, resolveActor,
   classifyAuthority, BUS_AUTHORITY, NEVER_GRANTABLE, GRANTABLE_AUTHORITY,
-  STALE_AFTER_MS, DELIVERY_MEANING, pendingFor,
+  STALE_AFTER_MS, DELIVERY_MEANING, pendingFor, workspaceCollisions, declaredWorkspace,
 } from '../src/bus-core.mjs';
 
 const T0 = '2026-08-09T12:00:00.000Z';
@@ -520,4 +520,70 @@ test('B3: re-registering under the same name is not a rename and changes no inde
   ]);
   assert.deepEqual(state.nameIndex, { codex: ['act-0001'] }, 'the ref appears exactly once, not twice and not zero times');
   assert.equal(state.actors['act-0001'].kind, 'reviewer');
+});
+
+// ---------------------------------------------------------------------------
+// B4: occupancy — two live sessions standing in one working tree
+//
+// Distinct from B3. A name collision is two actors answering to one address; this is
+// two actors editing one directory, and it happens between actors whose names differ.
+// It went undetected in this very repository: two sessions held the same checkout on
+// the same branch, each describing the uncommitted work in it as its own.
+// ---------------------------------------------------------------------------
+
+test('B4: two live actors declaring one working tree are reported to each other', () => {
+  const tree = ['cwd=D:\\Work\\gaia', 'branch=codex/otel-factory-tracing'];
+  const { state } = drive([
+    { type: 'register', at: at(0), actorId: 'gaia-ae', capabilities: tree },
+    { type: 'register', at: at(1), actorId: 'gaia-eb', capabilities: tree },
+  ]);
+
+  assert.deepEqual(workspaceCollisions(state), [{
+    cwd: 'd:/work/gaia',
+    branch: 'codex/otel-factory-tracing',
+    refs: ['act-0001', 'act-0002'],
+  }], 'the occupancy collision is reported, though the two share no name');
+
+  const byRef = new Map(snapshot(state).actors.map((a) => [a.ref, a]));
+  assert.deepEqual(byRef.get('act-0001').workspaceSharedWith, ['act-0002']);
+  assert.deepEqual(byRef.get('act-0002').workspaceSharedWith, ['act-0001'], 'the view never tells one occupant it is alone while telling the other it is not');
+  assert.deepEqual(byRef.get('act-0001').nameSharedWith, [], 'name and occupancy are independent: these two collide on one and not the other');
+
+  // The remedy is being told. Nothing was refused, and both keep every verb.
+  assert.deepEqual(byRef.get('act-0001').busAuthority, [...BUS_AUTHORITY], 'a reported collision revokes nothing');
+
+  // An actor that stops heartbeating is no longer standing anywhere. The log this
+  // ships against holds 27 stale lane actors from one batch run; counting them would
+  // fire the report forever on trees nobody holds.
+  const { state: later } = drive([
+    { type: 'register', at: at(0), actorId: 'gaia-ae', capabilities: tree },
+    { type: 'register', at: at(1), actorId: 'gaia-eb', capabilities: tree },
+    { type: 'register', at: at(1 + STALE_AFTER_MS / 1000 + 1), actorId: 'bystander' },
+  ]);
+  assert.equal(later.actors['act-0001'].status, 'stale', 'the precondition is real, not assumed');
+  assert.deepEqual(workspaceCollisions(later), [], 'stale occupants have let go');
+});
+
+test('B4: occupancy compares Windows-first, and silence claims no tree at all', () => {
+  const { state } = drive([
+    { type: 'register', at: at(0), actorId: 'backslashes', capabilities: ['cwd=D:\\Work\\gaia', 'branch=main'] },
+    { type: 'register', at: at(1), actorId: 'forward-slashes', capabilities: ['cwd=D:/WORK/gaia/', 'branch=main'] },
+    { type: 'register', at: at(2), actorId: 'other-branch', capabilities: ['cwd=D:/Work/gaia', 'branch=Main'] },
+    { type: 'register', at: at(3), actorId: 'undeclared-a', capabilities: ['kind=worker'] },
+    { type: 'register', at: at(4), actorId: 'undeclared-b' },
+  ]);
+
+  const byRef = new Map(snapshot(state).actors.map((a) => [a.ref, a]));
+  assert.deepEqual(byRef.get('act-0001').workspaceSharedWith, ['act-0002'],
+    'separator and case differences describe one Windows directory, and missing that would call two occupants safely apart');
+  assert.deepEqual(byRef.get('act-0003').workspaceSharedWith, [],
+    'git distinguishes main from Main, so two branches are two workspaces');
+  assert.deepEqual(byRef.get('act-0004').workspaceSharedWith, [], 'an actor that declared no cwd claims no tree');
+  assert.deepEqual(byRef.get('act-0005').workspaceSharedWith, [], 'nor does one that declared no capabilities at all');
+  assert.equal(workspaceCollisions(state).length, 1, 'silence is never grouped with silence into a collision nobody claimed');
+
+  assert.equal(declaredWorkspace(state.actors['act-0005']), null);
+  assert.deepEqual(declaredWorkspace(state.actors['act-0002']), { cwd: 'd:/work/gaia', branch: 'main' });
+  assert.deepEqual(declaredWorkspace({ declaredCapabilities: ['cwd=/srv/gaia'] }), { cwd: '/srv/gaia', branch: null },
+    'a declared tree with no branch is still a tree');
 });
