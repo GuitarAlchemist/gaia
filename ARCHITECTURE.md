@@ -342,9 +342,23 @@ atomic revocation guarantee. The intake workflow can now explicitly select the
 sealed-checkout `.github/gaia/normal-policy.json` using the default-off manual
 `normal_policy` input, or `GAIA_NORMAL_POLICY_ENABLED` for scheduled/labeled runs.
 The identity step publishes one selection consumed by the existing CLI environment
-port; incompatible modes refuse. No policy is installed or enablement variable set
-by this wiring. There is no automatic policy renewal, agent execution, merge or
-multirepo grant. See [normal admission repair](docs/issue40-live-admission-receipts.md).
+port; incompatible modes refuse. The sealed checkout ships `.github/gaia/normal-policy.json`
+(PR #134); the `GAIA_NORMAL_POLICY_ENABLED` enablement variable is not set, so the file
+stays unreachable by any scheduled or labeled run. Whenever that gate does select it
+(the variable, or an explicit manual `normal_policy` dispatch), one workflow step
+rewrites the sealed checkout's own copy of the file's `validFrom`/`validUntil` to a
+fresh window immediately before intake — in the ephemeral runner workspace only,
+nothing persisted back to the repository — because the validator's own ≤1h cap on
+that window (below) could not otherwise survive the gap between scheduled runs. Every
+other field (repository, owners, reviewers, writer identity, effect, round budget)
+is untouched by that step. This automatic renewal keeps an already-selected policy
+reachable; it grants no additional authority beyond what selecting the file already
+would, and it is inert while the gate stays closed. Whether reusing already-launched
+writer/reviewer sessions across separate grants (as this file currently does, from
+issue #130's canary) is acceptable for continuous operation is an open decision, not
+resolved by this wiring, and deferred to whoever makes the activation call. There is
+no automatic agent execution, merge or multirepo grant.
+See [normal admission repair](docs/issue40-live-admission-receipts.md).
 
 Explicit `GaiaCanaryAdmissionPolicyV1` produces `GaiaRoundReceiptV1` with a
 writer identity and independent AI reviewer assignments; V0 keeps its GitHub-only
