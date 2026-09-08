@@ -12,10 +12,12 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+
+import { validateNormalAdmissionPolicy } from '../src/normal-admission-policy.mjs';
 
 const INTAKE_URL = new URL('../.github/workflows/hosted-draft-intake.yml', import.meta.url);
 
@@ -241,4 +243,80 @@ test('GAIA_MANAGED_ROUND_JSON remains bound exactly once in the resume/admit ste
   const bindings = block.filter((line) => /^ {10}GAIA_MANAGED_ROUND_JSON: /u.test(line));
   assert.equal(bindings.length, 1);
   assert.match(bindings[0], /\$\{\{ vars\.GAIA_MANAGED_ROUND_JSON \}\}/u);
+});
+
+/**
+ * The committed `.github/gaia/normal-policy.json` pins identity, not time: a static
+ * validFrom/validUntil could not outlive the gap between scheduled runs (max 1h window,
+ * every-6h cron). This exercises the real "Freshen the normal-admission policy window"
+ * step body under pwsh against a copy of a stale policy file, the same mechanism the
+ * PWSH tests above use for the identity step.
+ */
+function windowScript() {
+  return runBody(stepBlock(workflowText(), 'Freshen the normal-admission policy window'));
+}
+
+function runWindowScript(policy) {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-normal-window-'));
+  try {
+    mkdirSync(join(scratch, '.github', 'gaia'), { recursive: true });
+    const policyPath = join(scratch, '.github', 'gaia', 'normal-policy.json');
+    writeFileSync(policyPath, JSON.stringify(policy));
+    const scriptPath = join(scratch, 'freshen.ps1');
+    writeFileSync(scriptPath, windowScript(), 'utf8');
+    const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', scriptPath], {
+      cwd: scratch, encoding: 'utf8', timeout: 30000,
+    });
+    return {
+      status: result.status, stderr: result.stderr,
+      policy: JSON.parse(readFileSync(policyPath, 'utf8')),
+    };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+const STALE_NORMAL_POLICY = Object.freeze({
+  schema: 'GaiaNormalAdmissionPolicyV0', version: 1,
+  repository: { nodeId: 'R_test', owner: 'test-org', name: 'test-repo' },
+  effectActorId: 123,
+  validFrom: '2020-01-01T00:00:00.000Z', validUntil: '2020-01-01T01:00:00.000Z',
+  accountableOwner: 'github:user:test-owner', effectOwner: 'github:app:test-pump',
+  reviewOwners: { standards: 'github:user:test-standards', spec: 'github:user:test-spec' },
+  allowedEffect: 'CREATE_DRAFT', roundBudget: 1,
+});
+
+test('the window step re-anchors validFrom/validUntil to the run instant, leaving identity untouched', PWSH, () => {
+  const before = Date.now();
+  const { status, stderr, policy } = runWindowScript(STALE_NORMAL_POLICY);
+  const after = Date.now();
+  assert.equal(status, 0, stderr);
+  const from = Date.parse(policy.validFrom);
+  const until = Date.parse(policy.validUntil);
+  assert.ok(from >= before - 5000 && from <= after + 5000,
+    `validFrom must be re-anchored to the run instant, got ${policy.validFrom}`);
+  assert.equal(until - from, 15 * 60 * 1000, 'the refreshed window must stay a fixed, bounded size');
+  assert.doesNotThrow(() => validateNormalAdmissionPolicy(policy));
+  const { validFrom: _sf, validUntil: _su, ...identityBefore } = STALE_NORMAL_POLICY;
+  const { validFrom: _rf, validUntil: _ru, ...identityAfter } = policy;
+  assert.deepEqual(identityAfter, identityBefore, 'only the window may change, never identity');
+});
+
+test('a policy already valid for the next 15 minutes is still fully replaced, never merely extended', PWSH, () => {
+  const from = new Date(Date.now() - 60_000);
+  const until = new Date(from.getTime() + 5 * 60_000);
+  const almostFresh = { ...STALE_NORMAL_POLICY,
+    validFrom: from.toISOString(), validUntil: until.toISOString() };
+  const { status, stderr, policy } = runWindowScript(almostFresh);
+  assert.equal(status, 0, stderr);
+  assert.notEqual(policy.validFrom, almostFresh.validFrom);
+  assert.notEqual(policy.validUntil, almostFresh.validUntil);
+});
+
+test('the freshen step only runs when normal admission is selected', () => {
+  const block = stepBlock(workflowText(), 'Freshen the normal-admission policy window');
+  assert.ok(
+    block.some((line) => /^ {8}if: steps\.identity\.outputs\.normal_policy == 'true'\s*$/u.test(line)),
+    'an unselected run must not touch the checked-out policy file at all',
+  );
 });
