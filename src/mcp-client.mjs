@@ -87,6 +87,19 @@ export class McpStdioClient {
       }
     });
 
+    // A dying child closes the read end of its stdin on one async path (pipe
+    // teardown) while the 'close' above arrives on another (process reaping), and
+    // the two are unordered. A write that lands between them raises EPIPE as an
+    // 'error' event on stdin; with no listener Node treats that as fatal to the
+    // WHOLE process, so a fail-closed server exit became an uncaught-exception crash
+    // of the caller (exit 1) instead of the documented exit 3. Swallow it here and
+    // let 'close' classify: it fires after stderr has fully drained, so the
+    // FATAL line the server wrote before exiting is guaranteed to be visible to the
+    // classifier above. Classifying at the EPIPE instead would race that drain and
+    // could latch failClosed=false before the reason arrived. The request stays in
+    // #pending until 'close' rejects it exactly once.
+    this.#child.stdin.on('error', () => {});
+
     // Wait for the server banner so we know it is actually listening on stdio.
     await new Promise((resolve) => setTimeout(resolve, 120));
     return this;
@@ -119,6 +132,9 @@ export class McpStdioClient {
   }
 
   get stderrLines() { return [...this.#stderr]; }
+
+  /** Test seam: lets a caller kill the child out from under a request. */
+  get pid() { return this.#child.pid; }
 
   async close() {
     if (this.#exited) return;
