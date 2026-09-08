@@ -769,9 +769,16 @@ test('output overflow kills the process tree before reporting failure', async ()
   const marker = join(scratch, 'overflow-child-survived.txt');
   const grandchild = join(scratch, 'overflow-grandchild.mjs');
   const parent = join(scratch, 'overflow-parent.mjs');
+  // The grandchild waits before writing its marker, and the assertion below waits
+  // longer still, so a tree that was NOT killed is always caught. Both delays are
+  // deliberately generous. At 300ms and 500ms this test also imposed an
+  // undeclared deadline — kill a process tree within 300ms — which Windows misses
+  // under a loaded `node --test`: it passed alone and failed in the full suite,
+  // which is a scheduling fact, not a defect in the code under test. What must be
+  // proven is that no orphan survives, not how quickly the kill lands.
   writeFileSync(grandchild, [
     "import { writeFileSync } from 'node:fs';",
-    `setTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'bad'), 300);`,
+    `setTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'bad'), 3_000);`,
     'setInterval(() => {}, 1_000);',
   ].join('\n'), 'utf8');
   writeFileSync(parent, [
@@ -788,6 +795,9 @@ test('output overflow kills the process tree before reporting failure', async ()
     shell: false,
   }, { timeoutMs: 2_000, maxOutputBytes: 128, terminationGraceMs: 50 }),
   (error) => error instanceof FactoryAgentError && error.code === 'AgentOutputLimit');
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+  // Longer than the grandchild's own delay, so an unkilled orphan has finished
+  // writing by the time this looks. A shorter wait would pass by racing rather
+  // than by the tree actually being dead.
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 4_000));
   assert.equal(existsSync(marker), false);
 });
