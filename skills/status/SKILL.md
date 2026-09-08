@@ -24,20 +24,38 @@ its own reading.
 Run these against **every** repository in play, not only the one you are standing in:
 
 ```bash
-gh pr list --repo OWNER/NAME --state open --json number,title,isDraft,mergeable,headRefName
+gh pr list --repo OWNER/NAME --state open   --json number,title,isDraft,mergeable,headRefName
+gh pr list --repo OWNER/NAME --state merged --limit 30 --json number,title,mergedAt
 gh pr view N --repo OWNER/NAME --json statusCheckRollup   # per open PR: real conclusions
-gh run list --repo OWNER/NAME --limit 5 --json name,conclusion,headBranch,createdAt
+gh run list --repo OWNER/NAME --limit 40 --json name,conclusion,headBranch,createdAt
 gh issue list --repo OWNER/NAME --state open --json number,title,labels
-gh release view TAG --repo OWNER/NAME --json assets        # 0 assets ships nothing
-git status --short && git worktree list                    # uncommitted work; who else holds a tree
-git rev-list --left-right --count origin/main...HEAD       # LEFT is behind, RIGHT is ahead
+gh release view TAG --repo OWNER/NAME --json assets
+
+git -C REPO_PATH fetch --quiet                             # before comparing against origin
+git -C REPO_PATH status --short
+git -C REPO_PATH rev-list --left-right --count origin/main...HEAD
+git worktree list                                          # who else holds a tree
 ```
+
+**The merged query is not optional.** *Done* is the only bucket with no other
+source: an open-PR list cannot contain a PR that merged, so without it the agent
+populates *Done* from memory — the exact failure the first paragraph of this skill
+forbids, in the one bucket where it is most tempted to credit itself.
+
+**`git -C` is not decoration.** `gh` takes `--repo`; `git status` and `git rev-list`
+read the working directory and have no equivalent. Running them once while running
+the `gh` lines per repository reports one tree as though it covered all of them, and
+uncommitted work elsewhere goes silently missing.
+
+**Fetch before comparing.** `rev-list` reads the local remote-tracking ref, whose
+freshness is whenever someone last fetched. Without a fetch it prints `0 0` — which
+reads as "in sync" with total confidence — while the remote is a dozen commits ahead.
 
 Read what is still moving too: background tasks you started, and other live agent
 sessions. A session that went idle without answering has not answered — record the
 silence, so it cannot pass for agreement.
 
-Two readings get misread often enough to name:
+These readings get misread often enough to name:
 
 - **`--left-right` order.** The left number counts commits on `main` missing here.
   Reading it backwards turns "two weeks stale" into "162 ahead" and reverses every
@@ -45,6 +63,16 @@ Two readings get misread often enough to name:
 - **Stale green.** A check whose run predates a toolchain, workflow or base change
   is green about a world that no longer exists. Compare run date to change date
   before treating it as signal. Say **stale green** in the report when you see it.
+- **A truncated list looks like a complete one.** `--limit N` returns N rows and no
+  signal that it truncated. Measured on one repository: `--limit 5` reached back 55
+  minutes while 32 runs had started in six hours. Check the oldest row's timestamp
+  against when the session began, and raise the limit until it covers it.
+- **`mergeable` has three values.** GitHub computes it asynchronously and returns
+  `UNKNOWN` until it lands. The field looks boolean and is not; either binary answer
+  is a guess, so report `UNKNOWN` as unknown.
+- **Zero release assets is not zero shipped.** An npm, crates.io, container or
+  registry release carries no GitHub asset. Absent assets means "this release ships
+  nothing *here*", which is a finding only when assets were the delivery.
 
 ## Done when
 
@@ -56,9 +84,15 @@ place goes under *Blocked on the human* with the reason you could not place it.
 
 Group by what the user can do about it. That is what makes a report actionable.
 
-**Done** — finished and verified. Each line carries its evidence: a release URL, a
-PR number, a check count, a test total, a duration. **Evidence or it is not done** —
-an unevidenced line belongs in *In progress*, whatever you believe about it.
+**Done** — finished and verified. Each line carries evidence of the **outcome**, not
+of the attempt: a merged-PR number *with what it changed*, a release URL *with its
+assets*, a passing check count, a test total, a measured duration.
+
+**Evidence or it is not done** — an unevidenced line belongs in *In progress*,
+whatever you believe about it. And an identifier is not evidence: an open, failing,
+draft PR has a number too, so `#136` alone says only that someone opened something.
+A merge proves bytes moved; whether the artifact works is a separate reading, and if
+you have not taken it, say the merge landed and say the artifact is unverified.
 
 **In progress** — running, and will finish on its own. Say what is being waited on
 and what will decide it. If a peer session is the thing being waited on, say it may
