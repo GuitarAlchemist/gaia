@@ -450,6 +450,97 @@ test('B1: exit 1 stays reserved for a genuine bus refusal', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// B1 — a write racing a dead server must not crash the caller
+//
+// A dying child closes the read end of its stdin on one async path (pipe teardown)
+// while McpStdioClient's 'close' handler arrives on another (process reaping), and
+// the two are unordered. A write that lands between them raises EPIPE as an 'error'
+// event on stdin, which Node treats as fatal to the whole process when nothing
+// listens for it. CI 34183305622 saw exactly that: interop.test.mjs:416 died with an
+// uncaught EPIPE from mcp-client.mjs and the CLI reported 1 instead of 3.
+//
+// `settleAll` below is the harness these tests share: it kills the child and closes
+// the client on EVERY exit path — including a baseline where `pid` does not exist —
+// so a failing assertion never leaks a live server. The short post-kill delay is a
+// window that empirically loses the race on the Windows CI host; it is not a
+// deterministic ordering, so the assertions are written to hold for either
+// interleaving and only distinguish "settled" from "crashed".
+// ---------------------------------------------------------------------------
+
+/** Kill the child if we can and close the client either way, bounded. */
+async function settleAll(client) {
+  try { if (typeof client.pid === 'number') process.kill(client.pid, 'SIGKILL'); } catch { /* already gone */ }
+  await Promise.race([
+    client.close().catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, 5_000)),
+  ]);
+}
+
+test('B1: a live request still resolves normally (control for the EPIPE-race tests below)', { timeout: 30_000 }, async () => {
+  const dir = freshDir('b1-epipe-control');
+  const client = new McpStdioClient({ dataDir: dir });
+  await client.start();
+  try {
+    const res = await client.request('tools/list', {});
+    assert.ok(Array.isArray(res.tools) && res.tools.length > 0, 'a healthy child still answers');
+  } finally {
+    await settleAll(client);
+  }
+});
+
+test('B1: a write racing a dead server rejects instead of crashing the caller', { timeout: 30_000 }, async () => {
+  const dir = freshDir('b1-epipe');
+  const client = new McpStdioClient({ dataDir: dir });
+  await client.start();
+  try {
+    assert.equal(typeof client.pid, 'number', 'the client exposes a real child pid to kill');
+    process.kill(client.pid, 'SIGKILL');
+    await new Promise((r) => setTimeout(r, 2));
+    await assert.rejects(
+      client.request('tools/list', {}),
+      (err) => /server exited/.test(err.message) && err.failClosed === false,
+      'the request settles with the exit error (a killed healthy server is not fail-closed), not an uncaught EPIPE',
+    );
+  } finally {
+    await settleAll(client);
+  }
+});
+
+test('B1: writes racing a fail-closed startup exit all reject as fail-closed, never crash', { timeout: 30_000 }, async () => {
+  // The CI shape: the server exits 3 with a FATAL CorruptLogError line during the
+  // client's own startup wait, so every write in that window may hit a dead pipe.
+  // Whatever the interleaving, each request must settle exactly once, and each must
+  // carry failClosed=true — the classification must not be latched by the EPIPE
+  // before stderr has drained.
+  const dir = freshDir('b1-epipe-corrupt');
+  await cli(dir, 'register', '--actorId', 'gaia');
+  writeFileSync(logIn(dir), `${readFileSync(logIn(dir), 'utf8')}not json at all\n`, 'utf8');
+
+  const client = new McpStdioClient({ dataDir: dir });
+  const started = client.start();
+  const outcomes = [];
+  try {
+    // Fire during the startup window, bounded: the child has already exited long
+    // before 60 x 2ms elapses, so this spans "pipe alive", "pipe dead, close not yet
+    // seen" and "close seen".
+    for (let i = 0; i < 60; i += 1) {
+      outcomes.push(client.request('tools/list', {}).then(() => ({ resolved: true }), (err) => ({ err })));
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    await started;
+    const settled = await Promise.all(outcomes);
+    assert.equal(settled.length, 60, 'every request settled');
+    for (const s of settled) {
+      assert.ok(s.err, 'no request against a fail-closed server resolves');
+      assert.equal(s.err.failClosed, true, `fail-closed survives the race: ${s.err.message}`);
+      assert.match(s.err.message, /CorruptLogError/, 'and the server\'s own reason crossed the boundary');
+    }
+  } finally {
+    await settleAll(client);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // B4 — well-formed JSON that is not a request object must be answered
 //
 // A batch array, a bare scalar and `null` all parse cleanly and have no `.id`, so
