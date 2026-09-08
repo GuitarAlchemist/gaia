@@ -102,6 +102,23 @@ jobs:
           "oid=$($policy.ledgerRegistryRootOid)" | Out-File $env:GITHUB_OUTPUT -Append
           "revision=$($policy.ledgerRegistryRootRevision)" | Out-File $env:GITHUB_OUTPUT -Append
 
+      - name: Freshen the normal-admission policy window
+        # The checked-in file pins identity (repository, owners, reviewers), never a live
+        # window: a static validFrom/validUntil could not outlive the gap between scheduled
+        # runs (max 1h, cron every 6h), so every run re-anchors the window to its own start
+        # instead of trusting whatever was last committed. This rewrites the sealed checkout's
+        # own copy in place, in the ephemeral runner workspace only — nothing is pushed, and
+        # the path bound below stays the one sealed literal; only its runtime content changes.
+        if: steps.identity.outputs.normal_policy == 'true'
+        shell: pwsh
+        run: |
+          $policy = Get-Content -LiteralPath '.github/gaia/normal-policy.json' -Raw | ConvertFrom-Json
+          $from = (Get-Date).ToUniversalTime()
+          $until = $from.AddMinutes(15)
+          $policy.validFrom = $from.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+          $policy.validUntil = $until.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+          $policy | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath '.github/gaia/normal-policy.json'
+
       - name: Prepare one operation without a Draft effect
         if: github.event_name == 'workflow_dispatch' && inputs.prepare_issue
         shell: pwsh
