@@ -145,6 +145,23 @@ the same way. Both guards were restored and the controls pass again. Removing
 only the explicit producer expiry guard does not escape the downstream lease
 validator; that mutant survived the effect assertion and is not reported killed.
 These observations establish only the named invariants, not complete mutation
-coverage or live autonomy. The existing reconciler conservatively classifies an
+coverage or live autonomy.
+
+Correction, 2026-09-07 — appended rather than edited into the paragraph above,
+which records what one experiment observed and stays as written. That paragraph
+says the expiry mutant "is not reported killed", and a later issue read it as a
+claim that the suite does not kill it. The suite does. Two mutation runs, each
+deleting one guard alone:
+
+| guard removed | tests that fail |
+|---|---|
+| `createCanaryDraftAdmission`'s own expiry guard | `the admission seam refuses an expired policy at construction, before a seam exists`, and `hosted intake creates no Draft for an expired canary policy` |
+| the expiry check inside `prepareCanaryManagedRound` | `canary producer refuses foreign, expired, unclaimed and conflicting inputs` |
+
+The two guards are covered by disjoint tests and neither is uncovered. "Not
+reported killed" was true of that experiment's effect assertion and false as a
+statement about the suite; both readings now have a place to point at. Which
+ports a mutant reaches before refusing is not measured by either run and is not
+claimed here. The existing reconciler conservatively classifies an
 exception after EFFECT_STARTED as ambiguous, even when this admission seam refused
 before calling the provider; this slice does not widen retry authority.

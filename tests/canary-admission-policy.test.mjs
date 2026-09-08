@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { prepareCanaryManagedRound, validateCanaryAdmissionPolicy } from '../src/canary-admission-policy.mjs';
+import { prepareCanaryManagedRound, validateCanaryAdmissionPolicy,
+  createCanaryDraftAdmission } from '../src/canary-admission-policy.mjs';
 import { validateManagedDraftConfiguration, createInitialManagedRound,
   planManagedRoundUpdate } from '../src/pr-delivery-round-history.mjs';
 import { createHash } from 'node:crypto';
@@ -122,4 +123,48 @@ test('canary producer refuses foreign, expired, unclaimed and conflicting inputs
     const value = input(); mutate(value);
     assert.throws(() => prepareCanaryManagedRound(value), { code }, name);
   }
+});
+
+test('the admission seam refuses an expired policy at construction, before a seam exists', () => {
+  // What this pins, limited to what two mutation runs actually showed.
+  //
+  // There are two expiry guards, and they are covered by disjoint tests. Deleting
+  // either one alone was run, and the failures recorded:
+  //
+  //   createCanaryDraftAdmission's own guard  -> this test fails, and
+  //                                              'hosted intake creates no Draft
+  //                                              for an expired canary policy'
+  //                                              in canary-hosted-intake.test.mjs
+  //                                              fails with it.
+  //   the guard inside prepareCanaryManagedRound
+  //                                           -> 'canary producer refuses foreign,
+  //                                              expired, unclaimed and conflicting
+  //                                              inputs' fails. THIS TEST STILL
+  //                                              PASSES; it does not reach that line.
+  //
+  // So neither guard is uncovered, and this test covers exactly one of them. It is a
+  // faster, unit-level second kill of an already-covered mutant — worth keeping
+  // because it names the seam and fails in milliseconds rather than through a CLI
+  // fixture, not because it closes a gap.
+  //
+  // Deliberately unclaimed: which ports the mutant reaches before refusing. That is
+  // a port-level assertion nothing here measures, and an earlier version of this
+  // comment asserted it anyway.
+  const value = input();
+  value.snapshot.state = 'CLAIMED'; // not EFFECT_STARTED/EFFECT_AMBIGUOUS: the guard applies here
+  value.observedAt = policy.validUntil; // already expired at the observed instant
+  const ports = {
+    policy: value.policy, snapshot: value.snapshot, pumpActorId: value.pumpActorId,
+    executorEpoch: value.executorEpoch, now: () => value.observedAt,
+    readPolicy: async () => value.policy,
+    readOperation: async () => value.snapshot,
+    reserveEffect: async () => 'AVAILABLE',
+    lookupExact: async () => null,
+    createDraft: async () => ({}),
+  };
+  // Counting port calls here would assert nothing: the ports are reachable only
+  // through the seam this call refuses to return, so every counter stays at zero
+  // whether or not the guard exists. The load-bearing claim is that construction
+  // itself throws, and that is what is asserted.
+  assert.throws(() => createCanaryDraftAdmission(ports), { code: 'CanaryPolicyExpired' });
 });
