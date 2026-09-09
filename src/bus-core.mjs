@@ -809,20 +809,60 @@ export function pendingFor(state, ref) {
  * names are NOT case-folded — git treats `main` and `Main` as two refs.
  */
 export function declaredWorkspace(actor) {
+  // Matched case-insensitively, tolerating spaces around `=`. These are self-declared
+  // strings typed by whatever wrote them, and `CWD=` naming the same directory as
+  // `cwd=` must not read as two different trees.
   const read = (key) => {
-    const hit = (actor.declaredCapabilities ?? []).find((c) => c.startsWith(`${key}=`));
-    return hit === undefined ? null : hit.slice(key.length + 1).trim();
+    const pattern = new RegExp(`^\\s*${key}\\s*=\\s*(.*)$`, 'iu');
+    for (const capability of actor.declaredCapabilities ?? []) {
+      const hit = pattern.exec(capability);
+      if (hit) return hit[1].trim();
+    }
+    return null;
   };
   const cwd = read('cwd');
   if (cwd === null || cwd === '') return null;
   const branch = read('branch');
-  return {
-    cwd: cwd.replace(/\\/gu, '/').replace(/\/+$/u, '').toLowerCase(),
-    branch: branch === null || branch === '' ? null : branch,
-  };
+  return { cwd: normalisePath(cwd), branch: branch === null || branch === '' ? null : branch };
 }
 
-const workspaceKey = (w) => `${w.cwd}\u0000${w.branch ?? ''}`;
+/**
+ * One directory, however the session that declared it happened to spell it.
+ *
+ * Every rewrite here answers a spelling seen in practice, not an imagined one. A
+ * session on this machine reads its own working directory as `D:\Work\x` through one
+ * tool and `/c/tmp/x` through another, so a report that treated those as two trees
+ * stayed silent on the single collision it was written to catch.
+ *
+ * Case folding is CONDITIONAL, and that is the correction that matters most.
+ * Lower-casing every path is right on Windows and wrong on POSIX, where
+ * `/srv/app/Repo` and `/srv/app/repo` are two directories — folding them reported two
+ * unrelated sessions as colliding. Only a Windows-shaped path is folded.
+ */
+function normalisePath(raw) {
+  let path = raw.trim().replace(/\\/gu, '/');
+  path = path.replace(/^\/\/\?\//u, '');                    // //?/C:/x — long-path prefix
+  path = path.replace(/^\/mnt\/([a-z])\//iu, '$1:/');       // WSL      /mnt/c/x
+  path = path.replace(/^\/([a-z])\/(?=[^/]|$)/u, '$1:/');   // Git Bash /c/x
+  path = path.replace(/(?:\/\.)+$/u, '');                   // trailing /. and /./.
+  path = path.replace(/\/+$/u, '');
+  return /^[a-z]:\//iu.test(path) ? path.toLowerCase() : path;
+}
+
+/**
+ * The key is the DIRECTORY, and only the directory.
+ *
+ * Branch used to be part of it, which split one physical tree into as many groups as
+ * there were spellings of its branch: `main` against `refs/heads/main`, `HEAD`
+ * against a SHA in a detached worktree, `Main` against `main`, or one session
+ * declaring a branch while the other declared none. Every one of those is two agents
+ * in one directory — the exact failure this reports — recorded as no collision.
+ *
+ * A working tree has one checked-out branch, so two branch strings for one cwd never
+ * mean two trees. The branch is still reported, because disagreement about it is
+ * worth seeing; it simply cannot suppress the finding.
+ */
+const workspaceKey = (w) => w.cwd;
 
 /**
  * Which LIVE actors declare the same workspace as each other.
@@ -848,17 +888,26 @@ const workspaceKey = (w) => `${w.cwd}\u0000${w.branch ?? ''}`;
 export function workspaceCollisions(state) {
   const groups = new Map();
   for (const actor of Object.values(state.actors)) {
-    if (actor.status !== 'online') continue;
     const workspace = declaredWorkspace(actor);
     if (workspace === null) continue;
     const key = workspaceKey(workspace);
-    const group = groups.get(key) ?? { workspace, refs: [] };
-    group.refs.push(actor.ref);
+    const group = groups.get(key) ?? { cwd: workspace.cwd, occupants: [] };
+    group.occupants.push({
+      ref: actor.ref,
+      status: actor.status,
+      lastSeenAt: actor.lastSeenAt,
+      branch: workspace.branch,
+    });
     groups.set(key, group);
   }
   return [...groups.values()]
-    .filter((g) => g.refs.length > 1)
-    .map((g) => ({ cwd: g.workspace.cwd, branch: g.workspace.branch, refs: g.refs }));
+    .filter((g) => g.occupants.length > 1 && g.occupants.some((o) => o.status === 'online'))
+    .map((g) => ({
+      cwd: g.cwd,
+      refs: g.occupants.map((o) => o.ref),
+      occupants: g.occupants,
+      branches: [...new Set(g.occupants.map((o) => o.branch).filter((b) => b !== null))],
+    }));
 }
 
 /** Compact, printable view of the whole bus. */
