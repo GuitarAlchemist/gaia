@@ -27,6 +27,9 @@ evidence on restart. Changing state directories is not a retry.
 
 ## Usage and topology
 
+Before `enable` or `watch`, satisfy the prior-manual-job reconciliation prerequisite
+in [Ownership and recovery](#ownership-and-recovery), especially for #141/#145.
+
 Use the pinned Node runtime, a trusted clone with GitHub read access, and existing
 Claude subscription authentication. Create an operator-owned local state directory
 outside all worker checkouts, then provision once:
