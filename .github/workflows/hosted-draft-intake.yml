@@ -15,6 +15,10 @@ on:
         description: Prepare one ready issue in the ledger only; no Draft or agent execution
         type: string
         default: ''
+      target_issue:
+        description: Restrict a manual normal-policy run to exactly one issue number; empty keeps the repository-wide funnel
+        type: string
+        default: ''
   issues:
     types: [labeled]
   schedule:
@@ -47,6 +51,7 @@ jobs:
           GAIA_PREPARE_ISSUE: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare_issue || '' }}
           GAIA_NORMAL_POLICY_DISPATCH: ${{ github.event_name == 'workflow_dispatch' && inputs.normal_policy }}
           GAIA_NORMAL_POLICY_VAR: ${{ github.event_name != 'workflow_dispatch' && vars.GAIA_NORMAL_POLICY_ENABLED == 'true' }}
+          GAIA_TARGET_ISSUE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_issue || '' }}
         run: |
           # Normal selection is computed once, here, and published as this step's only output so
           # every later step reads the same decision instead of re-deriving it from inputs/vars.
@@ -59,6 +64,27 @@ jobs:
           }
           if ($normalSelected -and $env:GAIA_PREPARE_ISSUE) {
             throw 'Preparation and normal admission execution are mutually exclusive.'
+          }
+          # An issue selector is scheduling data, not authority: it only narrows which issue this
+          # run may act on, and the policy, identity and ledger gates below and downstream are
+          # untouched by it. It is validated here, in the step that runs before the App token is
+          # minted and before anything reads the ledger, so a malformed or incompatible selection
+          # never reaches a token, a policy file or an effect. Syntax first, so a selector is
+          # always a positive safe integer before anything is decided about it; the 16-digit bound
+          # keeps the cast below inside Int64 and the explicit comparison keeps it inside the
+          # JavaScript safe range the CLI re-checks. Only a value of that shape is ever written to
+          # GITHUB_OUTPUT, which is what stops a newline in the input forging a second output line.
+          $target = $env:GAIA_TARGET_ISSUE
+          if ($target) {
+            if ($target -cnotmatch '^[1-9][0-9]{0,15}\z' -or [long]$target -gt 9007199254740991) {
+              throw 'An issue selector must be one positive issue number.'
+            }
+            if ($env:GAIA_NORMAL_POLICY_DISPATCH -ne 'true') {
+              throw 'An issue selector is accepted only on a manual normal-policy run.'
+            }
+            if ($env:GAIA_ONE_CANARY -eq 'true' -or $env:GAIA_PREPARE_ISSUE) {
+              throw 'An issue selector is incompatible with canary execution and preparation.'
+            }
           }
           $required = @(
             $env:GAIA_PUMP_APP_ID,
@@ -73,6 +99,7 @@ jobs:
             throw 'Dedicated Gaia pump identity is not configured.'
           }
           "normal_policy=$(if ($normalSelected) { 'true' } else { 'false' })" | Out-File $env:GITHUB_OUTPUT -Append
+          "target_issue=$target" | Out-File $env:GITHUB_OUTPUT -Append
 
       - name: Mint a bounded pump App token
         id: pump-token
@@ -159,7 +186,7 @@ jobs:
           GAIA_PUMP_ACTOR_ID: ${{ vars.GAIA_PUMP_ACTOR_ID }}
           GAIA_REPOSITORY_NODE_ID: ${{ vars.GAIA_REPOSITORY_NODE_ID }}
           GAIA_MANAGED_ROUND_JSON: ${{ vars.GAIA_MANAGED_ROUND_JSON }}
-          GAIA_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GAIA_ISSUE_NUMBER: ${{ steps.identity.outputs.target_issue || github.event.issue.number }}
           GAIA_CANARY_POLICY: ${{ github.event_name == 'workflow_dispatch' && inputs.one_canary && '.github/gaia/canary-policy.json' || '' }}
           GAIA_NORMAL_POLICY: ${{ steps.identity.outputs.normal_policy == 'true' && '.github/gaia/normal-policy.json' || '' }}
           GAIA_LEDGER_ROOT_OID: ${{ steps.policy.outputs.oid }}

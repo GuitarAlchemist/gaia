@@ -67,6 +67,7 @@ function runIdentityScript(scriptBody, env) {
         GAIA_PUMP_APP_ID: '', GAIA_PUMP_APP_PRIVATE_KEY: '', GAIA_PUMP_ACTOR_ID: '',
         GAIA_REPOSITORY_NODE_ID: '', GAIA_MANAGED_ROUND_JSON: '', GAIA_ONE_CANARY: '',
         GAIA_PREPARE_ISSUE: '', GAIA_NORMAL_POLICY_DISPATCH: '', GAIA_NORMAL_POLICY_VAR: '',
+        GAIA_TARGET_ISSUE: '',
         GITHUB_OUTPUT: outputPath, ...env },
     });
     let outputs = {};
@@ -318,5 +319,139 @@ test('the freshen step only runs when normal admission is selected', () => {
   assert.ok(
     block.some((line) => /^ {8}if: steps\.identity\.outputs\.normal_policy == 'true'\s*$/u.test(line)),
     'an unselected run must not touch the checked-out policy file at all',
+  );
+});
+
+/**
+ * The manual issue selector.
+ *
+ * The CLI and the intake application already accept explicit candidates; the manual workflow had no
+ * way to name one, so the only manual normal-policy run available was repository-wide. The selector
+ * added here is adapter-level scheduling data — it narrows which issue a run may act on and grants
+ * no authority — and it is validated in the identity step, which runs before the App token is minted
+ * and before any step reads or writes the ledger.
+ */
+
+const TARGETED_ISSUE = '128';
+
+test('the manual target_issue input is declared an optional string, empty by default', () => {
+  const workflow = workflowText();
+  assert.match(
+    workflow,
+    /target_issue:\s*\n\s+description:.*\n\s+type: string\s*\n\s+default: ''/u,
+    'the selector must be an optional free-text input, absent unless an operator types one',
+  );
+  assert.match(
+    workflow,
+    /GAIA_TARGET_ISSUE: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.target_issue \|\| '' \}\}/u,
+    'a non-dispatch event carries no selector at all',
+  );
+});
+
+test('a manual normal-policy run may select exactly one issue, published for the later steps', PWSH, () => {
+  const { status, stderr, outputs } = runIdentityScript(identityScript(), {
+    ...REQUIRED_IDENTITY,
+    GAIA_NORMAL_POLICY_DISPATCH: 'true',
+    GAIA_TARGET_ISSUE: TARGETED_ISSUE,
+  });
+  assert.equal(status, 0, stderr);
+  assert.equal(outputs.normal_policy, 'true');
+  assert.equal(outputs.target_issue, TARGETED_ISSUE);
+});
+
+test('an untargeted manual normal run still publishes an empty selection, unchanged', PWSH, () => {
+  for (const env of [
+    { GAIA_NORMAL_POLICY_DISPATCH: 'true' },
+    { GAIA_NORMAL_POLICY_VAR: 'true' },
+    { GAIA_MANAGED_ROUND_JSON: '{"fixture":true}' },
+  ]) {
+    const { status, stderr, outputs } = runIdentityScript(identityScript(), {
+      ...REQUIRED_IDENTITY, ...env,
+    });
+    assert.equal(status, 0, stderr);
+    assert.equal(
+      outputs.target_issue ?? '', '',
+      'a run nobody targeted must select no issue, leaving the existing funnel in charge',
+    );
+  }
+});
+
+test('a malformed issue selector is refused before any token, policy or ledger work', PWSH, () => {
+  // Everything here either is not a positive decimal integer, is not safe as a JavaScript number,
+  // or carries the whitespace/newline shapes that would let a selector forge a second GITHUB_OUTPUT
+  // line. The CLI refuses each of them too; this gate is about refusing them one step earlier.
+  const malformed = [
+    '0', '-1', '+1', '12.5', '1e3', '0x80', '007', 'abc', '12abc', '#128',
+    ' 128', '128 ', '128\n', '128\ntarget_issue=127', '128,129', '9007199254740992',
+    '99999999999999999999', '$(127)', '128;127', '--issue 128',
+  ];
+  for (const target of malformed) {
+    const { status, outputs } = runIdentityScript(identityScript(), {
+      ...REQUIRED_IDENTITY,
+      GAIA_NORMAL_POLICY_DISPATCH: 'true',
+      GAIA_TARGET_ISSUE: target,
+    });
+    assert.notEqual(status, 0, `${JSON.stringify(target)} must not be accepted as an issue number`);
+    assert.equal(
+      outputs.target_issue, undefined,
+      `${JSON.stringify(target)} must publish no selection for a later step to read`,
+    );
+  }
+});
+
+test('an issue selector outside a manual normal-policy selection is refused', PWSH, () => {
+  const incompatible = [
+    // Canary pins its own issue through the sealed policy; a second selector is ambiguous.
+    { GAIA_ONE_CANARY: 'true' },
+    // Preparation already names its issue through prepare_issue.
+    { GAIA_PREPARE_ISSUE: '5' },
+    // The legacy managed-round path is not the scoped normal run this selector was added for.
+    { GAIA_MANAGED_ROUND_JSON: '{"fixture":true}' },
+    // A vars-gated selection is not a manual run, and a selector cannot arrive without one.
+    { GAIA_NORMAL_POLICY_VAR: 'true' },
+  ];
+  for (const env of incompatible) {
+    const { status, outputs } = runIdentityScript(identityScript(), {
+      ...REQUIRED_IDENTITY, ...env, GAIA_TARGET_ISSUE: TARGETED_ISSUE,
+    });
+    assert.notEqual(status, 0, `${JSON.stringify(env)} must not combine with an issue selector`);
+    assert.equal(outputs.target_issue, undefined);
+  }
+});
+
+test('the selector is validated before the pump token exists and before any ledger step', () => {
+  const lines = workflowText().split(/\r?\n/u);
+  const at = (predicate) => lines.findIndex(predicate);
+  const identity = at((line) => line.trim() === '- name: Require the dedicated pump identity');
+  const token = at((line) => line.includes('actions/create-github-app-token'));
+  const checkout = at((line) => line.includes('actions/checkout'));
+  const cli = at((line) => line.includes('scripts/hosted-draft-pump.mjs'));
+  assert.ok(identity >= 0 && token > identity, 'no token may be minted before the identity gate');
+  assert.ok(checkout > identity && cli > identity, 'no ledger work may precede the identity gate');
+
+  const block = stepBlock(workflowText(), 'Require the dedicated pump identity');
+  assert.ok(
+    block.some((line) => line.includes('GAIA_TARGET_ISSUE')),
+    'the selector must be read by the gate that runs first, not by the step that acts',
+  );
+});
+
+test('the selector reaches the CLI through the environment, never through shell interpolation', () => {
+  const workflow = workflowText();
+  assert.match(
+    workflow,
+    /^ {10}GAIA_ISSUE_NUMBER: \$\{\{ steps\.identity\.outputs\.target_issue \|\| github\.event\.issue\.number \}\}$/mu,
+    'the validated selection, then the labelled issue: an empty output falls through to the lane',
+  );
+  const runBodies = [...workflow.matchAll(/^ {10}(?:&|\$| {2}).*$/gmu)].map(([line]) => line);
+  for (const line of runBodies) {
+    assert.doesNotMatch(
+      line, /\$\{\{/u,
+      `no run: line may interpolate an expression into the shell: ${line.trim()}`,
+    );
+  }
+  assert.doesNotMatch(
+    workflow, /--issue \$\{\{/u,
+    'a selector spliced into the command line is a shell injection seam, not an argument',
   );
 });

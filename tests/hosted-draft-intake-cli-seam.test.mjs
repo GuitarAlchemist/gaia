@@ -32,6 +32,11 @@ const ROOT_OID = 'd'.repeat(40);
 const ROOT_REVISION = 'e'.repeat(64);
 const GENERATION_KEY = 'f'.repeat(64);
 const LABELLED_ISSUE = 70;
+const TARGETED_ISSUE = 128;
+const FOREIGN_ISSUE = 127;
+const FOREIGN_OPERATION = '7'.repeat(64);
+const FOREIGN_WORK_KEY = '8'.repeat(64);
+const FOREIGN_REVISION = '6'.repeat(64);
 const MANAGED_ROUND_JSON = JSON.stringify({
   create: MANAGED_CREATE,
   advance: null,
@@ -53,6 +58,13 @@ function expressions(event, temp) {
   return new Map([
     ['inputs.prepare_issue', event === 'prepare' ? String(LABELLED_ISSUE) : ''],
     ['github.event.issue.number', event.endsWith('issues') ? String(LABELLED_ISSUE) : ''],
+    // The issue identity binding, in its three readings. A manual run publishes a validated
+    // selection or the empty string; only when it is empty does the labelled issue show through.
+    [
+      'steps.identity.outputs.target_issue || github.event.issue.number',
+      event === 'normal-targeted' ? String(TARGETED_ISSUE)
+        : event.endsWith('issues') ? String(LABELLED_ISSUE) : '',
+    ],
     ['steps.pump-token.outputs.token', 'ghs_fixture_installation_token'],
     ['vars.GAIA_PUMP_ACTOR_ID', '1234'],
     ['vars.GAIA_REPOSITORY_NODE_ID', 'R_kgDOGaia'],
@@ -345,6 +357,82 @@ test('normal workflow configuration uses policy instead of the stale blob; remov
     }
   }
   // This proves parser wiring only. Runtime expiry and provider effects are covered separately.
+});
+
+test('a targeted manual normal run acts on its own issue and never on a foreign unsettled one', async (t) => {
+  const temp = mkdtempSync(join(tmpdir(), 'gaia-normal-targeted-seam-'));
+  t.after(() => rmSync(temp, { recursive: true, force: true }));
+  const from = new Date(Date.now() - 60_000);
+  const path = join(temp, 'policy.json');
+  writeFileSync(path, JSON.stringify({
+    schema: 'GaiaNormalAdmissionPolicyV0', version: 1,
+    repository: { nodeId: 'R_kgDOGaia', owner: 'GuitarAlchemist', name: 'gaia' },
+    effectActorId: 1234, allowedEffect: 'CREATE_DRAFT', roundBudget: 1,
+    validFrom: from.toISOString(), validUntil: new Date(from.getTime() + 900_000).toISOString(),
+    accountableOwner: 'github:user:test-owner', effectOwner: 'github:app:test-pump',
+    reviewOwners: { standards: 'github:user:test-standards', spec: 'github:user:test-spec' },
+  }));
+
+  const { argv, environment } = invocation(workflowText(), 'normal-targeted', temp);
+  assert.equal(environment.GAIA_ISSUE_NUMBER, String(TARGETED_ISSUE));
+  assert.equal(environment.GAIA_NORMAL_POLICY, '.github/gaia/normal-policy.json');
+  environment.GAIA_NORMAL_POLICY = path;
+
+  // An unrelated operation is durably unsettled and quarantined. Repository-wide intake would
+  // resume it first; a selected run must leave it exactly where it is, counted but untouched.
+  const touched = [];
+  const output = sink(); const errors = sink();
+  const code = await main({
+    argv, env: environment, stdout: output.stream, stderr: errors.stream,
+    runtimeFactory: (configuration) => {
+      assert.equal(configuration.issue, TARGETED_ISSUE, 'the selector must reach the CLI intact');
+      return Object.freeze({
+        async listUnsettled() {
+          return [{
+            operationId: FOREIGN_OPERATION, workKey: FOREIGN_WORK_KEY,
+            committedRevision: FOREIGN_REVISION,
+            selector: {
+              repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+              workItem: { kind: 'ISSUE', number: FOREIGN_ISSUE },
+            },
+          }];
+        },
+        async listReadyIssues() {
+          return assert.fail('an explicitly selected run must not consult the ready funnel');
+        },
+        async enqueue(selector) {
+          touched.push(['enqueue', selector.workItem.number]);
+          return {
+            kind: 'Enqueued', operationId: OPERATION_ID, workKey: WORK_KEY,
+            generationKey: GENERATION_KEY, committedRevision: COMMITTED,
+          };
+        },
+        async reconcile(request) {
+          touched.push(['reconcile', request.operationId]);
+          return {
+            kind: 'Terminal', outcome: 'CREATED', effect: 'CREATE_DRAFT',
+            operationId: request.operationId, workKey: WORK_KEY, generationKey: GENERATION_KEY,
+            observedSourceRevision: '9'.repeat(64), pullRequest: null, refusal: null,
+            committedRevision: COMMITTED,
+          };
+        },
+      });
+    },
+  });
+
+  assert.equal(code, 0, errors.text());
+  const receipt = output.json();
+  assert.equal(receipt.phase, 'ADMIT');
+  assert.deepEqual(receipt.workItem, { kind: 'ISSUE', number: TARGETED_ISSUE });
+  assert.deepEqual(touched, [['enqueue', TARGETED_ISSUE], ['reconcile', OPERATION_ID]]);
+  for (const [verb, subject] of touched) {
+    assert.notEqual(subject, FOREIGN_ISSUE, `${verb} must never name the foreign issue`);
+    assert.notEqual(subject, FOREIGN_OPERATION, `${verb} must never name the foreign operation`);
+  }
+  assert.ok(
+    receipt.unsettledCount >= 1,
+    'the foreign operation stays counted as unsettled: untouched is not resolved',
+  );
 });
 
 test('a scheduled recovery tick reaches the CLI and is admitted as a schedule, not refused', async () => {
