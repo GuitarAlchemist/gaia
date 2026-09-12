@@ -15,16 +15,32 @@ const digest = (value) => createHash('sha256').update(value).digest('hex');
 // This transport inherits a real operator terminal. It never starts a detached UI,
 // redirects Claude into print mode, or treats a PID as successful work.
 function launchVisible(request) {
+  return launchClaude(request, false);
+}
+
+function launchHeadless(request) {
+  return launchClaude(request, true);
+}
+
+function launchClaude(request, headless) {
   const child = spawn(process.platform === 'win32' ? 'claude.exe' : 'claude', request.args, {
     cwd: request.cwd, env: request.env, shell: false,
-    stdio: 'inherit', windowsHide: false, detached: process.platform !== 'win32',
+    stdio: headless ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+    windowsHide: headless, detached: process.platform !== 'win32',
   });
   let exited = false;
+  let outputError;
+  let rejectClosed;
   const closed = new Promise((resolve, reject) => {
+    rejectClosed = reject;
     child.once('error', () => { exited = true; reject(error('AgentLaunchFailed', 'Visible provider launch failed')); });
-    child.once('close', (code) => { exited = true; resolve({ code }); });
+    child.once('close', (code) => {
+      exited = true;
+      if (outputError) reject(outputError);
+      else resolve({ code });
+    });
   });
-  return {
+  const provider = {
     closed,
     async stop() {
       if (exited) return;
@@ -44,6 +60,21 @@ function launchVisible(request) {
       await closed;
     },
   };
+  if (headless) {
+    let outputBytes = 0;
+    const drain = (chunk) => {
+      // Drain both pipes without retaining model output; the bound is shared.
+      if (outputError) return;
+      outputBytes += chunk.length;
+      if (outputBytes > request.maxOutputBytes) {
+        outputError = error('AgentOutputLimit', 'Headless provider exceeded its combined output bound');
+        void provider.stop().catch(rejectClosed);
+      }
+    };
+    child.stdout.on('data', drain);
+    child.stderr.on('data', drain);
+  }
+  return provider;
 }
 
 function readResult(path, limit) {
@@ -80,8 +111,19 @@ export function createVisibleClaudeAdapters({
   isInteractive = () => Boolean(process.stdin.isTTY && process.stdout.isTTY),
   launch = launchVisible,
 } = {}) {
+  return createClaudeAdapters({ isInteractive, launch, headless: false });
+}
+
+/** Noninteractive subscription transport for supervisor-owned, trusted worktrees.
+ * Restricted file tools are not an OS sandbox: the process inherits user identity.
+ */
+export function createHeadlessClaudeAdapters({ launch = launchHeadless } = {}) {
+  return createClaudeAdapters({ launch, headless: true });
+}
+
+function createClaudeAdapters({ isInteractive, launch, headless }) {
   async function run(role, context, { timeoutMs = 600_000, maxOutputBytes = 65_536 } = {}) {
-    if (!isInteractive()) throw error('InteractiveRequired', 'Visible execution requires an operator terminal');
+    if (!headless && !isInteractive()) throw error('InteractiveRequired', 'Visible execution requires an operator terminal');
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 1_800_000
         || !Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1 || maxOutputBytes > 1_048_576) {
       throw error('AgentBounds', 'Invalid visible provider bounds');
@@ -107,12 +149,13 @@ export function createVisibleClaudeAdapters({
       'If unable to finish, use status failed and state the reason. Never fabricate successful evidence.',
     ].join('\n');
     if (prompt.length > 16_000) throw error('AgentInputLimit', 'Visible provider prompt exceeds launch bound');
-    const args = ['--session-id', sessionId, '--model', 'sonnet', '--effort', 'medium',
+    const args = [...(headless ? ['--print', '--permission-prompts', 'none', '--no-session-persistence'] : []),
+      '--session-id', sessionId, '--model', 'sonnet', '--effort', 'medium',
       '--restricted', '--permission-mode', 'dontAsk', '--tools', 'Read,Write,Edit,Glob,Grep',
       '--allowedTools', 'Read,Write,Edit,Glob,Grep', '--add-dir', resultDir,
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--disable-slash-commands',
       '--name', `Gaia ${role} ${sessionId.slice(0, 8)}`, '--', prompt];
-    const child = launch({ cwd, args, env: buildClaudeWorkerInvocation(context).env, resultPath, binding });
+    const child = launch({ cwd, args, env: buildClaudeWorkerInvocation(context).env, resultPath, binding, maxOutputBytes });
     let closed = false;
     let exitResult;
     let launchError;
@@ -150,7 +193,7 @@ export function createVisibleClaudeAdapters({
       if (!output) throw error('AgentTimeout', 'Visible provider exceeded its execution bound');
     } finally {
       await boundedStop(child);
-      if (process.stdout.isTTY) {
+      if (!headless && process.stdout.isTTY) {
         process.stdout.write('\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1015l\u001b[?2004l\u001b[?25h');
       }
     }

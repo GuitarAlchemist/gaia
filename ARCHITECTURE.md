@@ -73,6 +73,7 @@ only in the final column and must not escape in a result or refusal.
 | Pull-request conflict classification | `classifyPrConflict(observation, claim) -> reading or refusal` | Exact-generation, read-only classification under a closed empty strategy registry | normalized GitHub observation; deterministic fixtures |
 | Runner capability probe | `probe(mandate, lease, adapter) -> receipt or blocker` | Read-only capability question decided by identity, generation, lease, admission and reconciliation before any adapter is consulted | synthetic-fixture probe; deterministic in-memory fixtures |
 | Publication and operator | `prepare(intent)`; `authorize(grant)`; `execute(intent) -> receipt` | Human-mediated privileged effect | GitHub publication/operator adapters; owned in-memory broker tests |
+| Local autonomous factory | `runAutonomousFactory(input) -> receipt or refusal`; `reconcileAutonomousJob(input) -> receipt or refusal` | Standing repository-scoped authority, one bounded candidate per Draft, unresolved work prevents another start | local SQLite policy/job registry; hosted receipt and Git worktree adapter; restricted headless subscription factory |
 | Factory telemetry | `record(phase)`; `replay(events) -> lifecycle or refusal` | Closed evidence events and freshness projection | local evidence log; wmux/Claude sensor; deterministic fixtures |
 | Lane generation bootstrap | `bootstrapLaneGeneration(manifest, ports) -> receipt or refusal`; `verifyLaneLaunchReceipt(receipt) -> receipt or refusal` | Work-scoped execution exclusion, topology before spawn, verified launch receipt, and recoverable CAS cleanup intent | deterministic shared-instance in-memory generation store; deterministic lane-adapter fixture; production exclusion not shipped |
 | Control room | `render(snapshot, observed instant) -> read model` | Authority-free operator projection | static HTML/dashboard; in-memory snapshots |
@@ -302,10 +303,22 @@ or service-level availability.
 
 Least privilege is structural: the bus lacks privileged verbs, adapters receive bounded inputs,
 provider secrets are excluded from evidence, and irreversible actions are separate transitions.
-The hosted operator requires an interactive human to confirm the full revision-bound intent and
+The manual operator requires an interactive human to confirm the full revision-bound intent and
 spends a short-lived grant once. Non-interactive input cannot authorize it. Publication, merge,
 deployment, spending, credential, and configuration rights are never inferred from agent text,
 labels, activity, or completion markers.
+
+The separate local autonomous composition consumes an operator-provisioned standing
+policy for one repository and a finite run budget. A local SQLite transaction commits
+STARTED once per issue/Draft and serializes revocation and the single active host slot.
+The application repeats existing portfolio and exact Draft admission before consuming
+that authority. A restricted headless subscription adapter then produces only a candidate.
+Original execution keys and bound receipts reconcile crashes; missing or corrupt evidence
+retains the slot without relaunch. This is one trusted OS-user/local-disk domain, not
+cross-host fencing or an OS sandbox. Manual runs and separate registries are outside its
+exclusion guarantee. Revocation prevents future starts, not already authorized execution.
+See [local autonomous continuation](docs/autonomous-factory.md) for the source-movement
+window, bounded hosted-artifact discovery, activation preconditions and recovery limits.
 
 Resource ceilings are local safeguards, not billing authority: four supported live lanes,
 bounded outputs, timeouts, one-step drain transitions, and explicit cost/fanout limits where a
@@ -410,6 +423,9 @@ accepted transitions and receipts, not tokens, lane activity, or prose completio
   Ubuntu remains portability discovery.
 - **Local factory/operator:** bounded Claude/Codex/wmux processes, offline artifacts, explicit
   worktrees, read-only dashboards, and an interactive authority boundary for privileged effects.
+- **Local autonomous continuation:** a separately provisioned standing policy, local durable
+  job registry and explicit polling process; exact Draft admission and headless subscription
+  workers produce candidates. Installation does not activate it or grant publication/merge.
 - **Hosted pump:** GitHub Actions runs the scheduled Draft intake in one serialized recovery group
   and issue-triggered intake partitioned per issue, plus
   the separately sealed effect path. Protected Git refs are the durable ingress/receipt ledger;
