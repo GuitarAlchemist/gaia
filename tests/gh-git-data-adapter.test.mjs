@@ -54,9 +54,232 @@ function scriptedRun(responses, calls) {
   return async (args, input) => {
     calls.push({ args: structuredClone(args), input: structuredClone(input) });
     assert.ok(responses.length > 0, 'adapter made only the expected GitHub calls');
-    return structuredClone(responses.shift());
+    const next = responses.shift();
+    if (next === LOST_ACK) throw new Error('token, path, and provider response');
+    return structuredClone(next);
   };
 }
+
+// The scripted call whose effect lands at GitHub while its acknowledgement never arrives.
+const LOST_ACK = Symbol('lost acknowledgement');
+
+// Every response the adapter consumes before it moves the ref: the authoritative head
+// read, then the protected blob, tree, and commit writes, then the pre-write recheck.
+function appendPreludeResponses(headRows, { blob = '3'.repeat(40), tree = '4'.repeat(40), commit }) {
+  return [
+    ...protectionResponses(),
+    headRows,
+    ...protectionResponses(), { sha: blob },
+    ...protectionResponses(), { sha: tree },
+    ...protectionResponses(), { sha: commit },
+    ...protectionResponses(),
+  ];
+}
+
+const REGISTRY_REF = 'refs/heads/gaia-ledger/registry-v0';
+const registryRows = (sha) => [{ ref: REGISTRY_REF, object: { sha } }];
+const reservedBody = () => ({
+  schema: 'GaiaDraftRegistryReceiptV0', priorCommittedRevision: 'a'.repeat(64), kind: 'RESERVED',
+});
+
+test('R6 a lost PATCH acknowledgement whose own commit holds the head is APPENDED', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const head = '1'.repeat(40);
+  const commitOid = '2'.repeat(40);
+  const body = reservedBody();
+  const calls = [];
+  const responses = [
+    ...appendPreludeResponses(registryRows(head), { commit: commitOid }),
+    LOST_ACK,
+    registryRows(commitOid),
+  ];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    run: scriptedRun(responses, calls),
+  });
+
+  assert.deepEqual(await api.compareAndAppend(REGISTRY_REF, head, body), {
+    kind: 'APPENDED', oid: commitOid, body, committedRevision: revision(body),
+  }, 'the durable append is reported as the append it is, not as a stale loss');
+  assert.equal(responses.length, 0);
+  const patches = calls.filter((call) => call.args[3] === 'PATCH');
+  assert.equal(patches.length, 1, 'the ref update is attempted exactly once');
+  assert.deepEqual(patches[0].input, { sha: commitOid, force: false },
+    'reconciliation never relaxes the non-force update');
+});
+
+test('R6 a lost initial POST acknowledgement that created the ref is APPENDED', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const workKey = 'b'.repeat(64);
+  const ref = `refs/heads/gaia-ledger/draft-operations-v0/${workKey}`;
+  const commitOid = '7'.repeat(40);
+  const body = {
+    schema: 'GaiaDraftWorkRootV0', priorCommittedRevision: 'NONE', kind: 'WORK_ROOT', workKey,
+  };
+  const calls = [];
+  const responses = [
+    ...appendPreludeResponses([], { commit: commitOid }),
+    LOST_ACK,
+    [{ ref, object: { sha: commitOid } }],
+  ];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    run: scriptedRun(responses, calls),
+  });
+
+  assert.deepEqual(await api.compareAndAppend(ref, 'NONE', body), {
+    kind: 'APPENDED', oid: commitOid, body, committedRevision: revision(body),
+  });
+  assert.equal(responses.length, 0);
+  const creates = calls.filter((call) => call.args[1].endsWith('/git/refs'));
+  assert.equal(creates.length, 1, 'the absent ref is created exactly once');
+  assert.deepEqual(creates[0].input, { ref, sha: commitOid },
+    'ref creation still carries no force');
+});
+
+test('R6 a lost acknowledgement over an unchanged head fails closed', async () => {
+  const { createGhGitDataApi, GhGitDataError } = await import(MODULE_URL);
+  const head = '1'.repeat(40);
+  const commitOid = '2'.repeat(40);
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    run: scriptedRun([
+      ...appendPreludeResponses(registryRows(head), { commit: commitOid }),
+      LOST_ACK,
+      registryRows(head),
+    ], calls),
+  });
+
+  await assert.rejects(
+    api.compareAndAppend(REGISTRY_REF, head, reservedBody()),
+    (error) => error instanceof GhGitDataError
+      && error.code === 'GitHubGitDataUnavailable'
+      && !error.message.includes('token'),
+    'an unchanged head proves nothing landed, so the caller must retry deliberately',
+  );
+  assert.equal(calls.filter((call) => call.args[3] === 'PATCH').length, 1,
+    'the unproven write is not repeated');
+});
+
+test('R6 a foreign winner after a lost acknowledgement stays STALE', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const head = '1'.repeat(40);
+  const commitOid = '2'.repeat(40);
+  const foreign = '9'.repeat(40);
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    run: scriptedRun([
+      ...appendPreludeResponses(registryRows(head), { commit: commitOid }),
+      LOST_ACK,
+      registryRows(foreign),
+    ], calls),
+  });
+
+  assert.deepEqual(await api.compareAndAppend(REGISTRY_REF, head, reservedBody()),
+    { kind: 'STALE', currentHeadOid: foreign },
+    'another appender holding the head is a real loss, not a lost acknowledgement');
+  assert.equal(calls.filter((call) => call.args[3] === 'PATCH').length, 1);
+});
+
+test('R6 an unreadable head after a lost acknowledgement fails closed', async () => {
+  const { createGhGitDataApi, GhGitDataError } = await import(MODULE_URL);
+  const head = '1'.repeat(40);
+  const commitOid = '2'.repeat(40);
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    run: scriptedRun([
+      ...appendPreludeResponses(registryRows(head), { commit: commitOid }),
+      LOST_ACK,
+      LOST_ACK,
+    ], calls),
+  });
+
+  await assert.rejects(
+    api.compareAndAppend(REGISTRY_REF, head, reservedBody()),
+    (error) => error instanceof GhGitDataError && error.code === 'GitHubGitDataUnavailable',
+    'an unreadable readback never becomes an APPENDED claim',
+  );
+  assert.equal(calls.filter((call) => call.args[3] === 'PATCH').length, 1,
+    'a failed reconciliation read triggers no second write');
+});
+
+test('R6 a reconciled append preserves its receipt transport metadata', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const body = {
+    schema: 'GaiaDraftRegistryReceiptV0', priorCommittedRevision: 'a'.repeat(64),
+    kind: 'CONFIRMED', workKey: 'b'.repeat(64), generationKey: 'c'.repeat(64),
+  };
+  const transportMetadata = { workRootOid: '9'.repeat(40) };
+  const head = '1'.repeat(40);
+  const commitOid = '2'.repeat(40);
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    run: scriptedRun([
+      ...appendPreludeResponses(registryRows(head), { commit: commitOid }),
+      LOST_ACK,
+      registryRows(commitOid),
+    ], calls),
+  });
+
+  assert.deepEqual(
+    await api.compareAndAppend(REGISTRY_REF, head, body, { ...transportMetadata }),
+    {
+      kind: 'APPENDED', oid: commitOid, body,
+      committedRevision: revision(body), transportMetadata,
+    },
+    'the reconciled result is the same result the acknowledged write would have returned',
+  );
+  const writtenWrapper = JSON.parse(Buffer.from(
+    calls.find((call) => call.input?.encoding === 'base64').input.content, 'base64',
+  ).toString('utf8'));
+  assert.deepEqual(writtenWrapper, {
+    body, committedRevision: revision(body), transportMetadata,
+  }, 'the receipt committed before the lost acknowledgement is the one reported');
+});
+
+test('R6 reconciliation adds one head read and no second write or blind retry', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const head = '1'.repeat(40);
+  const commitOid = '2'.repeat(40);
+  const calls = [];
+  const responses = [
+    ...appendPreludeResponses(registryRows(head), { commit: commitOid }),
+    LOST_ACK,
+    registryRows(commitOid),
+  ];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    pumpActor: PUMP_ACTOR,
+    run: scriptedRun(responses, calls),
+  });
+
+  assert.equal((await api.compareAndAppend(REGISTRY_REF, head, reservedBody())).kind, 'APPENDED');
+  assert.equal(responses.length, 0, 'no request beyond the scripted reconciliation is made');
+  assert.deepEqual(calls.map((call) => call.args[3]), [
+    'GET', 'GET', 'GET',
+    'GET', 'GET', 'POST',
+    'GET', 'GET', 'POST',
+    'GET', 'GET', 'POST',
+    'GET', 'GET',
+    'PATCH',
+    'GET',
+  ], 'protection stays re-read before each write; reconciliation is a single head read');
+  assert.deepEqual(calls.filter((call) => call.args[3] === 'POST').map((call) => call.args[1]), [
+    'repos/GuitarAlchemist/gaia/git/blobs',
+    'repos/GuitarAlchemist/gaia/git/trees',
+    'repos/GuitarAlchemist/gaia/git/commits',
+  ], 'no object is created twice and no ref write is reissued');
+});
 
 test('R2 gh Git Data adapter verifies protection, reads receipts, and appends by CAS', async () => {
   const { createGhGitDataApi } = await import(MODULE_URL);

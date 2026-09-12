@@ -388,9 +388,15 @@ export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run 
         }
       } catch (error) {
         if (!(error instanceof GhGitDataError)) throw error;
+        // The ref update can land and still lose its acknowledgement. Only the head being
+        // this exact new commit proves that; then the append happened and is reported as
+        // such. A foreign head is a real loss, and an unchanged head proves nothing, so
+        // both keep their previous outcome. Nothing is rewritten or retried here.
         const current = await currentHead(ref);
-        if (current !== expectedHeadOid) return { kind: 'STALE', currentHeadOid: current };
-        throw error;
+        if (current !== commitOid) {
+          if (current !== expectedHeadOid) return { kind: 'STALE', currentHeadOid: current };
+          throw error;
+        }
       }
       return {
         kind: 'APPENDED', oid: commitOid, body,
