@@ -524,6 +524,19 @@ test('the public CLI refuses a malformed record commit without producing a repor
   }
 });
 
+test('CI reruns body-dependent architecture checks on PR edits and retains default events', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const assertEvents = source => {
+    const trigger = source.match(/^  pull_request:\r?\n((?:    [^\r\n]*\r?\n)+)/m)?.[1] ?? '';
+    assert.match(trigger, /^    branches: \[main\]\r?$/m);
+    assert.match(trigger, /^    types: \[opened, synchronize, reopened, edited\]\r?$/m);
+  };
+  assertEvents(workflow);
+  // Removing the fix must recover the original missed body-edit event.
+  assert.throws(() => assertEvents(workflow.replace(/^    types:.*\r?\n/m, '')),
+    { code: 'ERR_ASSERTION' });
+});
+
 test('a production push event does not run the pull-request-only architecture impact gate', () => {
   const fixture = createPolicyCliFixture({
     changedFiles: { 'src/push-sensitive.mjs': 'export const changed = true;\n' },
