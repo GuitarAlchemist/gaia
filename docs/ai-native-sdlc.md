@@ -46,8 +46,14 @@ When a required predecessor changes, revalidate dependents and retain old receip
 history. An old candidate's passing test does not validate new code. Hypothesis: this
 reduces repeated explanation and stale approvals. Falsifier: a fresh reviewer cannot
 recover scope from these artifacts, or an old review is reused after required inputs
-change. Measure that before adding a graph engine. Reuse Git and existing receipts;
-automatic Markdown-triggered transitions and dependency invalidation remain unimplemented.
+change. Measure that before adding a graph engine. Reuse Git and existing receipts.
+
+[The artifact chain](artifact-chain.md) now implements the machine-checkable part of that handoff:
+a digest-pinned manifest over the real files, a pure validator that reports a changed required
+predecessor as invalidating its dependents transitively, and a candidate-stage sidecar emitted by
+the autonomous host. It adds no graph engine and no store. Automatic Markdown-triggered
+transitions remain unimplemented, a fresh chain still proves nothing about the claims inside its
+artifacts, and the hypothesis above remains unmeasured.
 
 ## Measurable learning loop
 
