@@ -29,7 +29,8 @@ function request(value = intent()) {
 function receipt(job, status = 'CANDIDATE_READY') {
   return { schema: 'gaia-autonomous-factory-receipt/1', status, jobKey: job.jobKey,
     intentRevision: job.intent.intentRevision, idempotencyKey: job.idempotencyKey,
-    factory: { schema: 'gaia-agent-factory-receipt/1', status: status === 'CANDIDATE_READY' ? 'completed' : 'rejected', task: job.intent.task } };
+    factory: { schema: 'gaia-agent-factory-receipt/1', status: status === 'CANDIDATE_READY' ? 'completed' : 'rejected', task: job.intent.task,
+      base: { head: job.intent.draft.headRevision }, reviewer: { verdict: status === 'CANDIDATE_READY' ? 'APPROVE' : 'REQUEST_CHANGES' } } };
 }
 function setup(t) {
   const dir = mkdtempSync(join(tmpdir(), 'gaia-autonomous-store-'));
@@ -75,6 +76,27 @@ test('revocation after STARTED prevents subsequent admission but permits bound c
   a.start(job); b.revoke(); b.finish({ jobKey: job.jobKey, receipt: receipt(job) });
   assert.equal(a.get(job.jobKey).state, 'COMPLETED');
   fails(() => a.start(request(intent(146))), 'PolicyDisabled');
+});
+
+test('terminal validation rejects a foreign base or non-approval, including persisted replay corruption', t => {
+  const { path, open } = setup(t); const store = open(); configure(store);
+  const job = request(); store.start(job);
+  for (const mutation of [
+    value => { value.factory.base.head = 'c'.repeat(40); },
+    value => { value.factory.reviewer.verdict = 'REQUEST_CHANGES'; },
+    value => { delete value.factory.base; },
+  ]) {
+    const bad = receipt(job); mutation(bad);
+    fails(() => store.finish({ jobKey: job.jobKey, receipt: bad }), 'InvalidReceipt');
+    assert.equal(store.get(job.jobKey).state, 'STARTED');
+  }
+  store.finish({ jobKey: job.jobKey, receipt: receipt(job) });
+  const bad = receipt(job); bad.factory.reviewer.verdict = 'REQUEST_CHANGES';
+  const external = new DatabaseSync(path);
+  external.prepare('UPDATE autonomous_jobs SET receipt_json=? WHERE job_key=?').run(JSON.stringify(bad), job.jobKey);
+  external.close();
+  fails(() => store.get(job.jobKey), 'StoreCorrupt');
+  fails(() => open(), 'StoreCorrupt');
 });
 
 test('restart with unresolved STARTED retains host slot and original intent even if source changes', t => {

@@ -84,7 +84,9 @@ function validateReceipt(value, job) {
     || receipt.idempotencyKey !== job.idempotencyKey
     || !receipt.factory || receipt.factory.schema !== 'gaia-agent-factory-receipt/1'
     || receipt.factory.status !== (receipt.status === 'CANDIDATE_READY' ? 'completed' : 'rejected')
-    || receipt.factory.task !== job.intent.task) fail('InvalidReceipt');
+    || receipt.factory.task !== job.intent.task
+    || receipt.factory.base?.head !== job.intent.draft.headRevision
+    || (receipt.factory.status === 'completed' && receipt.factory.reviewer?.verdict !== 'APPROVE')) fail('InvalidReceipt');
   return serialized;
 }
 
@@ -96,4 +98,3 @@ export {
   validateJob as validateAutonomousJob,
   validateReceipt as validateAutonomousReceipt,
 };
-

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createPortfolioFactory } from './github-portfolio.mjs';
-import { autonomousJobKey } from './autonomous-factory-contract.mjs';
+import { autonomousJobKey, validateAutonomousReceipt } from './autonomous-factory-contract.mjs';
 
 const canonical = value => value && typeof value === 'object'
   ? Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
@@ -12,16 +12,11 @@ const refuse = code => ({ schema: 'gaia-autonomous-factory-result/1', status: 'R
 const uncertain = jobKey => ({ schema: 'gaia-autonomous-factory-result/1', status: 'RECONCILIATION_REQUIRED', jobKey });
 
 function terminal(job, factory) {
-  if (factory?.schema !== 'gaia-agent-factory-receipt/1'
-      || !['completed', 'rejected'].includes(factory.status)
-      || factory.task !== job.intent.task || factory.base?.head !== job.intent.draft.headRevision
-      || (factory.status === 'completed' && factory.reviewer?.verdict !== 'APPROVE')) {
-    throw Object.assign(new Error('Unbound factory receipt'), { code: 'ExecutionReceiptMismatch' });
-  }
-  return { schema: 'gaia-autonomous-factory-receipt/1',
-    status: factory.status === 'completed' ? 'CANDIDATE_READY' : 'CANDIDATE_REJECTED',
+  const receipt = { schema: 'gaia-autonomous-factory-receipt/1',
+    status: factory?.status === 'completed' ? 'CANDIDATE_READY' : 'CANDIDATE_REJECTED',
     jobKey: job.jobKey, intentRevision: job.intent.intentRevision,
     idempotencyKey: job.idempotencyKey, factory };
+  return JSON.parse(validateAutonomousReceipt(receipt, job));
 }
 
 // Reconciliation reads the original operation, even when current readiness has changed.

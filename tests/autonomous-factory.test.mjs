@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -144,5 +144,21 @@ test('shipped CLI provisions once and revokes with closed non-TTY stdin', () => 
     assert.equal(run(['enable', '--repository', 'Example/app']).status, 1);
     assert.equal(JSON.parse(run(['revoke']).stdout).enabled, false);
     assert.equal(JSON.parse(run(['status']).stdout).enabled, false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('CLI rejects state inside a clone even when its child name starts with two dots', () => {
+  const root = mkdtempSync(join(tmpdir(), 'gaia-auto-containment-'));
+  const cli = fileURLToPath(new URL('../scripts/github-portfolio-autonomous.mjs', import.meta.url));
+  try {
+    for (const child of ['state', '..state']) {
+      const state = join(root, child); mkdirSync(state);
+      const enabled = spawnSync(process.execPath, [cli, 'enable', '--state', state, '--repository', 'Example/app'], { encoding: 'utf8' });
+      assert.equal(enabled.status, 0, enabled.stderr);
+      // Invalid timeout prevents network access even in the broken containment implementation.
+      const tick = spawnSync(process.execPath, [cli, 'tick', '--state', state, '--clone', root, '--timeout-ms', '0'], { encoding: 'utf8' });
+      assert.equal(tick.status, 1);
+      assert.equal(tick.stderr.trim(), 'StateInsideClone');
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

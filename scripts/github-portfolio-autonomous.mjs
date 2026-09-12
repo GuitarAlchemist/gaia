@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { openAutonomousFactoryStore } from '../src/autonomous-factory-store.mjs';
@@ -84,7 +84,7 @@ export async function runAutonomousCli(argv, { write = value => process.stdout.w
     if (!args.clone) fail('Usage');
     const clone = realDirectory(resolve(args.clone));
     const containment = relative(clone, root);
-    if (!containment || (!containment.startsWith('..') && !/^[A-Za-z]:/.test(containment))) fail('StateInsideClone');
+    if (!containment || !(containment === '..' || containment.startsWith(`..${sep}`) || isAbsolute(containment))) fail('StateInsideClone');
     const paths = ensureHostDirectories(root);
     const timeoutMs = integer(args['timeout-ms'], 600_000, 1000, 1_800_000);
     const interval = integer(args['interval-seconds'], 60, 10, 3600) * 1000;
