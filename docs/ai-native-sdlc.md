@@ -89,6 +89,86 @@ Two real cases anchor the first evaluation set:
   acknowledgement, with foreign winners and unreadable state still refusing. Reuse
   those adapter regression cases; the original live transport cause remains unproven.
 
+## Selective SlashForge adoption
+
+Origin: the user requested adopting the useful parts of SlashForge in Codex task
+`01a04b30-bd3a-7530-8f4f-185954d433c9` on 2026-09-13, after a read-only comparison.
+This is a documentation-only adaptation, not installation of SlashForge or a new
+runtime mechanism. The existing delivery skill and review policy remain the entry points.
+
+Sources inspected at upstream commit `1fe67b59bc7e4629b2ed9e4d53d5becbb4815b56`:
+[instruction coverage](https://github.com/rajdeepratan/SlashForge/blob/1fe67b59bc7e4629b2ed9e4d53d5becbb4815b56/templates/forge-coverage.md),
+[investigation handoff](https://github.com/rajdeepratan/SlashForge/blob/1fe67b59bc7e4629b2ed9e4d53d5becbb4815b56/templates/forge-workflow-investigation.md), and
+[review coverage](https://github.com/rajdeepratan/SlashForge/blob/1fe67b59bc7e4629b2ed9e4d53d5becbb4815b56/templates/forge-workflow-review-pr.md).
+The procedures below are original Gaia wording inspired by those sources; no upstream
+templates, scripts, or package files are vendored.
+
+### Instruction coverage check
+
+At planning and final-diff review, inspect newly introduced dependencies, source
+languages, top-level modules, and recurring workflows. Compare each with the actual
+instructions reached through `CLAUDE.md`, architecture references, and relevant
+repository-local rules, skills, and agent definitions. Read their content: a matching
+filename is not proof of coverage, and absence of a specialist agent is not a defect.
+
+Record a gap only when it names the changed path, the missing or contradictory
+instruction, and a concrete task an agent could mishandle. Put the observation and
+its disposition in the existing plan or review artifact: covered, update within
+accepted scope, defer with reason, or unknown because a source could not be read.
+An unread source is not an empty instruction set. If there is no applicable change,
+record not applicable once; ordinary edits need no new coverage document.
+
+Prefer correcting the existing canonical instruction over adding an agent, hook,
+skill, or mirrored rule. This advisory check creates no extra human gate, automatic
+configuration write, or permission to expand scope. A demonstrated invariant violation
+still follows the existing review policy; calling it a coverage note cannot waive it.
+Finish when each applicable change has an evidence-linked disposition.
+
+### Visible investigation report
+
+For an investigation or diagnostic handoff, retain one readable report at the existing
+issue-linked evidence path. If none exists, use `docs/investigations/<issue-or-slug>.md`
+and link it from the issue/PR when publication is authorized. Show its actual path in
+chat and open it in the available file/browser panel when supported; if opening fails,
+state that and retain the link. A Markdown preview is sufficient; no HTML generator,
+hidden `.claude/` report directory, or second status ledger is required.
+
+The report contains the observed outcome (confirmed, not reproduced, intended behavior,
+or insufficient evidence), expected versus actual behavior, exact reproduction attempts,
+root cause or explicitly labelled hypothesis, affected scope, and proposed next step.
+Bind observations to the code revision, environment, commands/results, producer, and
+raw evidence paths/digests. Redact secrets before making reports visible. Preserve
+earlier evidence; a correction identifies what it supersedes.
+
+Pass the report path and revision or digest to the next session, which checks freshness
+and separates observations from proposals before acting under its existing authority.
+A report grants no repair permission. It is supporting evidence, not a new stage in the
+five-stage artifact chain; it cannot fill missing tests, review, or publication evidence.
+Finish when the report is accessible and the next actor can identify what is known,
+what remains uncertain, and which action is actually authorized.
+
+### Limits and evaluation
+
+[REVIEW.md](../REVIEW.md#review-coverage) owns explicit review coverage and duplicate-feedback
+handling; the drain reviewer consumes it. Independent review stays mandatory under
+ENG-08, including small changes. Reuse existing verification commands and revision-bound
+evidence rather than adding a second verification workflow.
+
+Do not adopt SlashForge's repeated plan/branch/PR/cleanup prompts, quick-mode self-review
+substitution, global setup, or Graphify dependency. A graph could aid exploration, but
+its freshness heuristic is not Gaia's exact-revision evidence check. Existing runtime
+capabilities, branch protection, and authority boundaries remain unchanged.
+
+Assumption: these small additions help fresh sessions recover scope and expose stale
+instructions. The strongest counterargument is process duplication and noisy coverage
+notes; keeping the current workflow unchanged is the simpler alternative. For the next
+three eligible changes, record useful gaps, false alarms, and handoff re-explanation in
+their existing review artifacts. The baseline and benefit are unmeasured, not zero.
+Keep the check only if it finds actionable gaps without new routine approval prompts;
+narrow or remove it if all findings duplicate existing checks. Rollback is removing
+these guidance additions, retaining historical evidence. No machine detector, report
+renderer, measured token saving, or unattended-delivery improvement is claimed here.
+
 ## Adoption boundary
 
 The new files change agent guidance and review criteria. Machine enforcement lives in

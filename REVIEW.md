@@ -20,6 +20,22 @@ reviewer uses a fresh context and the existing assigned axis. The author's own
 
 ## Findings and terminal truth
 
+### Review coverage
+
+Account for every changed path against the pinned base in the review artifact:
+mark it reviewed, partially reviewed, or excluded with a reason. Name the examined
+ranges or concerns for partial reads and the generated/vendor exclusions explicitly.
+Group paths only when each member is enumerated or linked from the exact diff inventory.
+Keep commands executed separate from source inspected; passing tests do not establish
+review coverage. A large diff calls for bounded passes, not a claim of exhaustive review
+from one context. Required but unreviewed scope remains an evidence gap and prevents
+approval until an independent review covers it at the same revision.
+
+Check existing feedback before adding findings. Link a repeated finding to its existing
+thread; acknowledge and explain any disagreement rather than posting a duplicate.
+
+### Findings
+
 An **Important** finding demonstrates broken behavior, an authority or security
 violation, missing required verification, or a material mismatch with accepted
 intent. Include pass, severity, affected full SHA, `file:line`, reproducer, expected

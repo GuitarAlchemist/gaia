@@ -9,6 +9,10 @@ Read [the engineering doctrine](../../../docs/engineering-and-research-principle
 and [ARCHITECTURE.md](../../../ARCHITECTURE.md). This skill is process guidance;
 runtime capabilities and effect adapters enforce authority.
 
+For diagnosis-only work, inspect and reproduce within scope, then deliver the
+[visible investigation report](../../../docs/ai-native-sdlc.md#visible-investigation-report).
+Return without entering implementation or promotion; a proposed fix is not authority.
+
 1. **Recover intent.** Read the issue, linked PR, and prior user authorization.
    Record the origin, affected actor, outcome, scope, non-goals, success criteria,
    and unresolved questions in the existing intent artifact or issue. For the
@@ -21,8 +25,11 @@ runtime capabilities and effect adapters enforce authority.
    end-to-end change, changed files, verification, and compensation path in the
    linked design/plan. Apply ENG-02 when its load-bearing trigger is met. A narrow
    repair can keep this in its issue/PR; separate `spec.md` and `plan.md` files are
-   useful only when they hold distinct decisions. Finish when another engineer
-   could execute the plan and required design decisions are resolved.
+   useful only when they hold distinct decisions. Check the plan and, later, the
+   final diff for a new dependency, source language, top-level module, or recurring
+   workflow; apply the [instruction coverage check](../../../docs/ai-native-sdlc.md#instruction-coverage-check)
+   to each applicable change. Finish when another engineer could execute the plan
+   and required design decisions are resolved.
 3. **Build with feedback.** Reproduce a bug at the public seam before repair and
    retain the failing evidence. Implement the vertical slice and run its focused
    checks. Add refusal and mechanism-revert controls for invariant-bearing fixes.
@@ -44,5 +51,8 @@ runtime capabilities and effect adapters enforce authority.
 6. **Close the learning loop.** Link an incident or meaningful measured breach to
    its evidence, add a discriminating regression, and create the next bounded
    intent only if unresolved work remains. Use the source and baseline rules in
-   [the SDLC adaptation](../../../docs/ai-native-sdlc.md). Finish when the original
+   [the SDLC adaptation](../../../docs/ai-native-sdlc.md). For an investigation or
+   diagnostic handoff, use its [visible investigation report](../../../docs/ai-native-sdlc.md#visible-investigation-report)
+   before handing work to another session, including when no fix is authorized.
+   Finish when the original
    issue/PR links the evidence and follow-up, without a parallel status ledger.
