@@ -353,11 +353,12 @@ that window (below) could not otherwise survive the gap between scheduled runs. 
 other field (repository, owners, reviewers, writer identity, effect, round budget)
 is untouched by that step. This automatic renewal keeps an already-selected policy
 reachable; it grants no additional authority beyond what selecting the file already
-would, and it is inert while the gate stays closed. Whether reusing already-launched
-writer/reviewer sessions across separate grants (as this file currently does, from
-issue #130's canary) is acceptable for continuous operation is an open decision, not
-resolved by this wiring, and deferred to whoever makes the activation call. There is
-no automatic agent execution, merge or multirepo grant.
+would, and it is inert while the gate stays closed. PR #147 replaces the historical
+reviewer assignments with two distinct, observed Claude sessions assigned to the
+bounded issue #53 canary; the writer identity is unchanged. Assignment is not proof
+of session liveness or review approval. Whether reusing sessions across separate
+grants is acceptable for continuous operation remains an open activation decision.
+There is no automatic agent execution, merge or multirepo grant.
 See [normal admission repair](docs/issue40-live-admission-receipts.md).
 
 Explicit `GaiaCanaryAdmissionPolicyV1` produces `GaiaRoundReceiptV1` with a
