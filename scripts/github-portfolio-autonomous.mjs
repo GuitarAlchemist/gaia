@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { openAutonomousFactoryStore } from '../src/autonomous-factory-store.mjs';
 import { autonomousJobKey } from '../src/autonomous-factory-contract.mjs';
-import { runAutonomousFactory, reconcileAutonomousJob } from '../src/autonomous-factory.mjs';
+import { diagnosticCode, runAutonomousFactory, reconcileAutonomousJob } from '../src/autonomous-factory.mjs';
 import { collectHostedDraftReceipts, prepareAutonomousWorktree, ensureHostDirectories, realDirectory, runHost } from '../src/autonomous-factory-host.mjs';
 import { createGitHubReadAdapter } from '../src/github-read-adapter.mjs';
 import { createGitHubDraftAdmissionAdapter } from '../src/github-draft-admission.mjs';
@@ -84,11 +84,7 @@ export function emitCandidateSidecar({ result, store, evidenceRoot }) {
       intent: job.intent, status: result.status });
     return { status: emitted.status, subject: emitted.subject, pendingStages: emitted.pendingStages };
   } catch (error) {
-    // `typeof` first: an untyped Error carries no code, and testing the pattern against the
-    // absent value would report the literal string "undefined" as though it were one.
-    return { status: 'FAILED',
-      code: typeof error?.code === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(error.code)
-        ? error.code : 'ArtifactChainSidecarFailed' };
+    return { status: 'FAILED', code: diagnosticCode(error, 'ArtifactChainSidecarFailed') };
   }
 }
 
@@ -154,7 +150,7 @@ export async function runAutonomousCli(argv, { write = value => process.stdout.w
     const once = async () => {
       let result;
       try { result = await tick(); }
-      catch (error) { return { status: 'REFUSED', code: /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(error.code) ? error.code : 'HostReadFailed' }; }
+      catch (error) { return { status: 'REFUSED', code: diagnosticCode(error, 'HostReadFailed') }; }
       const artifactChain = emitCandidateSidecar({ result, store, evidenceRoot: paths.evidence });
       return artifactChain === null ? result : { ...result, artifactChain };
     };
@@ -182,7 +178,7 @@ export async function runAutonomousCli(argv, { write = value => process.stdout.w
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   runAutonomousCli(process.argv.slice(2)).then(code => { process.exitCode = code; }).catch(error => {
-    process.stderr.write(`${/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(error.code) ? error.code : 'AutonomousCliFailed'}\n`);
+    process.stderr.write(`${diagnosticCode(error, 'AutonomousCliFailed')}\n`);
     process.exitCode = 1;
   });
 }

@@ -7,7 +7,11 @@ const canonical = value => value && typeof value === 'object'
     : `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`
   : JSON.stringify(value);
 const digest = value => createHash('sha256').update(canonical(value)).digest('hex');
-const codeOf = error => /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(error?.code) ? error.code : 'AutonomousRunFailed';
+// `typeof` first: RegExp.test coerces its argument, so an absent code would read as the
+// token "undefined" and a coercible non-string could smuggle a spoofed token, either way
+// displacing the caller's named fallback diagnostic.
+export const diagnosticCode = (error, fallback) =>
+  typeof error?.code === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(error.code) ? error.code : fallback;
 const refuse = code => ({ schema: 'gaia-autonomous-factory-result/1', status: 'REFUSED', code });
 const uncertain = jobKey => ({ schema: 'gaia-autonomous-factory-result/1', status: 'RECONCILIATION_REQUIRED', jobKey });
 
@@ -69,6 +73,6 @@ export async function runAutonomousFactory({
     store.finish({ jobKey, receipt });
     return store.get(jobKey).receipt;
   } catch (error) {
-    return started ? uncertain(jobKey) : refuse(codeOf(error));
+    return started ? uncertain(jobKey) : refuse(diagnosticCode(error, 'AutonomousRunFailed'));
   }
 }
