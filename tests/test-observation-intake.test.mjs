@@ -780,6 +780,19 @@ test('the priority view keeps unknown and unavailable evidence, with its source 
   assert.equal(unreadable.revisions.length, 2);
   assert.equal(unreadable.revisions[0].revisionId, first.ledger.entries[0].revisionId);
   assert.notEqual(unreadable.revisions[0].rawDigest, null);
+
+  // Missing recency must sort behind every valid instant, including negative epoch values.
+  const historical = admitTestObservation(other.ledger, normalizeTestObservation({
+    ...distinctReading(6003, 'Fact: an old observation without declared severity.\n', '1950-01-01T00:00:00Z'),
+    createdAt: '1950-01-01T00:00:00Z',
+  }));
+  assert.deepEqual(prioritizeTestObservations(historical.ledger, 10).observations.map(row => row.commentId),
+    [6002, 6003, 6001], 'a known historical instant precedes missing recency within UNKNOWN severity');
+  const twoUnavailable = admitTestObservation(historical.ledger, normalizeTestObservation({
+    ...distinctReading(6004, null, null), availability: 'UNAVAILABLE', createdAt: null,
+  }));
+  assert.deepEqual(prioritizeTestObservations(twoUnavailable.ledger, 10).observations.map(row => row.commentId),
+    [6002, 6003, 6001, 6004], 'two missing instants retain the deterministic identity tie-break');
 });
 
 test('duplicate and edited readings reach the priority view through the existing admission semantics', () => {

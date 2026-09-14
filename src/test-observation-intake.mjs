@@ -801,7 +801,7 @@ export const TEST_OBSERVATION_PRIORITY_SEVERITY_ORDER = Object.freeze([
  * claim to recency and sorts behind every row that proved one.
  */
 function priorityRecency(row) {
-  return row.sourceUpdatedAt === null ? -1 : Date.parse(row.sourceUpdatedAt);
+  return row.sourceUpdatedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(row.sourceUpdatedAt);
 }
 
 /**
