@@ -14,6 +14,7 @@ import test from 'node:test';
 import {
   MAX_TEST_OBSERVATION_BATCH_SIZE,
   TEST_OBSERVATION_BATCH_SCHEMA,
+  TEST_OBSERVATION_PRIORITY_VIEW_SCHEMA,
   TEST_OBSERVATION_PROJECTION_SCHEMA,
   TEST_OBSERVATION_SCHEMA,
   TestObservationError,
@@ -21,6 +22,7 @@ import {
   admitTestObservationBatch,
   emptyTestObservationLedger,
   normalizeTestObservation,
+  prioritizeTestObservations,
   projectTestObservations,
 } from '../src/test-observation-intake.mjs';
 import { createGitHubTestObservationSource } from '../src/gh-test-observation-source.mjs';
@@ -670,6 +672,157 @@ test('a batch has an explicit bound and malformed/unknown input inside it cannot
   assert.equal(JSON.stringify(held), original, 'invalid structure rejects atomically, preserving prior evidence');
   const retried = admitTestObservationBatch(held, [newReading]);
   assert.equal(retried.ledger.entries.length, 2, 'absence of the held comment from this page is not deletion');
+});
+
+/** One distinct comment on the fixture issue: its own id, its own link, its own body and instant. */
+const distinctReading = (commentId, body, updatedAt) => editedReading({
+  commentId,
+  sourceUrl: `https://github.com/GuitarAlchemist/.github/issues/73#issuecomment-${commentId}`,
+  body,
+  updatedAt,
+});
+
+test('the priority view ranks declared severity first, recency second, identity last — deterministically', () => {
+  const page = [
+    distinctReading(6001, 'Severity: CRITICAL\nFact: gate A failed.\n', '2026-09-05T09:00:00Z'),
+    distinctReading(6002, 'Severity: CRITICAL\nFact: gate B failed.\n', '2026-09-05T10:00:00Z'),
+    distinctReading(6003, 'Severity: WARNING\nFact: gate C is flaky.\n', '2026-09-05T12:00:00Z'),
+    distinctReading(6004, 'Severity: WARNING\nFact: gate D is flaky.\n', '2026-09-05T12:00:00Z'),
+    distinctReading(6005, 'Severity: INFO\nFact: gate E is slow.\n', '2026-09-05T23:00:00Z'),
+    distinctReading(6006, 'Fact: gate F said nothing about severity.\n', '2026-09-05T23:00:00Z'),
+  ];
+  const { ledger } = admitTestObservationBatch(emptyTestObservationLedger(), page);
+  const view = prioritizeTestObservations(ledger, 6);
+
+  assert.equal(view.schema, TEST_OBSERVATION_PRIORITY_VIEW_SCHEMA);
+  assert.equal(view.effect, 'NONE');
+  assert.equal(view.authority, 'NONE');
+  assert.equal(view.claimBasis, 'SOURCE_ASSERTED', 'the ranking key is the source speaking');
+  assert.ok(Object.isFrozen(view));
+
+  // Declared severity outranks recency: the newest INFO sits below the oldest CRITICAL. Within one
+  // severity the newer source instant leads, and an exact tie falls to observation-key order.
+  assert.deepEqual(view.observations.map((row) => row.commentId),
+    [6002, 6001, 6003, 6004, 6005, 6006]);
+  // An unstated severity is last, not promoted: nobody declared gate F urgent.
+  assert.equal(view.observations.at(-1).severity, 'UNKNOWN');
+  assert.equal(view.observations.at(-1).severityBasis, 'ABSENT');
+
+  // Every row is the projection's own row: link and current revision identity travel intact.
+  for (const row of view.observations) {
+    assert.equal(row.sourceUrl, `https://github.com/GuitarAlchemist/.github/issues/73#issuecomment-${row.commentId}`);
+    assert.match(row.currentRevisionId, /^sha256:[0-9a-f]{64}$/u);
+  }
+
+  // Deterministic under admission order: the reversed page ranks identically.
+  const reversed = admitTestObservationBatch(emptyTestObservationLedger(), [...page].reverse());
+  assert.deepEqual(prioritizeTestObservations(reversed.ledger, 6).observations.map((row) => row.observationKey),
+    view.observations.map((row) => row.observationKey));
+
+  // And the existing projection contract is untouched: identity order, all rows, no limit.
+  const projection = projectTestObservations(ledger);
+  assert.deepEqual(projection.observations.map((row) => row.observationKey),
+    [...projection.observations.map((row) => row.observationKey)].sort());
+  assert.equal(projection.observations.length, 6);
+});
+
+test('the priority view applies its explicit bound and refuses an invalid limit', () => {
+  const { ledger } = admitTestObservationBatch(emptyTestObservationLedger(), [
+    distinctReading(6001, 'Severity: CRITICAL\nFact: gate A failed.\n', '2026-09-05T09:00:00Z'),
+    distinctReading(6002, 'Severity: INFO\nFact: gate B is slow.\n', '2026-09-05T10:00:00Z'),
+    distinctReading(6003, 'Severity: WARNING\nFact: gate C is flaky.\n', '2026-09-05T11:00:00Z'),
+  ]);
+
+  const cut = prioritizeTestObservations(ledger, 2);
+  assert.equal(cut.observations.length, 2, 'the limit cuts the view, never the ledger');
+  assert.equal(cut.limit, 2);
+  assert.equal(cut.totalObservations, 3, 'a cut view says how much it is not showing');
+  assert.deepEqual(cut.observations.map((row) => row.severity), ['CRITICAL', 'WARNING']);
+
+  // A limit past the ledger returns everything and invents nothing.
+  assert.equal(prioritizeTestObservations(ledger, 50).observations.length, 3);
+
+  // No default and no coercion: an absent, zero, negative, fractional or textual limit is refused.
+  for (const limit of [undefined, null, 0, -1, 2.5, '3', NaN, Infinity, 2 ** 53]) {
+    assert.throws(() => prioritizeTestObservations(ledger, limit), TestObservationError,
+      `an invalid limit was accepted: ${String(limit)}`);
+  }
+});
+
+test('the priority view keeps unknown and unavailable evidence, with its source and history intact', () => {
+  const first = admitTestObservation(emptyTestObservationLedger(), normalizeTestObservation(
+    distinctReading(6001, 'Severity: CRITICAL\nFact: gate A failed.\n', '2026-09-05T09:00:00Z'),
+  ));
+  const gone = admitTestObservation(first.ledger, normalizeTestObservation({
+    ...distinctReading(6001, null, null),
+    availability: 'UNAVAILABLE',
+    createdAt: null,
+    observedAt: '2026-09-05T19:00:00Z',
+  }));
+  const other = admitTestObservation(gone.ledger, normalizeTestObservation(
+    distinctReading(6002, 'Severity: INFO\nFact: gate B is slow.\n', '2026-09-05T10:00:00Z'),
+  ));
+
+  const view = prioritizeTestObservations(other.ledger, 10);
+  assert.equal(view.observations.length, 2, 'an unreadable source is shown, never dropped from attention');
+
+  // The unavailable reading is current, so its row is UNKNOWN and ranks by that, not by the
+  // severity its vanished content once declared.
+  const [readable, unreadable] = view.observations;
+  assert.equal(readable.commentId, 6002);
+  assert.equal(unreadable.commentId, 6001);
+  assert.equal(unreadable.state, 'UNKNOWN');
+  assert.equal(unreadable.unknownReason, 'SOURCE_UNAVAILABLE');
+  assert.equal(unreadable.severity, 'UNKNOWN');
+
+  // Its identity and history survive the ranking: the link, both revisions and the first digest.
+  assert.equal(unreadable.sourceUrl, 'https://github.com/GuitarAlchemist/.github/issues/73#issuecomment-6001');
+  assert.equal(unreadable.revisions.length, 2);
+  assert.equal(unreadable.revisions[0].revisionId, first.ledger.entries[0].revisionId);
+  assert.notEqual(unreadable.revisions[0].rawDigest, null);
+
+  // Missing recency must sort behind every valid instant, including negative epoch values.
+  const historical = admitTestObservation(other.ledger, normalizeTestObservation({
+    ...distinctReading(6003, 'Fact: an old observation without declared severity.\n', '1950-01-01T00:00:00Z'),
+    createdAt: '1950-01-01T00:00:00Z',
+  }));
+  assert.deepEqual(prioritizeTestObservations(historical.ledger, 10).observations.map(row => row.commentId),
+    [6002, 6003, 6001], 'a known historical instant precedes missing recency within UNKNOWN severity');
+  const twoUnavailable = admitTestObservation(historical.ledger, normalizeTestObservation({
+    ...distinctReading(6004, null, null), availability: 'UNAVAILABLE', createdAt: null,
+  }));
+  assert.deepEqual(prioritizeTestObservations(twoUnavailable.ledger, 10).observations.map(row => row.commentId),
+    [6002, 6003, 6001, 6004], 'two missing instants retain the deterministic identity tie-break');
+});
+
+test('duplicate and edited readings reach the priority view through the existing admission semantics', () => {
+  const reading6001 = distinctReading(6001, 'Severity: CRITICAL\nFact: gate A failed.\n', '2026-09-05T09:00:00Z');
+  const first = admitTestObservation(emptyTestObservationLedger(), normalizeTestObservation(reading6001));
+
+  // A replay is the same evidence: one row, the same current revision, nothing counted twice.
+  const replay = admitTestObservation(first.ledger, normalizeTestObservation(
+    { ...reading6001, observedAt: '2026-09-05T16:00:00Z' },
+  ));
+  assert.equal(replay.outcome, 'ALREADY_HELD');
+  const replayed = prioritizeTestObservations(replay.ledger, 5);
+  assert.equal(replayed.observations.length, 1);
+  assert.equal(replayed.totalObservations, 1);
+  assert.equal(replayed.observations[0].currentRevisionId, first.ledger.entries[0].revisionId);
+
+  // An edit revises the one row in place — and a source saying the failure is fixed is a source
+  // asserting a sentence, not a resolution: the row stays, at the severity the source declared.
+  const edited = admitTestObservation(replay.ledger, normalizeTestObservation(distinctReading(
+    6001, 'Severity: CRITICAL\nFact: the gate A failure above is fixed.\n', '2026-09-05T11:00:00Z',
+  )));
+  assert.equal(edited.outcome, 'REVISED');
+  const view = prioritizeTestObservations(edited.ledger, 5);
+  assert.equal(view.observations.length, 1, 'a claim of being fixed resolves nothing');
+  const [row] = view.observations;
+  assert.equal(row.severity, 'CRITICAL');
+  assert.equal(row.severityBasis, 'SOURCE_DECLARED');
+  assert.equal(row.currentRevisionId, edited.ledger.entries[1].revisionId);
+  assert.equal(row.revisions.length, 2, 'the pre-edit evidence is still beside the current reading');
+  assert.match(row.facts[0], /is fixed/u);
 });
 
 test('a cancelled read and a programmer error are raised, never reported as an absent source', async () => {

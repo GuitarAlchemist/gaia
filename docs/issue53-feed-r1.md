@@ -51,5 +51,20 @@ input ledger remains unchanged. This preserves the existing R0 validation bounda
 fabricating source identity or silently skipping invalid input. Partial-page absence is not deletion;
 it is distinct from partial success within a rejected batch.
 
+## Bounded attention-priority view (issue #148 slice)
+
+`prioritizeTestObservations(ledger, limit)` in `src/test-observation-intake.mjs` adds one pure,
+read-only view over the same ledger, reusing `projectTestObservations` unchanged — its rows are
+the projection's own frozen rows, so source links, current revision identities, `UNKNOWN`
+states/reasons and full revision history all travel intact, and the projection's identity ordering
+is preserved for existing callers. Rows are ordered by source-declared severity first
+(`CRITICAL` > `WARNING` > `INFO` > `UNKNOWN`; an unstated severity is never promoted), source
+recency second, and observation-key identity as the deterministic tie-break. The `limit` is an
+explicit, validated positive safe integer with no default; anything else is refused. Severity and
+claims remain source-asserted, and a source claiming a failure is fixed does not resolve or remove
+its observation. Tests cover priority ordering with deterministic ties, the bound and invalid
+limits, unknown/unavailable evidence retaining source and history, and duplicate/edited readings
+reusing the existing admission semantics.
+
 Not run by the worker: `node --test` execution is the coordinator's responsibility per the
 execution note above.
