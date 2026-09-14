@@ -1,0 +1,256 @@
+{
+  "schema": "gaia-bootstrap-deadlock-analysis/1",
+  "function": "ix_petri_analyze",
+  "maxStates": 10000,
+  "nets": [
+    {
+      "key": "asWritten",
+      "netRevision": "sha256:fae855b167973dc8b2f9f80f92fc56c365f1ca80d0dcbeb03a10a7f8a4db1a53",
+      "analysis": {
+        "net": "gaia#80 hosted Draft pump observation, as written",
+        "states": 1,
+        "transitions_fired": 0,
+        "truncated": false,
+        "deadlock_free": {
+          "verdict": "fails",
+          "detail": [
+            {
+              "state": 0,
+              "marking": "no pump observation published yet=1 observation schema merged (contract establishment)=1 scheduled recovery tick due=1",
+              "witness": []
+            }
+          ]
+        },
+        "deadlock_count": 1,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 1,
+            "per_place": [
+              [
+                "P_INTAKE_RECEIPT",
+                0
+              ],
+              [
+                "P_NO_OBSERVATION",
+                1
+              ],
+              [
+                "P_OBSERVATION",
+                0
+              ],
+              [
+                "P_OBSERVATION_SCHEMA",
+                1
+              ],
+              [
+                "P_TICK_DUE",
+                1
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "fails",
+          "detail": [
+            "T_PRODUCE_FIRST_OBSERVATION",
+            "T_PRODUCE_NEXT_OBSERVATION",
+            "T_REFUSE_OBSERVATION",
+            "T_RUN_PUMP"
+          ]
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "T_PRODUCE_FIRST_OBSERVATION",
+            "T_PRODUCE_NEXT_OBSERVATION",
+            "T_REFUSE_OBSERVATION",
+            "T_RUN_PUMP"
+          ]
+        },
+        "reversible": {
+          "verdict": "holds",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/1",
+        "net": "gaia#80 hosted Draft pump observation, as written",
+        "netRevision": "sha256:fae855b167973dc8b2f9f80f92fc56c365f1ca80d0dcbeb03a10a7f8a4db1a53",
+        "states": 1,
+        "truncated": false,
+        "reading": "BOOTSTRAP_DEADLOCK",
+        "marking": "no pump observation published yet=1 observation schema merged (contract establishment)=1 scheduled recovery tick due=1",
+        "witness": [],
+        "blocked": [
+          {
+            "transition": "T_PRODUCE_FIRST_OBSERVATION",
+            "missing": [
+              "P_INTAKE_RECEIPT"
+            ]
+          },
+          {
+            "transition": "T_PRODUCE_NEXT_OBSERVATION",
+            "missing": [
+              "P_INTAKE_RECEIPT",
+              "P_OBSERVATION"
+            ]
+          },
+          {
+            "transition": "T_REFUSE_OBSERVATION",
+            "missing": [
+              "P_INTAKE_RECEIPT"
+            ]
+          },
+          {
+            "transition": "T_RUN_PUMP",
+            "missing": [
+              "P_OBSERVATION"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "key": "asShipped",
+      "netRevision": "sha256:a0c6ad8e1c41e5aad94ff414624314f709c7b122e3d9ce2f2b65d11d4c6ba6ef",
+      "analysis": {
+        "net": "gaia#80 hosted Draft pump observation, as shipped",
+        "states": 4,
+        "transitions_fired": 6,
+        "truncated": false,
+        "deadlock_free": {
+          "verdict": "holds",
+          "detail": []
+        },
+        "deadlock_count": 0,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 1,
+            "per_place": [
+              [
+                "P_INTAKE_RECEIPT",
+                1
+              ],
+              [
+                "P_NO_OBSERVATION",
+                1
+              ],
+              [
+                "P_OBSERVATION",
+                1
+              ],
+              [
+                "P_OBSERVATION_SCHEMA",
+                1
+              ],
+              [
+                "P_TICK_DUE",
+                1
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "holds",
+          "detail": []
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "T_PRODUCE_FIRST_OBSERVATION"
+          ]
+        },
+        "reversible": {
+          "verdict": "fails",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/1",
+        "net": "gaia#80 hosted Draft pump observation, as shipped",
+        "netRevision": "sha256:a0c6ad8e1c41e5aad94ff414624314f709c7b122e3d9ce2f2b65d11d4c6ba6ef",
+        "states": 4,
+        "truncated": false,
+        "reading": "NO_DEADLOCK",
+        "marking": null,
+        "witness": null,
+        "blocked": []
+      }
+    },
+    {
+      "key": "seededControl",
+      "netRevision": "sha256:e2f8ab88a8b4d346ea80e7ee2d4becf7aeefbf2a1eabb66690cad1a7954b9943",
+      "analysis": {
+        "net": "gaia#80 hosted Draft pump observation, as written with a modelled seed",
+        "states": 2,
+        "transitions_fired": 3,
+        "truncated": false,
+        "deadlock_free": {
+          "verdict": "holds",
+          "detail": []
+        },
+        "deadlock_count": 0,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 1,
+            "per_place": [
+              [
+                "P_INTAKE_RECEIPT",
+                1
+              ],
+              [
+                "P_NO_OBSERVATION",
+                0
+              ],
+              [
+                "P_OBSERVATION",
+                1
+              ],
+              [
+                "P_OBSERVATION_SCHEMA",
+                1
+              ],
+              [
+                "P_TICK_DUE",
+                1
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "fails",
+          "detail": [
+            "T_PRODUCE_FIRST_OBSERVATION"
+          ]
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "T_PRODUCE_FIRST_OBSERVATION"
+          ]
+        },
+        "reversible": {
+          "verdict": "holds",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/1",
+        "net": "gaia#80 hosted Draft pump observation, as written with a modelled seed",
+        "netRevision": "sha256:e2f8ab88a8b4d346ea80e7ee2d4becf7aeefbf2a1eabb66690cad1a7954b9943",
+        "states": 2,
+        "truncated": false,
+        "reading": "NO_DEADLOCK",
+        "marking": null,
+        "witness": null,
+        "blocked": []
+      }
+    }
+  ]
+}
