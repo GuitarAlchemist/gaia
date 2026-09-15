@@ -11,6 +11,7 @@
         "states": 9,
         "transitions_fired": 15,
         "truncated": false,
+        "truncation": null,
         "deadlock_free": {
           "verdict": "holds",
           "detail": []
@@ -98,7 +99,7 @@
         }
       },
       "reading": {
-        "schema": "gaia-bootstrap-deadlock-reading/2",
+        "schema": "gaia-bootstrap-deadlock-reading/3",
         "net": "gaia#80 hosted Draft pump observation, as shipped",
         "netRevision": "sha256:ca058cb9a21caeac6e16341cd3ebf855bcf714cb3b9c72322c4f5086cf606265",
         "states": 9,
@@ -117,6 +118,7 @@
         "states": 21,
         "transitions_fired": 46,
         "truncated": false,
+        "truncation": null,
         "deadlock_free": {
           "verdict": "holds",
           "detail": []
@@ -199,7 +201,7 @@
         }
       },
       "reading": {
-        "schema": "gaia-bootstrap-deadlock-reading/2",
+        "schema": "gaia-bootstrap-deadlock-reading/3",
         "net": "gaia#80 hosted Draft pump observation, as #80 specifies",
         "netRevision": "sha256:cd93a37b9e3146b7e032737439256d5aadfee9bb64080c6925580a7b0b5c96ac",
         "states": 21,
@@ -218,6 +220,7 @@
         "states": 1,
         "transitions_fired": 0,
         "truncated": false,
+        "truncation": null,
         "deadlock_free": {
           "verdict": "fails",
           "detail": [
@@ -346,7 +349,7 @@
         }
       },
       "reading": {
-        "schema": "gaia-bootstrap-deadlock-reading/2",
+        "schema": "gaia-bootstrap-deadlock-reading/3",
         "net": "gaia#80 hosted Draft pump, run gated on a fresh observation (cyclic control)",
         "netRevision": "sha256:cefc1ced7329ce53e7282d79e532b990a2b6d4242895637e85380e7a98c62419",
         "states": 1,
@@ -369,7 +372,7 @@
             "cycle": [
               "T_OBSERVATION_GOES_STALE",
               "P_NO_FRESH_OBSERVATION",
-              "T_RECONCILED_RUN_AFTER_STALE",
+              "T_SEED_FIRST_OBSERVATION",
               "P_FRESH_OBSERVATION",
               "T_OBSERVATION_GOES_STALE"
             ]
@@ -382,15 +385,7 @@
               "P_STEADY_STATE",
               "P_STEADY_STATE_PROOF"
             ],
-            "cycle": [
-              "T_RECONCILED_RUN",
-              "P_IDLE",
-              "T_SCHEDULE_TICK",
-              "P_TICK_DUE",
-              "T_RUN_PUMP",
-              "P_INTAKE_RECEIPT",
-              "T_RECONCILED_RUN"
-            ]
+            "cycle": null
           },
           {
             "transition": "T_RECONCILED_RUN_AFTER_STALE",
@@ -399,13 +394,7 @@
               "P_STEADY_STATE",
               "P_STEADY_STATE_PROOF"
             ],
-            "cycle": [
-              "T_RECONCILED_RUN_AFTER_STALE",
-              "P_FRESH_OBSERVATION",
-              "T_RUN_PUMP",
-              "P_INTAKE_RECEIPT",
-              "T_RECONCILED_RUN_AFTER_STALE"
-            ]
+            "cycle": null
           },
           {
             "transition": "T_RECONCILE_NEXT_RUN",
@@ -415,13 +404,7 @@
               "P_SEED_UNRETIRED",
               "P_STEADY_STATE_PROOF"
             ],
-            "cycle": [
-              "T_RECONCILE_NEXT_RUN",
-              "P_STEADY_STATE",
-              "T_RECONCILED_RUN_AFTER_STALE",
-              "P_FRESH_OBSERVATION",
-              "T_RECONCILE_NEXT_RUN"
-            ]
+            "cycle": null
           },
           {
             "transition": "T_REFUSE_OBSERVATION",
@@ -485,7 +468,7 @@
             "cycle": [
               "T_RUN_PUMP",
               "P_INTAKE_RECEIPT",
-              "T_RECONCILED_RUN_AFTER_STALE",
+              "T_SEED_FIRST_OBSERVATION",
               "P_FRESH_OBSERVATION",
               "T_RUN_PUMP"
             ]
@@ -500,7 +483,7 @@
               "P_TICK_DUE",
               "T_RUN_PUMP",
               "P_INTAKE_RECEIPT",
-              "T_RECONCILED_RUN",
+              "T_REFUSE_OBSERVATION",
               "P_IDLE",
               "T_SCHEDULE_TICK"
             ]
@@ -523,47 +506,18 @@
     },
     {
       "key": "seededGatedControl",
-      "netRevision": "sha256:318a5282a5d125602732c613cc74976760d9a1f32d0faf5f49cef98c1e009957",
+      "netRevision": "sha256:cd6194424b84d0e6e271c4334b248feb8c7760a5cf4ce86154f6fa000b125a97",
       "analysis": {
-        "net": "sha256:318a5282a5d125602732c613cc74976760d9a1f32d0faf5f49cef98c1e009957",
+        "net": "sha256:cd6194424b84d0e6e271c4334b248feb8c7760a5cf4ce86154f6fa000b125a97",
         "states": 6,
-        "transitions_fired": 10,
+        "transitions_fired": 11,
         "truncated": false,
+        "truncation": null,
         "deadlock_free": {
-          "verdict": "fails",
-          "detail": [
-            {
-              "state": 1,
-              "marking": "steady state not proven=1 no fresh observation: none published, or aged past 12 h (reads STALE)=1 observation schema merged (contract establishment, not liveness)=1 receipt seed installed, Retirement Receipt owed=1 scheduled recovery run due=1",
-              "tokens": [
-                [
-                  "P_HEALTH_UNPROVEN",
-                  1
-                ],
-                [
-                  "P_NO_FRESH_OBSERVATION",
-                  1
-                ],
-                [
-                  "P_OBSERVATION_SCHEMA",
-                  1
-                ],
-                [
-                  "P_SEED_UNRETIRED",
-                  1
-                ],
-                [
-                  "P_TICK_DUE",
-                  1
-                ]
-              ],
-              "witness": [
-                "T_OBSERVATION_GOES_STALE"
-              ]
-            }
-          ]
+          "verdict": "holds",
+          "detail": []
         },
-        "deadlock_count": 1,
+        "deadlock_count": 0,
         "bounded": {
           "verdict": "holds",
           "detail": {
@@ -634,41 +588,27 @@
         "live": {
           "verdict": "fails",
           "detail": [
-            "T_OBSERVATION_GOES_STALE",
             "T_RECONCILED_RUN",
             "T_RECONCILED_RUN_AFTER_STALE",
             "T_RECONCILE_NEXT_RUN",
-            "T_REFUSE_OBSERVATION",
-            "T_RESEAL_FROM_RECEIPT",
-            "T_RESEED_AFTER_STALE",
             "T_RETIRE_SEED",
-            "T_RUN_PUMP",
-            "T_SCHEDULE_TICK",
             "T_SEED_FIRST_OBSERVATION"
           ]
         },
         "reversible": {
-          "verdict": "fails",
+          "verdict": "holds",
           "detail": null
         }
       },
       "reading": {
-        "schema": "gaia-bootstrap-deadlock-reading/2",
+        "schema": "gaia-bootstrap-deadlock-reading/3",
         "net": "gaia#80 hosted Draft pump, run gated on a fresh observation, seed installed",
-        "netRevision": "sha256:318a5282a5d125602732c613cc74976760d9a1f32d0faf5f49cef98c1e009957",
+        "netRevision": "sha256:cd6194424b84d0e6e271c4334b248feb8c7760a5cf4ce86154f6fa000b125a97",
         "states": 6,
         "truncated": false,
-        "reading": "REACHABLE_DEADLOCK",
-        "marking": {
-          "P_HEALTH_UNPROVEN": 1,
-          "P_NO_FRESH_OBSERVATION": 1,
-          "P_OBSERVATION_SCHEMA": 1,
-          "P_SEED_UNRETIRED": 1,
-          "P_TICK_DUE": 1
-        },
-        "witness": [
-          "T_OBSERVATION_GOES_STALE"
-        ],
+        "reading": "NO_DEADLOCK",
+        "marking": null,
+        "witness": null,
         "blocked": []
       }
     },
@@ -680,6 +620,7 @@
         "states": 1,
         "transitions_fired": 0,
         "truncated": false,
+        "truncation": null,
         "deadlock_free": {
           "verdict": "fails",
           "detail": [
@@ -727,7 +668,7 @@
         }
       },
       "reading": {
-        "schema": "gaia-bootstrap-deadlock-reading/2",
+        "schema": "gaia-bootstrap-deadlock-reading/3",
         "net": "gaia#80 acyclic control: a dispatch nobody requests",
         "netRevision": "sha256:8c75edfd1b50f80a16e93597104543991937c6fde1d470201ed142fa31bcb9eb",
         "states": 1,

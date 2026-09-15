@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 1998 gates
+node --test                                   # 2000 gates
 ```
 
 Use the single Node.js version in `.node-version` (26.8.1, the latest Current release
@@ -644,7 +644,7 @@ authoritative for their named contracts.
 | `src/drain-petri-net.mjs` | Pure bounded Petri-net interpreter for PR drain and lane lifecycles: validates nets, fires deterministic steps, replays evidence, and checks token-conserving reachability without I/O or authority. |
 | `src/drain-petri-net-facts.mjs` | Pure collector from an exact caller-authorized observation source plus content-addressed review artifacts into closed Petri receptivity facts; actor kind and prose grant nothing. |
 | `src/duckdb-drain-petri-net.mjs` | Optional, rebuildable DuckDB analytical projection of Petri markings and firings; named client-absence refusal, no transition or authority surface. |
-| `src/bootstrap-deadlock.mjs` | Pure issue #80 tracer nets (hosted Draft pump observation as shipped and as #80 specifies, with the receipt seed, staleness, steady state and seed retirement; a gated cyclic control, a seeded control and an acyclic control), content-addressed and handed to IX by revision, plus a fail-closed reading of an IX Petri analysis into `BOOTSTRAP_DEADLOCK` (dead at the initial marking on a prerequisite cycle), `MISSING_PREREQUISITE`, `REACHABLE_DEADLOCK`, `NO_DEADLOCK` or `UNDECIDED`; enumerates nothing itself. |
+| `src/bootstrap-deadlock.mjs` | Pure issue #80 tracer nets (hosted Draft pump observation as shipped and as #80 specifies, with the receipt seed, staleness, steady state and seed retirement; a gated cyclic control, a seeded control and an acyclic control), content-addressed and handed to IX by revision, plus a fail-closed reading of an IX Petri analysis into `BOOTSTRAP_DEADLOCK` (a dead marking whose transitions are blocked only by facts other blocked transitions would produce), `MISSING_PREREQUISITE`, `REACHABLE_DEADLOCK`, `NO_DEADLOCK` or `UNDECIDED`; enumerates nothing itself. |
 | `src/duckdb-ix-petri.mjs` | Optional DuckDB extension port to IX's `ix_petri_analyze`: loads a named `ix.duckdb_extension` into a throwaway in-memory store; named refusals for an absent client, an unloadable extension, or an extension without the function. |
 | `src/control-room.mjs` | Pure, content-addressed operator read model plus dependency-free HTML renderer; fresh real heartbeats are the only animated signal, and open-ended progress or ETA remains explicitly unknown. |
 | `src/git-gh-publication-effects.mjs` | Concrete local Git and `gh` publication effects with repeated identity checks, explicit remote-branch leases, and exact pull-request reuse. |
@@ -677,7 +677,7 @@ authoritative for their named contracts.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 1998 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 2000 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
