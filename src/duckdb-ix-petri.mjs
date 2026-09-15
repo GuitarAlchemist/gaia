@@ -14,7 +14,9 @@
  * -----------------------
  * Every missing piece is a named refusal, never an empty result:
  * - `DuckDbClientAbsent` — the optional client is not installed (the CI case);
- * - `IxExtensionLoadFailed` — the file is not a loadable extension for this engine;
+ * - `IxExtensionLoadFailed` — the file is not a loadable extension for this engine, carrying DuckDB's
+ *   own message. DuckDB derives the extension's entry point from the file stem, so the file must be
+ *   named `ix.duckdb_extension`: a renamed copy such as `ix-1234.duckdb_extension` fails to load;
  * - `IxPetriFunctionAbsent` — an extension loaded but carries no `ix_petri_analyze` (every IX
  *   release up to and including v0.5.0);
  * - `IxPetriAnalysisRefused` — the function refused the net (IX names the reason).
@@ -78,8 +80,8 @@ export async function analyzeNetsWithIxPetri({ nets, maxStates, extensionFile } 
   try {
     try {
       await connection.run(`LOAD ${sqlLiteral(resolve(extensionFile).replaceAll('\\', '/'))}`);
-    } catch {
-      fail('IxExtensionLoadFailed', 'the IX extension could not be loaded');
+    } catch (error) {
+      fail('IxExtensionLoadFailed', `the IX extension could not be loaded (its file stem must be \`ix\`): ${String(error?.message ?? error)}`);
     }
     const [{ n }] = (await connection.runAndReadAll(IX_PETRI_STATEMENTS.functionPresent)).getRowObjects();
     if (Number(n) === 0) fail('IxPetriFunctionAbsent', `the loaded extension has no ${IX_PETRI_FUNCTION}`);
