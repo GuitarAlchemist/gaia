@@ -8,19 +8,22 @@
  * initial transition", and its first acceptance criterion refuses an acyclic graph. This module
  * states both halves exactly, at a dead marking (no transition admissible there):
  *
- * - the blocked transitions are pruned to the largest set in which every place a member is missing
- *   has a producer (a transition that strictly adds tokens to it) that is itself a member. A
- *   transition missing a place that nothing produces, or that only transitions blocked for some
- *   other reason produce, is dropped, and so is everything waiting on it;
+ * - the circular set is the largest set of short places and blocked transitions in which every
+ *   member transition is short only of member places, and every member place is produced (strictly
+ *   given tokens) by some member transition while *every* transition that produces it is short of
+ *   some member place. The member places form a siphon: nothing puts tokens into them without
+ *   first taking tokens from them, so no transition outside the set is a way in (`blockedAt`);
  * - the marking is a bootstrap deadlock exactly when that set is not empty. Such a set always holds
  *   a cycle, and every member of it is blocked only by facts other members would produce.
  *
- * So an ordinary loop downstream of an unobtainable approval is not a bootstrap deadlock, nor is a
- * cycle whose entry also needs a place nothing produces: both read `MISSING_PREREQUISITE` when the
- * net is dead at its initial marking, and `REACHABLE_DEADLOCK` when it gets there after firing. A
- * dead marking reached after firing whose blockage is circular is a bootstrap deadlock too: #80
- * asks about the *currently* admissible transitions, not only the first. A net whose enumeration
- * was cut short is `UNDECIDED`. Nothing is inferred beyond that.
+ * So a loop downstream of an unobtainable approval is not a bootstrap deadlock, whether it re-enters
+ * through the blocked transition or through one of its own: the transition that lacks only the
+ * approval is a way in. Nor is a cycle whose entry also needs a place nothing produces. Both read
+ * `MISSING_PREREQUISITE` when the net is dead at its initial marking, and `REACHABLE_DEADLOCK` when
+ * it gets there after firing. A dead marking reached after firing whose blockage is circular is a
+ * bootstrap deadlock too: #80 asks about the *currently* admissible transitions, not only the
+ * first. A net whose enumeration was cut short, or whose dead markings IX listed only in part with
+ * none of the listed ones circular, is `UNDECIDED`. Nothing is inferred beyond that.
  *
  * The reachability analysis itself is not computed here. Issue #100's grooming asks to avoid a
  * duplicate Petri implementation, and ADR issue #107 routes Rust capabilities through a DuckDB
@@ -54,7 +57,10 @@
  * - `seededGatedControl` — `runGatedOnObservation` with #80's seed installed: a durable fact
  *   (`P_SEED_UNRETIRED`) that makes exactly one transition admissible, a run while no observation is
  *   fresh, as the shipped schedule runs whatever the observation's age. It is the control #80's
- *   grooming requires "not labelled deadlocked". It installs nothing.
+ *   grooming requires "not labelled deadlocked". It installs nothing. It is deadlock-free only
+ *   while the seed cannot retire, which `P_STEADY_STATE_PROOF = 0` guarantees: with the proof, the
+ *   seed retires, and the next STALE observation strands the gated run (a `REACHABLE_DEADLOCK`,
+ *   pinned in the tests).
  *
  * `acyclicControl` is a separate two-place net, dead at its initial marking with no cycle, for the
  * acyclic refusal. docs/bootstrap-deadlock.md maps every place and transition to the code.
@@ -62,7 +68,7 @@
 
 import { createHash } from 'node:crypto';
 
-export const BOOTSTRAP_DEADLOCK_READING_SCHEMA = 'gaia-bootstrap-deadlock-reading/3';
+export const BOOTSTRAP_DEADLOCK_READING_SCHEMA = 'gaia-bootstrap-deadlock-reading/4';
 
 /** Closed. `BOOTSTRAP_DEADLOCK` is #80's typed state; the others say why it is not that. */
 export const BOOTSTRAP_READINGS = Object.freeze([
@@ -181,7 +187,9 @@ export const CLAIMED_PREREQUISITE_ARCS = Object.freeze([
  * that makes exactly one transition admissible". The durable fact is `P_SEED_UNRETIRED`; the one
  * transition is a run while no observation is fresh, which is what the shipped schedule already
  * does (a six-hourly cron, and `runHostedDraftIntake` takes no observation). Both are read
- * arcs, so the seed is never spent and STALE cannot strand the run.
+ * arcs, so running never spends the seed and STALE cannot strand the run while the seed stands.
+ * `T_RETIRE_SEED` still consumes it; from then on this transition no longer matches the shipped
+ * schedule, which keeps running whatever the observation's age.
  */
 export const SEED_ADMITS_RUN = Object.freeze({
   transition: Object.freeze(['T_RUN_PUMP_ON_SEED', 'run hosted Draft intake admitted by the installed seed']),
@@ -282,10 +290,21 @@ function prerequisitePath(graph, start, goal, through) {
  * leaves short, and the shortest cycle `[transition, ..., missing place, transition]` that stays
  * inside the circular set, or null. Sorted by transition id.
  *
- * The circular set starts as every blocked transition and drops, until nothing changes, any member
- * missing a place that no remaining member produces. What is left is blocked only by facts other
- * members would produce, so it holds a cycle whenever it is not empty, and no member is blocked by
- * a place nothing in the net can supply.
+ * The circular set is the largest pair of a place set S and a transition set C such that:
+ * - a transition is in C when it is blocked and every place it is short of is in S;
+ * - a place is in S when some member of C produces it, and *every* producer of it is short of some
+ *   place in S.
+ * It is found by starting from every short place and every blocked transition and dropping, until
+ * nothing changes, whatever breaks its rule.
+ *
+ * The second rule makes S a siphon in the Petri-net sense (every transition that puts tokens into S
+ * takes tokens from S), and a siphon insufficiently marked at a marking stays so whatever else
+ * fires: no transition outside it offers a way in, even if every other missing fact were supplied.
+ * The first rule, with "some member produces it", makes the siphon one a seed on its own places
+ * restarts: every member is blocked only by facts other members would produce. So when the set is
+ * not empty it holds a cycle, and the blockage is circular in #80's sense. When a cycle's place has
+ * another producer short only of facts outside the set (an approval nothing grants, a spent fact),
+ * that producer is a way in, the cycle is downstream of what it lacks, and the place is dropped.
  */
 function blockedAt(definition, tokens) {
   const graph = incidence(definition);
@@ -295,12 +314,21 @@ function blockedAt(definition, tokens) {
     .map(([place]) => place)
     .sort()]));
   const circular = new Set(ids.filter((id) => missingOf.get(id).length > 0));
+  const places = new Set([...circular].flatMap((id) => missingOf.get(id)));
+  const producersOf = new Map([...places].map((place) => [place, ids.filter((id) => produces(graph, id, place))]));
   for (let pruned = true; pruned;) {
     pruned = false;
     for (const id of [...circular]) {
-      const supplied = (place) => [...circular].some((producer) => produces(graph, producer, place));
-      if (!missingOf.get(id).every(supplied)) {
+      if (!missingOf.get(id).every((place) => places.has(place))) {
         circular.delete(id);
+        pruned = true;
+      }
+    }
+    for (const place of [...places]) {
+      const producers = producersOf.get(place);
+      const noWayIn = producers.every((id) => missingOf.get(id).some((short) => places.has(short)));
+      if (!noWayIn || !producers.some((id) => circular.has(id))) {
+        places.delete(place);
         pruned = true;
       }
     }
@@ -334,15 +362,18 @@ const markingOf = ({ tokens }) => Object.fromEntries(tokens);
 /**
  * Read one `ix_petri_analyze` document for `definition` into a closed reading.
  *
- * Fails closed: an unrecognised verdict token, a failed verdict with no structured marking, a
- * `holds` from a truncated enumeration, or an analysis of any other net revision is refused rather
- * than read as `NO_DEADLOCK`. The analysis must have been requested with `ixNetDocument(definition)`,
- * which names the net by its revision.
+ * Fails closed: an unrecognised verdict token, a failed verdict with no structured marking or with
+ * a `deadlock_count` below the markings it lists, a `holds` from a truncated enumeration, or an
+ * analysis of any other net revision is refused rather than read as `NO_DEADLOCK`. The analysis
+ * must have been requested with `ixNetDocument(definition)`, which names the net by its revision.
  *
  * Only the dead markings IX lists are classified (at most 8, in breadth-first order, so the initial
  * marking comes first when it is dead). The first whose blockage is circular makes the reading
- * `BOOTSTRAP_DEADLOCK`; a dead initial marking with none is `MISSING_PREREQUISITE`; otherwise the
- * first listed is `REACHABLE_DEADLOCK`. A circular dead marking beyond those IX lists is not seen.
+ * `BOOTSTRAP_DEADLOCK`, which a longer list could not undo. Otherwise, when every dead marking was
+ * listed and the enumeration finished, a dead initial marking is `MISSING_PREREQUISITE` and any
+ * other is `REACHABLE_DEADLOCK`. When IX found more dead markings than it lists, or stopped short,
+ * an unseen one could be circular, so the reading is `UNDECIDED`. Every reading says how many dead
+ * markings IX found (`deadlockCount`) and how many of them were classified (`classifiedDeadlocks`).
  */
 export function readBootstrapAnalysis(definition, analysis) {
   if (analysis === null || typeof analysis !== 'object' || Array.isArray(analysis)) {
@@ -363,20 +394,29 @@ export function readBootstrapAnalysis(definition, analysis) {
     truncated: analysis.truncated,
   };
   const none = { marking: null, witness: null, blocked: [] };
-  if (verdict === 'unknown') return deepFreeze({ ...base, reading: 'UNDECIDED', ...none });
+  const counted = (deadlockCount, classifiedDeadlocks) => ({ ...base, deadlockCount, classifiedDeadlocks });
+  if (verdict === 'unknown') return deepFreeze({ ...counted(null, 0), reading: 'UNDECIDED', ...none });
   if (verdict === 'holds') {
     if (analysis.truncated) fail('AnalysisInvalid', 'a truncated enumeration cannot establish deadlock freedom');
-    return deepFreeze({ ...base, reading: 'NO_DEADLOCK', ...none });
+    return deepFreeze({ ...counted(0, 0), reading: 'NO_DEADLOCK', ...none });
   }
-  const classified = deadlocksOf(analysis.deadlock_free.detail).map((deadlock) => {
+  const listed = deadlocksOf(analysis.deadlock_free.detail);
+  const deadlockCount = analysis.deadlock_count;
+  if (!Number.isSafeInteger(deadlockCount) || deadlockCount < listed.length) {
+    fail('AnalysisInvalid', 'a failed deadlock verdict must count at least the dead markings it lists');
+  }
+  const classified = listed.map((deadlock) => {
     const blocked = blockedAt(definition, new Map(deadlock.tokens));
     return { deadlock, blocked, circular: blocked.some(({ cycle }) => cycle !== null) };
   });
   const reading = (reading, { deadlock, blocked }) => deepFreeze({
-    ...base, reading, marking: markingOf(deadlock), witness: [...deadlock.witness], blocked,
+    ...counted(deadlockCount, listed.length), reading, marking: markingOf(deadlock), witness: [...deadlock.witness], blocked,
   });
   const circular = classified.find((entry) => entry.circular);
   if (circular !== undefined) return reading('BOOTSTRAP_DEADLOCK', circular);
+  if (deadlockCount > listed.length || analysis.truncated) {
+    return deepFreeze({ ...counted(deadlockCount, listed.length), reading: 'UNDECIDED', ...none });
+  }
   const atStart = classified.find(({ deadlock }) => deadlock.witness.length === 0);
   if (atStart !== undefined) return reading('MISSING_PREREQUISITE', atStart);
   return reading('REACHABLE_DEADLOCK', { deadlock: classified[0].deadlock, blocked: [] });

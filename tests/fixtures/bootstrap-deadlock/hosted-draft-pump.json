@@ -99,11 +99,13 @@
         }
       },
       "reading": {
-        "schema": "gaia-bootstrap-deadlock-reading/3",
+        "schema": "gaia-bootstrap-deadlock-reading/4",
         "net": "gaia#80 hosted Draft pump observation, as shipped",
         "netRevision": "sha256:ca058cb9a21caeac6e16341cd3ebf855bcf714cb3b9c72322c4f5086cf606265",
         "states": 9,
         "truncated": false,
+        "deadlockCount": 0,
+        "classifiedDeadlocks": 0,
         "reading": "NO_DEADLOCK",
         "marking": null,
         "witness": null,
@@ -201,11 +203,13 @@
         }
       },
       "reading": {
-        "schema": "gaia-bootstrap-deadlock-reading/3",
+        "schema": "gaia-bootstrap-deadlock-reading/4",
         "net": "gaia#80 hosted Draft pump observation, as #80 specifies",
         "netRevision": "sha256:cd93a37b9e3146b7e032737439256d5aadfee9bb64080c6925580a7b0b5c96ac",
         "states": 21,
         "truncated": false,
+        "deadlockCount": 0,
+        "classifiedDeadlocks": 0,
         "reading": "NO_DEADLOCK",
         "marking": null,
         "witness": null,
@@ -349,11 +353,13 @@
         }
       },
       "reading": {
-        "schema": "gaia-bootstrap-deadlock-reading/3",
+        "schema": "gaia-bootstrap-deadlock-reading/4",
         "net": "gaia#80 hosted Draft pump, run gated on a fresh observation (cyclic control)",
         "netRevision": "sha256:cefc1ced7329ce53e7282d79e532b990a2b6d4242895637e85380e7a98c62419",
         "states": 1,
         "truncated": false,
+        "deadlockCount": 1,
+        "classifiedDeadlocks": 1,
         "reading": "BOOTSTRAP_DEADLOCK",
         "marking": {
           "P_HEALTH_UNPROVEN": 1,
@@ -601,11 +607,13 @@
         }
       },
       "reading": {
-        "schema": "gaia-bootstrap-deadlock-reading/3",
+        "schema": "gaia-bootstrap-deadlock-reading/4",
         "net": "gaia#80 hosted Draft pump, run gated on a fresh observation, seed installed",
         "netRevision": "sha256:cd6194424b84d0e6e271c4334b248feb8c7760a5cf4ce86154f6fa000b125a97",
         "states": 6,
         "truncated": false,
+        "deadlockCount": 0,
+        "classifiedDeadlocks": 0,
         "reading": "NO_DEADLOCK",
         "marking": null,
         "witness": null,
@@ -668,11 +676,13 @@
         }
       },
       "reading": {
-        "schema": "gaia-bootstrap-deadlock-reading/3",
+        "schema": "gaia-bootstrap-deadlock-reading/4",
         "net": "gaia#80 acyclic control: a dispatch nobody requests",
         "netRevision": "sha256:8c75edfd1b50f80a16e93597104543991937c6fde1d470201ed142fa31bcb9eb",
         "states": 1,
         "truncated": false,
+        "deadlockCount": 1,
+        "classifiedDeadlocks": 1,
         "reading": "MISSING_PREREQUISITE",
         "marking": {},
         "witness": [],

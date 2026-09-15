@@ -5,7 +5,8 @@
  *
  * - RECORDED. tests/fixtures/bootstrap-deadlock/hosted-draft-pump.json is the output of
  *   `node scripts/bootstrap-deadlock.mjs` against an `ix.duckdb_extension` built from
- *   GuitarAlchemist/ix#340 at commit 725bac4 (`pwsh crates/ix-duck-ext/build.ps1 -SmokeTest`). The
+ *   GuitarAlchemist/ix#340 at commit 05d2872 (`pwsh crates/ix-duck-ext/build.ps1 -SmokeTest`), and
+ *   probe-nets.json beside it is the same runner over the probe nets in probe-nets.mjs. The
  *   recorded tests run everywhere, including CI, and they are bound to the nets by content
  *   revision: IX is handed each net named by its revision, so editing a net without re-recording
  *   fails them rather than letting them keep asserting a verdict about a net that no longer exists.
@@ -36,10 +37,13 @@ import {
 } from '../src/bootstrap-deadlock.mjs';
 import { IX_PETRI_STATEMENTS, IxPetriDuckDbError, analyzeNetsWithIxPetri } from '../src/duckdb-ix-petri.mjs';
 import { runBootstrapDeadlock } from '../scripts/bootstrap-deadlock.mjs';
+import { PROBE_NETS } from './fixtures/bootstrap-deadlock/probe-nets.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const RECORDED_FILE = join(here, 'fixtures', 'bootstrap-deadlock', 'hosted-draft-pump.json');
 const RECORDED = JSON.parse(readFileSync(RECORDED_FILE, 'utf8'));
+const PROBED_FILE = join(here, 'fixtures', 'bootstrap-deadlock', 'probe-nets.json');
+const PROBED = JSON.parse(readFileSync(PROBED_FILE, 'utf8'));
 const NETS = HOSTED_DRAFT_PUMP_BOOTSTRAP_NETS;
 /** The recorded analysis, with its reading re-derived by today's core rather than read back. */
 const recorded = (key) => {
@@ -122,6 +126,10 @@ test('a run gated on a fresh observation is a bootstrap deadlock: dead at the in
     missing: ['P_INTAKE_RECEIPT'],
     cycle: ['T_SEED_FIRST_OBSERVATION', 'P_FRESH_OBSERVATION', 'T_RUN_PUMP', 'P_INTAKE_RECEIPT', 'T_SEED_FIRST_OBSERVATION'],
   });
+  // The proof path is a second producer of the fresh observation, but not a way in: besides the
+  // proof it needs a receipt, which only a gated run makes. That is what keeps the set circular
+  // under the siphon rule, where retryLoopBehindApproval's T_START, lacking only an approval, is not.
+  assert.deepEqual(blocked.T_RECONCILED_RUN_AFTER_STALE.missing, ['P_INTAKE_RECEIPT', 'P_STEADY_STATE', 'P_STEADY_STATE_PROOF']);
   const needsProof = ['T_RECONCILED_RUN', 'T_RECONCILED_RUN_AFTER_STALE', 'T_RECONCILE_NEXT_RUN', 'T_RETIRE_SEED'];
   for (const transition of needsProof) {
     assert.equal(blocked[transition].cycle, null, `${transition} waits on the steady-state proof nothing produces, not on the cycle`);
@@ -129,7 +137,7 @@ test('a run gated on a fresh observation is a bootstrap deadlock: dead at the in
   }
 });
 
-test('the seeded gated control is not labelled deadlocked: the durable seed keeps a run admissible after STALE', () => {
+test('the seeded gated control is not labelled deadlocked: while unretired, the durable seed keeps a run admissible after STALE', () => {
   const { analysis, reading } = recorded('seededGatedControl');
   assert.equal(reading.reading, 'NO_DEADLOCK');
   assert.equal(analysis.truncated, false);
@@ -168,17 +176,19 @@ test('the gated net differs from as shipped only by the prerequisite #80 does no
   assert.ok(Object.isFrozen(NETS.asShipped.arcs[0]));
 });
 
+// Synthetic documents: the reader's contract on shapes no recorded net produces.
 test('readBootstrapAnalysis separates a reachable deadlock and an undecided enumeration from a bootstrap deadlock', () => {
   const net = NETS.asShipped;
   const base = { net: netRevision(net), states: 3, truncated: false };
-  const reachable = readBootstrapAnalysis(net, {
-    ...base, deadlock_free: { verdict: 'fails', detail: [{ state: 2, marking: 'x=1', tokens: [['P_IDLE', 1]], witness: ['T_RUN_PUMP'] }] },
-  });
+  const dead = { verdict: 'fails', detail: [{ state: 2, marking: 'x=1', tokens: [['P_IDLE', 1]], witness: ['T_RUN_PUMP'] }] };
+  const reachable = readBootstrapAnalysis(net, { ...base, deadlock_free: dead, deadlock_count: 1 });
   assert.equal(reachable.reading, 'REACHABLE_DEADLOCK');
   assert.deepEqual(reachable.witness, ['T_RUN_PUMP']);
   assert.deepEqual(reachable.marking, { P_IDLE: 1 });
   const undecided = readBootstrapAnalysis(net, { ...base, truncated: true, deadlock_free: { verdict: 'unknown', detail: { reason: 'budget' } } });
   assert.equal(undecided.reading, 'UNDECIDED');
+  const cutShort = readBootstrapAnalysis(net, { ...base, truncated: true, deadlock_free: dead, deadlock_count: 1 });
+  assert.equal(cutShort.reading, 'UNDECIDED', 'an unexplored dead marking could be circular');
   assert.deepEqual([...BOOTSTRAP_READINGS].sort(), [
     'BOOTSTRAP_DEADLOCK', 'MISSING_PREREQUISITE', 'NO_DEADLOCK', 'REACHABLE_DEADLOCK', 'UNDECIDED',
   ]);
@@ -186,54 +196,107 @@ test('readBootstrapAnalysis separates a reachable deadlock and an undecided enum
 });
 
 /**
- * Small nets from the re-review, each read from the dead markings IX reports for it. The analyses
- * carry only the fields the reader consumes, with the `tokens` and `witness` an extension built from
- * ix#340 at 725bac4 returned for these exact nets.
+ * Small nets from the re-reviews (tests/fixtures/bootstrap-deadlock/probe-nets.mjs), read from the
+ * analyses the same extension recorded for them in probe-nets.json: every `states`, `state`,
+ * `deadlock_count`, `tokens` and `witness` below is one IX returned for that exact net.
  */
-const small = (name, places, transitions, arcs) => ({
-  name,
-  places: places.map(([id, tokens]) => ({ id, tokens })),
-  transitions: transitions.map((id) => ({ id })),
-  arcs: arcs.map(([from, to]) => ({ from, to })),
-});
-const readDead = (net, deadlocks) => readBootstrapAnalysis(net, {
-  net: netRevision(net), states: deadlocks.length + 1, truncated: false,
-  deadlock_free: { verdict: 'fails', detail: deadlocks.map(([tokens, witness], state) => ({ state, marking: '', tokens, witness })) },
-});
+const probe = (key) => {
+  const { analysis } = PROBED.nets.find((entry) => entry.key === key);
+  return { analysis, reading: readBootstrapAnalysis(PROBE_NETS[key], analysis) };
+};
 const cycles = (reading) => Object.fromEntries(reading.blocked.map(({ transition, cycle }) => [transition, cycle]));
 
-test('a loop downstream of an unobtainable prerequisite is not a bootstrap deadlock', () => {
-  const approvalWithWorkLoop = small('approval nobody grants, plus a reset loop',
-    [['P_APPROVAL', 0], ['P_IDLE', 1], ['P_DONE', 0]], ['T_WORK', 'T_RESET'],
-    [['P_APPROVAL', 'T_WORK'], ['P_IDLE', 'T_WORK'], ['T_WORK', 'P_DONE'], ['P_DONE', 'T_RESET'], ['T_RESET', 'P_IDLE']]);
-  const reading = readDead(approvalWithWorkLoop, [[[['P_IDLE', 1]], []]]);
-  assert.equal(reading.reading, 'MISSING_PREREQUISITE');
-  assert.deepEqual(cycles(reading), { T_RESET: null, T_WORK: null }, 'T_RESET waits on T_WORK, which waits on nothing the net makes');
-
-  const cyclePlusUnproducible = small('a cycle whose entry also needs a place nothing produces',
-    [['A', 0], ['B', 0], ['C', 0]], ['T', 'U'], [['A', 'T'], ['B', 'T'], ['T', 'C'], ['C', 'U'], ['U', 'A']]);
-  assert.equal(readDead(cyclePlusUnproducible, [[[], []]]).reading, 'MISSING_PREREQUISITE', 'no seed on the cycle admits T');
+test('the recorded probe analyses describe exactly the probe nets declared today, by revision', () => {
+  assert.equal(PROBED.maxStates, RECORDED.maxStates);
+  assert.deepEqual(PROBED.nets.map(({ key }) => key), Object.keys(PROBE_NETS));
+  for (const entry of PROBED.nets) {
+    assert.equal(entry.netRevision, netRevision(PROBE_NETS[entry.key]), `${entry.key}: re-record after editing the net`);
+    assert.equal(entry.analysis.net, entry.netRevision);
+    assert.deepEqual(entry.reading, readBootstrapAnalysis(PROBE_NETS[entry.key], entry.analysis));
+  }
 });
 
-test('a pure prerequisite cycle is a bootstrap deadlock at the initial marking and when a later firing wedges on it', () => {
-  const pureCycle = small('pure cycle', [['A', 0], ['C', 0]], ['T', 'U'], [['A', 'T'], ['T', 'C'], ['C', 'U'], ['U', 'A']]);
-  const atStart = readDead(pureCycle, [[[], []]]);
-  assert.equal(atStart.reading, 'BOOTSTRAP_DEADLOCK');
-  assert.deepEqual(cycles(atStart), { T: ['T', 'C', 'U', 'A', 'T'], U: ['U', 'A', 'T', 'C', 'U'] });
+test('a loop downstream of an unobtainable prerequisite is not a bootstrap deadlock, whichever transition it re-enters through', () => {
+  const approval = probe('approvalWithWorkLoop');
+  assert.equal(approval.analysis.states, 1);
+  assert.equal(approval.reading.reading, 'MISSING_PREREQUISITE');
+  assert.deepEqual(cycles(approval.reading), { T_RESET: null, T_WORK: null }, 'T_RESET waits on T_WORK, which waits on nothing the net makes');
 
-  const wedgesOnCycleLater = small('one step, then the pure cycle', [['S', 1], ['A', 0], ['C', 0]], ['T0', 'T', 'U'],
-    [['S', 'T0'], ['A', 'T'], ['T', 'C'], ['C', 'U'], ['U', 'A']]);
-  const later = readDead(wedgesOnCycleLater, [[[], ['T0']]]);
-  assert.equal(later.reading, 'BOOTSTRAP_DEADLOCK', '#80 asks about the currently admissible transitions');
-  assert.deepEqual(later.witness, ['T0']);
-  assert.deepEqual(cycles(later), { T: ['T', 'C', 'U', 'A', 'T'], T0: null, U: ['U', 'A', 'T', 'C', 'U'] });
+  // T_START, the way into P_RUNNING, lacks only the approval. The loop re-enters P_RUNNING through
+  // its own T_RETRY, but a place with a producer short only of facts outside the loop has a way in.
+  const retry = probe('retryLoopBehindApproval');
+  assert.equal(retry.reading.reading, 'MISSING_PREREQUISITE');
+  assert.deepEqual(cycles(retry.reading), { T_FAIL: null, T_FINISH: null, T_RETRY: null, T_START: null });
+  assert.deepEqual(retry.reading.blocked.find(({ transition }) => transition === 'T_START').missing, ['P_APPROVAL']);
 
-  const loopAfterWedge = small('one step, then an approval nobody grants', [['S', 1], ['P_APPROVAL', 0], ['P_IDLE', 0], ['P_DONE', 0]],
-    ['T0', 'T_WORK', 'T_RESET'],
-    [['S', 'T0'], ['T0', 'P_IDLE'], ['P_APPROVAL', 'T_WORK'], ['P_IDLE', 'T_WORK'], ['T_WORK', 'P_DONE'], ['P_DONE', 'T_RESET'], ['T_RESET', 'P_IDLE']]);
-  const ordinary = readDead(loopAfterWedge, [[[['P_IDLE', 1]], ['T0']]]);
-  assert.equal(ordinary.reading, 'REACHABLE_DEADLOCK');
-  assert.deepEqual(ordinary.blocked, []);
+  const unproducible = probe('cyclePlusUnproducible');
+  assert.equal(unproducible.reading.reading, 'MISSING_PREREQUISITE', 'no seed on the cycle admits T, which also needs B');
+
+  const later = probe('loopAfterWedge');
+  assert.equal(later.analysis.states, 2);
+  assert.equal(later.reading.reading, 'REACHABLE_DEADLOCK');
+  assert.deepEqual(later.reading.witness, ['T0']);
+  assert.deepEqual(later.reading.blocked, []);
+});
+
+test('a prerequisite cycle with no way in is a bootstrap deadlock: at the initial marking, after a firing, over read arcs and one token short', () => {
+  const atStart = probe('pureCycle');
+  assert.equal(atStart.analysis.states, 1, 'dead at m0 is the whole state space');
+  assert.equal(atStart.reading.reading, 'BOOTSTRAP_DEADLOCK');
+  assert.deepEqual(cycles(atStart.reading), { T: ['T', 'C', 'U', 'A', 'T'], U: ['U', 'A', 'T', 'C', 'U'] });
+
+  const later = probe('wedgesOnCycleLater');
+  assert.equal(later.analysis.states, 2);
+  assert.equal(later.analysis.deadlock_free.detail[0].state, 1, 'IX numbers the dead marking after m0');
+  assert.equal(later.reading.reading, 'BOOTSTRAP_DEADLOCK', '#80 asks about the currently admissible transitions');
+  assert.deepEqual(later.reading.witness, ['T0']);
+  assert.deepEqual(cycles(later.reading), { T: ['T', 'C', 'U', 'A', 'T'], T0: null, U: ['U', 'A', 'T', 'C', 'U'] });
+
+  const readArcs = probe('mutualReadArcs');
+  assert.equal(readArcs.reading.reading, 'BOOTSTRAP_DEADLOCK', 'a read arc produces nothing; the writes close the cycle');
+  const weighted = probe('weightedCycle');
+  assert.equal(weighted.reading.reading, 'BOOTSTRAP_DEADLOCK');
+  assert.deepEqual(weighted.reading.marking, { A: 1 }, 'one token short of the weight-2 arc');
+});
+
+test('a circular component anywhere in a dead marking decides the label, and the other blocked transitions still name what they lack', () => {
+  const { reading } = probe('blockerPlusUnrelatedLoop');
+  assert.equal(reading.reading, 'BOOTSTRAP_DEADLOCK', 'TX and TY are blocked only by each other');
+  assert.deepEqual(reading.blocked, [
+    { transition: 'TX', missing: ['X'], cycle: ['TX', 'Y', 'TY', 'X', 'TX'] },
+    { transition: 'TY', missing: ['Y'], cycle: ['TY', 'X', 'TX', 'Y', 'TY'] },
+    { transition: 'T_RESET', missing: ['P_DONE'], cycle: null },
+    { transition: 'T_WORK', missing: ['P_APPROVAL'], cycle: null },
+  ]);
+});
+
+test('when IX lists only some dead markings and none of them is circular, the reading is UNDECIDED and says how many it classified', () => {
+  const { analysis, reading } = probe('hiddenBehindEight');
+  assert.deepEqual([analysis.states, analysis.deadlock_count, analysis.deadlock_free.detail.length], [10, 9, 8]);
+  assert.deepEqual(analysis.deadlock_free.detail.map(({ witness }) => witness), [0, 1, 2, 3, 4, 5, 6, 7].map((i) => [`T_A${i}`]),
+    'the eight plain dead ends come first; the circular one, after T_Z, is not listed');
+  assert.equal(reading.reading, 'UNDECIDED');
+  assert.deepEqual([reading.classifiedDeadlocks, reading.deadlockCount], [8, 9]);
+  assert.deepEqual([reading.marking, reading.witness, reading.blocked], [null, null, []]);
+  for (const key of Object.keys(PROBE_NETS).filter((name) => name !== 'hiddenBehindEight')) {
+    const { analysis: complete, reading: whole } = probe(key);
+    assert.equal(whole.classifiedDeadlocks, complete.deadlock_free.detail.length);
+    assert.equal(whole.deadlockCount, complete.deadlock_count, `${key}: every other probe lists every dead marking`);
+  }
+});
+
+test('the seeded gated control is deadlock-free only while its seed is unretired: once a proof lets it retire, STALE strands the gated run', () => {
+  const { analysis, reading } = probe('seededGatedControlWithProof');
+  assert.equal(analysis.truncated, false);
+  assert.equal(analysis.states, 18);
+  // Not BOOTSTRAP_DEADLOCK: the seed run is a way into the cycle, closed by the retired seed, so
+  // what strands the run is the retirement, not the cycle alone.
+  assert.equal(reading.reading, 'REACHABLE_DEADLOCK');
+  assert.deepEqual(reading.witness, ['T_RUN_PUMP', 'T_RECONCILE_NEXT_RUN', 'T_OBSERVATION_GOES_STALE', 'T_RETIRE_SEED', 'T_SCHEDULE_TICK']);
+  assert.deepEqual(reading.marking, {
+    P_NO_FRESH_OBSERVATION: 1, P_OBSERVATION_SCHEMA: 1, P_SEED_RETIRED: 1, P_STEADY_STATE: 1, P_STEADY_STATE_PROOF: 1, P_TICK_DUE: 1,
+  }, 'retired, stale, due: the gated run needs a fresh observation, the seed run an unretired seed, the reconciled run a receipt');
+  assert.equal(recorded('seededGatedControl').reading.reading, 'NO_DEADLOCK', 'without the proof the seed never retires');
 });
 
 test('readBootstrapAnalysis fails closed on an unrecognised verdict, an empty or prose-only failure, or another revision', () => {
@@ -246,6 +309,9 @@ test('readBootstrapAnalysis fails closed on an unrecognised verdict, an empty or
   refuses({ ...base, deadlock_free: { verdict: 'mostly_holds', detail: [] } }, 'AnalysisInvalid');
   refuses({ ...base, deadlock_free: { verdict: 'fails', detail: [] } }, 'AnalysisInvalid');
   refuses({ ...base, deadlock_free: { verdict: 'fails', detail: [{ state: 0, marking: 'x=1', witness: [] }] } }, 'AnalysisInvalid');
+  const listed = { verdict: 'fails', detail: [{ state: 0, marking: '', tokens: [], witness: [] }] };
+  refuses({ ...base, deadlock_free: listed }, 'AnalysisInvalid');
+  refuses({ ...base, deadlock_free: listed, deadlock_count: 0 }, 'AnalysisInvalid');
   refuses({ ...base, truncated: 'no', deadlock_free: { verdict: 'holds', detail: [] } }, 'AnalysisInvalid');
   refuses({ ...base, truncated: true, deadlock_free: { verdict: 'holds', detail: [] } }, 'AnalysisInvalid');
   refuses({ ...base, net: net.name, deadlock_free: { verdict: 'holds', detail: [] } }, 'AnalysisNetMismatch');
@@ -326,7 +392,7 @@ test('the core imports only a hash, and the Adapter reads no environment, spawns
   }
 });
 
-test('live: the IX extension reproduces the recorded analyses byte for byte', async (t) => {
+test('live: the IX extension reproduces the recorded analyses, of the pump nets and the probe nets, byte for byte', async (t) => {
   const required = process.env.GAIA_REQUIRE_IX_PETRI === '1';
   const extensionFile = process.env.GAIA_IX_DUCKDB_EXTENSION;
   if (extensionFile === undefined || extensionFile === '') {
@@ -345,4 +411,6 @@ test('live: the IX extension reproduces the recorded analyses byte for byte', as
     throw error;
   }
   assert.equal(`${JSON.stringify(live, null, 2)}\n`, readFileSync(RECORDED_FILE, 'utf8'));
+  const probed = await runBootstrapDeadlock({ extensionFile, maxStates: PROBED.maxStates, nets: PROBE_NETS });
+  assert.equal(`${JSON.stringify(probed, null, 2)}\n`, readFileSync(PROBED_FILE, 'utf8'));
 });

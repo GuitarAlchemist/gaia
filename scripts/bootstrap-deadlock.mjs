@@ -26,10 +26,15 @@ export const DEFAULT_MAX_STATES = 10_000;
 
 const USAGE = 'usage: node scripts/bootstrap-deadlock.mjs --extension <file> [--max-states <n>]';
 
-/** One analysis document for every declared net, in declaration order. */
-export async function runBootstrapDeadlock({ extensionFile, maxStates = DEFAULT_MAX_STATES }, adapterOptions) {
-  const keys = Object.keys(HOSTED_DRAFT_PUMP_BOOTSTRAP_NETS);
-  const nets = keys.map((key) => HOSTED_DRAFT_PUMP_BOOTSTRAP_NETS[key]);
+/**
+ * One analysis document for every net in `nets` (by default issue #80's hosted Draft pump nets), in
+ * declaration order. The tests record their probe nets through this same path.
+ */
+export async function runBootstrapDeadlock({
+  extensionFile, maxStates = DEFAULT_MAX_STATES, nets: declared = HOSTED_DRAFT_PUMP_BOOTSTRAP_NETS,
+}, adapterOptions) {
+  const keys = Object.keys(declared);
+  const nets = keys.map((key) => declared[key]);
   const { analyses } = await analyzeNetsWithIxPetri({ nets: nets.map(ixNetDocument), maxStates, extensionFile }, adapterOptions);
   return {
     schema: BOOTSTRAP_DEADLOCK_RUN_SCHEMA,
