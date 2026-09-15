@@ -17,7 +17,7 @@
 import { pathToFileURL } from 'node:url';
 
 import {
-  BootstrapDeadlockError, HOSTED_DRAFT_PUMP_BOOTSTRAP_NETS, netRevision, readBootstrapAnalysis,
+  BootstrapDeadlockError, HOSTED_DRAFT_PUMP_BOOTSTRAP_NETS, ixNetDocument, netRevision, readBootstrapAnalysis,
 } from '../src/bootstrap-deadlock.mjs';
 import { IX_PETRI_FUNCTION, IxPetriDuckDbError, analyzeNetsWithIxPetri } from '../src/duckdb-ix-petri.mjs';
 
@@ -30,7 +30,7 @@ const USAGE = 'usage: node scripts/bootstrap-deadlock.mjs --extension <file> [--
 export async function runBootstrapDeadlock({ extensionFile, maxStates = DEFAULT_MAX_STATES }, adapterOptions) {
   const keys = Object.keys(HOSTED_DRAFT_PUMP_BOOTSTRAP_NETS);
   const nets = keys.map((key) => HOSTED_DRAFT_PUMP_BOOTSTRAP_NETS[key]);
-  const { analyses } = await analyzeNetsWithIxPetri({ nets, maxStates, extensionFile }, adapterOptions);
+  const { analyses } = await analyzeNetsWithIxPetri({ nets: nets.map(ixNetDocument), maxStates, extensionFile }, adapterOptions);
   return {
     schema: BOOTSTRAP_DEADLOCK_RUN_SCHEMA,
     function: IX_PETRI_FUNCTION,
