@@ -70,6 +70,7 @@ only in the final column and must not escape in a result or refusal.
 | Hosted Draft intake | `runHostedDraftIntake(trigger, observations) -> receipt or refusal`; `produceHostedDraftPumpObservation(receipt) -> observation or refusal` | Bounded unsettled recovery before admitting at most one candidate; unchanged ambiguous records are quarantined for the scheduled tick without being settled; authority-free sealed observation | GitHub Actions intake, one recovery group plus one group per labeled issue; existing Draft ledger/admission/effect adapters; deterministic fixtures |
 | Portfolio survey and drain | `survey(observations) -> revision`; `advance(revision) -> intent or refusal` | Read-only inventory to one bounded next transition; optional Draft `target()` selects only exact ready work from the full fresh inventory; restrictive Draft readback before authority consumption | GitHub inventory and exact Draft read adapters; deterministic fixtures; append-only drain ledger |
 | Drain Petri net | `buildNet(definition) -> net`; `replay(net, events) -> run`; `collectDrainFacts(input) -> facts or refusal` | Bounded pull-request drain and lane lifecycle with exact-source evidence | JSONL artifact adapter; optional DuckDB read projection; read-only CLI |
+| Bootstrap deadlock tracer | `readBootstrapAnalysis(net, analysis) -> reading or refusal`; `analyzeNetsWithIxPetri(nets, bound, extension) -> analyses or refusal` | Issue #80 tracer nets read as a typed bootstrap state from an external reachability analysis; no seed, no authority | IX `ix_petri_analyze` loaded as a DuckDB extension into a throwaway in-memory store; recorded fixture |
 | Pull-request conflict classification | `classifyPrConflict(observation, claim) -> reading or refusal` | Exact-generation, read-only classification under a closed empty strategy registry | normalized GitHub observation; deterministic fixtures |
 | Runner capability probe | `probe(mandate, lease, adapter) -> receipt or blocker` | Read-only capability question decided by identity, generation, lease, admission and reconciliation before any adapter is consulted | synthetic-fixture probe; deterministic in-memory fixtures |
 | Publication and operator | `prepare(intent)`; `authorize(grant)`; `execute(intent) -> receipt` | Human-mediated privileged effect | GitHub publication/operator adapters; owned in-memory broker tests |
@@ -445,6 +446,8 @@ are linked here.
 - [Lane generation bootstrap](docs/lane-generation-bootstrap.md) — manifest-derived generation
   identity, topology-before-spawn ordering, the launch receipt as linearization point, and exact
   compensation.
+- [Bootstrap deadlock tracer](docs/bootstrap-deadlock.md) — issue #80's hosted Draft pump cycle as
+  Petri nets, analysed by IX through the DuckDB extension port; recorded versus live evidence.
 - [Ecosystem adapters](docs/ecosystem-adapters.md) and
   [hybrid semantic search](docs/hybrid-semantic-search.md) — bounded external and offline inputs.
 - [Pull-request conflict classifier](docs/pr-conflict-reconciler.md) — exact-generation read-only
