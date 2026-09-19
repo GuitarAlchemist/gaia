@@ -1,0 +1,1330 @@
+{
+  "schema": "gaia-bootstrap-deadlock-analysis/1",
+  "function": "ix_petri_analyze",
+  "maxStates": 10000,
+  "nets": [
+    {
+      "key": "pureCycle",
+      "netRevision": "sha256:b59e6a3926fe570d617d12fb72b1465f347b55a06220686d7f61a1eefadcafd6",
+      "analysis": {
+        "net": "sha256:b59e6a3926fe570d617d12fb72b1465f347b55a06220686d7f61a1eefadcafd6",
+        "states": 1,
+        "transitions_fired": 0,
+        "truncated": false,
+        "truncation": null,
+        "deadlock_free": {
+          "verdict": "fails",
+          "detail": [
+            {
+              "state": 0,
+              "marking": "(empty)",
+              "tokens": [],
+              "witness": []
+            }
+          ]
+        },
+        "deadlock_count": 1,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 0,
+            "per_place": [
+              [
+                "A",
+                0
+              ],
+              [
+                "C",
+                0
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "fails",
+          "detail": [
+            "T",
+            "U"
+          ]
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "T",
+            "U"
+          ]
+        },
+        "reversible": {
+          "verdict": "holds",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/4",
+        "net": "pure cycle",
+        "netRevision": "sha256:b59e6a3926fe570d617d12fb72b1465f347b55a06220686d7f61a1eefadcafd6",
+        "states": 1,
+        "truncated": false,
+        "deadlockCount": 1,
+        "classifiedDeadlocks": 1,
+        "reading": "BOOTSTRAP_DEADLOCK",
+        "marking": {},
+        "witness": [],
+        "blocked": [
+          {
+            "transition": "T",
+            "missing": [
+              "A"
+            ],
+            "cycle": [
+              "T",
+              "C",
+              "U",
+              "A",
+              "T"
+            ]
+          },
+          {
+            "transition": "U",
+            "missing": [
+              "C"
+            ],
+            "cycle": [
+              "U",
+              "A",
+              "T",
+              "C",
+              "U"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "key": "wedgesOnCycleLater",
+      "netRevision": "sha256:b4b1d2b6e843e920197f0a1ff0b417fb2657282084979ec42423764165ba61f6",
+      "analysis": {
+        "net": "sha256:b4b1d2b6e843e920197f0a1ff0b417fb2657282084979ec42423764165ba61f6",
+        "states": 2,
+        "transitions_fired": 1,
+        "truncated": false,
+        "truncation": null,
+        "deadlock_free": {
+          "verdict": "fails",
+          "detail": [
+            {
+              "state": 1,
+              "marking": "(empty)",
+              "tokens": [],
+              "witness": [
+                "T0"
+              ]
+            }
+          ]
+        },
+        "deadlock_count": 1,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 1,
+            "per_place": [
+              [
+                "A",
+                0
+              ],
+              [
+                "C",
+                0
+              ],
+              [
+                "S",
+                1
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "fails",
+          "detail": [
+            "T",
+            "U"
+          ]
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "T",
+            "T0",
+            "U"
+          ]
+        },
+        "reversible": {
+          "verdict": "fails",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/4",
+        "net": "one step, then the pure cycle",
+        "netRevision": "sha256:b4b1d2b6e843e920197f0a1ff0b417fb2657282084979ec42423764165ba61f6",
+        "states": 2,
+        "truncated": false,
+        "deadlockCount": 1,
+        "classifiedDeadlocks": 1,
+        "reading": "BOOTSTRAP_DEADLOCK",
+        "marking": {},
+        "witness": [
+          "T0"
+        ],
+        "blocked": [
+          {
+            "transition": "T",
+            "missing": [
+              "A"
+            ],
+            "cycle": [
+              "T",
+              "C",
+              "U",
+              "A",
+              "T"
+            ]
+          },
+          {
+            "transition": "T0",
+            "missing": [
+              "S"
+            ],
+            "cycle": null
+          },
+          {
+            "transition": "U",
+            "missing": [
+              "C"
+            ],
+            "cycle": [
+              "U",
+              "A",
+              "T",
+              "C",
+              "U"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "key": "mutualReadArcs",
+      "netRevision": "sha256:c226efaeff7bdacc7081bf9a7d4f78e299fa3ad7dde7125114e2238e1f366e80",
+      "analysis": {
+        "net": "sha256:c226efaeff7bdacc7081bf9a7d4f78e299fa3ad7dde7125114e2238e1f366e80",
+        "states": 1,
+        "transitions_fired": 0,
+        "truncated": false,
+        "truncation": null,
+        "deadlock_free": {
+          "verdict": "fails",
+          "detail": [
+            {
+              "state": 0,
+              "marking": "(empty)",
+              "tokens": [],
+              "witness": []
+            }
+          ]
+        },
+        "deadlock_count": 1,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 0,
+            "per_place": [
+              [
+                "A",
+                0
+              ],
+              [
+                "B",
+                0
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "fails",
+          "detail": [
+            "T",
+            "U"
+          ]
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "T",
+            "U"
+          ]
+        },
+        "reversible": {
+          "verdict": "holds",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/4",
+        "net": "T reads A and writes B, U reads B and writes A",
+        "netRevision": "sha256:c226efaeff7bdacc7081bf9a7d4f78e299fa3ad7dde7125114e2238e1f366e80",
+        "states": 1,
+        "truncated": false,
+        "deadlockCount": 1,
+        "classifiedDeadlocks": 1,
+        "reading": "BOOTSTRAP_DEADLOCK",
+        "marking": {},
+        "witness": [],
+        "blocked": [
+          {
+            "transition": "T",
+            "missing": [
+              "A"
+            ],
+            "cycle": [
+              "T",
+              "B",
+              "U",
+              "A",
+              "T"
+            ]
+          },
+          {
+            "transition": "U",
+            "missing": [
+              "B"
+            ],
+            "cycle": [
+              "U",
+              "A",
+              "T",
+              "B",
+              "U"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "key": "weightedCycle",
+      "netRevision": "sha256:0928b5822e740b94a1a888b42979957e86d2101de8aa5c19e4a6f99f594a8eb5",
+      "analysis": {
+        "net": "sha256:0928b5822e740b94a1a888b42979957e86d2101de8aa5c19e4a6f99f594a8eb5",
+        "states": 1,
+        "transitions_fired": 0,
+        "truncated": false,
+        "truncation": null,
+        "deadlock_free": {
+          "verdict": "fails",
+          "detail": [
+            {
+              "state": 0,
+              "marking": "A=1",
+              "tokens": [
+                [
+                  "A",
+                  1
+                ]
+              ],
+              "witness": []
+            }
+          ]
+        },
+        "deadlock_count": 1,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 1,
+            "per_place": [
+              [
+                "A",
+                1
+              ],
+              [
+                "C",
+                0
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "fails",
+          "detail": [
+            "T",
+            "U"
+          ]
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "T",
+            "U"
+          ]
+        },
+        "reversible": {
+          "verdict": "holds",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/4",
+        "net": "a cycle one token short on a weight-2 arc",
+        "netRevision": "sha256:0928b5822e740b94a1a888b42979957e86d2101de8aa5c19e4a6f99f594a8eb5",
+        "states": 1,
+        "truncated": false,
+        "deadlockCount": 1,
+        "classifiedDeadlocks": 1,
+        "reading": "BOOTSTRAP_DEADLOCK",
+        "marking": {
+          "A": 1
+        },
+        "witness": [],
+        "blocked": [
+          {
+            "transition": "T",
+            "missing": [
+              "A"
+            ],
+            "cycle": [
+              "T",
+              "C",
+              "U",
+              "A",
+              "T"
+            ]
+          },
+          {
+            "transition": "U",
+            "missing": [
+              "C"
+            ],
+            "cycle": [
+              "U",
+              "A",
+              "T",
+              "C",
+              "U"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "key": "approvalWithWorkLoop",
+      "netRevision": "sha256:eaaa4537560f564d661d91173e081fc94982c76a4ffaa53b2cd329464e8e08f1",
+      "analysis": {
+        "net": "sha256:eaaa4537560f564d661d91173e081fc94982c76a4ffaa53b2cd329464e8e08f1",
+        "states": 1,
+        "transitions_fired": 0,
+        "truncated": false,
+        "truncation": null,
+        "deadlock_free": {
+          "verdict": "fails",
+          "detail": [
+            {
+              "state": 0,
+              "marking": "P_IDLE=1",
+              "tokens": [
+                [
+                  "P_IDLE",
+                  1
+                ]
+              ],
+              "witness": []
+            }
+          ]
+        },
+        "deadlock_count": 1,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 1,
+            "per_place": [
+              [
+                "P_APPROVAL",
+                0
+              ],
+              [
+                "P_DONE",
+                0
+              ],
+              [
+                "P_IDLE",
+                1
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "fails",
+          "detail": [
+            "T_RESET",
+            "T_WORK"
+          ]
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "T_RESET",
+            "T_WORK"
+          ]
+        },
+        "reversible": {
+          "verdict": "holds",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/4",
+        "net": "approval nobody grants, plus a reset loop",
+        "netRevision": "sha256:eaaa4537560f564d661d91173e081fc94982c76a4ffaa53b2cd329464e8e08f1",
+        "states": 1,
+        "truncated": false,
+        "deadlockCount": 1,
+        "classifiedDeadlocks": 1,
+        "reading": "MISSING_PREREQUISITE",
+        "marking": {
+          "P_IDLE": 1
+        },
+        "witness": [],
+        "blocked": [
+          {
+            "transition": "T_RESET",
+            "missing": [
+              "P_DONE"
+            ],
+            "cycle": null
+          },
+          {
+            "transition": "T_WORK",
+            "missing": [
+              "P_APPROVAL"
+            ],
+            "cycle": null
+          }
+        ]
+      }
+    },
+    {
+      "key": "retryLoopBehindApproval",
+      "netRevision": "sha256:9bdb27454a007ff54514c999d65dc789486cf9e59b36058df653777b5a057f92",
+      "analysis": {
+        "net": "sha256:9bdb27454a007ff54514c999d65dc789486cf9e59b36058df653777b5a057f92",
+        "states": 1,
+        "transitions_fired": 0,
+        "truncated": false,
+        "truncation": null,
+        "deadlock_free": {
+          "verdict": "fails",
+          "detail": [
+            {
+              "state": 0,
+              "marking": "(empty)",
+              "tokens": [],
+              "witness": []
+            }
+          ]
+        },
+        "deadlock_count": 1,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 0,
+            "per_place": [
+              [
+                "P_APPROVAL",
+                0
+              ],
+              [
+                "P_DONE",
+                0
+              ],
+              [
+                "P_FAILED",
+                0
+              ],
+              [
+                "P_RUNNING",
+                0
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "fails",
+          "detail": [
+            "T_FAIL",
+            "T_FINISH",
+            "T_RETRY",
+            "T_START"
+          ]
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "T_FAIL",
+            "T_FINISH",
+            "T_RETRY",
+            "T_START"
+          ]
+        },
+        "reversible": {
+          "verdict": "holds",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/4",
+        "net": "a retry loop behind an approval nobody grants",
+        "netRevision": "sha256:9bdb27454a007ff54514c999d65dc789486cf9e59b36058df653777b5a057f92",
+        "states": 1,
+        "truncated": false,
+        "deadlockCount": 1,
+        "classifiedDeadlocks": 1,
+        "reading": "MISSING_PREREQUISITE",
+        "marking": {},
+        "witness": [],
+        "blocked": [
+          {
+            "transition": "T_FAIL",
+            "missing": [
+              "P_RUNNING"
+            ],
+            "cycle": null
+          },
+          {
+            "transition": "T_FINISH",
+            "missing": [
+              "P_RUNNING"
+            ],
+            "cycle": null
+          },
+          {
+            "transition": "T_RETRY",
+            "missing": [
+              "P_FAILED"
+            ],
+            "cycle": null
+          },
+          {
+            "transition": "T_START",
+            "missing": [
+              "P_APPROVAL"
+            ],
+            "cycle": null
+          }
+        ]
+      }
+    },
+    {
+      "key": "blockerPlusUnrelatedLoop",
+      "netRevision": "sha256:6e61f9afcf119b0a2632d965ac2949441067e156b406ddf99107a89d83c0cf83",
+      "analysis": {
+        "net": "sha256:6e61f9afcf119b0a2632d965ac2949441067e156b406ddf99107a89d83c0cf83",
+        "states": 1,
+        "transitions_fired": 0,
+        "truncated": false,
+        "truncation": null,
+        "deadlock_free": {
+          "verdict": "fails",
+          "detail": [
+            {
+              "state": 0,
+              "marking": "P_IDLE=1",
+              "tokens": [
+                [
+                  "P_IDLE",
+                  1
+                ]
+              ],
+              "witness": []
+            }
+          ]
+        },
+        "deadlock_count": 1,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 1,
+            "per_place": [
+              [
+                "P_APPROVAL",
+                0
+              ],
+              [
+                "P_DONE",
+                0
+              ],
+              [
+                "P_IDLE",
+                1
+              ],
+              [
+                "X",
+                0
+              ],
+              [
+                "Y",
+                0
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "fails",
+          "detail": [
+            "TX",
+            "TY",
+            "T_RESET",
+            "T_WORK"
+          ]
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "TX",
+            "TY",
+            "T_RESET",
+            "T_WORK"
+          ]
+        },
+        "reversible": {
+          "verdict": "holds",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/4",
+        "net": "approval nobody grants with a reset loop, plus a disconnected empty loop",
+        "netRevision": "sha256:6e61f9afcf119b0a2632d965ac2949441067e156b406ddf99107a89d83c0cf83",
+        "states": 1,
+        "truncated": false,
+        "deadlockCount": 1,
+        "classifiedDeadlocks": 1,
+        "reading": "BOOTSTRAP_DEADLOCK",
+        "marking": {
+          "P_IDLE": 1
+        },
+        "witness": [],
+        "blocked": [
+          {
+            "transition": "TX",
+            "missing": [
+              "X"
+            ],
+            "cycle": [
+              "TX",
+              "Y",
+              "TY",
+              "X",
+              "TX"
+            ]
+          },
+          {
+            "transition": "TY",
+            "missing": [
+              "Y"
+            ],
+            "cycle": [
+              "TY",
+              "X",
+              "TX",
+              "Y",
+              "TY"
+            ]
+          },
+          {
+            "transition": "T_RESET",
+            "missing": [
+              "P_DONE"
+            ],
+            "cycle": null
+          },
+          {
+            "transition": "T_WORK",
+            "missing": [
+              "P_APPROVAL"
+            ],
+            "cycle": null
+          }
+        ]
+      }
+    },
+    {
+      "key": "cyclePlusUnproducible",
+      "netRevision": "sha256:dfeaf7d7e8a90d174d424fede23ea8a7ef709e43213e2a78ef17fa640702a205",
+      "analysis": {
+        "net": "sha256:dfeaf7d7e8a90d174d424fede23ea8a7ef709e43213e2a78ef17fa640702a205",
+        "states": 1,
+        "transitions_fired": 0,
+        "truncated": false,
+        "truncation": null,
+        "deadlock_free": {
+          "verdict": "fails",
+          "detail": [
+            {
+              "state": 0,
+              "marking": "(empty)",
+              "tokens": [],
+              "witness": []
+            }
+          ]
+        },
+        "deadlock_count": 1,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 0,
+            "per_place": [
+              [
+                "A",
+                0
+              ],
+              [
+                "B",
+                0
+              ],
+              [
+                "C",
+                0
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "fails",
+          "detail": [
+            "T",
+            "U"
+          ]
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "T",
+            "U"
+          ]
+        },
+        "reversible": {
+          "verdict": "holds",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/4",
+        "net": "a cycle whose entry also needs a place nothing produces",
+        "netRevision": "sha256:dfeaf7d7e8a90d174d424fede23ea8a7ef709e43213e2a78ef17fa640702a205",
+        "states": 1,
+        "truncated": false,
+        "deadlockCount": 1,
+        "classifiedDeadlocks": 1,
+        "reading": "MISSING_PREREQUISITE",
+        "marking": {},
+        "witness": [],
+        "blocked": [
+          {
+            "transition": "T",
+            "missing": [
+              "A",
+              "B"
+            ],
+            "cycle": null
+          },
+          {
+            "transition": "U",
+            "missing": [
+              "C"
+            ],
+            "cycle": null
+          }
+        ]
+      }
+    },
+    {
+      "key": "loopAfterWedge",
+      "netRevision": "sha256:d241a688100a96e76056c454a3814e6db68b11c749001f5df48183e91fcab3ae",
+      "analysis": {
+        "net": "sha256:d241a688100a96e76056c454a3814e6db68b11c749001f5df48183e91fcab3ae",
+        "states": 2,
+        "transitions_fired": 1,
+        "truncated": false,
+        "truncation": null,
+        "deadlock_free": {
+          "verdict": "fails",
+          "detail": [
+            {
+              "state": 1,
+              "marking": "P_IDLE=1",
+              "tokens": [
+                [
+                  "P_IDLE",
+                  1
+                ]
+              ],
+              "witness": [
+                "T0"
+              ]
+            }
+          ]
+        },
+        "deadlock_count": 1,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 1,
+            "per_place": [
+              [
+                "P_APPROVAL",
+                0
+              ],
+              [
+                "P_DONE",
+                0
+              ],
+              [
+                "P_IDLE",
+                1
+              ],
+              [
+                "S",
+                1
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "fails",
+          "detail": [
+            "T_RESET",
+            "T_WORK"
+          ]
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "T0",
+            "T_RESET",
+            "T_WORK"
+          ]
+        },
+        "reversible": {
+          "verdict": "fails",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/4",
+        "net": "one step, then an approval nobody grants",
+        "netRevision": "sha256:d241a688100a96e76056c454a3814e6db68b11c749001f5df48183e91fcab3ae",
+        "states": 2,
+        "truncated": false,
+        "deadlockCount": 1,
+        "classifiedDeadlocks": 1,
+        "reading": "REACHABLE_DEADLOCK",
+        "marking": {
+          "P_IDLE": 1
+        },
+        "witness": [
+          "T0"
+        ],
+        "blocked": []
+      }
+    },
+    {
+      "key": "hiddenBehindEight",
+      "netRevision": "sha256:e0003146821a202aa58aced820e7a9c637bd84697a2d581646df20f4560d2812",
+      "analysis": {
+        "net": "sha256:e0003146821a202aa58aced820e7a9c637bd84697a2d581646df20f4560d2812",
+        "states": 10,
+        "transitions_fired": 9,
+        "truncated": false,
+        "truncation": null,
+        "deadlock_free": {
+          "verdict": "fails",
+          "detail": [
+            {
+              "state": 1,
+              "marking": "D0=1",
+              "tokens": [
+                [
+                  "D0",
+                  1
+                ]
+              ],
+              "witness": [
+                "T_A0"
+              ]
+            },
+            {
+              "state": 2,
+              "marking": "D1=1",
+              "tokens": [
+                [
+                  "D1",
+                  1
+                ]
+              ],
+              "witness": [
+                "T_A1"
+              ]
+            },
+            {
+              "state": 3,
+              "marking": "D2=1",
+              "tokens": [
+                [
+                  "D2",
+                  1
+                ]
+              ],
+              "witness": [
+                "T_A2"
+              ]
+            },
+            {
+              "state": 4,
+              "marking": "D3=1",
+              "tokens": [
+                [
+                  "D3",
+                  1
+                ]
+              ],
+              "witness": [
+                "T_A3"
+              ]
+            },
+            {
+              "state": 5,
+              "marking": "D4=1",
+              "tokens": [
+                [
+                  "D4",
+                  1
+                ]
+              ],
+              "witness": [
+                "T_A4"
+              ]
+            },
+            {
+              "state": 6,
+              "marking": "D5=1",
+              "tokens": [
+                [
+                  "D5",
+                  1
+                ]
+              ],
+              "witness": [
+                "T_A5"
+              ]
+            },
+            {
+              "state": 7,
+              "marking": "D6=1",
+              "tokens": [
+                [
+                  "D6",
+                  1
+                ]
+              ],
+              "witness": [
+                "T_A6"
+              ]
+            },
+            {
+              "state": 8,
+              "marking": "D7=1",
+              "tokens": [
+                [
+                  "D7",
+                  1
+                ]
+              ],
+              "witness": [
+                "T_A7"
+              ]
+            }
+          ]
+        },
+        "deadlock_count": 9,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 1,
+            "per_place": [
+              [
+                "A",
+                0
+              ],
+              [
+                "C",
+                0
+              ],
+              [
+                "D0",
+                1
+              ],
+              [
+                "D1",
+                1
+              ],
+              [
+                "D2",
+                1
+              ],
+              [
+                "D3",
+                1
+              ],
+              [
+                "D4",
+                1
+              ],
+              [
+                "D5",
+                1
+              ],
+              [
+                "D6",
+                1
+              ],
+              [
+                "D7",
+                1
+              ],
+              [
+                "G",
+                1
+              ],
+              [
+                "S",
+                1
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "fails",
+          "detail": [
+            "T",
+            "U"
+          ]
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "T",
+            "T_A0",
+            "T_A1",
+            "T_A2",
+            "T_A3",
+            "T_A4",
+            "T_A5",
+            "T_A6",
+            "T_A7",
+            "T_Z",
+            "U"
+          ]
+        },
+        "reversible": {
+          "verdict": "fails",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/4",
+        "net": "eight plain dead ends listed before a circular one",
+        "netRevision": "sha256:e0003146821a202aa58aced820e7a9c637bd84697a2d581646df20f4560d2812",
+        "states": 10,
+        "truncated": false,
+        "deadlockCount": 9,
+        "classifiedDeadlocks": 8,
+        "reading": "UNDECIDED",
+        "marking": null,
+        "witness": null,
+        "blocked": []
+      }
+    },
+    {
+      "key": "seededGatedControlWithProof",
+      "netRevision": "sha256:85cc2579f79a515343dc542776dd9a785accf28030738703365aab4d99e3e337",
+      "analysis": {
+        "net": "sha256:85cc2579f79a515343dc542776dd9a785accf28030738703365aab4d99e3e337",
+        "states": 18,
+        "transitions_fired": 41,
+        "truncated": false,
+        "truncation": null,
+        "deadlock_free": {
+          "verdict": "fails",
+          "detail": [
+            {
+              "state": 14,
+              "marking": "no fresh observation: none published, or aged past 12 h (reads STALE)=1 observation schema merged (contract establishment, not liveness)=1 Retirement Receipt emitted for the receipt seed=1 steady state proven by a later independently reconciled run=1 a later run is reconciled independently of its own receipt=1 scheduled recovery run due=1",
+              "tokens": [
+                [
+                  "P_NO_FRESH_OBSERVATION",
+                  1
+                ],
+                [
+                  "P_OBSERVATION_SCHEMA",
+                  1
+                ],
+                [
+                  "P_SEED_RETIRED",
+                  1
+                ],
+                [
+                  "P_STEADY_STATE",
+                  1
+                ],
+                [
+                  "P_STEADY_STATE_PROOF",
+                  1
+                ],
+                [
+                  "P_TICK_DUE",
+                  1
+                ]
+              ],
+              "witness": [
+                "T_RUN_PUMP",
+                "T_RECONCILE_NEXT_RUN",
+                "T_OBSERVATION_GOES_STALE",
+                "T_RETIRE_SEED",
+                "T_SCHEDULE_TICK"
+              ]
+            }
+          ]
+        },
+        "deadlock_count": 1,
+        "bounded": {
+          "verdict": "holds",
+          "detail": {
+            "k": 1,
+            "per_place": [
+              [
+                "P_FRESH_OBSERVATION",
+                1
+              ],
+              [
+                "P_HEALTH_UNPROVEN",
+                1
+              ],
+              [
+                "P_IDLE",
+                1
+              ],
+              [
+                "P_INTAKE_RECEIPT",
+                1
+              ],
+              [
+                "P_NO_FRESH_OBSERVATION",
+                1
+              ],
+              [
+                "P_NO_SEED",
+                0
+              ],
+              [
+                "P_OBSERVATION_SCHEMA",
+                1
+              ],
+              [
+                "P_SEED_RETIRED",
+                1
+              ],
+              [
+                "P_SEED_UNRETIRED",
+                1
+              ],
+              [
+                "P_STEADY_STATE",
+                1
+              ],
+              [
+                "P_STEADY_STATE_PROOF",
+                1
+              ],
+              [
+                "P_TICK_DUE",
+                1
+              ]
+            ]
+          }
+        },
+        "unbounded_witness": null,
+        "quasi_live": {
+          "verdict": "fails",
+          "detail": [
+            "T_SEED_FIRST_OBSERVATION"
+          ]
+        },
+        "live": {
+          "verdict": "fails",
+          "detail": [
+            "T_OBSERVATION_GOES_STALE",
+            "T_RECONCILED_RUN",
+            "T_RECONCILED_RUN_AFTER_STALE",
+            "T_RECONCILE_NEXT_RUN",
+            "T_REFUSE_OBSERVATION",
+            "T_RESEAL_FROM_RECEIPT",
+            "T_RESEED_AFTER_STALE",
+            "T_RETIRE_SEED",
+            "T_RUN_PUMP",
+            "T_RUN_PUMP_ON_SEED",
+            "T_SCHEDULE_TICK",
+            "T_SEED_FIRST_OBSERVATION"
+          ]
+        },
+        "reversible": {
+          "verdict": "fails",
+          "detail": null
+        }
+      },
+      "reading": {
+        "schema": "gaia-bootstrap-deadlock-reading/4",
+        "net": "gaia#80 hosted Draft pump, run gated on a fresh observation, seed installed, with a steady-state proof",
+        "netRevision": "sha256:85cc2579f79a515343dc542776dd9a785accf28030738703365aab4d99e3e337",
+        "states": 18,
+        "truncated": false,
+        "deadlockCount": 1,
+        "classifiedDeadlocks": 1,
+        "reading": "REACHABLE_DEADLOCK",
+        "marking": {
+          "P_NO_FRESH_OBSERVATION": 1,
+          "P_OBSERVATION_SCHEMA": 1,
+          "P_SEED_RETIRED": 1,
+          "P_STEADY_STATE": 1,
+          "P_STEADY_STATE_PROOF": 1,
+          "P_TICK_DUE": 1
+        },
+        "witness": [
+          "T_RUN_PUMP",
+          "T_RECONCILE_NEXT_RUN",
+          "T_OBSERVATION_GOES_STALE",
+          "T_RETIRE_SEED",
+          "T_SCHEDULE_TICK"
+        ],
+        "blocked": []
+      }
+    }
+  ]
+}
