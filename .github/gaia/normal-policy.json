@@ -13,8 +13,8 @@
   "effectOwner": "github:app:gaia-draft-pump",
   "writerIdentity": "gaia:agent:v1:codex:01a04b30-bd3a-7530-8f4f-185954d433c9:root",
   "reviewOwners": {
-    "standards": "gaia:agent:v1:claude:ecfc9b0f-9600-4734-9a4f-b30b2ae20511:normal_standards_review",
-    "spec": "gaia:agent:v1:claude:ecfc9b0f-9600-4734-9a4f-b30b2ae20511:normal_spec_review"
+    "standards": "gaia:agent:v1:claude:7c396ad4-956a-40a3-88bc-3d73f8ee8651:normal_standards_review",
+    "spec": "gaia:agent:v1:claude:bf8c18d2-e592-43f6-8640-1cde8610f609:normal_spec_review"
   },
   "allowedEffect": "CREATE_DRAFT",
   "roundBudget": 1
