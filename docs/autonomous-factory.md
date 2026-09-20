@@ -139,6 +139,40 @@ content-addressed structures emitted by the factory. The exact pre-repair inputs
 `src/factory-agent.mjs` `932e54b7c3eb049c7c514ad225be874e732deea445672c4d299a3862aec738d6`,
 and the independent finding linked above.
 
+### Decision: replay completed candidate sidecars after interruption (ENG-02)
+
+Independent review of head `9bda592a4a09da1a6b2dd7e5db4f7cbea9db103e`
+([thread](https://github.com/GuitarAlchemist/gaia/pull/146#discussion_r4057486468))
+showed a recovery gap: the authority store can commit a terminal receipt before the host emits its
+rebuildable artifact-chain sidecar. A crash in that interval, or a transient first write failure,
+left later ticks skipping the completed job and therefore never retried the sidecar. Two independent
+perspectives and three materially different placements were compared before implementation.
+
+- **Authority perspective — rejected: make sidecar success part of `store.finish()`.** This would
+  keep a job `STARTED` when a projection write fails, occupying the single execution slot and
+  promoting a rebuildable file into terminal authority.
+- **Authority perspective — rejected: add a durable sidecar outbox to SQLite.** It would make the
+  transition atomic, but requires an authority-schema migration and a second lifecycle for data
+  already reconstructible from the validated receipt and intent.
+- **Projection perspective — selected: replay every completed receipt through the idempotent
+  emitter before ordinary scheduling.** `WRITTEN` and `UNCHANGED` prove convergence without another
+  worker invocation; `FAILED` remains explicit, does not rewrite conflicting evidence, and does not
+  prevent another completed projection or unrelated eligible work from being attempted. Recovery
+  precedes disabled-policy and exhausted-budget refusal because it consumes no authority or run.
+
+The host composition remains the one named sidecar writer. `COMPLETED` remains terminal truth;
+projection status cannot alter the receipt, release or occupy a slot, or call worker execution or
+receipt reconciliation. Reversibility class: **freely reversible in code but unsafe for recovery**;
+rollback restores the interval in which a durable terminal receipt can permanently lack its chain.
+The exact pre-repair inputs were `scripts/github-portfolio-autonomous.mjs`
+`f555fb3ba76bcc04f109fd5dd8e89d7686b24dc32c77cf85feac125a16e0031b`,
+`src/autonomous-factory.mjs` `4c8bf9da787866e45f6bf82949096d9bd3586ef4a40f3554c2cb2e2b3601cc82`,
+`src/autonomous-factory-store.mjs` `38ac960b329b992ed52c2da46644d9583c0f025e74ba0bf8d6bd7a6d32d638cd`,
+`src/artifact-chain-files.mjs` `ef0d6f6fe4e96f4e0381863ed903faa4507098b488779e66d828ed1c54af882e`,
+`docs/autonomous-factory.md` `b261decfba4b4414f155d4d1c7a9dcf8db5302dd6bdda620ead71e84b21ef5b3`,
+`docs/artifact-chain.md` `fd3d31e6317ff2882bbac18eb857beb787561a6aec715e322ffebdc15e20f104`,
+and the independent finding linked above.
+
 ## Ownership and recovery
 
 The application owns preview, authority consumption, execution and reconciliation.
