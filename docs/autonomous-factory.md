@@ -204,6 +204,42 @@ The exact pre-repair inputs were `scripts/github-portfolio-autonomous.mjs`
 `docs/artifact-chain.md` `fd3d31e6317ff2882bbac18eb857beb787561a6aec715e322ffebdc15e20f104`,
 and the independent finding linked above.
 
+### Decision: publish execution receipts before terminal authority (ENG-02)
+
+Independent review of head `ab5843d32534f17090b2e455ae7d0da8d275f44f`
+([thread](https://github.com/GuitarAlchemist/gaia/pull/146#discussion_r4057605985))
+showed that `receipt.json` bytes were flushed but its two newly created namespace entries were not:
+the receipt in the idempotency directory and that directory in the evidence root. A power loss could
+therefore leave SQLite `COMPLETED` while replay had no pathname from which to rebuild the candidate
+chain. Two perspectives and three materially different repairs were compared before implementation.
+
+- **Execution perspective — selected: make the receipt writer own namespace publication.** A new
+  receipt is flushed and closed, then the idempotency directory and evidence root are flushed before
+  execution returns on POSIX. Every valid existing-receipt path repeats those barriers, so a complete
+  receipt left by an earlier uncertain flush can reconcile without another provider invocation. On
+  Windows, where Node does not expose a portable directory-fsync handle, the writer reopens and
+  flushes the receipt as the strongest available per-entry metadata barrier and makes no claim of
+  equivalent directory durability.
+- **Authority perspective — rejected: journal receipt bytes in SQLite.** This could reconstruct a
+  missing file uniformly, but would add a second execution-evidence owner, a schema migration and a
+  new pre-terminal receipt lifecycle to solve a publication defect at the existing writer boundary.
+- **Projection perspective — rejected: reconstruct from the terminal ledger only.** This could help
+  after `COMPLETED`, but not after the provider effect and receipt write while the job remains
+  `STARTED`; it would also manufacture file provenance from a different store.
+
+A write, close or publication-barrier failure is the path-free typed refusal
+`ExecutionReceiptDurabilityUncertain`. Complete bytes are retained because the provider effect may
+already have happened. The job remains `STARTED`; reconciliation validates the existing operation
+binding, retries publication without rerunning the provider, and only then may commit `COMPLETED`.
+Corrupt or foreign receipts retain their existing refusals. Reversibility class: **freely reversible
+in code but unsafe for recovery**; rollback restores a crash interval in which terminal authority can
+outlive the pathname needed by its evidence projection. The exact pre-repair inputs were
+`docs/autonomous-factory.md` `2cc6c0716607a40bde0e78bdd3dfc91c66578fffe4d0f7387f15fa8fac9a0da1`,
+`src/github-portfolio-execution.mjs` `4aa5fce1e12eb29b4fe22696d9832493f584d14b2753475196a107be5e6583b3`,
+`tests/github-portfolio-execution.test.mjs` `d4f2de9709eadd2eded35602f2c1b74c450322cddd79b6d821ced3aec7eadc92`,
+`ARCHITECTURE.md` `5ded57ae736b6fb55fd7ff5808fd054e73c1676ee3b2ea06b22d06082adf7be3`,
+and the independent finding linked above.
+
 ## Ownership and recovery
 
 The application owns preview, authority consumption, execution and reconciliation.
