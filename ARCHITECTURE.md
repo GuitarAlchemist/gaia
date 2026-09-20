@@ -184,8 +184,12 @@ refuses instead of running an unobserved worker. It restricts Claude
 to file tools and working directories, removes API-key fallback through the existing
 subscription environment, and binds bounded provider results to fresh attempt identities.
 The owned process must stop before output acceptance; timeout, mismatch and cleanup
-failure refuse. Results remain untrusted provider evidence; factory candidate validation
-and human-mediated authority are unchanged. This is not an OS sandbox guarantee.
+failure refuse. Before SQLite may record terminal completion, the execution adapter durably publishes
+the bound receipt: POSIX flushes its containing directory and the evidence root, while Windows uses
+the strongest per-entry barrier Node exposes and claims no equivalent directory guarantee. An
+uncertain barrier leaves the job `STARTED`; reconciliation validates and republishes the same receipt
+without another provider invocation. Results remain untrusted provider evidence; factory candidate
+validation and human-mediated authority are unchanged. This is not an OS sandbox guarantee.
 Real operator authorization and an operation-linked canary remain unproven; controlled
 provider tests alone do not establish autonomous draining.
 

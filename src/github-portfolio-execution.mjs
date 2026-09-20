@@ -100,14 +100,55 @@ function readBoundReceipt(path, { intent, idempotencyKey }) {
   return receipt;
 }
 
-function writeDurableExclusive(path, value) {
-  const descriptor = openSync(path, 'wx', 0o600);
+function receiptDurabilityUncertain() {
+  return new PortfolioExecutionError(
+    'ExecutionReceiptDurabilityUncertain',
+    'factory receipt publication durability is uncertain',
+  );
+}
+
+function synchronizeReceiptPublication(path, evidenceDirectory, evidenceRoot) {
+  // Node does not expose a portable Windows directory-fsync handle. Reopening the receipt writable
+  // and flushing it is the strongest per-entry metadata barrier available there; POSIX flushes both
+  // directories whose new names must survive before terminal authority may consume this receipt.
+  const targets = process.platform === 'win32'
+    ? [[path, 'r+']]
+    : [[evidenceDirectory, 'r'], [evidenceRoot, 'r']];
+  for (const [target, flags] of targets) {
+    let descriptor;
+    try {
+      descriptor = openSync(target, flags);
+      fsyncSync(descriptor);
+      closeSync(descriptor);
+      descriptor = undefined;
+    } catch {
+      try { if (descriptor !== undefined) closeSync(descriptor); } catch { /* Keep typed refusal. */ }
+      throw receiptDurabilityUncertain();
+    }
+  }
+}
+
+function writeDurableExclusive(path, value, { evidenceDirectory, evidenceRoot }) {
+  let descriptor;
   try {
+    descriptor = openSync(path, 'wx', 0o600);
     writeFileSync(descriptor, `${JSON.stringify(value)}\n`, 'utf8');
     fsyncSync(descriptor);
-  } finally {
     closeSync(descriptor);
+    descriptor = undefined;
+  } catch {
+    try { if (descriptor !== undefined) closeSync(descriptor); } catch { /* Keep typed refusal. */ }
+    throw receiptDurabilityUncertain();
   }
+  synchronizeReceiptPublication(path, evidenceDirectory, evidenceRoot);
+}
+
+function readDurablyPublishedReceipt(path, binding, evidenceDirectory, evidenceRoot) {
+  const receipt = readBoundReceipt(path, binding);
+  // A complete receipt can remain after an earlier publication barrier failed. Reconciliation must
+  // retry that barrier before consuming the receipt, never rerun the provider or assume durability.
+  synchronizeReceiptPublication(path, evidenceDirectory, evidenceRoot);
+  return receipt;
 }
 
 // The only two shapes a github.com remote takes: a URL with a scheme, and the scp-like
@@ -217,9 +258,11 @@ export function createAgentFactoryExecutionAdapter({
           'InvalidIdempotencyKey', 'idempotencyKey must be a lowercase SHA-256',
         );
       }
-      const path = join(physicalEvidenceRoot, idempotencyKey, 'receipt.json');
+      const evidenceDirectory = join(physicalEvidenceRoot, idempotencyKey);
+      const path = join(evidenceDirectory, 'receipt.json');
       if (!existsSync(path)) return null;
-      const receipt = readBoundReceipt(path, { intent, idempotencyKey });
+      const receipt = readDurablyPublishedReceipt(path, { intent, idempotencyKey },
+        evidenceDirectory, physicalEvidenceRoot);
       return { ...receipt.factory, addressedCommentIds: receipt.addressedCommentIds };
     },
     async execute({ intent, idempotencyKey }) {
@@ -237,22 +280,26 @@ export function createAgentFactoryExecutionAdapter({
           'InvalidIdempotencyKey', 'idempotencyKey must be a lowercase SHA-256',
         );
       }
-      const existingReceiptPath = join(physicalEvidenceRoot, idempotencyKey, 'receipt.json');
+      const evidenceDirectory = join(physicalEvidenceRoot, idempotencyKey);
+      const existingReceiptPath = join(evidenceDirectory, 'receipt.json');
       if (existsSync(existingReceiptPath)) {
-        const existing = readBoundReceipt(existingReceiptPath, { intent, idempotencyKey });
+        const existing = readDurablyPublishedReceipt(existingReceiptPath,
+          { intent, idempotencyKey }, evidenceDirectory, physicalEvidenceRoot);
         return existing.factory;
       }
       const persistReceipt = async (factory) => {
-        mkdirSync(join(physicalEvidenceRoot, idempotencyKey), { recursive: true });
+        mkdirSync(evidenceDirectory, { recursive: true });
         if (!existsSync(existingReceiptPath)) {
           writeDurableExclusive(existingReceiptPath, {
             schema: 'gaia-portfolio-execution-receipt/2',
             ...receiptBinding(intent, idempotencyKey),
             factory,
             addressedCommentIds: measuredAddressedCommentIds(intent, factory),
-          });
+          }, { evidenceDirectory, evidenceRoot: physicalEvidenceRoot });
+          return readBoundReceipt(existingReceiptPath, { intent, idempotencyKey });
         }
-        return readBoundReceipt(existingReceiptPath, { intent, idempotencyKey });
+        return readDurablyPublishedReceipt(existingReceiptPath,
+          { intent, idempotencyKey }, evidenceDirectory, physicalEvidenceRoot);
       };
       const receipt = await executeFactory({
         worktree: candidateWorktree,
