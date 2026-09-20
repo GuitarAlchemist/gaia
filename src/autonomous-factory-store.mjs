@@ -68,7 +68,8 @@ export function openAutonomousFactoryStore({ path: inputPath }) {
         || ![0, 1].includes(policy.enabled))) fail('StoreCorrupt');
       const jobs = db.prepare('SELECT * FROM autonomous_jobs ORDER BY rowid').all().map(row => {
         const job = validateJob({ jobKey: row.job_key, intent: JSON.parse(row.intent_json), idempotencyKey: row.idempotency_key });
-        if (!policy || job.intent.repository !== policy.repository || row.repository !== job.intent.repository
+        if (!policy || job.intent.repository.toLowerCase() !== policy.repository.toLowerCase()
+          || row.repository !== job.intent.repository
           || row.item_id !== job.intent.itemId || row.draft_number !== job.intent.draft.number
           || !['STARTED', 'COMPLETED'].includes(row.state)
           || (row.state === 'STARTED' ? row.receipt_json !== null : typeof row.receipt_json !== 'string')) fail('StoreCorrupt');
@@ -133,7 +134,7 @@ export function openAutonomousFactoryStore({ path: inputPath }) {
       return transaction(() => {
         const { policy, jobs } = readState();
         if (!policy || !policy.enabled) fail('PolicyDisabled');
-        if (job.intent.repository !== policy.repository) fail('RepositoryMismatch');
+        if (job.intent.repository.toLowerCase() !== policy.repository.toLowerCase()) fail('RepositoryMismatch');
         if (jobs.some(existing => existing.jobKey === job.jobKey)) fail('JobExists');
         if (jobs.some(existing => existing.state === 'STARTED')) fail('HostBusy');
         if (jobs.length >= policy.max_runs) fail('BudgetExhausted');

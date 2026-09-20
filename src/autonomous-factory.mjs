@@ -62,7 +62,10 @@ export async function runAutonomousFactory({
     const portfolio = await factory.survey({ organization: repository.split('/')[0], policyRevision });
     const preview = await factory.advance({ portfolio });
     if (preview.status !== 'AWAITING_AUTHORITY') return preview;
-    if (preview.intent.repository !== repository) return refuse('RepositoryScopeMismatch');
+    if (typeof preview.intent.repository !== 'string'
+        || preview.intent.repository.toLowerCase() !== repository.toLowerCase()) {
+      return refuse('RepositoryScopeMismatch');
+    }
     jobKey = autonomousJobKey(preview.intent);
     const existing = store.get(jobKey);
     if (existing) return reconcileAutonomousJob({ store, execution, jobKey });

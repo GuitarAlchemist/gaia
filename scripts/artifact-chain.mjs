@@ -31,7 +31,7 @@
 
 import {
   ArtifactChainError, buildArtifactChain, canonicalArtifactChainJson, evaluateArtifactChain,
-  validateArtifactChain,
+  validateArtifactChain, validateArtifactChainDescriptor,
 } from '../src/artifact-chain.mjs';
 import {
   ArtifactChainFileError, measureArtifactChainFiles, persistArtifactChainManifest,
@@ -75,10 +75,9 @@ function create(flags) {
   if (flags.root === undefined || flags.descriptor === undefined) {
     usageError('create needs --root and --descriptor');
   }
-  const descriptor = readArtifactChainJson(flags.descriptor);
-  const nodes = Array.isArray(descriptor?.nodes) ? descriptor.nodes : [];
+  const descriptor = validateArtifactChainDescriptor(readArtifactChainJson(flags.descriptor));
   const manifest = buildArtifactChain({ descriptor,
-    measured: measureArtifactChainFiles({ root: flags.root, nodes }) });
+    measured: measureArtifactChainFiles({ root: flags.root, nodes: descriptor.nodes }) });
   const status = flags.manifest === undefined
     ? 'BUILT'
     : persistArtifactChainManifest({ path: flags.manifest, manifest }).status;

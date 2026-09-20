@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -134,7 +134,7 @@ test('the CLI refuses usage errors, escaping locators, wrong subjects, and confl
     writeFileSync(join(root, 'escaping.json'), JSON.stringify(escaping));
     const refused = run('create', '--root', root, '--descriptor', join(root, 'escaping.json'));
     assert.equal(refused.code, 3);
-    assert.match(refused.err, /^REFUSED: InvalidLocator$/mu);
+    assert.match(refused.err, /^REFUSED: InvalidDescriptor$/mu);
 
     assert.equal(run('create', '--root', root, '--descriptor', join(root, 'descriptor.json'),
       '--manifest', manifestPath).code, 0);
@@ -153,6 +153,36 @@ test('the CLI refuses usage errors, escaping locators, wrong subjects, and confl
     assert.equal(conflict.code, 3);
     assert.match(conflict.err, /^REFUSED: ManifestConflict$/mu);
     assert.deepEqual(readFileSync(manifestPath), bytes);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('create validates the complete descriptor before reading any artifact', () => {
+  const root = mkdtempSync(join(tmpdir(), 'gaia-artifact-chain-cli-preflight-'));
+  const manifestPath = join(root, 'artifact-chain.json');
+  const node = (id, overrides = {}) => ({ id, stage: 'INTENT', rootRevision: null,
+    producer: 'fixture', locator: `${id}.json`, claim: null, dependencies: [], ...overrides });
+  try {
+    const overLimit = { subject: SUBJECT,
+      nodes: Array.from({ length: 65 }, (_, index) => node(`intent-${index}`)) };
+    const overLimitPath = join(root, 'over-limit.json');
+    writeFileSync(overLimitPath, JSON.stringify(overLimit));
+    const bounded = run('create', '--root', root, '--descriptor', overLimitPath,
+      '--manifest', manifestPath);
+    assert.equal(bounded.code, 3);
+    assert.equal(bounded.out, '');
+    assert.match(bounded.err, /^REFUSED: InvalidDescriptor$/mu);
+    assert.equal(existsSync(manifestPath), false);
+
+    const malformed = { subject: SUBJECT,
+      nodes: [node('missing-first'), node('malformed-later', { producer: '' })] };
+    const malformedPath = join(root, 'malformed.json');
+    writeFileSync(malformedPath, JSON.stringify(malformed));
+    const complete = run('create', '--root', root, '--descriptor', malformedPath,
+      '--manifest', manifestPath);
+    assert.equal(complete.code, 3);
+    assert.equal(complete.out, '');
+    assert.match(complete.err, /^REFUSED: InvalidDescriptor$/mu);
+    assert.equal(existsSync(manifestPath), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

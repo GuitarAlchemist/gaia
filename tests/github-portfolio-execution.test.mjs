@@ -65,7 +65,7 @@ test('the execution adapter binds one repository, worktree, task, and evidence d
   };
   const runRepair = async () => {};
   const adapter = createAgentFactoryExecutionAdapter({
-    expectedRepository: 'GuitarAlchemist/ga',
+    expectedRepository: 'guitaralchemist/GA',
     worktree,
     evidenceRoot,
     executeFactory,

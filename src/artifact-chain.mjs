@@ -212,16 +212,19 @@ function freeze(value) {
  * That historical pin is preserved exactly; deriving it from the predecessor's current
  * measurement would silently rebind old downstream evidence to newer inputs.
  */
-export function buildArtifactChain({ descriptor, measured }) {
+export function validateArtifactChainDescriptor(descriptor) {
   const input = JSON.parse(canonicalArtifactChainJson(descriptor, 'InvalidDescriptor'));
   exact(input, DESCRIPTOR_KEYS, 'InvalidDescriptor');
   if (!text(input.subject, 512)) fail('InvalidDescriptor');
   checkNodeFields(input.nodes, 'InvalidDescriptor', { pinned: false });
-  // Identity before measurement: two nodes sharing an identifier is a defect in the descriptor,
-  // not a disagreement about how many digests the adapter should have supplied.
-  const ids = input.nodes.map(node => node.id);
-  if (new Set(ids).size !== ids.length) fail('DuplicateNodeId');
+  // The complete domain shape precedes every filesystem read: a late malformed node, duplicate,
+  // unknown edge, or invalid stage relationship cannot amplify I/O through earlier locators.
+  checkStructure(input.nodes);
+  return freeze(input);
+}
 
+export function buildArtifactChain({ descriptor, measured }) {
+  const input = validateArtifactChainDescriptor(descriptor);
   const digests = JSON.parse(canonicalArtifactChainJson(measured, 'InvalidMeasurement'));
   exact(digests, input.nodes.map(node => node.id), 'InvalidMeasurement');
   if (Object.values(digests).some(value => !matches(DIGEST, value))) fail('InvalidMeasurement');

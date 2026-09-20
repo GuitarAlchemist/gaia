@@ -71,6 +71,18 @@ test('standing policy persists and cannot be reset, including after revocation',
   fails(() => configure(a), 'PolicyExists');
 });
 
+test('policy and intent repository casing share one GitHub identity across restart', t => {
+  const { open } = setup(t);
+  const first = open();
+  first.configure({ repository: 'GUITARALCHEMIST/GAIA', maxRuns: 2 });
+  const job = request();
+  first.start(job);
+  first.close();
+  const restarted = open();
+  assert.equal(restarted.status().repository, 'GUITARALCHEMIST/GAIA', 'policy spelling is preserved');
+  assert.deepEqual(restarted.get(job.jobKey), { ...job, state: 'STARTED', receipt: null });
+});
+
 test('two connections serialize duplicate and other-job admission; budget survives completion and restart', t => {
   const { open } = setup(t); const a = open(); const b = open(); configure(a);
   const first = request();

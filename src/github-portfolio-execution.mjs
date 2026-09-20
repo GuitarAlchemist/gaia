@@ -269,7 +269,8 @@ export function createAgentFactoryExecutionAdapter({
       if (!intent || intent.action !== 'RUN_FACTORY_AGENT') {
         throw new PortfolioExecutionError('InvalidIntent', 'only RUN_FACTORY_AGENT is supported');
       }
-      if (intent.repository !== repository) {
+      if (typeof intent.repository !== 'string'
+          || intent.repository.toLowerCase() !== repository.toLowerCase()) {
         throw new PortfolioExecutionError(
           'RepositoryScopeMismatch', 'intent repository does not match this execution adapter',
         );

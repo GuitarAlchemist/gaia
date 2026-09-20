@@ -287,8 +287,8 @@ node scripts/artifact-chain.mjs create --root <dir> --descriptor <file.json> [--
 node scripts/artifact-chain.mjs validate --root <dir> --manifest <file.json> --subject <text> --root-revision <40-hex> [--root-revision <40-hex>]... [--json]
 ```
 
-`create` reads a bounded JSON descriptor, hashes each named artifact file through the
-adapter — the descriptor never supplies a digest — and prints or writes the canonical
+`create` reads a bounded JSON descriptor, validates its complete shape and graph before
+any artifact I/O, hashes each named artifact file through the adapter — the descriptor never supplies a digest — and prints or writes the canonical
 manifest. Writing is immutable: a create-if-absent open, and if the file already exists
 its bytes are compared. Identical bytes are `UNCHANGED`; different bytes are refused as
 `ManifestConflict` rather than overwritten, so two concurrent writers cannot silently

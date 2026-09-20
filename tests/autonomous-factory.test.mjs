@@ -77,6 +77,18 @@ test('fresh admitted work runs without any human reader and replays byte-identic
   assert.equal(f.counts().launches, 1);
 });
 
+test('policy, snapshot, target, and intent casing share one GitHub repository identity', async () => {
+  const f = fixture();
+  f.args.repository = 'example/app';
+  f.args.draftAdmission.target = async () => (
+    { repository: 'EXAMPLE/APP', itemKind: 'ISSUE', itemNumber: 1 }
+  );
+  const result = await runAutonomousFactory(f.args);
+  assert.equal(result.status, 'CANDIDATE_READY');
+  assert.equal(f.counts().launches, 1);
+  assert.equal(f.jobs.size, 1);
+});
+
 test('revocation during fresh admission refuses before provider launch', async () => {
   const f = fixture();
   const read = f.args.draftAdmission.read;
