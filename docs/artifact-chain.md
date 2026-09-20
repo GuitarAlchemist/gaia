@@ -288,15 +288,17 @@ node scripts/artifact-chain.mjs validate --root <dir> --manifest <file.json> --s
 ```
 
 `create` reads a bounded JSON descriptor, validates its complete shape and graph before
-any artifact I/O, hashes each named artifact file through the adapter — the descriptor never supplies a digest — and prints or writes the canonical
-manifest. Writing is immutable: a create-if-absent open, and if the file already exists
-its bytes are compared. Identical bytes are `UNCHANGED`; different bytes are refused as
-`ManifestConflict` rather than overwritten, so two concurrent writers cannot silently
-disagree. Re-running `create` against unmoved files rewrites byte-identical bytes.
+any artifact I/O, hashes each named artifact file through the adapter — the descriptor never supplies a node's own digest — and prints or writes the canonical
+manifest. Writing is immutable: complete durable temporary bytes are hard-linked into the final
+name without replacement, and if the file already exists its bytes are compared. Identical bytes
+are `UNCHANGED`; different bytes are refused as `ManifestConflict`, so two concurrent writers
+cannot silently disagree. Re-running `create` against unmoved files produces byte-identical bytes.
 
 `validate` re-measures every locator and evaluates the chain against the expectation
 supplied on the command line. Exit codes: `0` created/unchanged or `CHAIN_FRESH`, `1`
-`CHAIN_STALE`, `2` usage error, `3` typed refusal with nothing written.
+`CHAIN_STALE`, `2` usage error, `3` typed refusal. Most publication refusals leave the destination
+absent; if only the post-publication synchronization boundary refuses, a complete destination may
+remain. An identical retry re-synchronizes that destination before returning `UNCHANGED`.
 
 A descriptor is a JSON object with `subject` and `nodes`; each node supplies `id`,
 `stage`, `rootRevision`, `producer`, `locator`, optional `claim`, and `dependencies`
@@ -372,6 +374,21 @@ exact pre-repair inputs were `src/artifact-chain-files.mjs`
 `99086790ec9b3b46a5ef933af7281799b08421bfb648a13d95d2fc3a73696b12`,
 `docs/artifact-chain.md` `13429f4e0543cfa9f16d4556d8803453d53cb1fce2c23997661cd0902a97578f`,
 and the independent finding linked above.
+
+### Decision: no partial final-path fallback (ENG-02)
+
+When hard links are unavailable, writing directly through an exclusive final-path descriptor was
+rejected: exclusion prevents replacement but not observation of partial bytes. Temporary-file
+rename was also rejected because Node exposes no portable atomic no-replace rename primitive;
+ordinary rename can replace evidence owned by another writer.
+
+**Selected:** hard-link complete, flushed temporary bytes into the absent destination, or fail closed
+with `ManifestWriteFailed`, withdraw the temporary file and leave the destination absent. `EEXIST`
+is the concurrency signal: byte-identical complete evidence converges to `UNCHANGED`, while
+different evidence is `ManifestConflict`. This is complete-before-visible and never falls back to
+direct final-path writes. Publication-boundary synchronization remains a later durability step, so
+its typed refusal may retain the already complete destination; identical retry repeats that sync.
+Reversibility is freely reversible in format terms but unsafe if it restores partial visibility.
 
 ### Decision: descriptor validation precedes artifact measurement (ENG-02)
 

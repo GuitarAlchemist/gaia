@@ -240,7 +240,10 @@ outlive the pathname needed by its evidence projection. The exact pre-repair inp
 `ARCHITECTURE.md` `5ded57ae736b6fb55fd7ff5808fd054e73c1676ee3b2ea06b22d06082adf7be3`,
 and the independent finding linked above.
 
-### Decision: GitHub repository scope uses case-insensitive identity (ENG-02)
+### Superseded decision: comparison-only GitHub repository identity (ENG-02)
+
+**Superseded by the durable-identity decision below after exact-head review reproduced a
+case-only double-authority path. Preserved here as immutable Failure Evidence, not current design.**
 
 Independent review of head `ab5843d32534f17090b2e455ae7d0da8d275f44f`
 ([thread](https://github.com/GuitarAlchemist/gaia/pull/146#discussion_r4057605976))
@@ -275,14 +278,47 @@ policy or move a scope failure past authority consumption. The exact pre-repair 
 `tests/github-portfolio-execution.test.mjs` `ce17272eeb62d3843c3a86b890142066b9b496723b593fa91c834858c0df261f`,
 and the independent finding linked above.
 
+### Decision: accept exactly the two producer receipt forms (ENG-02)
+
+A permissive validator that merely checked any fields it recognized was rejected: it let a direct
+receipt carry stray repair claims and let a repaired receipt settle without proving the initial and
+final review relationship. Importing the process-owning factory implementation into the pure store
+contract was also rejected because it reverses the dependency boundary.
+
+**Selected:** the contract is an exact two-form union matching `executeAgentFactory`. Direct
+approval has no `repair` or `reviews` and its sole reviewer approves. Repaired output requires
+`repair` and `reviews` together; repair evidence, host authority and scope are closed; initial and
+repaired candidate identities differ; the repaired identity equals the terminal change-set identity;
+the initial review is `REQUEST_CHANGES`; the top-level reviewer is byte-canonical equal to the final
+review; and that final verdict alone controls ready versus rejected status. Any missing, mixed or
+extra form remains `InvalidReceipt` and keeps `STARTED` occupied. This is freely reversible in code
+but unsafe to relax because a false terminal receipt spends durable authority.
+
+### Decision: case-insensitive durable identity, original evidence spelling (ENG-02)
+
+Comparison-only folding was rejected because two processes could still persist distinct keys or
+SQLite identities for one GitHub repository. Lowercasing stored intents and receipts was rejected
+because it would rewrite captured provider evidence and strand existing evidence directories.
+
+**Selected:** new autonomous job keys hash the lowercase repository identity, while intent, policy,
+row and receipt spelling stays exactly as captured. SQLite independently enforces
+`repository COLLATE NOCASE, item_id, draft_number` uniqueness. Development ledgers created before
+this constraint gain the index transactionally; legacy keys remain under their original recipe and
+are aliased by the new key rather than rewritten, so restart and redelivery reconcile one authority
+against the original idempotency path. A collision while installing the index is corruption and
+fails closed. The shared `isAutonomousRepository` predicate now gates policy, hosted discovery and
+portfolio execution, avoiding narrower local regexes such as the one that rejected valid
+`Owner/.github`. Reversibility is unsafe without an equivalent provider-identity constraint.
+
 ## Ownership and recovery
 
 The application owns preview, authority consumption, execution and reconciliation.
 The host owns downloads and checkout preparation. SQLite owns serialized revocation,
 budget and unique admission. Six bus verbs and the manual operator remain unchanged.
 
-The stable job key derives from repository, issue node ID and Draft number. Changing
-portfolio/source or restarting cannot create a second job for that Draft. STARTED
+The stable job key derives from the lowercase GitHub repository identity, issue node ID and Draft
+number; captured repository spelling remains evidence rather than identity. Changing
+portfolio/source, case spelling or restarting cannot create a second job for that Draft. STARTED
 committed under `BEGIN IMMEDIATE` is the authorization linearization point. Losing
 actors receive `JobExists` or `HostBusy` without invoking the provider. The execution
 key binds that job key and fresh intent revision.

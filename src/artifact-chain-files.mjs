@@ -16,10 +16,10 @@
  * The create-if-absent write is done by writing a temporary sibling, making it durable, and then
  * hard-linking it into place — `link` fails with EEXIST rather than replacing, so a second writer
  * that arrives mid-write never observes a half-written manifest and never wins a race silently.
- * Where linking is unavailable the exclusive-create fallback is used instead. The temporary name
- * is removed and the available publication boundary is flushed before `WRITTEN`. This is atomic
- * creation of one file; it is not a lock, and observing a file is still not a claim about what
- * that file will contain a moment later.
+ * Where linking is unavailable there is no portable atomic no-replace fallback, so publication
+ * fails closed with the destination absent. The temporary name is removed and the available
+ * publication boundary is flushed before `WRITTEN`. This is atomic creation of one file; it is not
+ * a lock, and observing a file is still not a claim about what that file will contain a moment later.
  *
  * Refusals are typed and fail closed: the message is exactly the code, and a path is never
  * interpolated into a refusal. A refusal writes nothing *at the point it refuses*, but it is not
@@ -195,7 +195,7 @@ function synchronizePublishedEntry(path, writeCode) {
   }
 }
 
-function createImmutable(path, bytes, conflictCode, writeCode) {
+function createImmutable(path, bytes, conflictCode, writeCode, { link = linkSync } = {}) {
   const close = handle => {
     if (handle === undefined) return;
     try { closeSync(handle); } catch { fail(writeCode); }
@@ -234,34 +234,14 @@ function createImmutable(path, bytes, conflictCode, writeCode) {
 
     try {
       // Payload complete and durable before anything can observe it under its real name.
-      linkSync(temporary, path);
+      link(temporary, path);
       outcome = 'WRITTEN';
     } catch (error) {
       if (error?.code === 'EEXIST') outcome = 'EXISTING';
-      else {
-        // No hard links on this filesystem: fall back to exclusive create, which is still
-        // create-if-absent and never replaces existing evidence. Any write failure removes the
-        // file this call exclusively created before returning a typed, path-free refusal.
-        let fallback;
-        try { fallback = openSync(path, 'wx', 0o600); }
-        catch (raced) {
-          if (raced?.code === 'EEXIST') outcome = 'EXISTING';
-          else fail(writeCode);
-        }
-        if (fallback !== undefined) {
-          try {
-            writeFileSync(fallback, bytes);
-            fsyncSync(fallback);
-            close(fallback);
-            fallback = undefined;
-            outcome = 'WRITTEN';
-          } catch {
-            try { if (fallback !== undefined) closeSync(fallback); } catch { /* Keep typed refusal. */ }
-            try { unlinkSync(path); } catch { /* A later call will refuse partial evidence. */ }
-            fail(writeCode);
-          }
-        }
-      }
+      // Node exposes no portable atomic no-replace primitive beyond a hard link. Writing through
+      // an exclusive descriptor would expose partial final bytes, so unsupported publication is a
+      // typed refusal and the temporary file is withdrawn by the finally block.
+      else fail(writeCode);
     }
   } finally {
     try { if (temporaryHandle !== undefined) closeSync(temporaryHandle); } catch { /* typed below */ }
@@ -277,10 +257,10 @@ function createImmutable(path, bytes, conflictCode, writeCode) {
 }
 
 /** Persist a manifest immutably. An existing conflicting manifest is refused, never overwritten. */
-export function persistArtifactChainManifest({ path, manifest }) {
+export function persistArtifactChainManifest({ path, manifest }, dependencies) {
   if (typeof path !== 'string' || path.length === 0) fail('InvalidManifestPath');
   return createImmutable(path, documentBytes(validateArtifactChain(manifest)),
-    'ManifestConflict', 'ManifestWriteFailed');
+    'ManifestConflict', 'ManifestWriteFailed', dependencies);
 }
 
 /**

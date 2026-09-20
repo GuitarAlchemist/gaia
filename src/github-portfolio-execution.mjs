@@ -6,6 +6,7 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 
+import { isAutonomousRepository } from './autonomous-factory-contract.mjs';
 import {
   executeAgentFactory,
   runClaudeRepair,
@@ -28,7 +29,6 @@ function canonicalText(value, field) {
   return value;
 }
 
-const OWNER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const RECEIPT_KEYS = [
   'addressedCommentIds', 'expectedRevision', 'factory', 'idempotencyKey', 'intentDigest',
@@ -161,7 +161,7 @@ const REMOTE_FORMS = [
 
 function canonicalRepository(value, field) {
   const text = canonicalText(value, field);
-  if (!OWNER_NAME.test(text)) {
+  if (!isAutonomousRepository(text)) {
     throw new PortfolioExecutionError('InvalidExecution', `${field} must be owner/name`);
   }
   return text;
@@ -176,7 +176,7 @@ function normalizeRemoteIdentity(url) {
     const match = form.exec(trimmed);
     if (!match) continue;
     const path = match[1].replace(/\/+$/u, '').replace(/\.git$/u, '');
-    if (OWNER_NAME.test(path)) return path;
+    if (isAutonomousRepository(path)) return path;
   }
   return null;
 }
@@ -263,7 +263,10 @@ export function createAgentFactoryExecutionAdapter({
       if (!existsSync(path)) return null;
       const receipt = readDurablyPublishedReceipt(path, { intent, idempotencyKey },
         evidenceDirectory, physicalEvidenceRoot);
-      return { ...receipt.factory, addressedCommentIds: receipt.addressedCommentIds };
+      // Review-thread execution exposes its measured projection to the lane reconciler. Ordinary
+      // factory callers receive the exact producer receipt rather than an augmented third form.
+      return intent !== undefined && intent?.reviewThreadEvidence === undefined
+        ? receipt.factory : { ...receipt.factory, addressedCommentIds: receipt.addressedCommentIds };
     },
     async execute({ intent, idempotencyKey }) {
       if (!intent || intent.action !== 'RUN_FACTORY_AGENT') {

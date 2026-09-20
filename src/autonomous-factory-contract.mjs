@@ -66,7 +66,8 @@ function validateIntent(value) {
 }
 export function autonomousJobKey(value) {
   const intent = validateIntent(value);
-  return sha256(encode({ repository: intent.repository, itemId: intent.itemId, draftNumber: intent.draft.number }, 'InvalidIntent'));
+  return sha256(encode({ repository: intent.repository.toLowerCase(), itemId: intent.itemId,
+    draftNumber: intent.draft.number }, 'InvalidIntent'));
 }
 function validateJob(input) {
   const intent = validateIntent(input?.intent);
@@ -88,12 +89,23 @@ function validateWorker(value) {
     || value.requestedScope !== 'linked-worktree-only'
     || value.observedScope !== 'git-candidate-and-worktree-tree') fail('InvalidReceipt');
 }
-function validateReviewer(value) {
+function validateReviewer(value, evidenceRole) {
   exact(value, ['authority', 'evidence', 'provider', 'verifiedPostcondition', 'verdict'], 'InvalidReceipt');
-  validateEvidence(value.evidence, ['reviewer', 'reviewer-final']);
+  validateEvidence(value.evidence, [evidenceRole]);
   if (!text(value.provider, 256) || value.authority !== 'sandbox-requested-read-only'
     || value.verifiedPostcondition !== 'git-head-index-and-worktree-tree-unchanged'
     || !['APPROVE', 'REQUEST_CHANGES'].includes(value.verdict)) fail('InvalidReceipt');
+}
+function validateRepair(value, terminalIdentity) {
+  exact(value, ['authority', 'evidence', 'initialCandidateIdentity', 'observedScope', 'provider',
+    'repairedCandidateIdentity', 'requestedScope'], 'InvalidReceipt');
+  validateEvidence(value.evidence, ['repair']);
+  if (!text(value.provider, 256) || value.authority !== 'host-user-process'
+    || value.requestedScope !== 'linked-worktree-only'
+    || value.observedScope !== 'git-candidate-and-worktree-tree'
+    || !digest(value.initialCandidateIdentity) || !digest(value.repairedCandidateIdentity)
+    || value.initialCandidateIdentity === value.repairedCandidateIdentity
+    || value.repairedCandidateIdentity !== terminalIdentity) fail('InvalidReceipt');
 }
 function validateChangeSet(value, head) {
   exact(value, ['baseHead', 'files', 'identity', 'patchBytes', 'patchSha256',
@@ -130,16 +142,31 @@ function validateReceipt(value, job) {
     || Array.isArray(factory) || factory.schema !== 'gaia-agent-factory-receipt/1'
     || factory.status !== (receipt.status === 'CANDIDATE_READY' ? 'completed' : 'rejected')
     || factory.task !== job.intent.task) fail('InvalidReceipt');
+  const repaired = Object.hasOwn(factory, 'repair') || Object.hasOwn(factory, 'reviews');
+  exact(factory, ['schema', 'status', 'task', 'base', 'worker', 'changeSet', 'reviewer',
+    ...(repaired ? ['repair', 'reviews'] : [])], 'InvalidReceipt');
   exact(factory.base, ['executionBoundary', 'head', 'isolation'], 'InvalidReceipt');
   if (factory.base.head !== job.intent.draft.headRevision
     || factory.base.isolation !== 'caller-supplied-linked-git-worktree'
     || factory.base.executionBoundary !== 'host-user-process') fail('InvalidReceipt');
   validateWorker(factory.worker);
   validateChangeSet(factory.changeSet, factory.base.head);
-  validateReviewer(factory.reviewer);
-  if (factory.reviewer.verdict !== (factory.status === 'completed' ? 'APPROVE' : 'REQUEST_CHANGES')) {
-    fail('InvalidReceipt');
+  if (!repaired) {
+    validateReviewer(factory.reviewer, 'reviewer');
+    if (factory.status !== 'completed' || factory.reviewer.verdict !== 'APPROVE') {
+      fail('InvalidReceipt');
+    }
+    return serialized;
   }
+  exact(factory.reviews, ['final', 'initial'], 'InvalidReceipt');
+  validateRepair(factory.repair, factory.changeSet.identity);
+  validateReviewer(factory.reviews.initial, 'reviewer');
+  validateReviewer(factory.reviews.final, 'reviewer-final');
+  validateReviewer(factory.reviewer, 'reviewer-final');
+  if (factory.reviews.initial.verdict !== 'REQUEST_CHANGES'
+    || encode(factory.reviewer, 'InvalidReceipt') !== encode(factory.reviews.final, 'InvalidReceipt')
+    || factory.reviews.final.verdict
+      !== (factory.status === 'completed' ? 'APPROVE' : 'REQUEST_CHANGES')) fail('InvalidReceipt');
   return serialized;
 }
 

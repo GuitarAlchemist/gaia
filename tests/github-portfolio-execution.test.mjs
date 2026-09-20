@@ -91,6 +91,17 @@ test('the execution adapter binds one repository, worktree, task, and evidence d
   }), (error) => error instanceof PortfolioExecutionError
     && error.code === 'RepositoryScopeMismatch');
   assert.equal(calls.length, 1);
+
+  const dotWorktree = linkedWorktree('bound-dot-github', 'https://github.com/Owner/.github.git');
+  const dotAdapter = createAgentFactoryExecutionAdapter({
+    expectedRepository: 'Owner/.github', worktree: dotWorktree,
+    evidenceRoot: evidenceRootFor('bound-dot-github'),
+    executeFactory: async request => ({ schema: 'gaia-agent-factory-receipt/1',
+      status: 'completed', task: request.task }),
+    runWorker: async () => {}, runReviewer: async () => {}, runRepair: async () => {},
+  });
+  assert.equal((await dotAdapter.execute({ intent: intentFor('owner/.GITHUB'),
+    idempotencyKey: '9'.repeat(64) })).status, 'completed');
 });
 
 test('the execution adapter refuses a linked worktree belonging to another repository', () => {
@@ -309,8 +320,8 @@ test('redelivery under one idempotency key performs no second factory effect and
   const again = await adapter.execute({ intent, idempotencyKey });
   assert.equal(factoryRuns, 1);
   assert.deepEqual(again, first);
-  assert.deepEqual(await adapter.findReceipt({ idempotencyKey, intent }),
-    { ...first, addressedCommentIds: [] });
+  assert.deepEqual(await adapter.findReceipt({ idempotencyKey, intent }), first,
+    'ordinary reconciliation returns the exact producer receipt shape');
 
   // A different intent replayed under the same key must not be executed against the
   // receipt of another operation, nor be reported as that operation's result.

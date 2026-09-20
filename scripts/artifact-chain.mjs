@@ -11,11 +11,10 @@
  *                                            --subject <text>
  *                                            --root-revision <40-hex> [--root-revision ...] [--json]
  *
- * `create` hashes every artifact the descriptor names, through the file adapter, and pins each
- * dependency to its predecessor's measured digest. The descriptor supplies no digest and no pin,
- * so it cannot forge the evidence that would make a stale chain look fresh. Writing is immutable:
- * identical bytes are UNCHANGED, different bytes are refused, and existing evidence is never
- * overwritten. Re-running against unmoved files rewrites byte-identical bytes.
+ * `create` hashes every artifact the descriptor names through the file adapter. Every dependency
+ * must already carry its producer-recorded historical `pinnedDigest`; creation preserves that pin
+ * and never derives it from the predecessor's current measurement. Writing is immutable: identical
+ * bytes are UNCHANGED, different bytes are refused, and existing evidence is never overwritten.
  *
  * `validate` re-measures every artifact and evaluates the chain against the expectation given on
  * THIS command line. The manifest never supplies its own subject or root revision to itself, which
@@ -25,8 +24,9 @@
  * approved, or a publication happened: every claim in a manifest is unauthenticated text and is
  * reported as asserted. A stage with no node is reported NOT_PROVIDED, never as a pass.
  *
- * Exit codes: 0 created/unchanged or CHAIN_FRESH, 1 CHAIN_STALE, 2 usage error, 3 typed refusal
- * with nothing written. A refusal prints `REFUSED: <code>` and nothing else.
+ * Exit codes: 0 created/unchanged or CHAIN_FRESH, 1 CHAIN_STALE, 2 usage error, 3 typed refusal.
+ * A publication-boundary synchronization refusal may retain a complete destination; identical
+ * retry re-synchronizes it. A refusal prints `REFUSED: <code>` and nothing else.
  */
 
 import {
@@ -41,7 +41,8 @@ import {
 const USAGE = 'usage: node scripts/artifact-chain.mjs create --root <dir> --descriptor <file> '
   + '[--manifest <file>] [--json]\n'
   + '       node scripts/artifact-chain.mjs validate --root <dir> --manifest <file> '
-  + '--subject <text> --root-revision <40-hex> [--root-revision <40-hex>]... [--json]\n';
+  + '--subject <text> --root-revision <40-hex> [--root-revision <40-hex>]... [--json]\n'
+  + 'create descriptors require producer-recorded historical dependency pinnedDigest values.\n';
 
 const VALUED = new Set(['root', 'descriptor', 'manifest', 'subject', 'root-revision']);
 const REPEATED = new Set(['root-revision']);

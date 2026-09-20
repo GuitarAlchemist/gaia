@@ -1,11 +1,14 @@
+import { createHash } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   AutonomousFactoryContractError as AutonomousFactoryStoreError,
+  autonomousJobKey,
   canonicalAutonomousJson as encode,
   isAutonomousDigest as digest,
   isAutonomousRepository as repositoryName,
+  validateAutonomousIntent as validateIntent,
   validateAutonomousJob as validateJob,
   validateAutonomousReceipt as validateReceipt,
 } from './autonomous-factory-contract.mjs';
@@ -17,6 +20,24 @@ export { AutonomousFactoryContractError as AutonomousFactoryStoreError,
 // they are not an OS sandbox, protection against the owner replacing files, or
 // cross-host fencing. Keep this authority database outside worker worktrees.
 const fail = code => { throw new AutonomousFactoryStoreError(code); };
+const sha256 = value => createHash('sha256').update(value).digest('hex');
+
+// Development ledgers created before repository identity was folded retain their captured keys and
+// evidence paths. They are accepted only under the exact legacy recipe and are aliased by the new
+// durable key; new admissions can never mint a legacy key.
+function validateStoredJob(row) {
+  const intent = validateIntent(JSON.parse(row.intent_json));
+  const currentKey = autonomousJobKey(intent);
+  const legacyKey = sha256(encode({ repository: intent.repository, itemId: intent.itemId,
+    draftNumber: intent.draft.number }, 'StoreCorrupt'));
+  if (![currentKey, legacyKey].includes(row.job_key)
+    || row.idempotency_key !== sha256(encode({ grantId: row.job_key,
+      intentRevision: intent.intentRevision }, 'StoreCorrupt'))) fail('StoreCorrupt');
+  return { jobKey: row.job_key, intent, idempotencyKey: row.idempotency_key };
+}
+const matchesJobKey = (job, jobKey) => job.jobKey === jobKey
+  || autonomousJobKey(job.intent) === jobKey;
+
 function validatePath(input) {
   if (typeof input !== 'string' || !isAbsolute(input) || input.includes('\0')
     || /^[/\\]{2}/u.test(input)) fail('InvalidPath');
@@ -67,7 +88,7 @@ export function openAutonomousFactoryStore({ path: inputPath }) {
         || !Number.isSafeInteger(policy.max_runs) || policy.max_runs < 1 || policy.max_runs > 1000
         || ![0, 1].includes(policy.enabled))) fail('StoreCorrupt');
       const jobs = db.prepare('SELECT * FROM autonomous_jobs ORDER BY rowid').all().map(row => {
-        const job = validateJob({ jobKey: row.job_key, intent: JSON.parse(row.intent_json), idempotencyKey: row.idempotency_key });
+        const job = validateStoredJob(row);
         if (!policy || job.intent.repository.toLowerCase() !== policy.repository.toLowerCase()
           || row.repository !== job.intent.repository
           || row.item_id !== job.intent.itemId || row.draft_number !== job.intent.draft.number
@@ -99,12 +120,16 @@ export function openAutonomousFactoryStore({ path: inputPath }) {
           repository TEXT NOT NULL, max_runs INTEGER NOT NULL CHECK(max_runs BETWEEN 1 AND 1000),
           enabled INTEGER NOT NULL CHECK(enabled IN (0,1))) STRICT;
           CREATE TABLE autonomous_jobs (
-          job_key TEXT PRIMARY KEY, repository TEXT NOT NULL, item_id TEXT NOT NULL,
+          job_key TEXT PRIMARY KEY, repository TEXT NOT NULL COLLATE NOCASE, item_id TEXT NOT NULL,
           draft_number INTEGER NOT NULL, intent_json TEXT NOT NULL, idempotency_key TEXT NOT NULL,
           state TEXT NOT NULL CHECK(state IN ('STARTED','COMPLETED')), receipt_json TEXT,
           UNIQUE(repository,item_id,draft_number),
           CHECK((state='STARTED' AND receipt_json IS NULL) OR (state='COMPLETED' AND receipt_json IS NOT NULL))) STRICT;`);
       } else if (tables.map(table => table.name).sort().join(',') !== 'autonomous_jobs,autonomous_policy') fail('StoreCorrupt');
+      // Adds the provider-identity constraint to development databases without rewriting captured
+      // repository spelling, job keys, idempotency keys, receipts, or external evidence paths.
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS autonomous_jobs_repository_item_draft_nocase '
+        + 'ON autonomous_jobs(repository COLLATE NOCASE,item_id,draft_number)');
       readState();
     });
   } catch (error) {
@@ -127,7 +152,7 @@ export function openAutonomousFactoryStore({ path: inputPath }) {
     status() { return transaction(() => projection(readState())); },
     get(jobKey) {
       if (!digest(jobKey)) fail('InvalidJob');
-      return transaction(() => readState().jobs.find(job => job.jobKey === jobKey) ?? null);
+      return transaction(() => readState().jobs.find(job => matchesJobKey(job, jobKey)) ?? null);
     },
     start(input) {
       const job = validateJob(input);
@@ -135,7 +160,7 @@ export function openAutonomousFactoryStore({ path: inputPath }) {
         const { policy, jobs } = readState();
         if (!policy || !policy.enabled) fail('PolicyDisabled');
         if (job.intent.repository.toLowerCase() !== policy.repository.toLowerCase()) fail('RepositoryMismatch');
-        if (jobs.some(existing => existing.jobKey === job.jobKey)) fail('JobExists');
+        if (jobs.some(existing => matchesJobKey(existing, job.jobKey))) fail('JobExists');
         if (jobs.some(existing => existing.state === 'STARTED')) fail('HostBusy');
         if (jobs.length >= policy.max_runs) fail('BudgetExhausted');
         db.prepare("INSERT INTO autonomous_jobs VALUES (?,?,?,?,?,?,'STARTED',NULL)").run(
@@ -148,11 +173,12 @@ export function openAutonomousFactoryStore({ path: inputPath }) {
     finish({ jobKey, receipt }) {
       if (!digest(jobKey)) fail('InvalidJob');
       return transaction(() => {
-        const job = readState().jobs.find(item => item.jobKey === jobKey);
+        const job = readState().jobs.find(item => matchesJobKey(item, jobKey));
         if (!job) fail('JobMissing');
         const serialized = validateReceipt(receipt, job);
         if (job.state === 'COMPLETED' && encode(job.receipt, 'StoreCorrupt') !== serialized) fail('ReceiptConflict');
-        if (job.state === 'STARTED') db.prepare("UPDATE autonomous_jobs SET state='COMPLETED', receipt_json=? WHERE job_key=?").run(serialized, jobKey);
+        if (job.state === 'STARTED') db.prepare("UPDATE autonomous_jobs SET state='COMPLETED', receipt_json=? WHERE job_key=?")
+          .run(serialized, job.jobKey);
         return { ...job, state: 'COMPLETED', receipt: JSON.parse(serialized) };
       });
     },

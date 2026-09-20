@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
+import { isAutonomousRepository } from './autonomous-factory-contract.mjs';
 import { readDraftExpectation } from './github-draft-admission.mjs';
 
 const fail = code => { throw Object.assign(new Error(code), { code }); };
@@ -17,7 +18,7 @@ export function realDirectory(path) {
 // Artifacts are expectations only. Application admission always reads GitHub again.
 // A bounded discovery window is deliberate; it is not an exhaustive historical queue.
 export function collectHostedDraftReceipts({ repository, cacheDir, run = runHost }) {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(repository)) fail('InvalidRepository');
+  if (!isAutonomousRepository(repository)) fail('InvalidRepository');
   const cache = realDirectory(cacheDir);
   const runs = JSON.parse(run('gh', ['run', 'list', '-R', repository, '--workflow', 'hosted-draft-intake.yml',
     '--branch', 'main', '--status', 'success', '--limit', '20', '--json', 'databaseId,headSha,event']));

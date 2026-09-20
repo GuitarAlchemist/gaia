@@ -118,7 +118,10 @@ test('the CLI refuses usage errors, escaping locators, wrong subjects, and confl
   const manifestPath = join(root, 'evidence', 'artifact-chain.json');
   try {
     assert.equal(run().code, 2);
-    assert.equal(run('--help').code, 0);
+    const help = run('--help');
+    assert.equal(help.code, 0);
+    assert.match(help.out, /producer-recorded historical dependency pinnedDigest/u);
+    assert.doesNotMatch(help.out, /pins each dependency to its predecessor's measured digest/u);
     assert.equal(run('inspect', '--root', root).code, 2);
     assert.equal(run('create', '--root', root).code, 2);
     assert.equal(run('create', '--root', root, '--descriptor', join(root, 'descriptor.json'), '--nope', 'x').code, 2);

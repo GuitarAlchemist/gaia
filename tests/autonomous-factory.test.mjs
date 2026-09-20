@@ -262,10 +262,11 @@ test('shipped CLI provisions once and revokes with closed non-TTY stdin', () => 
   const cli = fileURLToPath(new URL('../scripts/github-portfolio-autonomous.mjs', import.meta.url));
   const run = args => spawnSync(process.execPath, [cli, ...args, '--state', root], { encoding: 'utf8', windowsHide: true, input: '' });
   try {
-    const enabled = run(['enable', '--repository', 'Example/app', '--max-runs', '2']);
+    const enabled = run(['enable', '--repository', 'Owner/.github', '--max-runs', '2']);
     assert.equal(enabled.status, 0, enabled.stderr);
     assert.equal(JSON.parse(enabled.stdout).enabled, true);
-    assert.equal(run(['enable', '--repository', 'Example/app']).status, 1);
+    assert.equal(JSON.parse(enabled.stdout).repository, 'Owner/.github');
+    assert.equal(run(['enable', '--repository', 'Owner/.github']).status, 1);
     assert.equal(JSON.parse(run(['revoke']).stdout).enabled, false);
     assert.equal(JSON.parse(run(['status']).stdout).enabled, false);
   } finally { rmSync(root, { recursive: true, force: true }); }

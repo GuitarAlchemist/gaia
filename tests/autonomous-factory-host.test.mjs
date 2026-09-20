@@ -25,6 +25,12 @@ test('discovery only downloads successful trusted workflow runs into private per
     assert.ok(list.includes('hosted-draft-intake.yml'));
     assert.ok(list.includes('success'));
     assert.ok(list.includes('main'));
+
+    const dotGitHubCache = mkdtempSync(join(root, 'dot-github-'));
+    assert.equal(collectHostedDraftReceipts({ repository: 'Owner/.github',
+      cacheDir: dotGitHubCache, run }).entries.length, 0);
+    assert.ok(calls.some(([, args]) => args.includes('Owner/.github')),
+      'shared repository validation admits the provider-valid .github name');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

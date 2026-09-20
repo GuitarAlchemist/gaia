@@ -188,10 +188,13 @@ failure refuse. Before SQLite may record terminal completion, the execution adap
 the bound receipt: POSIX flushes its containing directory and the evidence root, while Windows uses
 the strongest per-entry barrier Node exposes and claims no equivalent directory guarantee. An
 uncertain barrier leaves the job `STARTED`; reconciliation validates and republishes the same receipt
-without another provider invocation. GitHub owner/repository and organization scope comparisons are
-case-insensitive from targeted selection through policy replay and execution, while persisted spelling
-and all stable identity recipes remain unchanged. Results remain untrusted provider evidence; factory candidate
-validation and human-mediated authority are unchanged. This is not an OS sandbox guarantee.
+without another provider invocation. GitHub owner/repository and organization scope are case-insensitive from targeted selection through
+policy replay and execution. Autonomous job identity folds repository spelling to lowercase and SQLite
+independently enforces case-insensitive repository uniqueness, while captured intent, policy, receipt and
+legacy-key spelling remains immutable evidence. Repaired terminal receipts must bind repair evidence and
+both reviews to the terminal change-set identity; incomplete or contradictory lineage retains `STARTED`.
+Results remain untrusted provider evidence; factory candidate validation and human-mediated authority are
+unchanged. This is not an OS sandbox guarantee.
 Real operator authorization and an operation-linked canary remain unproven; controlled
 provider tests alone do not establish autonomous draining.
 
@@ -258,8 +261,10 @@ optional and never decides acceptance, readiness, or an effect. A projection may
 explain observation; it may not become a second writer of canonical state.
 
 An artifact-chain manifest is a derived, rebuildable sidecar: it records digests of artifacts that
-already exist elsewhere and is created if absent, compared if present, and never overwritten. It is
-not a ledger, not a second source of terminal truth, and holds no authority; losing one costs a
+already exist elsewhere and is created complete-before-visible if absent, compared if present, and never
+overwritten. Filesystems without the required atomic no-replace publication primitive refuse rather than
+expose partial final bytes. It is not a ledger, not a second source of terminal truth, and holds no authority;
+losing one costs a
 freshness check that can be rebuilt from the same files. Before ordinary autonomous scheduling, the
 host replays every completed candidate receipt through the idempotent sidecar emitter. A replay
 failure is reported per job but neither changes terminal authority nor blocks other projections or

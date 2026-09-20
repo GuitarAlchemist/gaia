@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  appendFileSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, readdirSync,
-  renameSync, rmSync, writeFileSync,
+  appendFileSync, closeSync, existsSync, linkSync, mkdtempSync, openSync, readFileSync,
+  readdirSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -91,7 +91,7 @@ test('the immutable comparison reads the existing file under the same ceiling', 
   });
 });
 
-test('an unwritable destination is a typed refusal and leaves no temporary sibling', () => {
+test('atomic no-replace publication fails closed without hard links and handles injected races', () => {
   temporary((dir) => {
     const manifest = buildArtifactChain({
       descriptor: { subject: 'subject', nodes: [{ id: 'intent', stage: 'INTENT', rootRevision: null,
@@ -101,6 +101,34 @@ test('an unwritable destination is a typed refusal and leaves no temporary sibli
       error => error instanceof ArtifactChainFileError && error.code === 'ManifestWriteFailed'
         && error.message === 'ManifestWriteFailed');
     assert.deepEqual(readdirSync(dir), []);
+
+    for (const code of ['EXDEV', 'EIO']) {
+      const path = join(dir, `${code.toLowerCase()}.json`);
+      assert.throws(() => persistArtifactChainManifest({ path, manifest }, {
+        link: () => { throw Object.assign(new Error('injected link refusal'), { code }); },
+      }), error => error instanceof ArtifactChainFileError && error.code === 'ManifestWriteFailed');
+      assert.equal(existsSync(path), false, `${code} leaves no visible destination`);
+      assert.equal(readdirSync(dir).some(name => name.startsWith(`.${code.toLowerCase()}.json.`)), false,
+        `${code} withdraws its complete temporary sibling`);
+    }
+
+    const identicalRace = join(dir, 'identical-race.json');
+    assert.deepEqual(persistArtifactChainManifest({ path: identicalRace, manifest }, {
+      link: (source, destination) => {
+        linkSync(source, destination);
+        throw Object.assign(new Error('injected lost link acknowledgement'), { code: 'EEXIST' });
+      },
+    }), { status: 'UNCHANGED' });
+    assert.ok(existsSync(identicalRace), 'a concurrent complete identical publication converges');
+
+    const conflictingRace = join(dir, 'conflicting-race.json');
+    assert.throws(() => persistArtifactChainManifest({ path: conflictingRace, manifest }, {
+      link: (_source, destination) => {
+        writeFileSync(destination, 'concurrent different bytes\n', { flag: 'wx' });
+        throw Object.assign(new Error('injected concurrent winner'), { code: 'EEXIST' });
+      },
+    }), error => error instanceof ArtifactChainFileError && error.code === 'ManifestConflict');
+    assert.equal(readFileSync(conflictingRace, 'utf8'), 'concurrent different bytes\n');
   });
 });
 
@@ -160,7 +188,8 @@ test('immutable publication flushes its namespace boundary and retries an uncert
       const failed = run(uncertain, true);
       assert.equal(failed.status, 3);
       assert.deepEqual(JSON.parse(failed.stdout), { code: 'ManifestWriteFailed' });
-      assert.equal(existsSync(uncertain), true, 'complete bytes survive an uncertain namespace flush');
+      assert.equal(existsSync(uncertain), true,
+        'exit-3 publication-boundary refusal may retain a complete destination for re-sync');
       assert.equal(readdirSync(dir).some(name => name.startsWith('.uncertain.json.')), false);
       const retried = run(uncertain);
       assert.equal(retried.status, 0, retried.stderr);

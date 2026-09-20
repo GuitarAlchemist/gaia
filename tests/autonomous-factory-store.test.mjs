@@ -26,27 +26,39 @@ function request(value = intent()) {
   const jobKey = autonomousJobKey(value);
   return { jobKey, intent: value, idempotencyKey: digest({ grantId: jobKey, intentRevision: value.intentRevision }) };
 }
-function receipt(job, status = 'CANDIDATE_READY') {
+function receipt(job, status = 'CANDIDATE_READY', { repaired = status === 'CANDIDATE_REJECTED' } = {}) {
   const files = [{ path: 'candidate.txt', state: 'present', bytes: 9, sha256: 'c'.repeat(64) }];
   const changeSetBody = { baseHead: job.intent.draft.headRevision, statusBytes: 1,
     statusSha256: 'd'.repeat(64), patchBytes: 2, patchSha256: 'e'.repeat(64), files };
+  const changeSet = { ...changeSetBody,
+    identity: createHash('sha256').update(`${JSON.stringify(changeSetBody)}\n`).digest('hex') };
   const evidence = role => ({ role, path: `/evidence/${role}.txt`, bytes: 3,
     sha256: 'f'.repeat(64), mediaType: 'text/plain; charset=utf-8',
     policy: 'local-sensitive-content-addressed' });
+  const review = (role, verdict) => ({ provider: `fixture-${role}`, evidence: evidence(role),
+    authority: 'sandbox-requested-read-only',
+    verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged', verdict });
   const factoryStatus = status === 'CANDIDATE_READY' ? 'completed' : 'rejected';
+  const final = review(repaired ? 'reviewer-final' : 'reviewer',
+    factoryStatus === 'completed' ? 'APPROVE' : 'REQUEST_CHANGES');
+  const factory = { schema: 'gaia-agent-factory-receipt/1', status: factoryStatus,
+    task: job.intent.task,
+    base: { head: job.intent.draft.headRevision, isolation: 'caller-supplied-linked-git-worktree',
+      executionBoundary: 'host-user-process' },
+    worker: { provider: 'fixture-worker', evidence: evidence('worker'), authority: 'host-user-process',
+      requestedScope: 'linked-worktree-only', observedScope: 'git-candidate-and-worktree-tree' },
+    changeSet, reviewer: final };
+  if (repaired) {
+    const initialCandidateIdentity = changeSet.identity === '1'.repeat(64)
+      ? '2'.repeat(64) : '1'.repeat(64);
+    factory.repair = { provider: 'fixture-repair', evidence: evidence('repair'),
+      authority: 'host-user-process', requestedScope: 'linked-worktree-only',
+      observedScope: 'git-candidate-and-worktree-tree', initialCandidateIdentity,
+      repairedCandidateIdentity: changeSet.identity };
+    factory.reviews = { initial: review('reviewer', 'REQUEST_CHANGES'), final };
+  }
   return { schema: 'gaia-autonomous-factory-receipt/1', status, jobKey: job.jobKey,
-    intentRevision: job.intent.intentRevision, idempotencyKey: job.idempotencyKey,
-    factory: { schema: 'gaia-agent-factory-receipt/1', status: factoryStatus, task: job.intent.task,
-      base: { head: job.intent.draft.headRevision, isolation: 'caller-supplied-linked-git-worktree',
-        executionBoundary: 'host-user-process' },
-      worker: { provider: 'fixture-worker', evidence: evidence('worker'), authority: 'host-user-process',
-        requestedScope: 'linked-worktree-only', observedScope: 'git-candidate-and-worktree-tree' },
-      changeSet: { ...changeSetBody,
-        identity: createHash('sha256').update(`${JSON.stringify(changeSetBody)}\n`).digest('hex') },
-      reviewer: { provider: 'fixture-reviewer', evidence: evidence('reviewer'),
-        authority: 'sandbox-requested-read-only',
-        verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged',
-        verdict: factoryStatus === 'completed' ? 'APPROVE' : 'REQUEST_CHANGES' } } };
+    intentRevision: job.intent.intentRevision, idempotencyKey: job.idempotencyKey, factory };
 }
 function setup(t) {
   const dir = mkdtempSync(join(tmpdir(), 'gaia-autonomous-store-'));
@@ -71,16 +83,56 @@ test('standing policy persists and cannot be reset, including after revocation',
   fails(() => configure(a), 'PolicyExists');
 });
 
-test('policy and intent repository casing share one GitHub identity across restart', t => {
-  const { open } = setup(t);
+test('case-only restart and legacy-schema redelivery retain one durable GitHub authority', t => {
+  const { path, open } = setup(t);
+  const capturedIntent = intent();
+  const legacyJobKey = digest({ repository: capturedIntent.repository, itemId: capturedIntent.itemId,
+    draftNumber: capturedIntent.draft.number });
+  const legacy = { jobKey: legacyJobKey, intent: capturedIntent,
+    idempotencyKey: digest({ grantId: legacyJobKey, intentRevision: capturedIntent.intentRevision }) };
+  const development = new DatabaseSync(path);
+  development.exec(`CREATE TABLE autonomous_policy (
+    id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL CHECK(version=1),
+    repository TEXT NOT NULL, max_runs INTEGER NOT NULL CHECK(max_runs BETWEEN 1 AND 1000),
+    enabled INTEGER NOT NULL CHECK(enabled IN (0,1))) STRICT;
+    CREATE TABLE autonomous_jobs (
+    job_key TEXT PRIMARY KEY, repository TEXT NOT NULL, item_id TEXT NOT NULL,
+    draft_number INTEGER NOT NULL, intent_json TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('STARTED','COMPLETED')), receipt_json TEXT,
+    UNIQUE(repository,item_id,draft_number),
+    CHECK((state='STARTED' AND receipt_json IS NULL) OR (state='COMPLETED' AND receipt_json IS NOT NULL))) STRICT;`);
+  development.prepare('INSERT INTO autonomous_policy VALUES (1,1,?,?,1)')
+    .run('GUITARALCHEMIST/GAIA', 2);
+  development.prepare("INSERT INTO autonomous_jobs VALUES (?,?,?,?,?,?,'STARTED',NULL)").run(
+    legacy.jobKey, capturedIntent.repository, capturedIntent.itemId, capturedIntent.draft.number,
+    JSON.stringify(capturedIntent), legacy.idempotencyKey);
+  development.close();
+
   const first = open();
-  first.configure({ repository: 'GUITARALCHEMIST/GAIA', maxRuns: 2 });
-  const job = request();
-  first.start(job);
+  const redelivered = request(intent(145, { repository: 'guitaralchemist/GAIA' }));
+  assert.equal(redelivered.jobKey, autonomousJobKey(capturedIntent),
+    'new job identity folds GitHub repository casing');
+  assert.deepEqual(first.get(redelivered.jobKey), { ...legacy, state: 'STARTED', receipt: null },
+    'the new key aliases captured development evidence without rewriting it');
+  fails(() => first.start(redelivered), 'JobExists');
+  const capturedReceipt = receipt(legacy);
+  first.finish({ jobKey: redelivered.jobKey, receipt: capturedReceipt });
+  assert.equal(first.get(redelivered.jobKey).jobKey, legacy.jobKey,
+    'completion through the folded alias retains the captured evidence identity');
+  const external = new DatabaseSync(path);
+  assert.throws(() => external.prepare(
+    "INSERT INTO autonomous_jobs VALUES (?,?,?,?,?,?,'STARTED',NULL)",
+  ).run('9'.repeat(64), 'guitaralchemist/gaia', capturedIntent.itemId,
+    capturedIntent.draft.number, JSON.stringify(redelivered.intent), '8'.repeat(64)),
+  /UNIQUE constraint failed/iu, 'SQLite enforces provider identity independently of application keys');
+  external.close();
   first.close();
+
   const restarted = open();
   assert.equal(restarted.status().repository, 'GUITARALCHEMIST/GAIA', 'policy spelling is preserved');
-  assert.deepEqual(restarted.get(job.jobKey), { ...job, state: 'STARTED', receipt: null });
+  assert.deepEqual(restarted.get(redelivered.jobKey),
+    { ...legacy, state: 'COMPLETED', receipt: capturedReceipt });
+  fails(() => restarted.start(redelivered), 'JobExists');
 });
 
 test('two connections serialize duplicate and other-job admission; budget survives completion and restart', t => {
@@ -106,9 +158,10 @@ test('revocation after STARTED prevents subsequent admission but permits bound c
   fails(() => a.start(request(intent(146))), 'PolicyDisabled');
 });
 
-test('terminal validation rejects a foreign base or non-approval, including persisted replay corruption', t => {
-  const { path, open } = setup(t); const store = open(); configure(store);
-  const job = request(); store.start(job);
+test('unrepaired and repaired producer forms fail closed, including persisted replay corruption', t => {
+  const { path, open } = setup(t); const store = open();
+  store.configure({ repository: 'GuitarAlchemist/gaia', maxRuns: 3 });
+  const direct = request(); store.start(direct);
   for (const mutation of [
     value => { value.factory.base.head = 'c'.repeat(40); },
     value => { value.factory.reviewer.verdict = 'REQUEST_CHANGES'; },
@@ -117,17 +170,51 @@ test('terminal validation rejects a foreign base or non-approval, including pers
     value => { delete value.factory.changeSet; },
     value => { delete value.factory.reviewer.evidence; },
     value => { value.factory.changeSet.identity = '0'.repeat(64); },
+    value => { value.factory.repair = receipt(direct, 'CANDIDATE_READY', { repaired: true }).factory.repair; },
   ]) {
-    const bad = receipt(job); mutation(bad);
-    fails(() => store.finish({ jobKey: job.jobKey, receipt: bad }), 'InvalidReceipt');
-    assert.equal(store.get(job.jobKey).state, 'STARTED');
+    const bad = receipt(direct); mutation(bad);
+    fails(() => store.finish({ jobKey: direct.jobKey, receipt: bad }), 'InvalidReceipt');
+    assert.equal(store.get(direct.jobKey).state, 'STARTED');
   }
-  store.finish({ jobKey: job.jobKey, receipt: receipt(job) });
-  const bad = receipt(job); bad.factory.reviewer.verdict = 'REQUEST_CHANGES';
+  store.finish({ jobKey: direct.jobKey, receipt: receipt(direct) });
+
+  const repaired = request(intent(146)); store.start(repaired);
+  for (const mutation of [
+    value => { delete value.factory.repair; },
+    value => { delete value.factory.reviews; },
+    value => { value.factory.repair.authority = 'sandbox-requested-read-only'; },
+    value => { value.factory.repair.evidence.role = 'worker'; },
+    value => { value.factory.repair.initialCandidateIdentity = value.factory.repair.repairedCandidateIdentity; },
+    value => { value.factory.repair.repairedCandidateIdentity = '0'.repeat(64); },
+    value => { value.factory.reviews.initial.verdict = 'APPROVE'; },
+    value => { value.factory.reviews.initial.evidence.role = 'reviewer-final'; },
+    value => { value.factory.reviews.final.evidence.role = 'reviewer'; },
+    value => { value.factory.reviewer = value.factory.reviews.initial; },
+    value => { value.factory.reviewer = { ...value.factory.reviewer,
+      provider: 'different-final-review' }; },
+    value => { value.factory.reviews.final.verdict = 'APPROVE'; },
+  ]) {
+    const bad = receipt(repaired, 'CANDIDATE_REJECTED'); mutation(bad);
+    fails(() => store.finish({ jobKey: repaired.jobKey, receipt: bad }), 'InvalidReceipt');
+    assert.equal(store.get(repaired.jobKey).state, 'STARTED');
+  }
+  const terminal = receipt(repaired, 'CANDIDATE_REJECTED');
+  store.finish({ jobKey: repaired.jobKey, receipt: terminal });
+  assert.deepEqual(store.get(repaired.jobKey).receipt, terminal);
+  const repairedApproval = request(intent(147));
+  store.start(repairedApproval);
+  const approved = receipt(repairedApproval, 'CANDIDATE_READY', { repaired: true });
+  store.finish({ jobKey: repairedApproval.jobKey, receipt: approved });
+  assert.deepEqual(store.get(repairedApproval.jobKey).receipt, approved,
+    'a final approval, not the initial request for changes, controls repaired terminal status');
+
+  const bad = receipt(repaired, 'CANDIDATE_REJECTED');
+  bad.factory.reviews.initial.verdict = 'APPROVE';
   const external = new DatabaseSync(path);
-  external.prepare('UPDATE autonomous_jobs SET receipt_json=? WHERE job_key=?').run(JSON.stringify(bad), job.jobKey);
+  external.prepare('UPDATE autonomous_jobs SET receipt_json=? WHERE job_key=?')
+    .run(JSON.stringify(bad), repaired.jobKey);
   external.close();
-  fails(() => store.get(job.jobKey), 'StoreCorrupt');
+  fails(() => store.get(repaired.jobKey), 'StoreCorrupt');
   fails(() => open(), 'StoreCorrupt');
 });
 
