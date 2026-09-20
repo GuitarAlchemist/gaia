@@ -134,3 +134,26 @@ for (const [name, [expression, expected]] of Object.entries(probes)) {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 }
+
+for (const writable of [false]) {
+  test('an unwritable TTY refuses before opening the authority store', () => {
+    const root = mkdtempSync(join(tmpdir(), 'gaia-auto-unwritable-cli-'));
+    const state = join(root, 'state');
+    const clone = join(root, 'clone');
+    mkdirSync(state); mkdirSync(clone);
+    // If preflight reaches SQLite, this deliberately invalid existing ledger yields StoreCorrupt.
+    writeFileSync(join(state, 'authority.sqlite'), 'not a database');
+    const probe = join(root, 'unwritable.cjs');
+    writeFileSync(probe, [
+      "Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true });",
+      `Object.defineProperty(process.stdout, 'writable', { configurable: true, value: ${writable} });`,
+    ].join('\n'));
+    try {
+      const tick = spawnSync(process.execPath, [cli, 'tick', '--state', state, '--clone', clone],
+        { encoding: 'utf8', windowsHide: true, input: '',
+          env: { ...process.env, NODE_OPTIONS: `--require "${probe.replaceAll('\\', '/')}"` } });
+      assert.equal(tick.status, 1);
+      assert.equal(tick.stderr.trim(), 'ObservabilityRequired');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}

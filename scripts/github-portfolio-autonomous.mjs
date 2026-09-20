@@ -10,7 +10,7 @@ import { collectHostedDraftReceipts, prepareAutonomousWorktree, ensureHostDirect
 import { createGitHubReadAdapter } from '../src/github-read-adapter.mjs';
 import { createGitHubDraftAdmissionAdapter } from '../src/github-draft-admission.mjs';
 import { createAgentFactoryExecutionAdapter } from '../src/github-portfolio-execution.mjs';
-import { createStreamingClaudeAdapters } from '../src/factory-visible-claude.mjs';
+import { canRenderProviderActivity, createStreamingClaudeAdapters } from '../src/factory-visible-claude.mjs';
 import { emitCandidateArtifactChain } from '../src/artifact-chain-files.mjs';
 
 const usage = `usage: github-portfolio-autonomous.mjs
@@ -121,6 +121,7 @@ export async function runAutonomousCli(argv, { write = value => process.stdout.w
   const path = join(root, 'authority.sqlite');
   if (command !== 'enable' && !existsSync(path)) fail('PolicyMissing');
   let clone;
+  const outputObservable = () => canRenderProviderActivity(process.stdout);
   if (['tick', 'watch'].includes(command)) {
     if (!args.clone) fail('Usage');
     clone = realDirectory(resolve(args.clone));
@@ -128,7 +129,7 @@ export async function runAutonomousCli(argv, { write = value => process.stdout.w
     if (!containment || !(containment === '..' || containment.startsWith(`..${sep}`) || isAbsolute(containment))) fail('StateInsideClone');
     // Keep topology refusals, then require visibility before opening the authority
     // store: a missing terminal must never consume a job's one execution slot.
-    if (!process.stdout.isTTY) fail('ObservabilityRequired');
+    if (!outputObservable()) fail('ObservabilityRequired');
   }
   const store = openAutonomousFactoryStore({ path });
   try {
@@ -144,7 +145,7 @@ export async function runAutonomousCli(argv, { write = value => process.stdout.w
     if (!repository) fail('PolicyMissing');
     // Visible by construction: provider activity is rendered to the terminal running the pump,
     // and an unrenderable run is refused rather than continued invisibly.
-    const providers = createStreamingClaudeAdapters();
+    const providers = createStreamingClaudeAdapters({ isObservable: outputObservable });
     const adapters = new Map();
     function adapter(intent, prepare) {
       const key = autonomousJobKey(intent);

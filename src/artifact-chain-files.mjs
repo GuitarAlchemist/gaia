@@ -16,7 +16,8 @@
  * The create-if-absent write is done by writing a temporary sibling, making it durable, and then
  * hard-linking it into place — `link` fails with EEXIST rather than replacing, so a second writer
  * that arrives mid-write never observes a half-written manifest and never wins a race silently.
- * Where linking is unavailable the exclusive-create fallback is used instead. This is atomic
+ * Where linking is unavailable the exclusive-create fallback is used instead. The temporary name
+ * is removed and the available publication boundary is flushed before `WRITTEN`. This is atomic
  * creation of one file; it is not a lock, and observing a file is still not a claim about what
  * that file will contain a moment later.
  *
@@ -176,6 +177,24 @@ const documentBytes = value => Buffer.from(`${canonicalArtifactChainJson(value)}
  * UNCHANGED the file already held byte-identical content; nothing was rewritten.
  * refusal   the file exists with different bytes. It is left exactly as it was.
  */
+function synchronizePublishedEntry(path, writeCode) {
+  // Node does not expose a portable Windows directory-fsync handle. Reopening the published file
+  // writable and flushing it is the strongest per-entry metadata barrier available there; POSIX
+  // can and must flush the parent directory that owns the new name.
+  const target = process.platform === 'win32' ? path : dirname(path);
+  const flags = process.platform === 'win32' ? 'r+' : 'r';
+  let handle;
+  try {
+    handle = openSync(target, flags);
+    fsyncSync(handle);
+    closeSync(handle);
+    handle = undefined;
+  } catch {
+    try { if (handle !== undefined) closeSync(handle); } catch { /* Keep the typed refusal. */ }
+    fail(writeCode);
+  }
+}
+
 function createImmutable(path, bytes, conflictCode, writeCode) {
   const close = handle => {
     if (handle === undefined) return;
@@ -192,11 +211,15 @@ function createImmutable(path, bytes, conflictCode, writeCode) {
     } catch { return fail(conflictCode); }
     finally { close(handle); }
     if (!current.equals(bytes)) fail(conflictCode);
+    // A prior publication may have returned a typed synchronization refusal after writing complete
+    // bytes. Retry that boundary before reporting convergence.
+    synchronizePublishedEntry(path, writeCode);
     return { status: 'UNCHANGED' };
   };
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${Date.now()}.tmp`);
   let temporaryHandle;
   let temporaryCreated = false;
+  let outcome;
   try {
     try {
       temporaryHandle = openSync(temporary, 'wx', 0o600);
@@ -212,26 +235,33 @@ function createImmutable(path, bytes, conflictCode, writeCode) {
     try {
       // Payload complete and durable before anything can observe it under its real name.
       linkSync(temporary, path);
-      return { status: 'WRITTEN' };
+      outcome = 'WRITTEN';
     } catch (error) {
-      if (error?.code === 'EEXIST') return existing();
-      // No hard links on this filesystem: fall back to exclusive create, which is still
-      // create-if-absent and never replaces existing evidence. Any write failure removes the
-      // file this call exclusively created before returning a typed, path-free refusal.
-      let fallback;
-      try { fallback = openSync(path, 'wx', 0o600); }
-      catch (raced) { return raced?.code === 'EEXIST' ? existing() : fail(writeCode); }
-      try {
-        writeFileSync(fallback, bytes);
-        fsyncSync(fallback);
-        close(fallback);
-        fallback = undefined;
-      } catch {
-        try { if (fallback !== undefined) closeSync(fallback); } catch { /* Refusal stays typed. */ }
-        try { unlinkSync(path); } catch { /* A later call will refuse partial evidence. */ }
-        return fail(writeCode);
+      if (error?.code === 'EEXIST') outcome = 'EXISTING';
+      else {
+        // No hard links on this filesystem: fall back to exclusive create, which is still
+        // create-if-absent and never replaces existing evidence. Any write failure removes the
+        // file this call exclusively created before returning a typed, path-free refusal.
+        let fallback;
+        try { fallback = openSync(path, 'wx', 0o600); }
+        catch (raced) {
+          if (raced?.code === 'EEXIST') outcome = 'EXISTING';
+          else fail(writeCode);
+        }
+        if (fallback !== undefined) {
+          try {
+            writeFileSync(fallback, bytes);
+            fsyncSync(fallback);
+            close(fallback);
+            fallback = undefined;
+            outcome = 'WRITTEN';
+          } catch {
+            try { if (fallback !== undefined) closeSync(fallback); } catch { /* Keep typed refusal. */ }
+            try { unlinkSync(path); } catch { /* A later call will refuse partial evidence. */ }
+            fail(writeCode);
+          }
+        }
       }
-      return { status: 'WRITTEN' };
     }
   } finally {
     try { if (temporaryHandle !== undefined) closeSync(temporaryHandle); } catch { /* typed below */ }
@@ -240,6 +270,10 @@ function createImmutable(path, bytes, conflictCode, writeCode) {
       catch (error) { if (error?.code !== 'ENOENT') fail(writeCode); }
     }
   }
+  if (outcome === 'EXISTING') return existing();
+  if (outcome !== 'WRITTEN') fail(writeCode);
+  synchronizePublishedEntry(path, writeCode);
+  return { status: 'WRITTEN' };
 }
 
 /** Persist a manifest immutably. An existing conflicting manifest is refused, never overwritten. */

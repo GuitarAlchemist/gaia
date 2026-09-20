@@ -177,9 +177,10 @@ worker profile is selectable with `--execution-profile claude-visible-restricted
 The provider adapter in `src/factory-visible-claude.mjs` implements the existing worker,
 reviewer and repair ports through three transports over one contract: an inherited interactive
 terminal, a noninteractive print transport that discards provider output, and a noninteractive
-print transport that renders bounded, sanitised provider events to the inherited terminal. The
-last is what the autonomous host uses, so a prompt-free run is still an observed run; an
-environment that cannot render refuses instead of running an unobserved worker. It restricts Claude
+print transport that renders bounded, closed-vocabulary provider events to the inherited terminal.
+The last is what the autonomous host uses, so a prompt-free run is still an observed run; the CLI
+requires a writable terminal before opening authority, and an environment that cannot render
+refuses instead of running an unobserved worker. It restricts Claude
 to file tools and working directories, removes API-key fallback through the existing
 subscription environment, and binds bounded provider results to fresh attempt identities.
 The owned process must stop before output acceptance; timeout, mismatch and cleanup

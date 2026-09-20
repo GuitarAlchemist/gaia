@@ -82,15 +82,16 @@ genuinely different ways to fix that were considered.
   point the composition root back at `createHeadlessClaudeAdapters`. Trigger for
   rollback: the rendered stream is found to carry payload or to slow a run.
 
-What is rendered is deliberately narrow: event kind, tool name, tool outcome, byte
-sizes, rate-limit status, the result verdict, and the presence/size of stderr. Prompts,
-assistant prose, tool inputs and tool results appear only as a size, because those are
-where task text, file bodies and credentials live. Control characters are replaced
-before anything is written, so a hostile tool name cannot inject an escape sequence.
-Stderr payloads are withheld too: provider diagnostics may echo credentials or input.
-The stream budget is separate from the small JSON result bound and both are enforced;
-exceeding either stops the provider. The CLI requires an inherited terminal before
-opening the authority store (`ObservabilityRequired`); a failed output sink stops
+What is rendered is deliberately narrow: closed event, block, model and configured-tool
+names, tool outcome, byte sizes, booleans, and the presence/size of stderr. Unknown,
+case-variant, and confusable provider identifiers become the fixed token `unknown`;
+provider spellings are never rendered. Prompts, assistant prose, tool inputs and tool
+results appear only as a size, because those are where task text, file bodies and
+credentials live. Control characters are replaced as defense in depth. Stderr payloads
+are withheld too: provider diagnostics may echo credentials or input. The stream budget
+is separate from the small JSON result bound and both are enforced; exceeding either
+stops the provider. The CLI requires a writable inherited terminal before opening the
+authority store (`ObservabilityRequired`); a failed output sink stops
 the owned provider (`AgentObservationFailed`) rather than accepting invisible work.
 If authority was already consumed, existing receipt reconciliation still applies.
 Model: `claude-fable-5`, verified against the locally

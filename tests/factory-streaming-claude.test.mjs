@@ -4,8 +4,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  createClaudeStreamRenderer, createStreamingClaudeAdapters, describeClaudeStreamEvent,
-  launchStreamingProvider,
+  canRenderProviderActivity, createClaudeStreamRenderer, createStreamingClaudeAdapters,
+  describeClaudeStreamEvent, launchStreamingProvider,
 } from '../src/factory-visible-claude.mjs';
 
 const context = { cwd: '.', task: 'Change fixture', baseHead: 'a'.repeat(40),
@@ -45,6 +45,9 @@ test('the autonomous streaming transport prints a rendered stream and never open
 });
 
 test('streaming refuses rather than silently running an invisible worker when nothing can render', async () => {
+  assert.equal(canRenderProviderActivity({ isTTY: true, writable: true }), true);
+  assert.equal(canRenderProviderActivity({ isTTY: true, writable: false }), false);
+  assert.equal(canRenderProviderActivity({ isTTY: false, writable: true }), false);
   const adapters = createStreamingClaudeAdapters({
     isObservable: () => false, launch: () => assert.fail('must not launch an unobservable provider') });
   await assert.rejects(adapters.runWorker(context), { code: 'ObservabilityRequired' });
@@ -80,6 +83,17 @@ test('rendered events carry tool names and progress but never prompt text, file 
       { type: 'tool_result', tool_use_id: 'toolu_1', is_error: false,
         content: 'ANTHROPIC_API_KEY=sk-ant-LEAKED\nfile body line two' }] } }),
     JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 2, duration_ms: 1234 }),
+    JSON.stringify({ type: 'PRINTABLE_SECRET_EVENT', subtype: 'PRINTABLE_SECRET_SUBTYPE',
+      model: 'PRINTABLE_SECRET_MODEL' }),
+    JSON.stringify({ type: 'rate_limit_event', rate_limit_info: {
+      status: 'PRINTABLE_SECRET_STATUS', rateLimitType: 'PRINTABLE_SECRET_LIMIT' } }),
+    JSON.stringify({ type: 'assistant', message: { content: [
+      { type: 'PRINTABLE_SECRET_BLOCK' },
+      { type: 'tool_use', id: 'toolu_secret', name: 'PRINTABLE_SECRET_TOOL', input: {} },
+      { type: 'tool_use', id: 'toolu_case', name: 'read', input: {} }] } }),
+    JSON.stringify({ type: 'user', message: { content: [
+      { type: 'tool_result', tool_use_id: 'toolu_secret', content: 'withheld' },
+      { type: 'tool_result', tool_use_id: 'toolu_case', content: 'withheld' }] } }),
   ].join('\n')}\n`));
   renderer.stderr(Buffer.from('provider stderr: ANTHROPIC_API_KEY=sk-ant-LEAKED'));
   const rendered = lines.join('');
@@ -89,6 +103,11 @@ test('rendered events carry tool names and progress but never prompt text, file 
   assert.doesNotMatch(rendered, /sk-ant-LEAKED/u);
   assert.doesNotMatch(rendered, /credentials\.txt/u);
   assert.doesNotMatch(rendered, /file body line two/u);
+  assert.doesNotMatch(rendered, /PRINTABLE_SECRET/u);
+  assert.match(rendered, /event unknown/u);
+  assert.match(rendered, /block unknown/u);
+  assert.equal((rendered.match(/tool unknown/g) ?? []).length, 4,
+    'unknown and case-variant tool names stay unknown in both use and result events');
   for (const line of lines) {
     assert.ok(line.endsWith('\n'), 'every rendered event is one terminated line');
     assert.doesNotMatch(line.slice(0, -1), /[\u0000-\u001f\u007f]/u, 'no control bytes reach the terminal');

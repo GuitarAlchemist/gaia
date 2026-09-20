@@ -18,12 +18,18 @@ const STREAM_EVENT_LIMIT = 400;
 const STREAM_LINE_LIMIT = 262_144;
 const STREAM_TOOL_LIMIT = 256;
 const RENDERED_TEXT_LIMIT = 200;
+const EVENT_TYPES = new Set(['system', 'result', 'rate_limit_event', 'assistant', 'user']);
+const BLOCK_TYPES = new Set(['tool_use', 'tool_result', 'text', 'thinking']);
+const TOOL_NAMES = new Set(['Read', 'Write', 'Edit', 'Glob', 'Grep']);
+const SYSTEM_SUBTYPES = new Set(['init']);
+const MODELS = new Set(['claude-fable-5']);
+const RESULT_SUBTYPES = new Set(['success', 'error_max_turns', 'error_during_execution', 'error_max_budget_usd']);
 
 /**
- * Provider text is untrusted. Control characters — and therefore the escape introducer of every
- * ANSI sequence — are replaced before anything reaches the terminal, and the result is truncated,
- * so a hostile tool name or error string cannot move the cursor, retitle the window, or flood the
- * pane. What survives is a short printable description, never a body.
+ * Rendered text is locally generated from closed vocabularies and counts. Control characters — and
+ * therefore the escape introducer of every ANSI sequence — are still replaced before anything
+ * reaches the terminal, and each result is truncated. Provider spellings never become identifiers
+ * merely because they contain printable characters.
  */
 function printable(value, max = RENDERED_TEXT_LIMIT) {
   const cleaned = String(value ?? '')
@@ -33,10 +39,8 @@ function printable(value, max = RENDERED_TEXT_LIMIT) {
   return cleaned.length > max ? `${cleaned.slice(0, max)}...` : cleaned;
 }
 
-const identifier = (value) => {
-  const name = printable(value, 48).replace(/[^A-Za-z0-9_.:/-]/gu, '');
-  return name === '' ? 'unknown' : name;
-};
+const closedIdentifier = (value, vocabulary) =>
+  typeof value === 'string' && vocabulary.has(value) ? value : 'unknown';
 
 const sizeOf = (value) => {
   try { return JSON.stringify(value)?.length ?? 0; } catch { return 0; }
@@ -47,33 +51,32 @@ const count = (value) => (Number.isSafeInteger(value) ? value : '?');
 /**
  * Describe one provider stream event as bounded human-readable lines.
  *
- * Names, sizes, statuses and errors are reported; prompts, assistant prose, tool inputs and tool
- * results are reported only by size, because those are exactly where task text, file bodies and
- * credentials live. `tools` maps a tool-use id to its name so a result can be attributed; it is
- * bounded, and an unknown id is reported as unknown rather than guessed.
+ * Closed event, block, model and configured-tool names plus sizes and booleans are reported;
+ * prompts, assistant prose, tool inputs and tool results are reported only by size, because those
+ * are exactly where task text, file bodies and credentials live. `tools` maps a tool-use id to its
+ * normalized configured name so a result can be attributed; it is bounded, and any unknown
+ * spelling or id is reported as `unknown` rather than rendered or guessed.
  */
 export function describeClaudeStreamEvent(event, tools) {
   if (!event || typeof event !== 'object' || Array.isArray(event)) return ['event malformed'];
-  const type = identifier(event.type);
+  const type = closedIdentifier(event.type, EVENT_TYPES);
   if (type === 'system') {
-    return [`session ${identifier(event.subtype)} model=${identifier(event.model)}`
+    return [`session ${closedIdentifier(event.subtype, SYSTEM_SUBTYPES)}`
+      + ` model=${closedIdentifier(event.model, MODELS)}`
       + ` tools=${Array.isArray(event.tools) ? event.tools.length : 0}`];
   }
   if (type === 'result') {
-    return [`result ${identifier(event.subtype)} error=${event.is_error === true}`
+    return [`result ${closedIdentifier(event.subtype, RESULT_SUBTYPES)} error=${event.is_error === true}`
       + ` turns=${count(event.num_turns)} duration=${count(event.duration_ms)}ms`];
   }
-  if (type === 'rate_limit_event') {
-    return [`rate-limit ${identifier(event.rate_limit_info?.status)}`
-      + ` ${identifier(event.rate_limit_info?.rateLimitType)}`];
-  }
+  if (type === 'rate_limit_event') return ['rate-limit event'];
   const blocks = event.message?.content;
   if ((type !== 'assistant' && type !== 'user') || !Array.isArray(blocks)) return [`event ${type}`];
   return blocks.map((block) => {
     if (!block || typeof block !== 'object') return 'block malformed';
-    const kind = identifier(block.type);
+    const kind = closedIdentifier(block.type, BLOCK_TYPES);
     if (kind === 'tool_use') {
-      const name = identifier(block.name);
+      const name = closedIdentifier(block.name, TOOL_NAMES);
       if (typeof block.id === 'string' && tools.size < STREAM_TOOL_LIMIT) tools.set(block.id, name);
       return `tool ${name} input=${sizeOf(block.input)}B`;
     }
@@ -297,10 +300,13 @@ export function createHeadlessClaudeAdapters({ launch = launchHeadless } = {}) {
  * interactive screen — is what makes the run observable. When nothing can render, the run is
  * refused: falling back to an invisible worker would report success for work nobody watched.
  */
+export const canRenderProviderActivity = (output = process.stdout) =>
+  Boolean(output?.isTTY) && output.writable !== false;
+
 export function createStreamingClaudeAdapters({
   launch = launchStreamingProvider,
   render = (line) => process.stdout.write(line),
-  isObservable = () => Boolean(process.stdout.isTTY) && process.stdout.writable !== false,
+  isObservable = () => canRenderProviderActivity(process.stdout),
 } = {}) {
   return createClaudeAdapters({ launch, render, isObservable, mode: 'streaming' });
 }

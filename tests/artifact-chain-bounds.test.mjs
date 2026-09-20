@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  appendFileSync, closeSync, existsSync, mkdtempSync, openSync, readdirSync, renameSync, rmSync,
-  writeFileSync,
+  appendFileSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, readdirSync,
+  renameSync, rmSync, writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -100,6 +101,74 @@ test('an unwritable destination is a typed refusal and leaves no temporary sibli
       error => error instanceof ArtifactChainFileError && error.code === 'ManifestWriteFailed'
         && error.message === 'ManifestWriteFailed');
     assert.deepEqual(readdirSync(dir), []);
+  });
+});
+
+test('immutable publication flushes its namespace boundary and retries an uncertain flush', () => {
+  temporary((dir) => {
+    const probe = join(dir, 'fsync-probe.cjs');
+    const runner = join(dir, 'persist.mjs');
+    const log = join(dir, 'fsync.log');
+    writeFileSync(probe, [
+      "const fs = require('node:fs');",
+      "const { syncBuiltinESMExports } = require('node:module');",
+      'const original = fs.fsyncSync;',
+      'fs.fsyncSync = (fd) => {',
+      "  const directory = fs.fstatSync(fd).isDirectory();",
+      "  fs.appendFileSync(process.env.GAIA_FSYNC_LOG, directory ? 'D' : 'F');",
+      "  if (directory && process.env.GAIA_FAIL_DIRECTORY === '1') {",
+      "    throw Object.assign(new Error('injected directory sync failure'), { code: 'EIO' });",
+      '  }',
+      '  return original(fd);',
+      '};',
+      'syncBuiltinESMExports();',
+    ].join('\n'));
+    writeFileSync(runner, [
+      `import { buildArtifactChain } from ${JSON.stringify(new URL('../src/artifact-chain.mjs', import.meta.url).href)};`,
+      `import { persistArtifactChainManifest } from ${JSON.stringify(new URL('../src/artifact-chain-files.mjs', import.meta.url).href)};`,
+      "const manifest = buildArtifactChain({ descriptor: { subject: 'subject', nodes: [",
+      "  { id: 'intent', stage: 'INTENT', rootRevision: null, producer: 'producer',",
+      "    locator: 'intent.json', claim: null, dependencies: [] }] },",
+      "  measured: { intent: 'a'.repeat(64) } });",
+      'try {',
+      '  const first = persistArtifactChainManifest({ path: process.argv[2], manifest });',
+      '  const second = persistArtifactChainManifest({ path: process.argv[2], manifest });',
+      '  process.stdout.write(JSON.stringify({ first, second }));',
+      '} catch (error) {',
+      '  process.stdout.write(JSON.stringify({ code: error.code }));',
+      '  process.exitCode = 3;',
+      '}',
+    ].join('\n'));
+    const run = (path, failDirectory = false) => {
+      writeFileSync(log, '');
+      const required = `--require "${probe.replaceAll('\\', '/')}"`;
+      return spawnSync(process.execPath, [runner, path], { encoding: 'utf8', windowsHide: true,
+        env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} ${required}`.trim(),
+          GAIA_FSYNC_LOG: log, GAIA_FAIL_DIRECTORY: failDirectory ? '1' : '0' } });
+    };
+
+    const path = join(dir, 'manifest.json');
+    const written = run(path);
+    assert.equal(written.status, 0, written.stderr);
+    assert.deepEqual(JSON.parse(written.stdout), { first: { status: 'WRITTEN' }, second: { status: 'UNCHANGED' } });
+    const marks = readFileSync(log, 'utf8');
+    if (process.platform === 'win32') assert.ok(/^F{3,}$/u.test(marks), `file entry flushes recorded: ${marks}`);
+    else assert.match(marks, /^F.*D.*D$/u, `file then parent directory flushes recorded: ${marks}`);
+
+    if (process.platform !== 'win32') {
+      const uncertain = join(dir, 'uncertain.json');
+      const failed = run(uncertain, true);
+      assert.equal(failed.status, 3);
+      assert.deepEqual(JSON.parse(failed.stdout), { code: 'ManifestWriteFailed' });
+      assert.equal(existsSync(uncertain), true, 'complete bytes survive an uncertain namespace flush');
+      assert.equal(readdirSync(dir).some(name => name.startsWith('.uncertain.json.')), false);
+      const retried = run(uncertain);
+      assert.equal(retried.status, 0, retried.stderr);
+      assert.deepEqual(JSON.parse(retried.stdout),
+        { first: { status: 'UNCHANGED' }, second: { status: 'UNCHANGED' } });
+      assert.match(readFileSync(log, 'utf8'), /^FDFD$/u,
+        'each retry flushes its temporary bytes, removes them, then flushes before UNCHANGED');
+    }
   });
 });
 
