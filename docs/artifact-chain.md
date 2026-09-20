@@ -373,6 +373,35 @@ exact pre-repair inputs were `src/artifact-chain-files.mjs`
 `docs/artifact-chain.md` `13429f4e0543cfa9f16d4556d8803453d53cb1fce2c23997661cd0902a97578f`,
 and the independent finding linked above.
 
+### Decision: descriptor validation precedes artifact measurement (ENG-02)
+
+Independent review of head `ab5843d32534f17090b2e455ae7d0da8d275f44f`
+([thread](https://github.com/GuitarAlchemist/gaia/pull/146#discussion_r4057605981))
+showed that `create` could read and hash every locator before the pure builder enforced its 64-node
+bound and complete descriptor shape. A malformed bounded JSON document could therefore drive
+thousands of unnecessary bounded file reads before its inevitable `InvalidDescriptor` refusal.
+Two placements were compared before implementation.
+
+- **Pure-policy perspective — selected: expose one complete descriptor validator.** Exact keys,
+  subject and node bounds, field and locator shape, dependency bounds, duplicate identities, graph
+  references and stage ordering are checked in `src/artifact-chain.mjs` before any adapter call.
+  `buildArtifactChain` invokes the same validator, so direct callers cannot bypass it.
+- **Filesystem perspective — rejected: duplicate the 64-node limit in the measurement adapter.** A
+  local count check would close only this example while malformed later nodes, unknown dependencies
+  and invalid ordering could still trigger earlier I/O; duplicating domain policy in the adapter
+  would also let the two contracts drift.
+
+Malformed descriptors retain existing typed codes, with `InvalidDescriptor` for shape or count and
+structural codes for graph defects. The CLI exits `3`, writes no manifest and inspects no artifact
+path. Valid descriptors produce byte-identical manifests; unreadable valid artifacts retain their
+filesystem refusal. Reversibility class: **freely reversible**, but rollback restores malformed
+input as an I/O amplifier. The exact pre-repair inputs were `docs/artifact-chain.md`
+`d7f2902b63662f76f74b21b951615b9603526991baa2184b9e6299c6dc39c3f9`,
+`scripts/artifact-chain.mjs` `3971ce60842eb75fad4459e308d4297778abb3db4a1b0d7e6a9cb77b68ae62c0`,
+`src/artifact-chain.mjs` `58441192c0fcbe0482571b93891a376475ea90c81483e6a5bf300a959df114c3`,
+`tests/artifact-chain-cli.test.mjs` `b21a9cd9f28d5d6aea2f874cf37311f870f92545a05a1ff75d0977652968947e`,
+and the independent finding linked above.
+
 ## Boundaries and residual risk
 
 - The evaluation is a local read of local bytes at one instant. It is **not** a

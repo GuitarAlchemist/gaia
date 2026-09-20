@@ -240,6 +240,41 @@ outlive the pathname needed by its evidence projection. The exact pre-repair inp
 `ARCHITECTURE.md` `5ded57ae736b6fb55fd7ff5808fd054e73c1676ee3b2ea06b22d06082adf7be3`,
 and the independent finding linked above.
 
+### Decision: GitHub repository scope uses case-insensitive identity (ENG-02)
+
+Independent review of head `ab5843d32534f17090b2e455ae7d0da8d275f44f`
+([thread](https://github.com/GuitarAlchemist/gaia/pull/146#discussion_r4057605976))
+showed that one-time policy, preview, admission and execution did not share GitHub's
+case-insensitive owner/name semantics. A case-only difference could refuse before authority, or—if
+fixed at only the first check—consume `STARTED` and then fail at execution with no receipt. Two
+identity designs were compared across the complete path before implementation.
+
+- **Semantic-comparison perspective — selected: preserve spelling and compare ASCII owner/name
+  case-insensitively at provider-identity seams.** Target selection, autonomous preview scope,
+  policy/job replay, store admission and execution scope all accept case-only variants. The stored
+  policy and provider intent retain their original bytes, so existing job keys, intent revisions,
+  idempotency keys and receipts remain unchanged. The database row repository must still exactly
+  equal its captured intent repository; disagreement there is corruption, not provider identity.
+- **Canonical-storage perspective — rejected: lowercase every persisted repository.** This would
+  simplify future equality but requires a versioned migration of policy rows, intents, job keys,
+  idempotency keys and bound receipts. Rewriting stable identity to repair comparison semantics
+  would invalidate evidence already produced under the current recipes.
+
+Case-only variants proceed silently as one GitHub repository. Genuinely different repositories keep
+`RepositoryScopeMismatch` before provider invocation or `RepositoryMismatch` at direct store
+admission. Malformed values retain their existing contract refusals. Reversibility class: **freely
+reversible in storage terms but unsafe for configured policy**; rollback can strand an immutable
+policy or move a scope failure past authority consumption. The exact pre-repair inputs were
+`docs/autonomous-factory.md` `b0681a8c226239f8213aa2afc76325a990dd3a394dbf59cd1cd2ebc1ef6aa638`,
+`src/autonomous-factory.mjs` `4c8bf9da787866e45f6bf82949096d9bd3586ef4a40f3554c2cb2e2b3601cc82`,
+`src/autonomous-factory-store.mjs` `38ac960b329b992ed52c2da46644d9583c0f025e74ba0bf8d6bd7a6d32d638cd`,
+`src/github-portfolio.mjs` `9bae4db1fb9aaf99c0e7980a4cc9e158325c0225c40ed701d094d31385539404`,
+`src/github-portfolio-execution.mjs` `1000bbcac044849a8a360804e88b0acfe6d3c2f8eb9bb952cd7ca1206afcea29`,
+`tests/autonomous-factory.test.mjs` `548c6d6b9d97d384cf59a7f8d572721995d31e856fd77f1167db3598cc14267e`,
+`tests/autonomous-factory-store.test.mjs` `f13f493acdb51a7b60d7d108969dce3e4e1c5500f8984de8945a56665548449b`,
+`tests/github-portfolio-execution.test.mjs` `ce17272eeb62d3843c3a86b890142066b9b496723b593fa91c834858c0df261f`,
+and the independent finding linked above.
+
 ## Ownership and recovery
 
 The application owns preview, authority consumption, execution and reconciliation.
