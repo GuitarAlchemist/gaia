@@ -109,6 +109,36 @@ Inputs read for this decision, lowercase SHA-256 over file bytes at
 | `tests/factory-visible-claude.test.mjs` | `95aa5ece5cba937882a1b131cef5f0c83f9dc95c76ff2a0e13cb9ae8cf629ed6` |
 | `docs/autonomous-factory.md` | `a6094efe99171f0d78828c64dc01427f50df8e37066615aa602ceecbde9828d4` |
 
+### Decision: close the observability boundary before authority (ENG-02)
+
+Independent review of head `7a458e479aacc6417fd56236634e0293a41a8d84` found two ways the
+visible-stream claim could fail: an already-unwritable TTY was rejected only after `STARTED`, and
+printable provider-controlled identifiers could pass through the renderer
+([preflight](https://github.com/GuitarAlchemist/gaia/pull/146#discussion_r4057534488),
+[renderer](https://github.com/GuitarAlchemist/gaia/pull/146#discussion_r4057534485)).
+Two perspectives and three placements were compared before implementation.
+
+- **Authority perspective — rejected: check terminal state inside `store.start()`.** The store has no
+  terminal capability and must not couple durable authority to one process UI.
+- **Transport perspective — rejected: rely on the streaming adapter's late observability check and
+  character sanitization.** The late check follows authority consumption, while sanitization makes
+  payload terminal-safe but does not make printable payload confidential.
+- **Composition/projection perspective — selected: share one writable-TTY predicate between the CLI
+  preflight and streaming adapter, and project every provider identifier through exact closed
+  vocabularies.** The preflight runs before the store opens. Known event/block/tool/model values
+  remain visible; unknown, case-variant, or confusable values become a fixed `unknown` token. The
+  renderer retains only normalized tool names, never the provider spelling.
+
+A sink can still fail after preflight, so `AgentObservationFailed` remains the runtime backstop.
+The host remains the one authority consumer and the renderer remains a zero-authority projection.
+Reversibility class: **freely reversible in code but unsafe for authority and confidentiality**.
+The exact pre-repair inputs were `scripts/github-portfolio-autonomous.mjs`
+`5381ecd539df1f10fad1bbd1cb67028bb61e7c2c0c672b1d8f171d2454551f18`,
+`src/factory-visible-claude.mjs` `6805ddcd4cab26d58be97fb12205f438963d201aa2cef1527de73024b806e883`,
+`tests/factory-streaming-claude.test.mjs` `094c4c5b99fa12069e497ddcca3eb6f2067deca54b9388f940a2d207af3b1e22`,
+`tests/autonomous-factory-errors.test.mjs` `c6770f140e24f665217b800a08a8dc45690c6b5e72c6711959de6ab543fd3a0f`,
+and the independent findings linked above.
+
 ### Decision: terminal receipts must carry replayable factory evidence (ENG-02)
 
 Independent review of head `2d6cb73006185ea1317cafb93a879214ab73f49e`

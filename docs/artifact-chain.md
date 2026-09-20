@@ -343,6 +343,36 @@ reported in `artifactChainRecovery`; one failure neither stops another replay no
 prevents unrelated eligible work. A sidecar failure therefore never reruns a completed
 worker, never consumes authority or a run, and never frees or occupies the host slot.
 
+### Decision: `WRITTEN` follows namespace synchronization (ENG-02)
+
+Independent review of head `7a458e479aacc6417fd56236634e0293a41a8d84`
+([thread](https://github.com/GuitarAlchemist/gaia/pull/146#discussion_r4057534493))
+showed that flushing file contents before publication did not flush the new directory entry before
+returning `WRITTEN`. Two perspectives and three placements were compared before implementation.
+
+- **Caller perspective — rejected: synchronize in the autonomous host.** That misses the standalone
+  manifest writer, stored-intent writes, and future callers of the immutable primitive.
+- **Contract perspective — rejected: redefine `WRITTEN` as merely visible.** This would weaken the
+  existing durability claim and give callers no closed result for a file whose bytes are stable but
+  whose published name has not crossed the available synchronization boundary.
+- **Filesystem perspective — selected: synchronize the publication inside `createImmutable`.** The
+  temporary bytes are flushed, the final name is created without replacement, the temporary name is
+  removed, and then the publication boundary is flushed before `WRITTEN`. A complete destination is
+  preserved after a synchronization refusal; byte-identical retry repeats the boundary flush before
+  returning `UNCHANGED`. No conflicting destination is ever replaced.
+
+On POSIX, Node exposes the required parent-directory descriptor and the implementation fsyncs it.
+On Windows, Node exposes no portable directory-fsync primitive; the implementation reopens the
+published file writable and flushes that handle, the strongest per-entry metadata flush available
+through the supported runtime. The immutable replay path remains the restart repair on either
+platform. Reversibility class: **freely reversible in code but unsafe for crash durability**. The
+exact pre-repair inputs were `src/artifact-chain-files.mjs`
+`ef0d6f6fe4e96f4e0381863ed903faa4507098b488779e66d828ed1c54af882e`,
+`tests/artifact-chain-bounds.test.mjs`
+`99086790ec9b3b46a5ef933af7281799b08421bfb648a13d95d2fc3a73696b12`,
+`docs/artifact-chain.md` `13429f4e0543cfa9f16d4556d8803453d53cb1fce2c23997661cd0902a97578f`,
+and the independent finding linked above.
+
 ## Boundaries and residual risk
 
 - The evaluation is a local read of local bytes at one instant. It is **not** a
