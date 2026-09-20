@@ -253,7 +253,10 @@ explain observation; it may not become a second writer of canonical state.
 An artifact-chain manifest is a derived, rebuildable sidecar: it records digests of artifacts that
 already exist elsewhere and is created if absent, compared if present, and never overwritten. It is
 not a ledger, not a second source of terminal truth, and holds no authority; losing one costs a
-freshness check that can be rebuilt from the same files.
+freshness check that can be rebuilt from the same files. Before ordinary autonomous scheduling, the
+host replays every completed candidate receipt through the idempotent sidecar emitter. A replay
+failure is reported per job but neither changes terminal authority nor blocks other projections or
+eligible work.
 
 The drain Petri-net core and fact collector are pure replay modules. Their CLI composes JSONL and
 artifact observations at the edge, and their optional DuckDB adapter rebuilds analytical tables

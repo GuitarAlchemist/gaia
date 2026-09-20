@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { openAutonomousFactoryStore } from '../src/autonomous-factory-store.mjs';
-import { runAutonomousTick } from '../scripts/github-portfolio-autonomous.mjs';
+import { runAutonomousHostTick, runAutonomousTick } from '../scripts/github-portfolio-autonomous.mjs';
 import { runAutonomousFactory, reconcileAutonomousJob } from '../src/autonomous-factory.mjs';
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
@@ -150,6 +150,98 @@ test('production SQLite and actual tick compose to one candidate with byte-ident
     assert.equal(store.status().usedRuns, 1);
     store.revoke();
     assert.equal((await runAutonomousTick({ ...args, collect: () => assert.fail('must not poll after revoke') })).code, 'PolicyDisabled');
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('host tick rebuilds a missing completed sidecar without relaunching its worker', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gaia-auto-sidecar-replay-'));
+  const evidenceRoot = join(root, 'evidence'); mkdirSync(evidenceRoot);
+  const store = openAutonomousFactoryStore({ path: join(root, 'policy.sqlite') });
+  try {
+    store.configure({ repository: 'Example/app', maxRuns: 3 });
+    const f = fixture(); f.args.store = store;
+    const args = { store, execution: f.args.execution, githubRead: f.args.githubRead,
+      collect: () => ({ entries: [{ runId: 1, expectation: { workItem: { number: 1 }, number: 2 } }], refusals: [] }),
+      admission: () => f.args.draftAdmission };
+    const first = await runAutonomousTick(args);
+    const evidenceDir = join(evidenceRoot, first.idempotencyKey); mkdirSync(evidenceDir);
+    writeFileSync(join(evidenceDir, 'receipt.json'), `${JSON.stringify(first.factory)}\n`);
+    assert.equal(existsSync(join(evidenceDir, 'artifact-chain.json')), false);
+
+    const replay = await runAutonomousHostTick({ store, evidenceRoot, tick: () => runAutonomousTick(args) });
+    assert.equal(replay.status, 'NO_NEW_CANDIDATE');
+    assert.deepEqual(replay.artifactChainRecovery.map(({ jobKey, status }) => ({ jobKey, status })),
+      [{ jobKey: first.jobKey, status: 'WRITTEN' }]);
+    assert.equal(existsSync(join(evidenceDir, 'artifact-chain.json')), true);
+    assert.equal(f.counts().launches, 1);
+
+    const unchanged = await runAutonomousHostTick({ store, evidenceRoot, tick: () => runAutonomousTick(args) });
+    assert.equal(Object.hasOwn(unchanged, 'artifactChainRecovery'), false);
+    assert.equal(f.counts().launches, 1);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const gate of ['revoked policy', 'exhausted budget']) {
+  test(`completed sidecar recovery precedes ${gate} refusal`, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gaia-auto-sidecar-gate-'));
+    const evidenceRoot = join(root, 'evidence'); mkdirSync(evidenceRoot);
+    const store = openAutonomousFactoryStore({ path: join(root, 'policy.sqlite') });
+    try {
+      store.configure({ repository: 'Example/app', maxRuns: 1 });
+      const f = fixture(); f.args.store = store;
+      const args = { store, execution: f.args.execution, githubRead: f.args.githubRead,
+        collect: () => ({ entries: [{ runId: 1, expectation: { workItem: { number: 1 }, number: 2 } }], refusals: [] }),
+        admission: () => f.args.draftAdmission };
+      const first = await runAutonomousTick(args);
+      const evidenceDir = join(evidenceRoot, first.idempotencyKey); mkdirSync(evidenceDir);
+      writeFileSync(join(evidenceDir, 'receipt.json'), `${JSON.stringify(first.factory)}\n`);
+      if (gate === 'revoked policy') store.revoke();
+      const replay = await runAutonomousHostTick({ store, evidenceRoot,
+        tick: () => runAutonomousTick({ ...args, collect: () => assert.fail('gate must refuse before discovery') }) });
+      assert.equal(replay.code, gate === 'revoked policy' ? 'PolicyDisabled' : 'BudgetExhausted');
+      assert.equal(replay.artifactChainRecovery[0].status, 'WRITTEN');
+      assert.equal(f.counts().launches, 1);
+    } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+test('a failed completed-sidecar replay does not block unrelated eligible work', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gaia-auto-sidecar-isolation-'));
+  const evidenceRoot = join(root, 'evidence'); mkdirSync(evidenceRoot);
+  const store = openAutonomousFactoryStore({ path: join(root, 'policy.sqlite') });
+  try {
+    store.configure({ repository: 'Example/app', maxRuns: 3 });
+    const first = fixture(); first.args.store = store;
+    const oldArgs = { store, execution: first.args.execution, githubRead: first.args.githubRead,
+      collect: () => ({ entries: [{ runId: 1, expectation: { workItem: { number: 1 }, number: 2 } }], refusals: [] }),
+      admission: () => first.args.draftAdmission };
+    const old = await runAutonomousTick(oldArgs);
+
+    const next = fixture(); next.args.store = store;
+    next.snapshot.repositories[0].issues[0].id = 'issue-2';
+    next.snapshot.repositories[0].issues[0].number = 2;
+    next.args.draftAdmission.target = async () => ({ repository: 'Example/app', itemKind: 'ISSUE', itemNumber: 2 });
+    next.args.draftAdmission.read = async () => ({ number: 3, state: 'OPEN', isDraft: true,
+      headRef: 'codex/next', headRevision: 'b'.repeat(40) });
+    const nextArgs = { store, execution: next.args.execution, githubRead: next.args.githubRead,
+      collect: () => ({ entries: [{ runId: 2, expectation: { workItem: { number: 2 }, number: 3 } }], refusals: [] }),
+      admission: () => next.args.draftAdmission };
+    const result = await runAutonomousHostTick({ store, evidenceRoot, tick: () => runAutonomousTick(nextArgs) });
+    assert.equal(result.status, 'CANDIDATE_READY');
+    assert.equal(result.artifactChainRecovery[0].jobKey, old.jobKey);
+    assert.equal(result.artifactChainRecovery[0].status, 'FAILED');
+    assert.equal(next.counts().launches, 1);
+    assert.equal(first.counts().launches, 1);
+
+    const nextEvidence = join(evidenceRoot, result.idempotencyKey); mkdirSync(nextEvidence);
+    writeFileSync(join(nextEvidence, 'receipt.json'), `${JSON.stringify(result.factory)}\n`);
+    const projections = await runAutonomousHostTick({ store, evidenceRoot,
+      tick: async () => ({ status: 'NO_INTAKE_RECEIPTS' }) });
+    assert.deepEqual(projections.artifactChainRecovery.map(({ jobKey, status }) => ({ jobKey, status })), [
+      { jobKey: old.jobKey, status: 'FAILED' },
+      { jobKey: result.jobKey, status: 'WRITTEN' },
+    ]);
+    assert.equal(next.counts().launches, 1);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

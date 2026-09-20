@@ -88,6 +88,32 @@ export function emitCandidateSidecar({ result, store, evidenceRoot }) {
   }
 }
 
+/** Rebuild missing terminal projections without changing authority or invoking execution. */
+export function recoverCompletedCandidateSidecars({ store, evidenceRoot }) {
+  const outcomes = [];
+  for (const job of store.status().jobs) {
+    if (job.state !== 'COMPLETED') continue;
+    const outcome = emitCandidateSidecar({ result: job.receipt, store, evidenceRoot });
+    if (outcome?.status !== 'UNCHANGED') outcomes.push({ jobKey: job.jobKey, ...outcome });
+  }
+  return outcomes;
+}
+
+/** One host pass: recover projections first, then schedule work, then project its result. */
+export async function runAutonomousHostTick({ store, evidenceRoot, tick }) {
+  let artifactChainRecovery;
+  let result;
+  try {
+    artifactChainRecovery = recoverCompletedCandidateSidecars({ store, evidenceRoot });
+    result = await tick();
+  } catch (error) {
+    result = { status: 'REFUSED', code: diagnosticCode(error, 'HostReadFailed') };
+  }
+  const artifactChain = emitCandidateSidecar({ result, store, evidenceRoot });
+  const projected = artifactChain === null ? result : { ...result, artifactChain };
+  return artifactChainRecovery?.length ? { ...projected, artifactChainRecovery } : projected;
+}
+
 export async function runAutonomousCli(argv, { write = value => process.stdout.write(`${JSON.stringify(value)}\n`) } = {}) {
   if (argv.length === 0 || argv[0] === '--help') { process.stdout.write(`${usage}\n`); return 0; }
   const { command, args } = parse(argv);
@@ -147,13 +173,7 @@ export async function runAutonomousCli(argv, { write = value => process.stdout.w
       collect: () => collectHostedDraftReceipts({ repository, cacheDir: paths.cache }),
       admission: entry => createGitHubDraftAdmissionAdapter({ expectedRepository: repository, receiptText: entry.receiptText }),
     });
-    const once = async () => {
-      let result;
-      try { result = await tick(); }
-      catch (error) { return { status: 'REFUSED', code: diagnosticCode(error, 'HostReadFailed') }; }
-      const artifactChain = emitCandidateSidecar({ result, store, evidenceRoot: paths.evidence });
-      return artifactChain === null ? result : { ...result, artifactChain };
-    };
+    const once = () => runAutonomousHostTick({ store, evidenceRoot: paths.evidence, tick });
     if (command === 'tick') {
       const result = await once(); write(result);
       return ['REFUSED', 'RECONCILIATION_REQUIRED'].includes(result.status) ? 1 : 0;

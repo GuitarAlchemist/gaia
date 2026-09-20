@@ -189,8 +189,11 @@ Before new selection, a STARTED job is reconciled with its original intent/key. 
 completed/rejected factory receipt closes it. Missing, corrupt or mismatched evidence
 returns `RECONCILIATION_REQUIRED`, retaining the slot. Even a crash before invocation
 cannot establish safe absence: there is no automatic lock stealing or blind relaunch.
-Revocation and starts serialize in one database; GitHub readback and process spawn
-are not atomic. Remote source movement in that interval remains a limitation; the
+Before policy and budget gates or new selection, the host also replays every COMPLETED
+receipt through the candidate-sidecar emitter. This projection recovery invokes no
+worker, consumes no run, continues after per-job failure, and leaves terminal authority
+untouched. Revocation and starts serialize in one database; GitHub readback and process
+spawn are not atomic. Remote source movement in that interval remains a limitation; the
 local source is rechecked immediately before execution.
 
 This guarantee covers actors sharing this registry. Manual runs, another database,

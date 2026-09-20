@@ -336,8 +336,12 @@ as the latter would be reading a receipt as a build.
 This changes no existing schema and preserves the original receipt and the
 reconciliation path. Sidecar emission is strictly after the store's terminal
 transition, cannot throw into it, and reports itself in a separate `artifactChain`
-field of the tick result (`WRITTEN`, `UNCHANGED`, or `FAILED` with a code). A sidecar
-failure therefore never reruns a completed worker and never frees the host slot.
+field of the tick result (`WRITTEN`, `UNCHANGED`, or `FAILED` with a code). Before each
+later host tick schedules work or applies policy and budget gates, it replays every
+COMPLETED receipt through the same idempotent emitter. Non-`UNCHANGED` outcomes are
+reported in `artifactChainRecovery`; one failure neither stops another replay nor
+prevents unrelated eligible work. A sidecar failure therefore never reruns a completed
+worker, never consumes authority or a run, and never frees or occupies the host slot.
 
 ## Boundaries and residual risk
 
