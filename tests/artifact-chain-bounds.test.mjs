@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { appendFileSync, closeSync, existsSync, mkdtempSync, openSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync, closeSync, existsSync, mkdtempSync, openSync, readdirSync, renameSync, rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -87,6 +90,19 @@ test('the immutable comparison reads the existing file under the same ceiling', 
   });
 });
 
+test('an unwritable destination is a typed refusal and leaves no temporary sibling', () => {
+  temporary((dir) => {
+    const manifest = buildArtifactChain({
+      descriptor: { subject: 'subject', nodes: [{ id: 'intent', stage: 'INTENT', rootRevision: null,
+        producer: 'producer', locator: 'intent.json', claim: null, dependencies: [] }] },
+      measured: { intent: digest('a') } });
+    assert.throws(() => persistArtifactChainManifest({ path: join(dir, 'absent', 'manifest.json'), manifest }),
+      error => error instanceof ArtifactChainFileError && error.code === 'ManifestWriteFailed'
+        && error.message === 'ManifestWriteFailed');
+    assert.deepEqual(readdirSync(dir), []);
+  });
+});
+
 test('an oversize artifact is still refused through the public measurement seam', () => {
   temporary((dir) => {
     writeFileSync(join(dir, 'huge.json'), 'p'.repeat(ARTIFACT_BYTE_LIMIT + 1));
@@ -137,7 +153,7 @@ const chainOf = (rootRevision) => buildArtifactChain({ descriptor: { subject: 's
     claim: { kind: 'ACCEPTED_INTENT', statement: 'recorded intent' }, dependencies: [] },
   { id: 'candidate', stage: 'CANDIDATE', rootRevision, producer: 'producer', locator: 'receipt.json',
     claim: { kind: 'CANDIDATE_READY', statement: 'asserted by the receipt' },
-    dependencies: [{ nodeId: 'intent', relation: 'required' }] }] },
+    dependencies: [{ nodeId: 'intent', relation: 'required', pinnedDigest: digest('a') }] }] },
 measured: { intent: digest('a'), candidate: digest('c') } });
 
 const observed = { intent: digest('a'), candidate: digest('c') };

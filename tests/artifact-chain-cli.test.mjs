@@ -32,6 +32,7 @@ function fixture(name) {
   writeFileSync(join(root, 'evidence/tests.log'), 'ok 12 passing\nexit code 0\n');
   writeFileSync(join(root, 'evidence/review.md'), 'independent review: APPROVE, no important findings\n');
   writeFileSync(join(root, 'evidence/publication.json'), '{"draft":145,"head":"published"}\n');
+  const fileDigest = path => createHash('sha256').update(readFileSync(join(root, path))).digest('hex');
   const descriptor = {
     subject: SUBJECT,
     nodes: [
@@ -42,16 +43,22 @@ function fixture(name) {
         locator: 'notes.md', claim: null, dependencies: [] },
       { id: 'candidate', stage: 'CANDIDATE', rootRevision: REVISION, producer: 'gaia-agent-factory',
         locator: 'receipt.json', claim: { kind: 'CANDIDATE_READY', statement: 'a change set exists' },
-        dependencies: [{ nodeId: 'intent', relation: 'required' }, { nodeId: 'notes', relation: 'advisory' }] },
+        dependencies: [
+          { nodeId: 'intent', relation: 'required', pinnedDigest: fileDigest('INTENT.md') },
+          { nodeId: 'notes', relation: 'advisory', pinnedDigest: fileDigest('notes.md') },
+        ] },
       { id: 'tests', stage: 'TEST_EVIDENCE', rootRevision: REVISION, producer: 'node--test',
         locator: 'evidence/tests.log', claim: { kind: 'TESTS_REPORTED', statement: 'asserted by the log' },
-        dependencies: [{ nodeId: 'candidate', relation: 'required' }] },
+        dependencies: [{ nodeId: 'candidate', relation: 'required',
+          pinnedDigest: fileDigest('receipt.json') }] },
       { id: 'review', stage: 'INDEPENDENT_REVIEW', rootRevision: REVISION, producer: 'independent-reviewer',
         locator: 'evidence/review.md', claim: { kind: 'APPROVE', statement: 'asserted by the artifact' },
-        dependencies: [{ nodeId: 'tests', relation: 'required' }] },
+        dependencies: [{ nodeId: 'tests', relation: 'required',
+          pinnedDigest: fileDigest('evidence/tests.log') }] },
       { id: 'publication', stage: 'PUBLICATION_EVIDENCE', rootRevision: REVISION, producer: 'gaia-publication-adapter',
         locator: 'evidence/publication.json', claim: { kind: 'DRAFT_PUBLISHED', statement: 'asserted by the receipt' },
-        dependencies: [{ nodeId: 'review', relation: 'required' }] },
+        dependencies: [{ nodeId: 'review', relation: 'required',
+          pinnedDigest: fileDigest('evidence/review.md') }] },
     ],
   };
   writeFileSync(join(root, 'descriptor.json'), `${JSON.stringify(descriptor, null, 2)}\n`);

@@ -97,9 +97,9 @@ function resolveLocator(physical, locator) {
  *
  * The ceiling is decided twice from the descriptor and never from the path: `fstat` measures the
  * file this descriptor actually holds, and the read then fills a `limit + 1` buffer at explicit
- * positions and refuses when it comes back full. A file that grows or is replaced between the
- * two is therefore refused rather than read, which is what makes the promised bound a bound
- * instead of a hope. Exported so that property can be exercised against a real descriptor whose
+ * positions and refuses when it comes back full. Growth of the opened file beyond the limit is
+ * refused. Replacing its pathname leaves the descriptor bound to the original inode, whose bytes
+ * remain bounded. Exported so that property can be exercised against a real descriptor whose
  * file changes underneath it; production callers always pass `ARTIFACT_BYTE_LIMIT`.
  */
 export function readBoundedDescriptor(handle, limit, { unreadable, tooLarge }) {
@@ -176,59 +176,77 @@ const documentBytes = value => Buffer.from(`${canonicalArtifactChainJson(value)}
  * UNCHANGED the file already held byte-identical content; nothing was rewritten.
  * refusal   the file exists with different bytes. It is left exactly as it was.
  */
-function createImmutable(path, bytes, conflictCode) {
+function createImmutable(path, bytes, conflictCode, writeCode) {
+  const close = handle => {
+    if (handle === undefined) return;
+    try { closeSync(handle); } catch { fail(writeCode); }
+  };
   const existing = () => {
-    let current;
-    // Under the same ceiling as every other read: an existing file larger than a manifest can
-    // ever be is a conflict, not something to load in order to discover it does not match.
     let handle;
-    try { handle = openSync(path, 'r'); } catch { return fail(conflictCode); }
-    try { current = readBoundedDescriptor(handle, ARTIFACT_BYTE_LIMIT,
-      { unreadable: conflictCode, tooLarge: conflictCode }); }
-    catch { return fail(conflictCode); }
-    finally { closeSync(handle); }
+    try { handle = openSync(path, 'r'); }
+    catch (error) { return fail(error?.code === 'ENOENT' ? writeCode : conflictCode); }
+    let current;
+    try {
+      current = readBoundedDescriptor(handle, ARTIFACT_BYTE_LIMIT,
+        { unreadable: conflictCode, tooLarge: conflictCode });
+    } catch { return fail(conflictCode); }
+    finally { close(handle); }
     if (!current.equals(bytes)) fail(conflictCode);
     return { status: 'UNCHANGED' };
   };
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${Date.now()}.tmp`);
-  let handle;
-  try { handle = openSync(temporary, 'wx', 0o600); } catch { return existing(); }
+  let temporaryHandle;
+  let temporaryCreated = false;
   try {
-    writeFileSync(handle, bytes);
-    fsyncSync(handle);
-  } finally {
-    closeSync(handle);
-  }
-  try {
-    // Payload complete and durable before anything can observe it under its real name.
-    linkSync(temporary, path);
-    return { status: 'WRITTEN' };
-  } catch (error) {
-    if (error.code === 'EEXIST') return existing();
-    // No hard links on this filesystem: fall back to exclusive create, which is still
-    // create-if-absent and still never replaces an existing file. It gives up only the
-    // complete-before-visible property, so a writer interrupted mid-write leaves bytes that the
-    // next writer refuses as a conflict rather than accepting as a manifest.
-    let fallback;
-    try { fallback = openSync(path, 'wx', 0o600); } catch (raced) {
-      return raced.code === 'EEXIST' ? existing() : fail(conflictCode);
-    }
     try {
-      writeFileSync(fallback, bytes);
-      fsyncSync(fallback);
-    } finally {
-      closeSync(fallback);
+      temporaryHandle = openSync(temporary, 'wx', 0o600);
+      temporaryCreated = true;
+    } catch { return existing(); }
+    try {
+      writeFileSync(temporaryHandle, bytes);
+      fsyncSync(temporaryHandle);
+      close(temporaryHandle);
+      temporaryHandle = undefined;
+    } catch { return fail(writeCode); }
+
+    try {
+      // Payload complete and durable before anything can observe it under its real name.
+      linkSync(temporary, path);
+      return { status: 'WRITTEN' };
+    } catch (error) {
+      if (error?.code === 'EEXIST') return existing();
+      // No hard links on this filesystem: fall back to exclusive create, which is still
+      // create-if-absent and never replaces existing evidence. Any write failure removes the
+      // file this call exclusively created before returning a typed, path-free refusal.
+      let fallback;
+      try { fallback = openSync(path, 'wx', 0o600); }
+      catch (raced) { return raced?.code === 'EEXIST' ? existing() : fail(writeCode); }
+      try {
+        writeFileSync(fallback, bytes);
+        fsyncSync(fallback);
+        close(fallback);
+        fallback = undefined;
+      } catch {
+        try { if (fallback !== undefined) closeSync(fallback); } catch { /* Refusal stays typed. */ }
+        try { unlinkSync(path); } catch { /* A later call will refuse partial evidence. */ }
+        return fail(writeCode);
+      }
+      return { status: 'WRITTEN' };
     }
-    return { status: 'WRITTEN' };
   } finally {
-    try { unlinkSync(temporary); } catch { /* The link already consumed it. */ }
+    try { if (temporaryHandle !== undefined) closeSync(temporaryHandle); } catch { /* typed below */ }
+    if (temporaryCreated) {
+      try { unlinkSync(temporary); }
+      catch (error) { if (error?.code !== 'ENOENT') fail(writeCode); }
+    }
   }
 }
 
 /** Persist a manifest immutably. An existing conflicting manifest is refused, never overwritten. */
 export function persistArtifactChainManifest({ path, manifest }) {
   if (typeof path !== 'string' || path.length === 0) fail('InvalidManifestPath');
-  return createImmutable(path, documentBytes(validateArtifactChain(manifest)), 'ManifestConflict');
+  return createImmutable(path, documentBytes(validateArtifactChain(manifest)),
+    'ManifestConflict', 'ManifestWriteFailed');
 }
 
 /**
@@ -260,7 +278,8 @@ export function emitCandidateArtifactChain({ evidenceDir, intent, status }) {
   if (typeof headRevision !== 'string' || !/^[a-f0-9]{40}$/u.test(headRevision)) fail('InvalidJobIntent');
   const subject = `${intent.repository}#${intent.itemNumber}/draft-${intent.draft.number}`;
   const intentBytes = documentBytes(intent);
-  const stored = createImmutable(join(physical, ARTIFACT_CHAIN_INTENT_NAME), intentBytes, 'StoredIntentConflict');
+  const stored = createImmutable(join(physical, ARTIFACT_CHAIN_INTENT_NAME), intentBytes,
+    'StoredIntentConflict', 'StoredIntentWriteFailed');
 
   const descriptor = {
     subject,
@@ -272,13 +291,15 @@ export function emitCandidateArtifactChain({ evidenceDir, intent, status }) {
       { id: 'candidate', stage: 'CANDIDATE', rootRevision: headRevision,
         producer: 'gaia-agent-factory', locator: 'receipt.json',
         claim: { kind: status, statement: 'asserted by the stored factory receipt' },
-        dependencies: [{ nodeId: 'accepted-intent', relation: 'required' }] },
+        dependencies: [] },
     ],
   };
   let manifest;
   try {
-    manifest = buildArtifactChain({ descriptor,
-      measured: measureArtifactChainFiles({ root: physical, nodes: descriptor.nodes }) });
+    const measured = measureArtifactChainFiles({ root: physical, nodes: descriptor.nodes });
+    descriptor.nodes[1].dependencies.push({ nodeId: 'accepted-intent', relation: 'required',
+      pinnedDigest: measured['accepted-intent'] });
+    manifest = buildArtifactChain({ descriptor, measured });
   } catch (error) {
     if (error instanceof ArtifactChainFileError) throw error;
     fail(error.code === undefined ? 'InvalidJobIntent' : error.code);

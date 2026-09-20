@@ -42,21 +42,21 @@ function descriptor(overrides = {}) {
       { id: 'candidate', stage: 'CANDIDATE', rootRevision: REVISION, producer: 'gaia-agent-factory',
         locator: 'receipt.json', claim: { kind: 'CANDIDATE_READY', statement: 'worker produced a change set' },
         dependencies: [
-          { nodeId: 'intent', relation: 'required' },
-          { nodeId: 'notes', relation: 'advisory' },
+          { nodeId: 'intent', relation: 'required', pinnedDigest: digestOf(FIXTURE.intent) },
+          { nodeId: 'notes', relation: 'advisory', pinnedDigest: digestOf(FIXTURE.notes) },
         ] },
       { id: 'tests', stage: 'TEST_EVIDENCE', rootRevision: REVISION, producer: 'node--test',
         locator: 'evidence/tests.log', claim: { kind: 'TESTS_PASSED', statement: 'exit code zero' },
         dependencies: [
-          { nodeId: 'candidate', relation: 'required' },
-          { nodeId: 'notes', relation: 'reference' },
+          { nodeId: 'candidate', relation: 'required', pinnedDigest: digestOf(FIXTURE.candidate) },
+          { nodeId: 'notes', relation: 'reference', pinnedDigest: digestOf(FIXTURE.notes) },
         ] },
       { id: 'review', stage: 'INDEPENDENT_REVIEW', rootRevision: REVISION, producer: 'independent-reviewer',
         locator: 'evidence/review.md', claim: { kind: 'APPROVE', statement: 'no important findings' },
-        dependencies: [{ nodeId: 'tests', relation: 'required' }] },
+        dependencies: [{ nodeId: 'tests', relation: 'required', pinnedDigest: digestOf(FIXTURE.tests) }] },
       { id: 'publication', stage: 'PUBLICATION_EVIDENCE', rootRevision: REVISION, producer: 'gaia-publication-adapter',
         locator: 'evidence/publication.json', claim: { kind: 'DRAFT_PUBLISHED', statement: 'draft head updated' },
-        dependencies: [{ nodeId: 'review', relation: 'required' }] },
+        dependencies: [{ nodeId: 'review', relation: 'required', pinnedDigest: digestOf(FIXTURE.review) }] },
     ],
     ...overrides,
   };
@@ -146,6 +146,19 @@ test('a changed required predecessor makes every dependent stale transitively', 
     intent: 'CONTENT_CHANGED', notes: 'FRESH', candidate: 'STALE_REQUIRED_INPUT',
     tests: 'STALE_REQUIRED_INPUT', review: 'STALE_REQUIRED_INPUT', publication: 'STALE_REQUIRED_INPUT',
   });
+});
+
+test('building around newer predecessor bytes preserves the dependent producer pin and exposes staleness', () => {
+  const newerIntent = digestOf('newer accepted intent\n');
+  const manifest = chain(descriptor(), { ...MEASURED, intent: newerIntent });
+  const candidatePin = manifest.nodes.find(node => node.id === 'candidate').dependencies
+    .find(dependency => dependency.nodeId === 'intent').pinnedDigest;
+  assert.equal(candidatePin, MEASURED.intent, 'creation must not rebind old dependent evidence');
+  const report = evaluateArtifactChain({ manifest,
+    observed: { ...MEASURED, intent: newerIntent }, expectation: EXPECTATION });
+  assert.equal(freshnessOf(report).intent, 'FRESH');
+  assert.equal(freshnessOf(report).candidate, 'PIN_MISMATCH');
+  assert.equal(freshnessOf(report).tests, 'STALE_REQUIRED_INPUT');
 });
 
 test('a required pin that disagrees with the recorded predecessor digest is a pin mismatch', () => {
@@ -251,43 +264,47 @@ test('structural refusals: duplicates, unknown, cyclic, out-of-order, and skippe
 
   const duplicateEdge = descriptor();
   duplicateEdge.nodes.find(node => node.id === 'candidate').dependencies
-    .push({ nodeId: 'intent', relation: 'reference' });
+    .push({ nodeId: 'intent', relation: 'reference', pinnedDigest: MEASURED.intent });
   refusal(() => chain(duplicateEdge, MEASURED), 'DuplicateDependency');
 
   const unknown = descriptor();
   unknown.nodes.find(node => node.id === 'candidate').dependencies
-    .push({ nodeId: 'ghost', relation: 'advisory' });
+    .push({ nodeId: 'ghost', relation: 'advisory', pinnedDigest: MEASURED.intent });
   refusal(() => chain(unknown, MEASURED), 'UnknownDependency');
 
   const self = descriptor();
   self.nodes.find(node => node.id === 'candidate').dependencies
-    .push({ nodeId: 'candidate', relation: 'advisory' });
+    .push({ nodeId: 'candidate', relation: 'advisory', pinnedDigest: MEASURED.candidate });
   refusal(() => chain(self, MEASURED), 'InvalidDependencyOrder');
 
   const cyclic = descriptor();
   cyclic.nodes.find(node => node.id === 'intent').dependencies
-    .push({ nodeId: 'candidate', relation: 'required' });
+    .push({ nodeId: 'candidate', relation: 'required', pinnedDigest: MEASURED.candidate });
   refusal(() => chain(cyclic, MEASURED), 'UnexpectedDependency');
 
   const backwards = descriptor();
   backwards.nodes.find(node => node.id === 'candidate').dependencies
-    .push({ nodeId: 'tests', relation: 'advisory' });
+    .push({ nodeId: 'tests', relation: 'advisory', pinnedDigest: MEASURED.tests });
   refusal(() => chain(backwards, MEASURED), 'InvalidDependencyOrder');
 
   const sameStage = descriptor();
   sameStage.nodes.find(node => node.id === 'candidate').dependencies
-    .push({ nodeId: 'candidate', relation: 'required' });
+    .push({ nodeId: 'candidate', relation: 'required', pinnedDigest: MEASURED.candidate });
   refusal(() => chain(sameStage, MEASURED), 'InvalidDependencyOrder');
 
   // A publication node cannot exist without the review stage it claims to follow.
   const skipped = descriptor();
   skipped.nodes = skipped.nodes.filter(node => node.id !== 'review');
-  skipped.nodes.find(node => node.id === 'publication').dependencies = [{ nodeId: 'tests', relation: 'required' }];
+  skipped.nodes.find(node => node.id === 'publication').dependencies = [
+    { nodeId: 'tests', relation: 'required', pinnedDigest: MEASURED.tests },
+  ];
   const { review, ...withoutReview } = MEASURED;
   refusal(() => chain(skipped, withoutReview), 'MissingPredecessorStage');
 
   const advisoryOnly = descriptor();
-  advisoryOnly.nodes.find(node => node.id === 'candidate').dependencies = [{ nodeId: 'intent', relation: 'advisory' }];
+  advisoryOnly.nodes.find(node => node.id === 'candidate').dependencies = [
+    { nodeId: 'intent', relation: 'advisory', pinnedDigest: MEASURED.intent },
+  ];
   refusal(() => chain(advisoryOnly, MEASURED), 'MissingPredecessorStage');
 });
 
@@ -296,6 +313,9 @@ test('malformed descriptors, measurements, and manifests are refused rather than
   refusal(() => chain({ ...descriptor(), extra: 1 }, MEASURED), 'InvalidDescriptor');
   refusal(() => chain({ ...descriptor(), subject: ' leading space' }, MEASURED), 'InvalidDescriptor');
   refusal(() => chain({ ...descriptor(), nodes: [] }, {}), 'InvalidDescriptor');
+  const missingPin = descriptor();
+  delete missingPin.nodes.find(node => node.id === 'candidate').dependencies[0].pinnedDigest;
+  refusal(() => chain(missingPin), 'InvalidDescriptor');
   refusal(() => buildArtifactChain({ descriptor: descriptor() }), 'InvalidMeasurement');
   const { intent, ...missing } = MEASURED;
   refusal(() => chain(descriptor(), missing), 'InvalidMeasurement');

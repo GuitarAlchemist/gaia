@@ -10,6 +10,7 @@ const repositoryName = value => typeof value === 'string'
   && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(value)
   && !['.', '..'].includes(value.split('/')[1]);
 const positive = value => Number.isSafeInteger(value) && value > 0;
+const nonnegative = value => Number.isSafeInteger(value) && value >= 0;
 const text = (value, max = 4096) => typeof value === 'string' && value.length > 0
   && value.length <= max && value.trim() === value && !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value);
 
@@ -74,19 +75,71 @@ function validateJob(input) {
     || input.idempotencyKey !== sha256(encode({ grantId: input.jobKey, intentRevision: intent.intentRevision }, 'InvalidJob'))) fail('InvalidJob');
   return { jobKey: input.jobKey, intent, idempotencyKey: input.idempotencyKey };
 }
+function validateEvidence(value, roles) {
+  exact(value, ['bytes', 'mediaType', 'path', 'policy', 'role', 'sha256'], 'InvalidReceipt');
+  if (!roles.includes(value.role) || !text(value.path) || !nonnegative(value.bytes)
+    || !digest(value.sha256) || value.mediaType !== 'text/plain; charset=utf-8'
+    || value.policy !== 'local-sensitive-content-addressed') fail('InvalidReceipt');
+}
+function validateWorker(value) {
+  exact(value, ['authority', 'evidence', 'observedScope', 'provider', 'requestedScope'], 'InvalidReceipt');
+  validateEvidence(value.evidence, ['worker']);
+  if (!text(value.provider, 256) || value.authority !== 'host-user-process'
+    || value.requestedScope !== 'linked-worktree-only'
+    || value.observedScope !== 'git-candidate-and-worktree-tree') fail('InvalidReceipt');
+}
+function validateReviewer(value) {
+  exact(value, ['authority', 'evidence', 'provider', 'verifiedPostcondition', 'verdict'], 'InvalidReceipt');
+  validateEvidence(value.evidence, ['reviewer', 'reviewer-final']);
+  if (!text(value.provider, 256) || value.authority !== 'sandbox-requested-read-only'
+    || value.verifiedPostcondition !== 'git-head-index-and-worktree-tree-unchanged'
+    || !['APPROVE', 'REQUEST_CHANGES'].includes(value.verdict)) fail('InvalidReceipt');
+}
+function validateChangeSet(value, head) {
+  exact(value, ['baseHead', 'files', 'identity', 'patchBytes', 'patchSha256',
+    'statusBytes', 'statusSha256'], 'InvalidReceipt');
+  if (value.baseHead !== head || !nonnegative(value.statusBytes) || !digest(value.statusSha256)
+    || !nonnegative(value.patchBytes) || !digest(value.patchSha256) || !digest(value.identity)
+    || !Array.isArray(value.files) || value.files.length === 0 || value.files.length > 10000) fail('InvalidReceipt');
+  const files = value.files.map(file => {
+    exact(file, ['bytes', 'path', 'sha256', 'state'], 'InvalidReceipt');
+    if (!text(file.path, 4096) || file.path.includes('\\') || file.path.startsWith('/')
+      || file.path.split('/').some(part => part === '' || part === '.' || part === '..')
+      || !['present', 'deleted'].includes(file.state) || !nonnegative(file.bytes)
+      || (file.state === 'present' ? !digest(file.sha256) : file.sha256 !== null || file.bytes !== 0)) {
+      fail('InvalidReceipt');
+    }
+    return { path: file.path, state: file.state, bytes: file.bytes, sha256: file.sha256 };
+  });
+  if (new Set(files.map(file => file.path)).size !== files.length
+    || files.some((file, index) => index > 0 && files[index - 1].path >= file.path)) fail('InvalidReceipt');
+  const body = { baseHead: value.baseHead, statusBytes: value.statusBytes,
+    statusSha256: value.statusSha256, patchBytes: value.patchBytes,
+    patchSha256: value.patchSha256, files };
+  if (sha256(`${JSON.stringify(body)}\n`) !== value.identity) fail('InvalidReceipt');
+}
 function validateReceipt(value, job) {
   const serialized = encode(value, 'InvalidReceipt');
   const receipt = JSON.parse(serialized);
   exact(receipt, ['schema', 'status', 'jobKey', 'intentRevision', 'idempotencyKey', 'factory'], 'InvalidReceipt');
+  const factory = receipt.factory;
   if (receipt.schema !== 'gaia-autonomous-factory-receipt/1'
     || !['CANDIDATE_READY', 'CANDIDATE_REJECTED'].includes(receipt.status)
     || receipt.jobKey !== job.jobKey || receipt.intentRevision !== job.intent.intentRevision
-    || receipt.idempotencyKey !== job.idempotencyKey
-    || !receipt.factory || receipt.factory.schema !== 'gaia-agent-factory-receipt/1'
-    || receipt.factory.status !== (receipt.status === 'CANDIDATE_READY' ? 'completed' : 'rejected')
-    || receipt.factory.task !== job.intent.task
-    || receipt.factory.base?.head !== job.intent.draft.headRevision
-    || (receipt.factory.status === 'completed' && receipt.factory.reviewer?.verdict !== 'APPROVE')) fail('InvalidReceipt');
+    || receipt.idempotencyKey !== job.idempotencyKey || !factory || typeof factory !== 'object'
+    || Array.isArray(factory) || factory.schema !== 'gaia-agent-factory-receipt/1'
+    || factory.status !== (receipt.status === 'CANDIDATE_READY' ? 'completed' : 'rejected')
+    || factory.task !== job.intent.task) fail('InvalidReceipt');
+  exact(factory.base, ['executionBoundary', 'head', 'isolation'], 'InvalidReceipt');
+  if (factory.base.head !== job.intent.draft.headRevision
+    || factory.base.isolation !== 'caller-supplied-linked-git-worktree'
+    || factory.base.executionBoundary !== 'host-user-process') fail('InvalidReceipt');
+  validateWorker(factory.worker);
+  validateChangeSet(factory.changeSet, factory.base.head);
+  validateReviewer(factory.reviewer);
+  if (factory.reviewer.verdict !== (factory.status === 'completed' ? 'APPROVE' : 'REQUEST_CHANGES')) {
+    fail('InvalidReceipt');
+  }
   return serialized;
 }
 

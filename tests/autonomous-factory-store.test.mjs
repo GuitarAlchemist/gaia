@@ -27,10 +27,26 @@ function request(value = intent()) {
   return { jobKey, intent: value, idempotencyKey: digest({ grantId: jobKey, intentRevision: value.intentRevision }) };
 }
 function receipt(job, status = 'CANDIDATE_READY') {
+  const files = [{ path: 'candidate.txt', state: 'present', bytes: 9, sha256: 'c'.repeat(64) }];
+  const changeSetBody = { baseHead: job.intent.draft.headRevision, statusBytes: 1,
+    statusSha256: 'd'.repeat(64), patchBytes: 2, patchSha256: 'e'.repeat(64), files };
+  const evidence = role => ({ role, path: `/evidence/${role}.txt`, bytes: 3,
+    sha256: 'f'.repeat(64), mediaType: 'text/plain; charset=utf-8',
+    policy: 'local-sensitive-content-addressed' });
+  const factoryStatus = status === 'CANDIDATE_READY' ? 'completed' : 'rejected';
   return { schema: 'gaia-autonomous-factory-receipt/1', status, jobKey: job.jobKey,
     intentRevision: job.intent.intentRevision, idempotencyKey: job.idempotencyKey,
-    factory: { schema: 'gaia-agent-factory-receipt/1', status: status === 'CANDIDATE_READY' ? 'completed' : 'rejected', task: job.intent.task,
-      base: { head: job.intent.draft.headRevision }, reviewer: { verdict: status === 'CANDIDATE_READY' ? 'APPROVE' : 'REQUEST_CHANGES' } } };
+    factory: { schema: 'gaia-agent-factory-receipt/1', status: factoryStatus, task: job.intent.task,
+      base: { head: job.intent.draft.headRevision, isolation: 'caller-supplied-linked-git-worktree',
+        executionBoundary: 'host-user-process' },
+      worker: { provider: 'fixture-worker', evidence: evidence('worker'), authority: 'host-user-process',
+        requestedScope: 'linked-worktree-only', observedScope: 'git-candidate-and-worktree-tree' },
+      changeSet: { ...changeSetBody,
+        identity: createHash('sha256').update(`${JSON.stringify(changeSetBody)}\n`).digest('hex') },
+      reviewer: { provider: 'fixture-reviewer', evidence: evidence('reviewer'),
+        authority: 'sandbox-requested-read-only',
+        verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged',
+        verdict: factoryStatus === 'completed' ? 'APPROVE' : 'REQUEST_CHANGES' } } };
 }
 function setup(t) {
   const dir = mkdtempSync(join(tmpdir(), 'gaia-autonomous-store-'));
@@ -85,6 +101,10 @@ test('terminal validation rejects a foreign base or non-approval, including pers
     value => { value.factory.base.head = 'c'.repeat(40); },
     value => { value.factory.reviewer.verdict = 'REQUEST_CHANGES'; },
     value => { delete value.factory.base; },
+    value => { delete value.factory.worker; },
+    value => { delete value.factory.changeSet; },
+    value => { delete value.factory.reviewer.evidence; },
+    value => { value.factory.changeSet.identity = '0'.repeat(64); },
   ]) {
     const bad = receipt(job); mutation(bad);
     fails(() => store.finish({ jobKey: job.jobKey, receipt: bad }), 'InvalidReceipt');

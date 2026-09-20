@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -8,6 +9,26 @@ import { fileURLToPath } from 'node:url';
 import { openAutonomousFactoryStore } from '../src/autonomous-factory-store.mjs';
 import { runAutonomousTick } from '../scripts/github-portfolio-autonomous.mjs';
 import { runAutonomousFactory, reconcileAutonomousJob } from '../src/autonomous-factory.mjs';
+
+const sha256 = value => createHash('sha256').update(value).digest('hex');
+function factoryReceipt(intent, status = 'completed') {
+  const files = [{ path: 'candidate.txt', state: 'present', bytes: 9, sha256: 'c'.repeat(64) }];
+  const body = { baseHead: intent.draft.headRevision, statusBytes: 1, statusSha256: 'd'.repeat(64),
+    patchBytes: 2, patchSha256: 'e'.repeat(64), files };
+  const evidence = role => ({ role, path: `/evidence/${role}.txt`, bytes: 3,
+    sha256: 'f'.repeat(64), mediaType: 'text/plain; charset=utf-8',
+    policy: 'local-sensitive-content-addressed' });
+  return { schema: 'gaia-agent-factory-receipt/1', status, task: intent.task,
+    base: { head: intent.draft.headRevision, isolation: 'caller-supplied-linked-git-worktree',
+      executionBoundary: 'host-user-process' },
+    worker: { provider: 'fixture-worker', evidence: evidence('worker'), authority: 'host-user-process',
+      requestedScope: 'linked-worktree-only', observedScope: 'git-candidate-and-worktree-tree' },
+    changeSet: { ...body, identity: sha256(`${JSON.stringify(body)}\n`) },
+    reviewer: { provider: 'fixture-reviewer', evidence: evidence('reviewer'),
+      authority: 'sandbox-requested-read-only',
+      verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged',
+      verdict: status === 'completed' ? 'APPROVE' : 'REQUEST_CHANGES' } };
+}
 
 function fixture() {
   const snapshot = { schema: 'gaia-github-read-snapshot/1', organization: 'Example',
@@ -38,8 +59,7 @@ function fixture() {
       read: async () => ({ number: 2, state: 'OPEN', isDraft: true, headRef: 'codex/fix', headRevision: 'b'.repeat(40) }) },
     execution: { execute: async ({ intent }) => {
       launches++;
-      persisted = { schema: 'gaia-agent-factory-receipt/1', status: 'completed', task: intent.task,
-        base: { head: 'b'.repeat(40) }, reviewer: { verdict: 'APPROVE' } };
+      persisted = factoryReceipt(intent);
       return persisted;
     }, findReceipt: async () => persisted },
   };

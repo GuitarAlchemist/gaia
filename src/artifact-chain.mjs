@@ -68,6 +68,7 @@ const MANIFEST_KEYS = ['nodes', 'pendingStages', 'schema', 'subject'];
 const DESCRIPTOR_NODE_KEYS = ['claim', 'dependencies', 'id', 'locator', 'producer', 'rootRevision', 'stage'];
 const MANIFEST_NODE_KEYS = [...DESCRIPTOR_NODE_KEYS, 'contentDigest'].sort();
 const CLAIM_KEYS = ['kind', 'statement'];
+const DEPENDENCY_KEYS = ['nodeId', 'pinnedDigest', 'relation'];
 const EXPECTATION_KEYS = ['requiredRootRevisions', 'subject'];
 
 const DIGEST = /^[a-f0-9]{64}$/u;
@@ -147,10 +148,10 @@ function checkNodeFields(nodes, code, { pinned }) {
     }
     if (!Array.isArray(node.dependencies) || node.dependencies.length > MAX_DEPENDENCIES) fail(code);
     for (const dependency of node.dependencies) {
-      exact(dependency, pinned ? ['nodeId', 'pinnedDigest', 'relation'] : ['nodeId', 'relation'], code);
+      exact(dependency, DEPENDENCY_KEYS, code);
       if (!matches(NODE_ID, dependency.nodeId)
-        || !ARTIFACT_CHAIN_RELATIONS.includes(dependency.relation)) fail(code);
-      if (pinned && !matches(DIGEST, dependency.pinnedDigest)) fail(code);
+        || !ARTIFACT_CHAIN_RELATIONS.includes(dependency.relation)
+        || !matches(DIGEST, dependency.pinnedDigest)) fail(code);
     }
   }
 }
@@ -206,9 +207,10 @@ function freeze(value) {
 /**
  * Build a manifest from a descriptor and the digests an adapter measured for it.
  *
- * The descriptor never carries a digest and never carries a pin: `contentDigest` comes from
- * `measured`, and every dependency's `pinnedDigest` is its predecessor's measured digest. A
- * descriptor therefore cannot forge the evidence that would make a stale chain look fresh.
+ * The descriptor never carries a node's own digest: `contentDigest` comes from `measured`.
+ * Every dependency does carry the digest its producer recorded when the dependent was produced.
+ * That historical pin is preserved exactly; deriving it from the predecessor's current
+ * measurement would silently rebind old downstream evidence to newer inputs.
  */
 export function buildArtifactChain({ descriptor, measured }) {
   const input = JSON.parse(canonicalArtifactChainJson(descriptor, 'InvalidDescriptor'));
@@ -229,10 +231,10 @@ export function buildArtifactChain({ descriptor, measured }) {
     contentDigest: digests[node.id],
     dependencies: [...node.dependencies]
       .sort((a, b) => (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0))
-      .map(dependency => ({ ...dependency, pinnedDigest: digests[dependency.nodeId] })),
+      .map(dependency => ({ ...dependency })),
   }));
-  // A dependency on an unmeasured node would have produced `undefined` above; the field check
-  // and the structural check below both refuse it rather than pinning nothing.
+  // Pins are producer evidence, not current measurements. Field and structural checks refuse a
+  // missing, malformed, or unknown predecessor rather than manufacturing a current binding.
   checkNodeFields(nodes, 'UnknownDependency', { pinned: true });
   nodes.sort(nodeOrder);
   checkStructure(nodes);
