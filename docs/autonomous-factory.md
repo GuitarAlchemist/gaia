@@ -109,6 +109,36 @@ Inputs read for this decision, lowercase SHA-256 over file bytes at
 | `tests/factory-visible-claude.test.mjs` | `95aa5ece5cba937882a1b131cef5f0c83f9dc95c76ff2a0e13cb9ae8cf629ed6` |
 | `docs/autonomous-factory.md` | `a6094efe99171f0d78828c64dc01427f50df8e37066615aa602ceecbde9828d4` |
 
+### Decision: terminal receipts must carry replayable factory evidence (ENG-02)
+
+Independent review of head `2d6cb73006185ea1317cafb93a879214ab73f49e`
+([thread](https://github.com/GuitarAlchemist/gaia/pull/146#discussion_r4057322231))
+showed that the autonomous wrapper accepted only a few scalar factory fields. A skeletal receipt
+could therefore settle `STARTED` without worker evidence, a measured change set, or reviewer
+evidence. Two validation placements were compared before implementation.
+
+- **Rejected: keep scalar spot checks in the autonomous wrapper.** This is locally small but allows
+  the wrapper to manufacture terminal truth from a status and verdict while omitting the evidence
+  structures that make those claims replayable.
+- **Rejected: import the execution module into the authority/store contract.** Reusing execution
+  code directly would couple the pure persisted-contract reader to filesystem, process, and Git
+  mechanisms, reversing the architecture's dependency direction.
+- **Selected: validate the closed factory receipt projection in the pure autonomous contract.** The
+  terminal reader requires the base binding, worker evidence descriptor, measured change-set
+  identity and files, and reviewer evidence descriptor before it can settle a job. It recomputes
+  the change-set identity with the factory's documented recipe and preserves the existing exact
+  job, intent, idempotency, task, base, status, and approval bindings. Missing or contradictory
+  evidence remains `InvalidReceipt`, so reconciliation retains the occupied slot.
+
+Reversibility class: **freely reversible in code but unsafe in operation**; rollback reopens the
+reproduced false-terminal path. This does not prove the referenced evidence files still exist or
+that their claims are true; it proves only that the persisted terminal shape contains the bounded,
+content-addressed structures emitted by the factory. The exact pre-repair inputs were
+`docs/autonomous-factory.md` `c8e48b38a3ab51c6d219fd9184b594228398557d2ff8bd33fa10d05695ae1869`,
+`src/autonomous-factory-contract.mjs` `17a7c37224dd5bfa4b8f35b75e5a783da61de2b9ce7adc5f32eaff651a6dfa7f`,
+`src/factory-agent.mjs` `932e54b7c3eb049c7c514ad225be874e732deea445672c4d299a3862aec738d6`,
+and the independent finding linked above.
+
 ## Ownership and recovery
 
 The application owns preview, authority consumption, execution and reconciliation.

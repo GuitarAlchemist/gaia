@@ -119,6 +119,35 @@ instruction in the artifact-chain decision was to measure before adding a graph 
   [`src/autonomous-factory-contract.mjs`](../src/autonomous-factory-contract.mjs);
   file artifacts use lowercase SHA-256 over their exact bytes.
 
+### Decision: historical pins are producer evidence (ENG-02)
+
+Independent review of head `2d6cb73006185ea1317cafb93a879214ab73f49e`
+([thread](https://github.com/GuitarAlchemist/gaia/pull/146#discussion_r4057322217))
+showed that deriving every dependency pin from the predecessor's current measurement can rebind an
+old downstream artifact to newer evidence. Two repairs were compared before implementation.
+
+- **Rejected: keep implicit current-measurement pins and rely on later observation.** This keeps the
+  smaller descriptor, but creation erases the historical question: the resulting manifest records
+  what the predecessor contains now, not what the dependent consumed when it was produced. A stale
+  review can therefore become internally fresh merely by rebuilding its manifest.
+- **Selected: require each descriptor dependency to carry its producer-recorded `pinnedDigest`.**
+  `buildArtifactChain` validates and preserves that pin; it never synthesizes or replaces it from
+  current measurements. Current measurements still supply each node's own `contentDigest`, and
+  evaluation compares the preserved pin to that digest. A missing pin is a typed descriptor
+  refusal. The descriptor remains unauthenticated evidence, so a malicious writer can still lie;
+  this change prevents accidental rebinding and does not claim authenticity.
+
+Reversibility class: **freely reversible**, but rolling back reintroduces the demonstrated stale-
+evidence acceptance and is therefore permitted only with a replacement historical-binding seam.
+The alternative of incrementally extending a prior manifest was deferred: it preserves pins but
+adds lifecycle and previous-manifest ownership to a pure one-shot builder. The selected repair
+changes no persisted manifest schema; it makes the creation descriptor honest about evidence only
+the producer can know. The exact pre-repair inputs were `docs/artifact-chain.md`
+`971aa8da5ed91a4d6c78d69ea7db84423890a5a58729afe6e270eeeed4c42679`,
+`src/artifact-chain.mjs` `c91af5340654ade3f80e14bee8385438fb9552198aa4f859c4c08a94620c53de`,
+`src/artifact-chain-files.mjs` `efca72e43b3f63c38644433eea96dc5bbd78efc24e3fcbb3b282fb229e1fc2db`,
+and the independent finding linked above.
+
 ### Decision: where the byte ceiling is enforced (ENG-02)
 
 The first adapter opened a descriptor, then called `statSync` on the *path* and
@@ -133,9 +162,10 @@ Two genuinely different repairs were considered.
   ceiling exists to avoid. It also leaves the path/descriptor mismatch in place.
 - **Selected: decide the ceiling entirely from the open descriptor.** `fstatSync`
   measures the file the descriptor actually holds, and the read fills a `limit + 1`
-  buffer at explicit positions and refuses when it comes back full. A file that grows
-  or is replaced after `open` is then refused rather than read, because neither
-  observation consults the path again. Reversibility class: **freely reversible**;
+  buffer at explicit positions and refuses when it comes back full. Growth of that
+  opened file beyond the limit is refused. Replacing its pathname does not change the
+  descriptor's inode: the bounded read returns the original opened bytes, not the
+  replacement. Reversibility class: **freely reversible**;
   no format, receipt or manifest changes. The same primitive is used by the immutable
   comparison in `createImmutable`, which previously read an existing file unbounded.
 
@@ -270,8 +300,10 @@ supplied on the command line. Exit codes: `0` created/unchanged or `CHAIN_FRESH`
 
 A descriptor is a JSON object with `subject` and `nodes`; each node supplies `id`,
 `stage`, `rootRevision`, `producer`, `locator`, optional `claim`, and `dependencies`
-with `nodeId` and `relation`. Pins are computed from the measured predecessors, so a
-descriptor cannot forge one.
+with `nodeId`, `relation`, and the producer-recorded `pinnedDigest`. The builder
+preserves those historical pins and never replaces them with current measurements.
+Descriptors are unauthenticated evidence and can lie; requiring the field prevents
+creation from silently rebinding an old dependent to a newly measured predecessor.
 
 ### Worked example
 
