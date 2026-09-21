@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import {
   withLock, commitEvents, appendEvents, readEvents, readEventsConsistent, parseEventLog,
   resetLog, logPath, lockPath, dataDir,
+  busMetadataPath, flushFileAndPublication, migrateLegacyBusInstance,
   LockTimeoutError, CorruptLogError, LOCK_TIMEOUT_MS,
 } from '../src/event-log.mjs';
 import { replay, snapshot, commit, EMPTY_STATE } from '../src/bus-core.mjs';
@@ -255,7 +256,10 @@ test('readEventsConsistent fails closed while a peer holds the lock', () => {
 
 test('commitEvents sees every prior event before deciding', () => {
   freshDir('commit-sees-prior');
-  appendEvents([EVENT(1), EVENT(2)]);
+  commitEvents((existing) => {
+    assert.equal(existing.length, 0);
+    return { events: [EVENT(1), EVENT(2)] };
+  });
 
   const { priorCount, value } = commitEvents((existing) => {
     assert.equal(existing.length, 2, 'the decide callback is handed the full committed log');
@@ -346,6 +350,53 @@ test('release actually removes the lock directory and its owner marker, every cy
   }
   assert.equal(readEvents().length, 200, 'and every cycle committed exactly one record');
   assert.equal(existsSync(dir), true);
+});
+
+test('a throwing first decision creates neither event log nor bus-instance sidecar', () => {
+  freshDir('decision-throws-before-instance');
+  assert.throws(() => commitEvents(() => { throw new Error('decision failed'); }), /decision failed/);
+  assert.equal(existsSync(logPath()), false);
+  assert.equal(existsSync(busMetadataPath()), false);
+});
+
+test('ordinary commits preserve a legacy nonempty log until explicit cursor migration', () => {
+  freshDir('legacy-upgrade');
+  writeFileSync(logPath(), `${JSON.stringify(EVENT(1))}\n`, 'utf8');
+  assert.equal(existsSync(busMetadataPath()), false);
+
+  commitEvents(existing => {
+    assert.equal(existing.length, 1);
+    return { events: [EVENT(2)] };
+  });
+  assert.equal(readEvents().length, 2, 'ordinary legacy writes remain compatible');
+  assert.equal(existsSync(busMetadataPath()), false, 'ordinary writes do not silently adopt legacy evidence');
+
+  const metadata = migrateLegacyBusInstance();
+  assert.match(metadata.instanceId, /^[0-9a-f-]{36}$/u);
+  assert.equal(existsSync(busMetadataPath()), true);
+});
+
+test('a durability-barrier failure is retried instead of accepting visible bytes', () => {
+  const dir = freshDir('durability-retry');
+  const path = join(dir, 'published.bin');
+  writeFileSync(path, 'complete visible bytes', 'utf8');
+  let firstCalls = 0;
+  assert.throws(() => flushFileAndPublication(path, {
+    platformName: 'win32',
+    fsync() {
+      firstCalls += 1;
+      throw new Error('injected fsync failure');
+    },
+  }), /injected fsync failure/);
+  assert.equal(firstCalls, 1);
+
+  let retryCalls = 0;
+  flushFileAndPublication(path, {
+    platformName: 'win32',
+    fsync() { retryCalls += 1; },
+  });
+  assert.equal(retryCalls, 2, 'Windows fallback reopens and flushes the published file');
+  assert.equal(readFileSync(path, 'utf8'), 'complete visible bytes');
 });
 
 test('a failed release is not swallowed — the caller learns the lock may be stuck', () => {
