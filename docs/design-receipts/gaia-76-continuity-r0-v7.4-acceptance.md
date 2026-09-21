@@ -39,9 +39,39 @@ npx --yes node@26.8.1 --input-type=module -e "import { DatabaseSync } from 'node
 {"node":"v26.8.1","nodeSqlite":true,"journalMode":"wal","beginImmediateCommitted":1}
 ```
 
-No system installation or repository dependency was added. The implementation
-snapshot and Demerzel consumer revision are recorded below only after their
-respective commits exist; until then this receipt is not publication evidence.
+No system installation or repository dependency was added.
+
+## Implementation and verification evidence
+
+- Gaia implementation commit: `9a2f696805740cd75da6ebe29e9a99976f57dc2f`
+- Gaia implementation tree: `e189138862e8138cba557614a5d9575caebdc515`
+- Full suite under Node `26.8.1`: `2261` tests, `2259` passed, `0` failed,
+  `2` skipped.
+- Focused continuity and bus regression: `87/87` passed.
+- `npm run verify`: `37` passed, `0` failed.
+- `npm run architecture:verify`: `PASS`, content revision
+  `sha256:f6cf6aecb9326c1c168935b27d6ff8493f0786eb0ad3e1a6b0e586829c27d93b`.
+- Final independent Astra delta review: `PASS`, SHA-256
+  `8283abc2d37dc1b294d10a4566601497e2d80954dc477864df305318af26cd45`.
+
+The final review independently exercised checkpoint-ID collision, the exact
+524288-byte aggregate inspection boundary, and repeated real `fsync` calls on
+publication retries. It retained the explicit Windows power-loss limitation
+below.
+
+## Read-only Demerzel consumer
+
+- Demerzel consumer commit: `fa04d7ce234f10cd38b1134531c0b0032af59d72`
+- Demerzel consumer tree: `83bfdec589397cf58852ee04f6bd2e590cb365dc`
+- Full verification: `787` Python tests with `1` skipped and `10/10` IXQL
+  checks.
+- Fresh Windows clone contract verification: `4/4` passed with the vendored
+  schema and fixture bytes marked `-text` so Git cannot rewrite their pinned
+  digests.
+
+These commits are candidate identities. They become publication evidence only
+after their branches are pushed and the corresponding pull requests expose the
+same heads; they do not by themselves prove merge or release.
 
 ## Authorized implementation boundary
 
