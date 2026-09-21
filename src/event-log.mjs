@@ -31,8 +31,9 @@ import {
   appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync,
   openSync, closeSync, fsyncSync, statSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { homedir, tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { homedir, platform, tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 
 /** How long a caller will wait for the lock before failing closed. */
 export const LOCK_TIMEOUT_MS = Number(process.env.GAIA_INTERAGENT_LOCK_TIMEOUT_MS ?? 10_000);
@@ -88,6 +89,14 @@ export class CorruptLogError extends Error {
   }
 }
 
+export class BusInstanceMetadataError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.name = 'BusInstanceMetadataError';
+    this.code = code;
+  }
+}
+
 /**
  * Where the bus keeps its data when the caller does not say.
  *
@@ -115,6 +124,114 @@ export function logPath() {
 
 export function lockPath() {
   return join(dataDir(), 'events.lock');
+}
+
+export function busMetadataPath() {
+  return join(dataDir(), 'bus-instance.json');
+}
+
+const BUS_INSTANCE_SCHEMA = 'gaia.bus-instance/1';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/**
+ * Re-establish durability for both file contents and publication of its name.
+ *
+ * POSIX exposes directory fsync directly. Windows does not reliably allow a
+ * directory handle through Node, so the documented fallback reopens and flushes
+ * the published file after its first flush. This is the strongest synchronous,
+ * dependency-free barrier available through the repository's Node runtime.
+ */
+export function flushFileAndPublication(path, {
+  fsync = fsyncSync,
+  platformName = platform(),
+} = {}) {
+  const flushFile = () => {
+    const fd = openSync(path, 'r+');
+    try { fsync(fd); } finally { closeSync(fd); }
+  };
+  flushFile();
+  if (platformName === 'win32') {
+    flushFile();
+    return;
+  }
+  const directoryFd = openSync(dirname(path), 'r');
+  try { fsync(directoryFd); } finally { closeSync(directoryFd); }
+}
+
+/**
+ * Read the bus-instance sidecar while the caller holds the event-log lock.
+ *
+ * Ordinary sidecar creation happens only beside an empty/missing log. The exclusive
+ * create plus fsync makes its contents durable before the first event append. A
+ * missing sidecar beside legacy nonempty evidence is adopted only through the
+ * explicit, locked migration path; ordinary reads and writes never invent identity.
+ */
+export function readBusInstanceMetadata({ createIfEmpty = false, migrateLegacy = false,
+  fsync = fsyncSync, flushPublication = flushFileAndPublication } = {}) {
+  const path = busMetadataPath();
+  if (!existsSync(path)) {
+    const eventPath = logPath();
+    const nonempty = existsSync(eventPath) && statSync(eventPath).size > 0;
+    if ((nonempty && !migrateLegacy) || (!nonempty && !createIfEmpty)) {
+      throw new BusInstanceMetadataError(
+        `${path}: bus-instance sidecar is missing${nonempty ? ' beside a nonempty event log' : ''}`,
+        'GAIA_BUS_INSTANCE_MISSING',
+      );
+    }
+
+    mkdirSync(dataDir(), { recursive: true });
+    const metadata = Object.freeze({ schema: BUS_INSTANCE_SCHEMA, instanceId: randomUUID() });
+    const fd = openSync(path, 'wx', 0o600);
+    try {
+      writeFileSync(fd, `${JSON.stringify(metadata)}\n`, 'utf8');
+      fsync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    flushPublication(path);
+    return metadata;
+  }
+
+  let metadata;
+  try {
+    const raw = readFileSync(path, 'utf8');
+    if (!raw.endsWith('\n') || raw.indexOf('\n') !== raw.length - 1) throw new Error('expected one newline-terminated JSON record');
+    metadata = JSON.parse(raw.slice(0, -1));
+  } catch (error) {
+    throw new BusInstanceMetadataError(
+      `${path}: corrupt bus-instance sidecar (${error.message})`,
+      'GAIA_BUS_INSTANCE_CORRUPT',
+    );
+  }
+
+  const keys = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    ? Object.keys(metadata).sort()
+    : [];
+  if (
+    keys.length !== 2
+    || keys[0] !== 'instanceId'
+    || keys[1] !== 'schema'
+    || metadata.schema !== BUS_INSTANCE_SCHEMA
+    || typeof metadata.instanceId !== 'string'
+    || !UUID.test(metadata.instanceId)
+  ) {
+    throw new BusInstanceMetadataError(
+      `${path}: corrupt bus-instance sidecar shape`,
+      'GAIA_BUS_INSTANCE_CORRUPT',
+    );
+  }
+  // A previous attempt may have made complete bytes visible before its fsync
+  // failed. Exact retry must repeat the barrier before accepting the sidecar.
+  flushPublication(path);
+  return Object.freeze({ schema: metadata.schema, instanceId: metadata.instanceId });
+}
+
+/** Explicit one-time adoption required before continuity can cursor a legacy log. */
+export function migrateLegacyBusInstance(lockOptions) {
+  return withLock(
+    () => readBusInstanceMetadata({ createIfEmpty: true, migrateLegacy: true }),
+    lockOptions,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +421,8 @@ export function readEventFile(path) {
  * function does not take it itself, because taking it here would make the
  * read-decide-append sequence non-atomic — the exact bug the commit protocol removes.
  */
-export function appendEvents(events) {
+export function appendEvents(events, { flushPublication = flushFileAndPublication,
+  ...publicationOptions } = {}) {
   if (events.length === 0) return;
   mkdirSync(dataDir(), { recursive: true });
 
@@ -317,9 +435,15 @@ export function appendEvents(events) {
   const payload = lines.join('\n') + '\n';
 
   const path = logPath();
+  const nonempty = existsSync(path) && statSync(path).size > 0;
+  // This primitive owns identity establishment for every fresh valid append.
+  // A pre-sidecar nonempty log remains writable for backward compatibility and
+  // must be adopted explicitly by migrateLegacyBusInstance before cursor use.
+  if (!nonempty || existsSync(busMetadataPath())) {
+    readBusInstanceMetadata({ createIfEmpty: true });
+  }
   appendFileSync(path, payload, 'utf8');
-  const fd = openSync(path, 'r+');
-  try { fsyncSync(fd); } finally { closeSync(fd); }
+  flushPublication(path, publicationOptions);
 }
 
 /**
