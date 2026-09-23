@@ -965,6 +965,9 @@ test('doctor stays green on a directory built only from operations it accepted',
     state = out.state;
   }
   writeFileSync(join(dir, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+  writeFileSync(join(dir, 'bus-instance.json'),
+    `${JSON.stringify({ schema: 'gaia.bus-instance/1', instanceId: '00000000-0000-4000-8000-000000000001' })}\n`,
+    'utf8');
 
   const doctor = await run(CTL, ['doctor', '--data-dir', dir]);
   assert.equal(doctor.code, 0, `accepted claims must not condemn the directory: ${doctor.stdout}${doctor.stderr}`);

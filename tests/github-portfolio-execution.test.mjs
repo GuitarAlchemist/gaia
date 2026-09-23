@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
@@ -65,7 +65,7 @@ test('the execution adapter binds one repository, worktree, task, and evidence d
   };
   const runRepair = async () => {};
   const adapter = createAgentFactoryExecutionAdapter({
-    expectedRepository: 'GuitarAlchemist/ga',
+    expectedRepository: 'guitaralchemist/GA',
     worktree,
     evidenceRoot,
     executeFactory,
@@ -91,6 +91,17 @@ test('the execution adapter binds one repository, worktree, task, and evidence d
   }), (error) => error instanceof PortfolioExecutionError
     && error.code === 'RepositoryScopeMismatch');
   assert.equal(calls.length, 1);
+
+  const dotWorktree = linkedWorktree('bound-dot-github', 'https://github.com/Owner/.github.git');
+  const dotAdapter = createAgentFactoryExecutionAdapter({
+    expectedRepository: 'Owner/.github', worktree: dotWorktree,
+    evidenceRoot: evidenceRootFor('bound-dot-github'),
+    executeFactory: async request => ({ schema: 'gaia-agent-factory-receipt/1',
+      status: 'completed', task: request.task }),
+    runWorker: async () => {}, runReviewer: async () => {}, runRepair: async () => {},
+  });
+  assert.equal((await dotAdapter.execute({ intent: intentFor('owner/.GITHUB'),
+    idempotencyKey: '9'.repeat(64) })).status, 'completed');
 });
 
 test('the execution adapter refuses a linked worktree belonging to another repository', () => {
@@ -212,6 +223,75 @@ test('a Windows short path and its long form bind the same canonical roots', {
   assert.equal(calls[0].evidenceDir, join(realpathSync.native(evidenceRoot), 'c'.repeat(64)));
 });
 
+test('receipt publication flushes both namespace entries and retries an uncertain barrier', () => {
+  const dir = join(scratch, 'durable-publication');
+  const evidenceRoot = join(dir, 'evidence');
+  const probe = join(dir, 'fsync-probe.cjs');
+  const runner = join(dir, 'runner.mjs');
+  const log = join(dir, 'fsync.log');
+  mkdirSync(evidenceRoot, { recursive: true });
+  writeFileSync(probe, [
+    "const fs = require('node:fs');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    'const original = fs.fsyncSync;',
+    'let failed = false;',
+    'fs.fsyncSync = (fd) => {',
+    "  const directory = fs.fstatSync(fd).isDirectory();",
+    "  fs.appendFileSync(process.env.GAIA_FSYNC_LOG, directory ? 'D' : 'F');",
+    "  if (directory && !failed && process.env.GAIA_FAIL_DIRECTORY === '1') {",
+    '    failed = true;',
+    "    throw Object.assign(new Error('injected directory sync failure'), { code: 'EIO' });",
+    '  }',
+    '  return original(fd);',
+    '};',
+    'syncBuiltinESMExports();',
+  ].join('\n'));
+  writeFileSync(runner, [
+    "import { execFileSync } from 'node:child_process';",
+    "import { mkdirSync, writeFileSync } from 'node:fs';",
+    "import { join } from 'node:path';",
+    `import { createAgentFactoryExecutionAdapter } from ${JSON.stringify(new URL('../src/github-portfolio-execution.mjs', import.meta.url).href)};`,
+    "const git = (cwd, ...args) => execFileSync('git', args, { cwd, windowsHide: true, stdio: 'ignore' });",
+    "const repo = join(process.argv[3], 'repo'); const worktree = join(process.argv[3], 'worktree');",
+    'mkdirSync(repo); git(repo, \'init\', \'--initial-branch=main\');',
+    "git(repo, 'config', 'user.name', 'Gaia Test'); git(repo, 'config', 'user.email', 'gaia@example.invalid');",
+    "writeFileSync(join(repo, 'candidate.txt'), 'before\\n'); git(repo, 'add', 'candidate.txt');",
+    "git(repo, 'commit', '-m', 'fixture'); git(repo, 'remote', 'add', 'origin', 'https://github.com/GuitarAlchemist/gaia.git');",
+    "git(repo, 'worktree', 'add', '-b', 'gaia-durable-publication', worktree, 'HEAD');",
+    'let factoryRuns = 0;',
+    'const adapter = createAgentFactoryExecutionAdapter({',
+    "  expectedRepository: 'GuitarAlchemist/gaia', worktree, evidenceRoot: process.argv[2],",
+    "  executeFactory: async () => { factoryRuns += 1; return { schema: 'gaia-agent-factory-receipt/1', status: 'completed' }; },",
+    '  runWorker: async () => {}, runReviewer: async () => {}, runRepair: async () => {},',
+    '});',
+    "const intent = { action: 'RUN_FACTORY_AGENT', repository: 'GuitarAlchemist/gaia', task: 'bounded task' };",
+    "const idempotencyKey = 'f'.repeat(64);",
+    'let firstCode = null;',
+    'try { await adapter.execute({ intent, idempotencyKey }); } catch (error) { firstCode = error.code; }',
+    'const recovered = await adapter.findReceipt({ intent, idempotencyKey });',
+    'process.stdout.write(JSON.stringify({ firstCode, factoryRuns, status: recovered.status }));',
+  ].join('\n'));
+  writeFileSync(log, '');
+  const required = `--require "${probe.replaceAll('\\', '/')}"`;
+  const result = spawnSync(process.execPath, [runner, evidenceRoot, dir], {
+    encoding: 'utf8', windowsHide: true,
+    env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} ${required}`.trim(),
+      GAIA_FSYNC_LOG: log, GAIA_FAIL_DIRECTORY: '1' },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.factoryRuns, 1, 'recovery never invokes the provider twice');
+  assert.equal(output.status, 'completed');
+  const marks = readFileSync(log, 'utf8');
+  if (process.platform === 'win32') {
+    assert.equal(output.firstCode, null);
+    assert.match(marks, /^F{3}$/u, `file-level barriers recorded: ${marks}`);
+  } else {
+    assert.equal(output.firstCode, 'ExecutionReceiptDurabilityUncertain');
+    assert.match(marks, /^FDDD$/u, `file, failed directory, and retried directory barriers: ${marks}`);
+  }
+});
+
 test('redelivery under one idempotency key performs no second factory effect and fails closed on a torn or foreign receipt', async () => {
   const worktree = linkedWorktree('redelivery', 'https://github.com/GuitarAlchemist/ga.git');
   const evidenceRoot = evidenceRootFor('redelivery');
@@ -240,8 +320,8 @@ test('redelivery under one idempotency key performs no second factory effect and
   const again = await adapter.execute({ intent, idempotencyKey });
   assert.equal(factoryRuns, 1);
   assert.deepEqual(again, first);
-  assert.deepEqual(await adapter.findReceipt({ idempotencyKey, intent }),
-    { ...first, addressedCommentIds: [] });
+  assert.deepEqual(await adapter.findReceipt({ idempotencyKey, intent }), first,
+    'ordinary reconciliation returns the exact producer receipt shape');
 
   // A different intent replayed under the same key must not be executed against the
   // receipt of another operation, nor be reported as that operation's result.

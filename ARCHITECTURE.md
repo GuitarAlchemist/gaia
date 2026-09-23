@@ -74,12 +74,15 @@ only in the final column and must not escape in a result or refusal.
 | Pull-request conflict classification | `classifyPrConflict(observation, claim) -> reading or refusal` | Exact-generation, read-only classification under a closed empty strategy registry | normalized GitHub observation; deterministic fixtures |
 | Runner capability probe | `probe(mandate, lease, adapter) -> receipt or blocker` | Read-only capability question decided by identity, generation, lease, admission and reconciliation before any adapter is consulted | synthetic-fixture probe; deterministic in-memory fixtures |
 | Publication and operator | `prepare(intent)`; `authorize(grant)`; `execute(intent) -> receipt` | Human-mediated privileged effect | GitHub publication/operator adapters; owned in-memory broker tests |
+| Local autonomous factory | `runAutonomousFactory(input) -> receipt or refusal`; `reconcileAutonomousJob(input) -> receipt or refusal` | Standing repository-scoped authority, one bounded candidate per Draft, unresolved work prevents another start | local SQLite policy/job registry; hosted receipt and Git worktree adapter; restricted noninteractive subscription factory whose provider activity is rendered to the host terminal |
 | Factory telemetry | `record(phase)`; `replay(events) -> lifecycle or refusal` | Closed evidence events and freshness projection | local evidence log; wmux/Claude sensor; deterministic fixtures |
+| Continuity successor tracer | `accept(input) -> receipt or refusal`; `replace(input) -> receipt or refusal`; `deliverWake(input) -> receipt or refusal`; `consume(input) -> portable receipt or refusal`; `inspect(input) -> projection or refusal` | One Work Identity owns one successor slot; only generation 0 may be replaced by generation 1. Revisioned transitions replay exact response bytes, evidence age never moves backward, and no decision is admitted before one exact bus wake is durably reconciled. The post-consumption receipt is authority-empty and cannot grant implementation or merge authority | Node SQLite WAL store with serialized transitions; bus evidence cursor/checkpoint/idempotent-send adapter over the existing event log; ecosystem-neutral JSON Schema and bounded fixtures; Demerzel read-only validator |
 | Lane generation bootstrap | `bootstrapLaneGeneration(manifest, ports) -> receipt or refusal`; `verifyLaneLaunchReceipt(receipt) -> receipt or refusal` | Work-scoped execution exclusion, topology before spawn, verified launch receipt, and recoverable CAS cleanup intent | deterministic shared-instance in-memory generation store; deterministic lane-adapter fixture; production exclusion not shipped |
 | Control room | `render(snapshot, observed instant) -> read model` | Authority-free operator projection | static HTML/dashboard; in-memory snapshots |
 | Hybrid search | `index(corpus)`; `query(request) -> matches or refusal` | Advisory retrieval with provenance | local JavaScript engine; optional IX embedding input |
 | Architecture drift | `checkArchitectureDrift(inventory) -> report or refusal` | Normalized repository inventory | filesystem inventory; deterministic in-memory inventory |
 | Managed PR delivery rounds | `createInitialManagedRound(input) -> round or refusal`; `executeManagedRoundUpdate(input) -> receipt or blocker` | One evidence-bound managed-section transition with read-after-write proof | GitHub pull-request body CAS and conditional-write adapter; memory evidence and effect adapters |
+| Artifact chain | `buildArtifactChain(input) -> manifest or refusal`; `evaluateArtifactChain(input) -> report or refusal` | The caller supplies the subject and the currently expected root revisions, so a self-consistent old chain cannot declare itself current. A changed required predecessor invalidates dependents transitively; advisory and reference predecessors are reported and never affect required freshness. Absent stages stay absent, and a recorded claim stays asserted rather than verified: a fresh chain is a statement about digests and edges, never about tests, approval, or publication. Historical acceptance and effect authority are untouched | pure deterministic descriptor preflight before any artifact measurement; bounded local measurement and immutable create-if-absent sidecar adapter; read-only CLI; deterministic in-memory fixtures |
 | Test observation intake | `normalizeTestObservation(reading) -> observation`; `admitTestObservation(ledger, observation) -> admission`; `admitTestObservationBatch(ledger, readings) -> batch or refusal`; `projectTestObservations(ledger) -> read model` | Untrusted comments become digest-verified, append-only observation entries and an authority-free read model; admission owns predecessor linkage and immutable content snapshots. A bounded batch sequences existing admission rules atomically: structural errors or capacity exhaustion return no partial ledger. Absence from a page is not deletion. Current-state deduplication preserves recovery after unavailability without weakening the monotonic source-time frontier. Every claim remains source-asserted, not authenticated or verified | injected read-only comment source; captured-replay and synthetic fixtures |
 
 The architecture-drift verification seam is the only seam introduced by this map itself. One
@@ -173,12 +176,26 @@ existing human-mediated grant and creates no new authority. It does not close th
 between readback and process start or prove cross-process execution exclusion. A safe live
 worker profile is selectable with `--execution-profile claude-visible-restricted`.
 The provider adapter in `src/factory-visible-claude.mjs` implements the existing worker,
-reviewer and repair ports through an inherited interactive terminal. It restricts Claude
+reviewer and repair ports through three transports over one contract: an inherited interactive
+terminal, a noninteractive print transport that discards provider output, and a noninteractive
+print transport that renders bounded, closed-vocabulary provider events to the inherited terminal.
+The last is what the autonomous host uses, so a prompt-free run is still an observed run; the CLI
+requires a writable terminal before opening authority, and an environment that cannot render
+refuses instead of running an unobserved worker. It restricts Claude
 to file tools and working directories, removes API-key fallback through the existing
 subscription environment, and binds bounded provider results to fresh attempt identities.
 The owned process must stop before output acceptance; timeout, mismatch and cleanup
-failure refuse. Results remain untrusted provider evidence; factory candidate validation
-and human-mediated authority are unchanged. This is not an OS sandbox guarantee.
+failure refuse. Before SQLite may record terminal completion, the execution adapter durably publishes
+the bound receipt: POSIX flushes its containing directory and the evidence root, while Windows uses
+the strongest per-entry barrier Node exposes and claims no equivalent directory guarantee. An
+uncertain barrier leaves the job `STARTED`; reconciliation validates and republishes the same receipt
+without another provider invocation. GitHub owner/repository and organization scope are case-insensitive from targeted selection through
+policy replay and execution. Autonomous job identity folds repository spelling to lowercase and SQLite
+independently enforces case-insensitive repository uniqueness, while captured intent, policy, receipt and
+legacy-key spelling remains immutable evidence. Repaired terminal receipts must bind repair evidence and
+both reviews to the terminal change-set identity; incomplete or contradictory lineage retains `STARTED`.
+Results remain untrusted provider evidence; factory candidate validation and human-mediated authority are
+unchanged. This is not an OS sandbox guarantee.
 Real operator authorization and an operation-linked canary remain unproven; controlled
 provider tests alone do not establish autonomous draining.
 
@@ -244,6 +261,16 @@ projections. Their absence or corruption cannot be treated as loss of hosted aut
 optional and never decides acceptance, readiness, or an effect. A projection may accelerate or
 explain observation; it may not become a second writer of canonical state.
 
+An artifact-chain manifest is a derived, rebuildable sidecar: it records digests of artifacts that
+already exist elsewhere and is created complete-before-visible if absent, compared if present, and never
+overwritten. Filesystems without the required atomic no-replace publication primitive refuse rather than
+expose partial final bytes. It is not a ledger, not a second source of terminal truth, and holds no authority;
+losing one costs a
+freshness check that can be rebuilt from the same files. Before ordinary autonomous scheduling, the
+host replays every completed candidate receipt through the idempotent sidecar emitter. A replay
+failure is reported per job but neither changes terminal authority nor blocks other projections or
+eligible work.
+
 The drain Petri-net core and fact collector are pure replay modules. Their CLI composes JSONL and
 artifact observations at the edge, and their optional DuckDB adapter rebuilds analytical tables
 from the same deterministic run. Neither the CLI nor the projection may fire a transition or turn
@@ -303,10 +330,23 @@ or service-level availability.
 
 Least privilege is structural: the bus lacks privileged verbs, adapters receive bounded inputs,
 provider secrets are excluded from evidence, and irreversible actions are separate transitions.
-The hosted operator requires an interactive human to confirm the full revision-bound intent and
+The manual operator requires an interactive human to confirm the full revision-bound intent and
 spends a short-lived grant once. Non-interactive input cannot authorize it. Publication, merge,
 deployment, spending, credential, and configuration rights are never inferred from agent text,
 labels, activity, or completion markers.
+
+The separate local autonomous composition consumes an operator-provisioned standing
+policy for one repository and a finite run budget. A local SQLite transaction commits
+STARTED once per issue/Draft and serializes revocation and the single active host slot.
+The application repeats existing portfolio and exact Draft admission before consuming
+that authority. A restricted noninteractive subscription adapter then produces only a candidate,
+rendering bounded provider events to the terminal running the host rather than discarding them.
+Original execution keys and bound receipts reconcile crashes; missing or corrupt evidence
+retains the slot without relaunch. This is one trusted OS-user/local-disk domain, not
+cross-host fencing or an OS sandbox. Manual runs and separate registries are outside its
+exclusion guarantee. Revocation prevents future starts, not already authorized execution.
+See [local autonomous continuation](docs/autonomous-factory.md) for the source-movement
+window, bounded hosted-artifact discovery, activation preconditions and recovery limits.
 
 Resource ceilings are local safeguards, not billing authority: four supported live lanes,
 bounded outputs, timeouts, one-step drain transitions, and explicit cost/fanout limits where a
@@ -412,6 +452,9 @@ accepted transitions and receipts, not tokens, lane activity, or prose completio
   Ubuntu remains portability discovery.
 - **Local factory/operator:** bounded Claude/Codex/wmux processes, offline artifacts, explicit
   worktrees, read-only dashboards, and an interactive authority boundary for privileged effects.
+- **Local autonomous continuation:** a separately provisioned standing policy, local durable
+  job registry and explicit polling process; exact Draft admission and noninteractive subscription
+  workers produce candidates. Installation does not activate it or grant publication/merge.
 - **Hosted pump:** GitHub Actions runs the scheduled Draft intake in one serialized recovery group
   and issue-triggered intake partitioned per issue, plus
   the separately sealed effect path. Protected Git refs are the durable ingress/receipt ledger;
@@ -456,6 +499,9 @@ are linked here.
   single-owner conditional effect, durable intent, and read-after-write reconciliation.
 - [Test observation intake R0](docs/test-observation-intake-r0.md) — comment identity, raw-source
   digest, append-only revisions, and the fact/interpretation/recommendation distinction.
+- [Artifact chain](docs/artifact-chain.md) — the five stages, digest-pinned required/advisory/
+  reference edges, caller-supplied currency, the candidate-stage sidecar, and why a fresh chain is
+  not a verified one.
 - [Crash recovery](docs/crash-recovery.md),
   [artifact completion signals](docs/artifact-completion-signals.md), and
   [holdout-safe reporting](docs/holdout-safe-reporting.md) — recovery, terminal evidence, and

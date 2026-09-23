@@ -260,7 +260,8 @@ async function selectNext(portfolio, draftAdmission) {
       || !Number.isSafeInteger(target.itemNumber) || target.itemNumber < 1) {
     throw new PortfolioFactoryError('DraftTargetInvalid', 'draft target must name exact work');
   }
-  const candidates = portfolio.workItems.filter(item => item.repository === target.repository
+  const candidates = portfolio.workItems.filter(item =>
+    item.repository.toLowerCase() === target.repository.toLowerCase()
     && item.itemKind === target.itemKind && item.itemNumber === target.itemNumber);
   const next = buildSchedule(candidates)[0];
   if (!next) throw new PortfolioFactoryError('DraftTargetNotReady', 'draft target is absent or not ready');
@@ -288,7 +289,8 @@ function buildPortfolio(snapshot, request) {
   if (!snapshot || snapshot.schema !== 'gaia-github-read-snapshot/1') {
     throw new PortfolioFactoryError('InvalidSnapshot', 'unsupported GitHub read snapshot');
   }
-  if (snapshot.organization !== request.organization
+  if (typeof snapshot.organization !== 'string'
+      || snapshot.organization.toLowerCase() !== request.organization.toLowerCase()
       || snapshot.scope !== 'all-repositories-visible-to-adapter') {
     throw new PortfolioFactoryError('InvalidSnapshot', 'snapshot scope does not match the request');
   }

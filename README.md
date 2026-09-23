@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 2008 gates
+node --test                                   # 2143 gates
 ```
 
 Use the single Node.js version in `.node-version` (26.8.1, the latest Current release
@@ -286,6 +286,17 @@ confirmation and grant consumption. Refusals and execution failures also end wit
 terminal outcome. Progress writer and timer failures are ignored and cannot affect grant
 consumption, execution, receipts, final stdout, or exit status.
 See [`docs/github-portfolio-operator.md`](docs/github-portfolio-operator.md).
+
+The separate `npm run portfolio:autonomous -- --help` command consumes hosted intake
+receipts under an explicitly provisioned, revocable local policy. It reuses exact
+Draft admission and the candidate factory without per-run terminal prompts. One local
+registry serializes starts, enforces a finite budget and preserves uncertain jobs for
+reconciliation. Read [the authority contract](docs/autonomous-factory.md) before
+provisioning; a candidate is not publication or merge. The manual operator remains
+interactive. No background service is installed or activated by this change.
+
+[INTENT.md](INTENT.md) records the accepted outcome. The [SDLC adaptation](docs/ai-native-sdlc.md),
+[CLAUDE.md](CLAUDE.md) and [REVIEW.md](REVIEW.md) link it to verification and review.
 
 ### GitHub drain agent team
 
@@ -677,7 +688,7 @@ authoritative for their named contracts.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 2008 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 2143 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
