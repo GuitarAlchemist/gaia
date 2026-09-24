@@ -34,7 +34,7 @@ function qualifiedReference(reference, repository) {
   return reference.startsWith('#') ? `${repository}${reference}` : reference;
 }
 
-function declaredRelationships(body, repository) {
+export function declaredRelationships(body, repository) {
   const dependencies = [];
   const duplicates = [];
   let dependenciesAreEmpty = false;
