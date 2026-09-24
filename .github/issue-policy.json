@@ -1,0 +1,59 @@
+{
+  "$comment": "Gaia's issue consistency policy. Read by scripts/issue-consistency.mjs. Every key overrides DEFAULT_POLICY in src/issue-consistency.mjs; omitted keys keep the default. Change this file, not the code, when a convention changes.",
+  "titleTypes": ["feat", "fix", "docs", "test", "spike", "ops", "adr", "chore", "refactor"],
+  "machineStatusLabels": {
+    "ready-for-agent": "READY",
+    "ready-for-human": "AWAITING_HUMAN"
+  },
+  "advisoryStatusLabels": [
+    "needs-triage",
+    "blocked",
+    "blocker:capacity",
+    "validation-failed",
+    "priority:critical"
+  ],
+  "workflowLabels": [
+    "ready-for-agent",
+    "ready-for-human",
+    "needs-triage",
+    "blocked",
+    "blocker:capacity",
+    "validation-failed"
+  ],
+  "exclusiveStatusLabels": [
+    ["ready-for-agent", "blocked"],
+    ["ready-for-agent", "needs-triage"],
+    ["ready-for-agent", "validation-failed"]
+  ],
+  "typeLabels": { "feat": "enhancement", "fix": "bug" },
+  "freeLabels": ["retrospective", "documentation", "question"],
+  "completionHeading": "Done when",
+  "completionAliases": [
+    "Acceptance criteria",
+    "Acceptance",
+    "Tracer-bullet acceptance criteria",
+    "Evidence",
+    "Verification",
+    "Success criteria",
+    "Success evidence",
+    "Success metrics",
+    "R0 acceptance"
+  ],
+  "requiredHeadings": ["Why"],
+  "evidenceSentinels": ["Depends-On: NONE", "Duplicate-Of: NONE"],
+  "groomingMarker": "gaia-grooming",
+  "groomingFields": [
+    "Assessment / priority",
+    "Outcome",
+    "Next slice",
+    "Completion proof",
+    "Ownership",
+    "Relations",
+    "Proposed boundaries",
+    "Sizing / uncertainty",
+    "Constraint / correction",
+    "Admission"
+  ],
+  "degenerateShare": 0.85,
+  "maxBodyBytes": 12000
+}
