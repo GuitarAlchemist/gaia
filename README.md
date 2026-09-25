@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 2139 gates
+node --test                                   # 2149 gates
 ```
 
 Use the single Node.js version in `.node-version` (26.8.1, the latest Current release
@@ -294,6 +294,11 @@ registry serializes starts, enforces a finite budget and preserves uncertain job
 reconciliation. Read [the authority contract](docs/autonomous-factory.md) before
 provisioning; a candidate is not publication or merge. The manual operator remains
 interactive. No background service is installed or activated by this change.
+
+`npm run draft:seed-evidence -- --issue N [--apply]` opens the evidence branch that hosted intake
+requires for a labelled issue: one empty commit carrying the exact `Gaia-Issue` and
+`Gaia-Ready-Receipt` trailers. It never applies the label. See
+[evidence head seeding](docs/hosted-draft-intake.md#evidence-head-seeding).
 
 [INTENT.md](INTENT.md) records the accepted outcome. The [SDLC adaptation](docs/ai-native-sdlc.md),
 [CLAUDE.md](CLAUDE.md) and [REVIEW.md](REVIEW.md) link it to verification and review.
@@ -688,7 +693,7 @@ authoritative for their named contracts.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 2139 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 2149 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
