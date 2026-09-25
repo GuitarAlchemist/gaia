@@ -167,6 +167,28 @@ test('the read-back decides: a failed ref write is FAILED, a divergent one AMBIG
   assert.equal(ambiguous.status, 'AMBIGUOUS');
 });
 
+test('an unreadable read-back after a write is AMBIGUOUS, and a rerun reports PRESENT', async () => {
+  const world = fakeGitHub();
+  const listHeadRefs = world.github.listHeadRefs;
+  let writes = false;
+  world.writer.createRef = ((create) => async (request) => {
+    await create(request);
+    writes = true;
+  })(world.writer.createRef);
+  world.github.listHeadRefs = async (request) => {
+    if (writes) throw new Error('connection aborted');
+    return listHeadRefs(request);
+  };
+  const ambiguous = await seedEvidenceHead({ ...world, selector: SELECTOR, apply: true });
+  assert.equal(ambiguous.status, 'AMBIGUOUS');
+  assert.equal(ambiguous.reason, 'ReadBackUnavailable');
+
+  world.github.listHeadRefs = listHeadRefs;
+  const rerun = await seedEvidenceHead({ ...world, selector: SELECTOR, apply: true });
+  assert.equal(rerun.status, 'PRESENT');
+  assert.equal(rerun.headRevision, ambiguous.commitRevision);
+});
+
 test('the gh writer issues the three Git Data calls with the exact trailers', async () => {
   const calls = [];
   const writer = createGhEvidenceHeadWriter({

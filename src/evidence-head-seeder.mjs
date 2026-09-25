@@ -137,8 +137,15 @@ export async function seedEvidenceHead({ github, writer = null, selector, apply 
     refError = error;
   }
 
-  // The read-back, not the write's response, decides the outcome.
-  const after = await findEvidenceHeads(github, repository, number, queueReceiptRevision);
+  // The read-back, not the write's response, decides the outcome. Once a write was attempted, an
+  // unreadable GitHub is AMBIGUOUS, never fail-closed: the ref may exist, so "nothing was written"
+  // would be false. Rerunning is safe; it reports PRESENT when the ref landed.
+  let after;
+  try {
+    after = await findEvidenceHeads(github, repository, number, queueReceiptRevision);
+  } catch {
+    return result({ status: 'AMBIGUOUS', reason: 'ReadBackUnavailable', commitRevision: commit });
+  }
   if (after.length === 1 && after[0].name === branch && after[0].revision === commit) {
     return result({ status: 'CREATED', headRevision: commit });
   }
