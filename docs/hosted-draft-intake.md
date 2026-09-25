@@ -254,6 +254,25 @@ nothing; several refuse. After writing, the read-back decides the result: `CREAT
 automatically. Exit codes: `0` planned, present, or created · `1` refused, failed, or ambiguous ·
 `2` usage · `3` fail-closed.
 
+### Choosing what to feed
+
+`ready-for-agent` is an act of authority: the collector binds the receipt to the label event and
+refuses an actor below `triage`. So nothing in Gaia applies it on its own, and a feeder that picked
+and labelled its own work would be self-authorization. `scripts/pump-candidates.mjs` does the part
+that can be automated without that: it ranks, and the operator labels.
+
+```bash
+npm run pump:candidates                       # top 3, with a tally of refusal reasons
+npm run pump:candidates -- --format json      # every issue and every reason
+```
+
+An open issue is a candidate when it carries none of `needs-triage`, `blocked`, `ready-for-agent`,
+`retrospective`, `wontfix`, `duplicate` or `blocker:*` (plus any `--exclude-label`); declares no
+`Depends-On`/`Blocked-By` or `Duplicate-Of` (asserted `NONE` is fine; a malformed block refuses);
+is not named as a parent by another open issue; has a completion section (`Done when`,
+`Acceptance criteria`, and their variants); and has neither a `deliver issue #N` Draft nor a
+`gaia/issue-N-*` branch. Candidates are listed lowest number first. The module exports no effect.
+
 ### No new configuration
 
 `.github/gaia/pump-policy.json` already carries `ledgerRegistryRootOid` and

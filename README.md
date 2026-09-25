@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 2148 gates
+node --test                                   # 2156 gates
 ```
 
 Use the single Node.js version in `.node-version` (26.8.1, the latest Current release
@@ -299,6 +299,10 @@ interactive. No background service is installed or activated by this change.
 requires for a labelled issue: one empty commit carrying the exact `Gaia-Issue` and
 `Gaia-Ready-Receipt` trailers. It never applies the label. See
 [evidence head seeding](docs/hosted-draft-intake.md#evidence-head-seeding).
+
+`npm run pump:candidates` proposes the next issues to label, read-only, with the reason every
+other open issue is refused. Choosing what is ready stays the operator's act; see
+[choosing what to feed](docs/hosted-draft-intake.md#choosing-what-to-feed).
 
 [INTENT.md](INTENT.md) records the accepted outcome. The [SDLC adaptation](docs/ai-native-sdlc.md),
 [CLAUDE.md](CLAUDE.md) and [REVIEW.md](REVIEW.md) link it to verification and review.
@@ -693,7 +697,7 @@ authoritative for their named contracts.
 | `scripts/ga-watch.mjs` | Read-only GA JSONL tailer → bus `send` with `requestedAuthority: ["report"]`. |
 | `scripts/inventory-digest.mjs` | Prints this tree's reproducible fixed point. Writes nothing inside the tree. |
 | `scripts/lineage-receipt.mjs` | Emits a lineage receipt, registers an exposure, checks a receipt's freshness. Exit `0`/`2`/`3`. |
-| `tests/` | 2148 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 2156 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
