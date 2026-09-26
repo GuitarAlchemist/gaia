@@ -194,6 +194,11 @@ policy replay and execution. Autonomous job identity folds repository spelling t
 independently enforces case-insensitive repository uniqueness, while captured intent, policy, receipt and
 legacy-key spelling remains immutable evidence. Repaired terminal receipts must bind repair evidence and
 both reviews to the terminal change-set identity; incomplete or contradictory lineage retains `STARTED`.
+Before a candidate may settle ready, the host itself runs `node --test` with the pinned runtime in the
+candidate worktree, bounded in time and output and without provider or GitHub credentials, and binds the
+observed exit code, counts and output evidence to that change-set identity; `CANDIDATE_READY` requires an
+approving review and a passing run, and a new terminal receipt without a run is refused. The run executes
+candidate code as the host user with network access: the same trust as the worker that wrote it.
 Results remain untrusted provider evidence; factory candidate validation and human-mediated authority are
 unchanged. This is not an OS sandbox guarantee.
 Real operator authorization and an operation-linked canary remain unproven; controlled
