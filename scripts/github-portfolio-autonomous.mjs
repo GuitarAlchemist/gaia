@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -11,6 +11,7 @@ import { createGitHubReadAdapter } from '../src/github-read-adapter.mjs';
 import { createGitHubDraftAdmissionAdapter } from '../src/github-draft-admission.mjs';
 import { createAgentFactoryExecutionAdapter } from '../src/github-portfolio-execution.mjs';
 import { canRenderProviderActivity, createStreamingClaudeAdapters } from '../src/factory-visible-claude.mjs';
+import { runNodeTestVerification } from '../src/factory-agent.mjs';
 import { emitCandidateArtifactChain } from '../src/artifact-chain-files.mjs';
 
 const usage = `usage: github-portfolio-autonomous.mjs
@@ -158,6 +159,11 @@ export async function runAutonomousCli(argv, { write = value => process.stdout.w
     const interval = integer(args['interval-seconds'], 60, 10, 3600) * 1000;
     const repository = store.status().repository;
     if (!repository) fail('PolicyMissing');
+    // Every candidate is tested by the host with the pinned runtime (#163). Refuse to
+    // start under another Node rather than spend a run on a verification that must fail.
+    const pinPath = join(clone, '.node-version');
+    if (existsSync(pinPath)
+      && process.version !== `v${readFileSync(pinPath, 'utf8').trim().replace(/^v/u, '')}`) fail('VerificationRuntimeMismatch');
     // Visible by construction: provider activity is rendered to the terminal running the pump,
     // and an unrenderable run is refused rather than continued invisibly.
     const providers = createStreamingClaudeAdapters({ isObservable: outputObservable });
@@ -172,6 +178,7 @@ export async function runAutonomousCli(argv, { write = value => process.stdout.w
           runWorker: ctx => providers.runWorker(ctx, { timeoutMs }),
           runReviewer: ctx => providers.runReviewer(ctx, { timeoutMs }),
           runRepair: ctx => providers.runRepair(ctx, { timeoutMs }),
+          runVerification: ctx => runNodeTestVerification(ctx),
         }));
       }
       return adapters.get(key);

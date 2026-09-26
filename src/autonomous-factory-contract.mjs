@@ -107,6 +107,26 @@ function validateRepair(value, terminalIdentity) {
     || value.initialCandidateIdentity === value.repairedCandidateIdentity
     || value.repairedCandidateIdentity !== terminalIdentity) fail('InvalidReceipt');
 }
+// The host-owned test run (#163). `passed` is recomputed from the observed facts
+// rather than trusted, and each record binds the exact candidate it measured.
+function validateVerification(value, evidenceRole, candidateIdentity) {
+  exact(value, ['authority', 'candidateIdentity', 'command', 'counts', 'evidence', 'exitCode',
+    'passed', 'runtime', 'schema', 'termination'], 'InvalidReceipt');
+  validateEvidence(value.evidence, [evidenceRole]);
+  exact(value.runtime, ['pinned', 'version'], 'InvalidReceipt');
+  if (value.counts !== null) exact(value.counts, ['fail', 'pass', 'tests'], 'InvalidReceipt');
+  const counted = value.counts !== null && nonnegative(value.counts.tests)
+    && nonnegative(value.counts.pass) && nonnegative(value.counts.fail);
+  if (value.schema !== 'gaia-factory-verification/1' || value.authority !== 'host-user-process'
+    || !text(value.command, 256) || !text(value.runtime.version, 64)
+    || !(value.runtime.pinned === null || text(value.runtime.pinned, 64))
+    || value.candidateIdentity !== candidateIdentity
+    || !['exit', 'timeout', 'output-limit'].includes(value.termination)
+    || !(value.exitCode === null || Number.isSafeInteger(value.exitCode))
+    || (value.counts !== null && !counted)
+    || value.passed !== (value.termination === 'exit' && value.exitCode === 0 && counted
+      && value.counts.tests > 0 && value.counts.fail === 0)) fail('InvalidReceipt');
+}
 function validateChangeSet(value, head, noChange = false) {
   exact(value, ['baseHead', 'files', 'identity', 'patchBytes', 'patchSha256',
     'statusBytes', 'statusSha256'], 'InvalidReceipt');
@@ -133,7 +153,7 @@ function validateChangeSet(value, head, noChange = false) {
     patchSha256: value.patchSha256, files };
   if (sha256(`${JSON.stringify(body)}\n`) !== value.identity) fail('InvalidReceipt');
 }
-function validateReceipt(value, job) {
+function validateReceipt(value, job, { requireVerification = false } = {}) {
   const serialized = encode(value, 'InvalidReceipt');
   const receipt = JSON.parse(serialized);
   if (receipt?.schema === 'gaia-autonomous-retirement/1') {
@@ -162,9 +182,14 @@ function validateReceipt(value, job) {
     || factory.task !== job.intent.task) fail('InvalidReceipt');
   const repaired = Object.hasOwn(factory, 'repair') || Object.hasOwn(factory, 'reviews');
   const noChange = receipt.status === 'NO_CANDIDATE';
+  // Receipts stored before #163 carry no verification and stay readable; a new
+  // terminal receipt is bound with requireVerification.
+  const verified = Object.hasOwn(factory, 'verification') || Object.hasOwn(factory, 'verifications');
+  if (requireVerification && !noChange && !verified) fail('VerificationRequired');
   exact(factory, ['schema', 'status', 'task', 'base', 'worker', 'changeSet',
     ...(noChange ? ['reason'] : ['reviewer']),
-    ...(repaired ? ['repair', 'reviews'] : [])], 'InvalidReceipt');
+    ...(repaired ? ['repair', 'reviews'] : []),
+    ...(verified ? ['verification', ...(repaired ? ['verifications'] : [])] : [])], 'InvalidReceipt');
   exact(factory.base, ['executionBoundary', 'head', 'isolation'], 'InvalidReceipt');
   if (factory.base.head !== job.intent.draft.headRevision
     || factory.base.isolation !== 'caller-supplied-linked-git-worktree'
@@ -172,25 +197,37 @@ function validateReceipt(value, job) {
   validateWorker(factory.worker);
   validateChangeSet(factory.changeSet, factory.base.head, noChange);
   if (noChange) {
-    if (repaired || factory.reason !== 'NoCandidateChange') fail('InvalidReceipt');
+    if (repaired || verified || factory.reason !== 'NoCandidateChange') fail('InvalidReceipt');
     return serialized;
   }
   if (!repaired) {
     validateReviewer(factory.reviewer, 'reviewer');
-    if (factory.status !== 'completed' || factory.reviewer.verdict !== 'APPROVE') {
+    if (verified) validateVerification(factory.verification, 'verification', factory.changeSet.identity);
+    // Unrepaired rejection exists only as an approval over a failing test run.
+    if (factory.reviewer.verdict !== 'APPROVE'
+      || factory.status !== (!verified || factory.verification.passed ? 'completed' : 'rejected')) {
       fail('InvalidReceipt');
     }
     return serialized;
   }
   exact(factory.reviews, ['final', 'initial'], 'InvalidReceipt');
   validateRepair(factory.repair, factory.changeSet.identity);
-  validateReviewer(factory.reviews.initial, 'reviewer');
+  // The factory names a REQUEST_CHANGES initial review `reviewer-initial`, as the
+  // publication gate already requires.
+  validateReviewer(factory.reviews.initial, 'reviewer-initial');
   validateReviewer(factory.reviews.final, 'reviewer-final');
   validateReviewer(factory.reviewer, 'reviewer-final');
+  if (verified) {
+    exact(factory.verifications, ['final', 'initial'], 'InvalidReceipt');
+    validateVerification(factory.verifications.initial, 'verification', factory.repair.initialCandidateIdentity);
+    validateVerification(factory.verifications.final, 'verification-final', factory.changeSet.identity);
+    if (encode(factory.verification, 'InvalidReceipt')
+      !== encode(factory.verifications.final, 'InvalidReceipt')) fail('InvalidReceipt');
+  }
+  const ready = factory.reviews.final.verdict === 'APPROVE' && (!verified || factory.verification.passed);
   if (factory.reviews.initial.verdict !== 'REQUEST_CHANGES'
     || encode(factory.reviewer, 'InvalidReceipt') !== encode(factory.reviews.final, 'InvalidReceipt')
-    || factory.reviews.final.verdict
-      !== (factory.status === 'completed' ? 'APPROVE' : 'REQUEST_CHANGES')) fail('InvalidReceipt');
+    || factory.status !== (ready ? 'completed' : 'rejected')) fail('InvalidReceipt');
   return serialized;
 }
 

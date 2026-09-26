@@ -18,16 +18,21 @@ function factoryReceipt(intent, status = 'completed') {
   const evidence = role => ({ role, path: `/evidence/${role}.txt`, bytes: 3,
     sha256: 'f'.repeat(64), mediaType: 'text/plain; charset=utf-8',
     policy: 'local-sensitive-content-addressed' });
+  const identity = sha256(`${JSON.stringify(body)}\n`);
   return { schema: 'gaia-agent-factory-receipt/1', status, task: intent.task,
     base: { head: intent.draft.headRevision, isolation: 'caller-supplied-linked-git-worktree',
       executionBoundary: 'host-user-process' },
     worker: { provider: 'fixture-worker', evidence: evidence('worker'), authority: 'host-user-process',
       requestedScope: 'linked-worktree-only', observedScope: 'git-candidate-and-worktree-tree' },
-    changeSet: { ...body, identity: sha256(`${JSON.stringify(body)}\n`) },
+    changeSet: { ...body, identity },
     reviewer: { provider: 'fixture-reviewer', evidence: evidence('reviewer'),
       authority: 'sandbox-requested-read-only',
       verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged',
-      verdict: status === 'completed' ? 'APPROVE' : 'REQUEST_CHANGES' } };
+      verdict: status === 'completed' ? 'APPROVE' : 'REQUEST_CHANGES' },
+    verification: { schema: 'gaia-factory-verification/1', authority: 'host-user-process',
+      command: 'node --test --test-reporter=spec', runtime: { version: 'v26.8.1', pinned: '26.8.1' },
+      candidateIdentity: identity, termination: 'exit', exitCode: 0,
+      counts: { tests: 1, pass: 1, fail: 0 }, passed: true, evidence: evidence('verification') } };
 }
 
 function fixture() {

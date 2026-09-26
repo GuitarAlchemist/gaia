@@ -57,7 +57,7 @@ function receipt(job, status = 'CANDIDATE_READY', { repaired = status === 'CANDI
       authority: 'host-user-process', requestedScope: 'linked-worktree-only',
       observedScope: 'git-candidate-and-worktree-tree', initialCandidateIdentity,
       repairedCandidateIdentity: changeSet.identity };
-    factory.reviews = { initial: review('reviewer', 'REQUEST_CHANGES'), final };
+    factory.reviews = { initial: review('reviewer-initial', 'REQUEST_CHANGES'), final };
   }
   return { schema: 'gaia-autonomous-factory-receipt/1', status, jobKey: job.jobKey,
     intentRevision: job.intent.intentRevision, idempotencyKey: job.idempotencyKey, factory };
