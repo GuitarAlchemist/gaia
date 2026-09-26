@@ -5,8 +5,8 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { openAutonomousFactoryStore } from '../src/autonomous-factory-store.mjs';
 import { autonomousJobKey } from '../src/autonomous-factory-contract.mjs';
-import { diagnosticCode, runAutonomousFactory, reconcileAutonomousJob } from '../src/autonomous-factory.mjs';
-import { collectHostedDraftReceipts, prepareAutonomousWorktree, ensureHostDirectories, realDirectory, runHost } from '../src/autonomous-factory-host.mjs';
+import { diagnosticCode, runAutonomousFactory, reconcileAutonomousJob, retireClosedAutonomousJob } from '../src/autonomous-factory.mjs';
+import { collectHostedDraftReceipts, prepareAutonomousWorktree, ensureHostDirectories, realDirectory, runHost, readClosedJobDisposition } from '../src/autonomous-factory-host.mjs';
 import { createGitHubReadAdapter } from '../src/github-read-adapter.mjs';
 import { createGitHubDraftAdmissionAdapter } from '../src/github-draft-admission.mjs';
 import { createAgentFactoryExecutionAdapter } from '../src/github-portfolio-execution.mjs';
@@ -16,15 +16,19 @@ import { emitCandidateArtifactChain } from '../src/artifact-chain-files.mjs';
 const usage = `usage: github-portfolio-autonomous.mjs
   enable --state EXISTING_DIR --repository OWNER/NAME --max-runs 20
   status|revoke --state DIR
+  retire-closed --state DIR --job SHA256 --intent-revision SHA256 [--apply true]
   tick|watch --state DIR --clone TRUSTED_CLONE [--timeout-ms 600000] [--interval-seconds 60]
 Local standing authority, one host slot, one candidate per Draft. No per-run prompt.
 State must be outside the trusted clone and owned by its operator. Enable is one-time;
 revoke prevents future starts. Retain this state directory on restart. No auto-merge.
 Watch reads the latest 20 successful main hosted-draft-intake runs. Exceptions are
-reported; missing/ambiguous receipts are never blindly rerun. Ctrl+C stops watch.`;
+reported; missing/ambiguous receipts are never blindly rerun. Ctrl+C stops watch.
+Retirement defaults to preview. Stop the old host and owned providers before apply;
+it abandons a closed issue/Draft job, never approves work or refunds its budget.`;
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const allowed = {
   enable: ['state', 'repository', 'max-runs'], status: ['state'], revoke: ['state'],
+  'retire-closed': ['state', 'job', 'intent-revision', 'apply'],
   tick: ['state', 'clone', 'timeout-ms'], watch: ['state', 'clone', 'timeout-ms', 'interval-seconds'],
 };
 function parse(argv) {
@@ -76,7 +80,8 @@ export async function runAutonomousTick({ store, collect, execution, githubRead,
  * to write one must not rerun a finished worker, free the host slot, or change the tick's verdict.
  */
 export function emitCandidateSidecar({ result, store, evidenceRoot }) {
-  if (result?.schema !== 'gaia-autonomous-factory-receipt/1') return null;
+  if (result?.schema !== 'gaia-autonomous-factory-receipt/1'
+      || !['CANDIDATE_READY', 'CANDIDATE_REJECTED'].includes(result.status)) return null;
   try {
     const job = store.get(result.jobKey);
     if (!job) return { status: 'FAILED', code: 'UnknownJob' };
@@ -94,7 +99,7 @@ export function recoverCompletedCandidateSidecars({ store, evidenceRoot }) {
   for (const job of store.status().jobs) {
     if (job.state !== 'COMPLETED') continue;
     const outcome = emitCandidateSidecar({ result: job.receipt, store, evidenceRoot });
-    if (outcome?.status !== 'UNCHANGED') outcomes.push({ jobKey: job.jobKey, ...outcome });
+    if (outcome && outcome.status !== 'UNCHANGED') outcomes.push({ jobKey: job.jobKey, ...outcome });
   }
   return outcomes;
 }
@@ -117,6 +122,9 @@ export async function runAutonomousHostTick({ store, evidenceRoot, tick }) {
 export async function runAutonomousCli(argv, { write = value => process.stdout.write(`${JSON.stringify(value)}\n`) } = {}) {
   if (argv.length === 0 || argv[0] === '--help') { process.stdout.write(`${usage}\n`); return 0; }
   const { command, args } = parse(argv);
+  if (command === 'retire-closed' && (!/^[a-f0-9]{64}$/.test(args.job ?? '')
+    || !/^[a-f0-9]{64}$/.test(args['intent-revision'] ?? '')
+    || (args.apply !== undefined && !['true', 'false'].includes(args.apply)))) fail('Usage');
   const root = realDirectory(resolve(args.state));
   const path = join(root, 'authority.sqlite');
   if (command !== 'enable' && !existsSync(path)) fail('PolicyMissing');
@@ -138,6 +146,13 @@ export async function runAutonomousCli(argv, { write = value => process.stdout.w
       return 0;
     }
     if (command === 'status' || command === 'revoke') { write(store[command]()); return 0; }
+    if (command === 'retire-closed') {
+      const result = await retireClosedAutonomousJob({ store, jobKey: args.job,
+        expectedIntentRevision: args['intent-revision'], apply: args.apply === 'true',
+        readDisposition: readClosedJobDisposition });
+      write(result);
+      return result.status === 'REFUSED' ? 1 : 0;
+    }
     const paths = ensureHostDirectories(root);
     const timeoutMs = integer(args['timeout-ms'], 600_000, 1000, 1_800_000);
     const interval = integer(args['interval-seconds'], 60, 10, 3600) * 1000;

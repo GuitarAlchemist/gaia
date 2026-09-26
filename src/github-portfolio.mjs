@@ -728,7 +728,7 @@ export function createPortfolioFactory({
             intent: structuredClone(intent), idempotencyKey,
           }));
           if (receipt.schema !== 'gaia-agent-factory-receipt/1'
-              || !['completed', 'rejected'].includes(receipt.status)
+              || !['completed', 'rejected', 'no-change'].includes(receipt.status)
               || receipt.task !== intent.task) {
             throw new PortfolioFactoryError(
               'ExecutionProtocol', 'the execution receipt does not bind this exact intent',
@@ -736,7 +736,8 @@ export function createPortfolioFactory({
           }
           const authorizedBody = {
             schema: 'gaia-github-portfolio-transition/1',
-            status: receipt.status === 'completed' ? 'CANDIDATE_READY' : 'CANDIDATE_REJECTED',
+            status: receipt.status === 'no-change' ? 'NO_CANDIDATE'
+              : receipt.status === 'completed' ? 'CANDIDATE_READY' : 'CANDIDATE_REJECTED',
             fromRevision: request.portfolio.revision,
             intent,
             authority: {

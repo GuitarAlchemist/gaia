@@ -7,6 +7,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { Worker } from 'node:worker_threads';
 import test from 'node:test';
 import { autonomousJobKey, openAutonomousFactoryStore } from '../src/autonomous-factory-store.mjs';
+import { retireClosedAutonomousJob } from '../src/autonomous-factory.mjs';
+import { emitCandidateSidecar, recoverCompletedCandidateSidecars } from '../scripts/github-portfolio-autonomous.mjs';
 
 const canonical = value => value && typeof value === 'object'
   ? Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
@@ -70,6 +72,114 @@ function setup(t) {
 }
 const configure = store => store.configure({ repository: 'GuitarAlchemist/gaia', maxRuns: 2 });
 const fails = (fn, code) => assert.throws(fn, error => error.code === code);
+
+function closedObservation(job) {
+  return { repository: job.intent.repository, itemId: job.intent.itemId, itemNumber: job.intent.itemNumber,
+    issueState: 'CLOSED', issueStateReason: 'COMPLETED', draftNumber: job.intent.draft.number,
+    draftState: 'CLOSED', draftMerged: false, headRef: job.intent.draft.headRef,
+    headRevision: job.intent.draft.headRevision };
+}
+
+test('explicit retirement consumes no extra budget, survives restart, and fences late completion', t => {
+  const { open } = setup(t); const a = open(); configure(a);
+  const job = request(); a.start(job);
+  const b = open();
+  const input = { jobKey: job.jobKey, expectedIntentRevision: job.intent.intentRevision,
+    observation: closedObservation(job) };
+  const terminal = a.retireClosed(input);
+  assert.equal(terminal.status, 'ABANDONED');
+  assert.equal(b.status().activeJobKey, null);
+  assert.equal(b.status().usedRuns, 1);
+  assert.deepEqual(b.retireClosed(input), terminal, 'duplicate converges to the same immutable receipt');
+  fails(() => b.finish({ jobKey: job.jobKey, receipt: receipt(job) }), 'ReceiptConflict');
+  fails(() => b.start(job), 'JobExists');
+  assert.equal(a.start(request(intent(146))).status, 'AUTHORIZED', 'the next distinct job can acquire the slot');
+  assert.equal(open().status().usedRuns, 2);
+});
+
+test('retirement refuses moved, open, merged, foreign and incomplete observations', t => {
+  const { open } = setup(t); const store = open(); configure(store);
+  const job = request(); store.start(job);
+  const input = { jobKey: job.jobKey, expectedIntentRevision: job.intent.intentRevision,
+    observation: closedObservation(job) };
+  fails(() => store.retireClosed({ ...input, expectedIntentRevision: '9'.repeat(64) }), 'IntentChanged');
+  for (const patch of [ { issueState: 'OPEN' }, { issueStateReason: 'NOT_PLANNED' },
+    { draftState: 'OPEN' }, { draftMerged: true }, { headRevision: 'b'.repeat(40) },
+    { headRef: 'other' }, { repository: 'Other/repo' }, { itemId: 'foreign' },
+    { itemNumber: 42 }, { draftNumber: 42 }, { extra: 'field' } ]) {
+    fails(() => store.retireClosed({ ...input, observation: { ...input.observation, ...patch } }), 'InvalidReceipt');
+  }
+  fails(() => store.retireClosed({ ...input, observation: {} }), 'InvalidReceipt');
+  assert.equal(store.status().activeJobKey, job.jobKey);
+  store.finish({ jobKey: job.jobKey, receipt: receipt(job) });
+  fails(() => store.retireClosed(input), 'ReceiptConflict', 'completion wins over stale retirement');
+  assert.equal(store.get(job.jobKey).receipt.status, 'CANDIDATE_READY');
+});
+
+test('retirement application previews, rereads on apply, and preserves the concurrent terminal winner', async t => {
+  const { open } = setup(t); const store = open(); configure(store);
+  const job = request(); store.start(job);
+  let reads = 0;
+  const args = { store, jobKey: job.jobKey, expectedIntentRevision: job.intent.intentRevision,
+    readDisposition: async () => { reads++; return closedObservation(job); } };
+  const preview = await retireClosedAutonomousJob(args);
+  assert.equal(preview.status, 'RETIREMENT_PREVIEW');
+  assert.equal(store.status().activeJobKey, job.jobKey);
+  const result = await retireClosedAutonomousJob({ ...args, apply: true });
+  assert.deepEqual(result, preview.receipt);
+  assert.equal(reads, 2);
+  assert.deepEqual(await retireClosedAutonomousJob({ ...args, apply: true }), result);
+  assert.equal(reads, 2, 'terminal replay performs no provider read or effect');
+  assert.equal(emitCandidateSidecar({ result, store }), null);
+  assert.deepEqual(recoverCompletedCandidateSidecars({ store }), []);
+  const next = request(intent(146)); store.start(next);
+  const race = await retireClosedAutonomousJob({ store, jobKey: next.jobKey,
+    expectedIntentRevision: next.intent.intentRevision, apply: true, readDisposition: async () => {
+      open().finish({ jobKey: next.jobKey, receipt: receipt(next) });
+      return closedObservation(next);
+    } });
+  assert.equal(race.status, 'REFUSED'); assert.equal(race.code, 'ReceiptConflict');
+  assert.equal(store.get(next.jobKey).receipt.status, 'CANDIDATE_READY');
+});
+
+function noCandidateReceipt(job) {
+  const value = receipt(job);
+  value.status = 'NO_CANDIDATE'; value.factory.status = 'no-change';
+  value.factory.reason = 'NoCandidateChange'; delete value.factory.reviewer;
+  const empty = createHash('sha256').update('').digest('hex');
+  const body = { baseHead: job.intent.draft.headRevision, statusBytes: 0, statusSha256: empty,
+    patchBytes: 0, patchSha256: empty, files: [] };
+  value.factory.changeSet = { ...body, identity: createHash('sha256').update(`${JSON.stringify(body)}\n`).digest('hex') };
+  return value;
+}
+
+test('NO_CANDIDATE admits only measured empty receipts and never weakens candidate review', t => {
+  const { open } = setup(t); const store = open(); configure(store);
+  const job = request(); store.start(job); const valid = noCandidateReceipt(job);
+  const mutations = [
+    value => { value.factory.reason = 'AlreadyImplemented'; },
+    value => { value.factory.base.head = 'b'.repeat(40); },
+    value => { value.factory.changeSet.statusBytes = 1; },
+    value => { value.factory.changeSet.patchBytes = 1; },
+    value => { value.factory.changeSet.patchSha256 = '9'.repeat(64); },
+    value => { value.factory.changeSet.files = receipt(job).factory.changeSet.files; },
+    value => { value.factory.reviewer = receipt(job).factory.reviewer; },
+    value => { value.factory.worker = {}; },
+    value => { value.status = 'CANDIDATE_READY'; value.factory.status = 'completed'; },
+    value => { value.idempotencyKey = 'f'.repeat(64); },
+  ];
+  for (const mutate of mutations) {
+    const bad = structuredClone(valid); mutate(bad);
+    fails(() => store.finish({ jobKey: job.jobKey, receipt: bad }), 'InvalidReceipt');
+    assert.equal(store.status().activeJobKey, job.jobKey);
+  }
+  store.finish({ jobKey: job.jobKey, receipt: valid });
+  assert.equal(store.status().activeJobKey, null);
+  assert.equal(store.status().usedRuns, 1);
+  assert.equal(emitCandidateSidecar({ result: valid, store }), null);
+  assert.deepEqual(recoverCompletedCandidateSidecars({ store }), []);
+  assert.deepEqual(open().get(job.jobKey).receipt, valid);
+});
 
 test('standing policy persists and cannot be reset, including after revocation', t => {
   const { open } = setup(t); const a = open();

@@ -869,7 +869,18 @@ export async function executeAgentFactory({
   assertGitControlState(worktree, control, 'worker');
   const candidate = changeSet(worktree, head);
   if (candidate.files.length === 0) {
-    throw new FactoryAgentError('NoCandidateChange', 'the worker produced no repository change');
+    // A measured empty candidate is terminal, but says nothing about whether the
+    // task is implemented. Do not invent review evidence or retry the worker.
+    const receipt = {
+      schema: FACTORY_AGENT_RECEIPT_SCHEMA,
+      status: 'no-change', reason: 'NoCandidateChange', task: task.trim(),
+      base: { head, isolation: 'caller-supplied-linked-git-worktree', executionBoundary: 'host-user-process' },
+      worker: { ...worker, authority: 'host-user-process', requestedScope: 'linked-worktree-only',
+        observedScope: 'git-candidate-and-worktree-tree' },
+      changeSet: candidate,
+    };
+    if (typeof persistReceipt === 'function') await persistReceipt(receipt);
+    return receipt;
   }
 
   const beforeReviewTree = workspaceTree(worktree);
