@@ -779,3 +779,69 @@ export function projectTestObservations(ledgerInput) {
     observations: Object.freeze(observations),
   });
 }
+
+// ---------------------------------------------------------------------------
+// The attention-priority view: the same rows, ordered by declared urgency, and bounded
+// ---------------------------------------------------------------------------
+
+export const TEST_OBSERVATION_PRIORITY_VIEW_SCHEMA = 'gaia-test-observation-priority-view/1';
+
+/**
+ * Severity in attention order, most urgent first. `UNKNOWN` is last on purpose: an unstated
+ * severity is a severity nobody declared, and ranking it above a declared `INFO` would be this
+ * module inventing an urgency the source never asserted.
+ */
+export const TEST_OBSERVATION_PRIORITY_SEVERITY_ORDER = Object.freeze([
+  'CRITICAL', 'WARNING', 'INFO', 'UNKNOWN',
+]);
+
+/**
+ * Recency of one row, for ordering only. The source's own updated instant is what recency means;
+ * a row with none — an unavailable or deleted current reading carries no source instant — has no
+ * claim to recency and sorts behind every row that proved one.
+ */
+function priorityRecency(row) {
+  return row.sourceUpdatedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(row.sourceUpdatedAt);
+}
+
+/**
+ * The bounded attention-priority view: `projectTestObservations` rows, reordered and cut.
+ *
+ * It adds no row of its own and removes no field from one. Every row is the exact frozen row the
+ * projection built — source link, current revision identity, `UNKNOWN` state and reason, full
+ * revision history — so nothing a reader could see in the projection is hidden by being ranked.
+ * `projectTestObservations` and its identity ordering are untouched for existing callers.
+ *
+ * The order is declared severity first, source recency second, and observation-key identity as the
+ * deterministic tie-break, so two ledgers holding the same evidence rank it identically whatever
+ * order it was admitted in. Severity here is what `severityBasis` already says it is: the source's
+ * own assertion, never a triage Gaia performed. And no claim resolves anything — a source saying
+ * a failure is fixed is a source asserting a sentence, so the row ranks by its declared severity
+ * and stays in the view until the evidence itself changes.
+ *
+ * The limit is the caller's explicit statement of how much attention it has: a positive safe
+ * integer, validated and refused otherwise, never defaulted — an unbounded "priority" view is just
+ * the whole ledger wearing a different name.
+ */
+export function prioritizeTestObservations(ledgerInput, limit) {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    refuse('a priority view requires one explicit positive integer limit');
+  }
+  const projection = projectTestObservations(ledgerInput);
+  const ranked = [...projection.observations].sort((a, b) =>
+    TEST_OBSERVATION_PRIORITY_SEVERITY_ORDER.indexOf(a.severity)
+      - TEST_OBSERVATION_PRIORITY_SEVERITY_ORDER.indexOf(b.severity)
+    || priorityRecency(b) - priorityRecency(a)
+    || ordinal(a.observationKey, b.observationKey));
+  return Object.freeze({
+    schema: TEST_OBSERVATION_PRIORITY_VIEW_SCHEMA,
+    effect: 'NONE',
+    authority: 'NONE',
+    limit,
+    // Named so a reader can tell a short ledger from a cut one without counting.
+    totalObservations: projection.observations.length,
+    // Restated at the view level exactly as on every row: the ranking key is source-asserted.
+    claimBasis: TEST_OBSERVATION_CLAIM_BASIS,
+    observations: Object.freeze(ranked.slice(0, limit)),
+  });
+}
