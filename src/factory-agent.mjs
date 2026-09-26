@@ -225,6 +225,7 @@ export function runBoundedInvocation(invocation, {
   timeoutMs = 10 * 60_000,
   maxOutputBytes = 1_048_576,
   terminationGraceMs = 250,
+  rejectNonZero = true,
 } = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
     let native;
@@ -310,7 +311,7 @@ export function runBoundedInvocation(invocation, {
       };
       if (terminationError) {
         rejectPromise(terminationError);
-      } else if (code !== 0) {
+      } else if (rejectNonZero && code !== 0) {
         rejectPromise(new FactoryAgentError(
           'AgentFailed', `${invocation.command} exited ${code}; output retained only by an explicit evidence policy`,
         ));
@@ -673,7 +674,8 @@ function assertGitControlState(worktree, expected, actor) {
   if (actual.head !== expected.head || actual.indexTree !== expected.indexTree) {
     throw new FactoryAgentError(
       actor === 'worker' ? 'AgentGitMutation'
-        : actor === 'repair' ? 'RepairGitMutation' : 'ReviewerMutation',
+        : actor === 'repair' ? 'RepairGitMutation'
+          : actor === 'verification' ? 'VerificationMutation' : 'ReviewerMutation',
       `${actor} changed Git HEAD or the index`,
     );
   }
@@ -842,6 +844,108 @@ function persistAgentOutput(evidenceDir, result, role, protocolCode = 'AgentProt
   };
 }
 
+export const FACTORY_VERIFICATION_SCHEMA = 'gaia-factory-verification/1';
+const VERIFICATION_ARGS = ['--test', '--test-reporter=spec'];
+const VERIFICATION_TERMINATIONS = new Set(['exit', 'timeout', 'output-limit']);
+
+// Host-owned test run over the candidate (#163). The model never holds a shell;
+// "tests pass" becomes an observed exit code instead of a claim in model prose.
+// The candidate's code runs as the host user with the subscription allow-list
+// environment only, so provider and GitHub credentials are not inherited.
+export async function runNodeTestVerification({ cwd }, {
+  timeoutMs = 30 * 60_000,
+  maxOutputBytes = 8 * 1_048_576,
+  env = process.env,
+} = {}) {
+  const pinPath = join(cwd, '.node-version');
+  const pinned = existsSync(pinPath) ? readFileSync(pinPath, 'utf8').trim().replace(/^v/u, '') : null;
+  if (pinned !== null && process.version !== `v${pinned}`) {
+    throw new FactoryAgentError(
+      'VerificationRuntimeMismatch', `verification requires Node ${pinned}; the host runs ${process.version}`,
+    );
+  }
+  const runtime = { version: process.version, pinned };
+  const command = `node ${VERIFICATION_ARGS.join(' ')}`;
+  const invocation = {
+    command: process.execPath,
+    args: VERIFICATION_ARGS,
+    cwd,
+    env: { ...subscriptionEnvironment(env), NO_COLOR: '1' },
+    shell: false,
+  };
+  try {
+    const result = await runBoundedInvocation(invocation, { timeoutMs, maxOutputBytes, rejectNonZero: false });
+    return { runtime, command, termination: 'exit', exitCode: result.code, output: `${result.stdout}${result.stderr}` };
+  } catch (error) {
+    const termination = error?.code === 'AgentTimeout' ? 'timeout'
+      : error?.code === 'AgentOutputLimit' ? 'output-limit' : null;
+    if (termination === null) throw error;
+    return { runtime, command, termination, exitCode: null, output: `${error.message}\n` };
+  }
+}
+
+function lastCount(output, name) {
+  const matches = [...output.matchAll(new RegExp(`^ℹ ${name} (\\d+)\\r?$`, 'gmu'))];
+  return matches.length === 0 ? null : Number(matches.at(-1)[1]);
+}
+
+function testCounts(output) {
+  const counts = { tests: lastCount(output, 'tests'), pass: lastCount(output, 'pass'), fail: lastCount(output, 'fail') };
+  return Object.values(counts).every(Number.isSafeInteger) ? counts : null;
+}
+
+async function verifyCandidate({
+  runVerification, worktree, head, control, candidate, evidenceDir, role,
+}) {
+  const beforeTree = workspaceTree(worktree);
+  const result = await runVerification({
+    cwd: worktree, baseHead: head, changeSet: structuredClone(candidate),
+  });
+  assertGitControlState(worktree, control, 'verification');
+  if (changeSet(worktree, head).identity !== candidate.identity
+      || workspaceTree(worktree).identity !== beforeTree.identity) {
+    throw new FactoryAgentError('VerificationMutation', 'the verification run changed the candidate worktree');
+  }
+  if (!result || typeof result !== 'object' || typeof result.output !== 'string'
+      || typeof result.command !== 'string' || result.command === ''
+      || !VERIFICATION_TERMINATIONS.has(result.termination)
+      || !(result.exitCode === null || Number.isSafeInteger(result.exitCode))
+      || typeof result.runtime?.version !== 'string' || result.runtime.version === ''
+      || !(result.runtime.pinned === null || typeof result.runtime.pinned === 'string')) {
+    throw new FactoryAgentError('VerificationProtocol', 'verification returned no well-formed result');
+  }
+  const { evidence } = persistAgentOutput(
+    evidenceDir, { provider: 'host', output: result.output }, role, 'VerificationProtocol',
+  );
+  const counts = testCounts(result.output);
+  const record = {
+    schema: FACTORY_VERIFICATION_SCHEMA,
+    authority: 'host-user-process',
+    command: result.command,
+    runtime: { version: result.runtime.version, pinned: result.runtime.pinned },
+    candidateIdentity: candidate.identity,
+    termination: result.termination,
+    exitCode: result.exitCode,
+    counts,
+    passed: result.termination === 'exit' && result.exitCode === 0
+      && counts !== null && counts.tests > 0 && counts.fail === 0,
+    evidence,
+  };
+  return { record, output: result.output };
+}
+
+// What the reviewer and the repair worker see: the observed facts plus a bounded
+// tail of a failing output, as data, never as a verdict they could overrule.
+function verificationBrief({ record, output }) {
+  const { evidence, ...facts } = record;
+  return { ...facts, outputTail: record.passed ? '' : output.slice(-16_384) };
+}
+
+function repairFindings(reviewerOutput, verified) {
+  if (!verified || verified.record.passed) return reviewerOutput;
+  return `${reviewerOutput}\n\nHost verification (${verified.record.command}) did not pass:\n${verificationBrief(verified).outputTail}`;
+}
+
 export async function executeAgentFactory({
   worktree: suppliedWorktree,
   evidenceDir: suppliedEvidenceDir,
@@ -849,6 +953,7 @@ export async function executeAgentFactory({
   runWorker,
   runReviewer,
   runRepair,
+  runVerification,
   persistReceipt,
 }) {
   const worktree = resolve(suppliedWorktree ?? '');
@@ -857,6 +962,9 @@ export async function executeAgentFactory({
   }
   if (typeof runWorker !== 'function' || typeof runReviewer !== 'function') {
     throw new FactoryAgentError('AdapterRequired', 'worker and reviewer adapters are required');
+  }
+  if (runVerification !== undefined && typeof runVerification !== 'function') {
+    throw new FactoryAgentError('AdapterRequired', 'the verification adapter must be a function');
   }
 
   assertLinkedCleanWorktree(worktree);
@@ -883,12 +991,16 @@ export async function executeAgentFactory({
     return receipt;
   }
 
+  const verified = runVerification === undefined ? null : await verifyCandidate({
+    runVerification, worktree, head, control, candidate, evidenceDir, role: 'verification',
+  });
   const beforeReviewTree = workspaceTree(worktree);
   const reviewerResult = await runReviewer({
     cwd: worktree,
     task: task.trim(),
     baseHead: head,
     changeSet: structuredClone(candidate),
+    ...(verified ? { verification: verificationBrief(verified) } : {}),
   });
   if (!['APPROVE', 'REQUEST_CHANGES'].includes(reviewerResult.verdict)) {
     throw new FactoryAgentError('ReviewerProtocol', 'reviewer verdict must be APPROVE or REQUEST_CHANGES');
@@ -909,7 +1021,8 @@ export async function executeAgentFactory({
 
   const receipt = {
     schema: FACTORY_AGENT_RECEIPT_SCHEMA,
-    status: reviewerResult.verdict === 'APPROVE' ? 'completed' : 'rejected',
+    status: reviewerResult.verdict === 'APPROVE' && (!verified || verified.record.passed)
+      ? 'completed' : 'rejected',
     task: task.trim(),
     base: {
       head,
@@ -929,8 +1042,11 @@ export async function executeAgentFactory({
       verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged',
       verdict: reviewerResult.verdict,
     },
+    ...(verified ? { verification: verified.record } : {}),
   };
 
+  // An approval over failing tests is still a rejection. Repair is driven only by
+  // review findings, which carry the failing output when verification ran.
   if (reviewerResult.verdict === 'APPROVE') {
     if (typeof persistReceipt === 'function') await persistReceipt(receipt);
     return receipt;
@@ -946,7 +1062,7 @@ export async function executeAgentFactory({
     task: task.trim(),
     baseHead: head,
     initialCandidate: structuredClone(candidate),
-    findings: reviewerResult.output,
+    findings: repairFindings(reviewerResult.output, verified),
   });
   const repair = persistAgentOutput(evidenceDir, repairResult, 'repair', 'RepairProtocol');
   assertGitControlState(worktree, control, 'repair');
@@ -958,12 +1074,17 @@ export async function executeAgentFactory({
     throw new FactoryAgentError('RepairNoChange', 'the repair did not change the candidate identity');
   }
 
+  const finalVerified = verified === null ? null : await verifyCandidate({
+    runVerification, worktree, head, control, candidate: repairedCandidate, evidenceDir,
+    role: 'verification-final',
+  });
   const beforeFinalReviewTree = workspaceTree(worktree);
   const finalReviewerResult = await runReviewer({
     cwd: worktree,
     task: task.trim(),
     baseHead: head,
     changeSet: structuredClone(repairedCandidate),
+    ...(finalVerified ? { verification: verificationBrief(finalVerified) } : {}),
   });
   if (!['APPROVE', 'REQUEST_CHANGES'].includes(finalReviewerResult.verdict)) {
     throw new FactoryAgentError(
@@ -991,7 +1112,8 @@ export async function executeAgentFactory({
   };
   const finalReceipt = {
     ...receipt,
-    status: finalReviewerResult.verdict === 'APPROVE' ? 'completed' : 'rejected',
+    status: finalReviewerResult.verdict === 'APPROVE' && (!finalVerified || finalVerified.record.passed)
+      ? 'completed' : 'rejected',
     changeSet: repairedCandidate,
     reviewer: finalReview,
     repair: {
@@ -1006,6 +1128,10 @@ export async function executeAgentFactory({
       initial: receipt.reviewer,
       final: finalReview,
     },
+    ...(finalVerified ? {
+      verification: finalVerified.record,
+      verifications: { initial: verified.record, final: finalVerified.record },
+    } : {}),
   };
   if (typeof persistReceipt === 'function') await persistReceipt(finalReceipt);
   return finalReceipt;

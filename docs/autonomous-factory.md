@@ -310,6 +310,47 @@ fails closed. The shared `isAutonomousRepository` predicate now gates policy, ho
 portfolio execution, avoiding narrower local regexes such as the one that rejected valid
 `Owner/.github`. Reversibility is unsafe without an equivalent provider-identity constraint.
 
+### Decision: the host runs the tests, the models only read the result (#163)
+
+Until #163 no step executed a test. The visible worker's tools are `Read,Write,Edit,Glob,Grep`,
+the reviewer is read-only, and the prompt told both that "tests are run separately by the
+supervisor", a step that did not exist. Issue 104's candidate settled `CANDIDATE_READY` with an
+`APPROVE` while one of its own tests and the README gate-count test failed. Giving the worker a
+shell was rejected: it widens provider authority and still leaves "tests passed" as model prose.
+
+**Selected:** `executeAgentFactory` accepts a `runVerification` adapter, and the autonomous
+composition always supplies `runNodeTestVerification`. After the worker, and again after the one
+repair, the host runs `node --test --test-reporter=spec` in the candidate worktree with
+`process.execPath`:
+
+- **Runtime.** A `.node-version` in the worktree must equal the host runtime, or the run refuses
+  with `VerificationRuntimeMismatch`. `watch` and `tick` check the trusted clone's pin before
+  consuming a run.
+- **Bounds.** 30 minutes and 8 MiB of combined output. A timeout or an output overflow kills the
+  process tree and is recorded as a failed run (`termination: timeout | output-limit`), not
+  thrown.
+- **Environment.** The same allow-list as the subscription providers, plus `NO_COLOR`, so GitHub
+  and provider credentials are not inherited. The candidate's code still runs as the host user,
+  with the network available: this is the same trust as the worker that wrote it, not a sandbox.
+- **Postcondition.** Git HEAD, the index, the change set and the worktree tree must be unchanged
+  afterwards, else `VerificationMutation`.
+
+The receipt gains `verification`: schema `gaia-factory-verification/1`, command, runtime version and
+pin, the measured `candidateIdentity`, termination, exit code, the `ℹ tests/pass/fail` counts, and
+the output as content-addressed evidence with role `verification` (`verification-final` after a
+repair, with both runs under `verifications.initial/final`). `passed` means a normal exit 0 with
+at least one test and zero failures; the contract recomputes it rather than trusting it. The
+reviewer receives the facts and, when the run failed, the last 16 KiB of output, as data. The
+repair worker receives that output appended to the review findings.
+
+Status: `completed`, hence `CANDIDATE_READY`, now needs an `APPROVE` **and** a passing run. An
+approval over a failing run is `rejected`; repair is still driven only by a `REQUEST_CHANGES`
+review, so the publication gate's repaired form is unchanged. `terminal()` validates new receipts
+with `requireVerification`, so a composition without the adapter cannot settle a candidate. Stored
+receipts from before #163 carry no verification and remain readable. The same change aligns the
+contract with the factory's `reviewer-initial` evidence role for a repaired receipt, which it
+previously refused.
+
 ## Ownership and recovery
 
 The application owns preview, authority consumption, execution and reconciliation.

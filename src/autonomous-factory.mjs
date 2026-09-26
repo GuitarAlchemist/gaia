@@ -21,7 +21,7 @@ function terminal(job, factory) {
       : factory?.status === 'completed' ? 'CANDIDATE_READY' : 'CANDIDATE_REJECTED',
     jobKey: job.jobKey, intentRevision: job.intent.intentRevision,
     idempotencyKey: job.idempotencyKey, factory };
-  return JSON.parse(validateAutonomousReceipt(receipt, job));
+  return JSON.parse(validateAutonomousReceipt(receipt, job, { requireVerification: true }));
 }
 
 // Reconciliation reads the original operation, even when current readiness has changed.

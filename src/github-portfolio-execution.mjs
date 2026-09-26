@@ -229,11 +229,13 @@ export function createAgentFactoryExecutionAdapter({
   runWorker = runClaudeWorker,
   runReviewer = runCodexReviewer,
   runRepair = runClaudeRepair,
+  runVerification,
 }) {
   const repository = canonicalRepository(expectedRepository, 'expectedRepository');
   const suppliedWorktree = resolve(canonicalText(worktree, 'worktree'));
   if (typeof executeFactory !== 'function' || typeof runWorker !== 'function'
-      || typeof runReviewer !== 'function' || typeof runRepair !== 'function') {
+      || typeof runReviewer !== 'function' || typeof runRepair !== 'function'
+      || (runVerification !== undefined && typeof runVerification !== 'function')) {
     throw new PortfolioExecutionError(
       'InvalidAdapter', 'factory, worker, repair, and reviewer must be functions',
     );
@@ -312,6 +314,7 @@ export function createAgentFactoryExecutionAdapter({
         runWorker,
         runReviewer,
         runRepair,
+        ...(runVerification ? { runVerification } : {}),
         persistReceipt,
       });
       // The authoritative factory can commit through `persistReceipt` before returning. Keep the
