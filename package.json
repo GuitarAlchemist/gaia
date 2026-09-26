@@ -9,9 +9,9 @@
   },
   "gaiaArchitectureVerification": {
     "schema": "gaia-architecture-verification/1",
-    "commit": "9a2f696805740cd75da6ebe29e9a99976f57dc2f",
-    "date": "2026-09-20",
-    "contentRevision": "sha256:f6cf6aecb9326c1c168935b27d6ff8493f0786eb0ad3e1a6b0e586829c27d93b"
+    "commit": "1ccd1dbc8558762c60812a0a62ed8ddab113b110",
+    "date": "2026-09-26",
+    "contentRevision": "sha256:65d67d9e4d389df37e8c9080b00ee4c99816bd175574bb128167d86573ef4eff"
   },
   "scripts": {
     "test": "node --test",
@@ -31,7 +31,7 @@
     "portfolio:survey": "node scripts/github-portfolio.mjs",
     "portfolio:operator": "node scripts/github-portfolio-operator.mjs",
     "portfolio:autonomous": "node scripts/github-portfolio-autonomous.mjs",
-    "test:autonomy": "node --test tests/autonomous-factory.test.mjs tests/autonomous-factory-store.test.mjs tests/autonomous-factory-host.test.mjs tests/autonomous-factory-errors.test.mjs tests/github-portfolio-execution.test.mjs tests/factory-agent.test.mjs tests/factory-headless-claude.test.mjs tests/factory-visible-claude.test.mjs tests/factory-streaming-claude.test.mjs tests/artifact-chain.test.mjs tests/artifact-chain-bounds.test.mjs tests/artifact-chain-cli.test.mjs",
+    "test:autonomy": "node --test tests/autonomous-factory.test.mjs tests/autonomous-factory-store.test.mjs tests/autonomous-factory-host.test.mjs tests/autonomous-factory-no-change.test.mjs tests/autonomous-factory-errors.test.mjs tests/github-portfolio-execution.test.mjs tests/factory-agent.test.mjs tests/factory-headless-claude.test.mjs tests/factory-visible-claude.test.mjs tests/factory-streaming-claude.test.mjs tests/artifact-chain.test.mjs tests/artifact-chain-bounds.test.mjs tests/artifact-chain-cli.test.mjs",
     "pr-review:watch": "node scripts/pr-review-thread-supervisor.mjs",
     "lanes:sensor": "node scripts/local-lane-sensor.mjs",
     "lanes:watch": "node scripts/local-lanes-watch.mjs"

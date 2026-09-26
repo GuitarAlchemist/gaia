@@ -324,7 +324,7 @@ actors receive `JobExists` or `HostBusy` without invoking the provider. The exec
 key binds that job key and fresh intent revision.
 
 Before new selection, a STARTED job is reconciled with its original intent/key. A bound
-completed/rejected factory receipt closes it. Missing, corrupt or mismatched evidence
+completed/rejected factory receipt or a measured `no-change` receipt closes it. Missing, corrupt or mismatched evidence
 returns `RECONCILIATION_REQUIRED`, retaining the slot. Even a crash before invocation
 cannot establish safe absence: there is no automatic lock stealing or blind relaunch.
 Before policy and budget gates or new selection, the host also replays every COMPLETED
@@ -339,6 +339,50 @@ another host and malicious OS-user modification are outside it. Reconcile prior
 manual jobs, especially #141/#145, before activation; an empty registry is not proof
 that no previous worker ran. Rollback is revoke and stop the owned watcher, retaining
 all state and candidate work.
+
+### No-candidate results and explicit retirement
+
+A successful worker invocation with no Git candidate now publishes a bound factory
+receipt with `status: no-change`, reason `NoCandidateChange`, its worker evidence,
+and the measured empty change set. The autonomous result is `NO_CANDIDATE`, not
+`CANDIDATE_READY` or a review rejection. Empty files alone are insufficient: both
+status and patch must have zero bytes and the empty-content digest, with the
+original base and recomputed change-set identity. There is no reviewer or repair
+claim. This does not prove the issue is implemented. The used run is not refunded.
+Candidate-sidecar recovery skips this non-candidate outcome.
+
+Older failures with only worker output remain unresolved; no receipt is synthesized
+from provider prose. For an obsolete job whose issue is completed and whose
+unmerged Draft is closed at the original head/ref, the operator may explicitly retire
+the job. First stop the old watcher and its owned provider processes and preserve
+a database backup plus the original worktree/evidence. This is an operator
+precondition, not a liveness inference made by the command. Closing a Draft does not
+cancel an already authorized process. Do not delete any candidate edits.
+
+```powershell
+node scripts/github-portfolio-autonomous.mjs retire-closed --state C:\Gaia\state --job <job-key> --intent-revision <original-intent-revision>
+# Inspect RETIREMENT_PREVIEW, then explicitly apply the same bounded request:
+node scripts/github-portfolio-autonomous.mjs retire-closed --state C:\Gaia\state --job <job-key> --intent-revision <original-intent-revision> --apply true
+```
+
+Each nonterminal invocation rereads only the exact issue and pull request through
+GitHub GETs. Wrong repository/id/number, open issue, non-completed closure, merged
+PR, moved head/ref or unavailable evidence refuses. Preview makes no terminal
+write. Apply records `gaia-autonomous-retirement/1`, status `ABANDONED`, with the
+original job/intent/execution identities and closed observations. It neither runs
+an agent nor writes GitHub, and is never invoked by watch. No past success,
+review, absence of effects, or reconciliation of a hosted Draft operation is claimed.
+
+The SQLite `BEGIN IMMEDIATE` transaction serializes retirement against completion:
+one terminal wins, same-result repeats replay, conflicting late results refuse.
+The row remains COMPLETED (meaning *job terminal*), its budget remains consumed,
+and the same issue/Draft cannot run again. No candidate sidecar is minted.
+
+These additive terminal contracts require this reader revision or newer on restart;
+old readers fail closed rather than understand them. Do not erase state to roll
+back or re-enable authority. Preserve the original database backup as evidence,
+not as a way to restore spent capacity. Design alternatives and the incident are
+in [the bounded repair intent](../intent/pump-no-candidate/intent.md).
 
 ## Verification and artifact chain
 

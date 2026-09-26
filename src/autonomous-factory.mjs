@@ -17,7 +17,8 @@ const uncertain = jobKey => ({ schema: 'gaia-autonomous-factory-result/1', statu
 
 function terminal(job, factory) {
   const receipt = { schema: 'gaia-autonomous-factory-receipt/1',
-    status: factory?.status === 'completed' ? 'CANDIDATE_READY' : 'CANDIDATE_REJECTED',
+    status: factory?.status === 'no-change' ? 'NO_CANDIDATE'
+      : factory?.status === 'completed' ? 'CANDIDATE_READY' : 'CANDIDATE_REJECTED',
     jobKey: job.jobKey, intentRevision: job.intent.intentRevision,
     idempotencyKey: job.idempotencyKey, factory };
   return JSON.parse(validateAutonomousReceipt(receipt, job));
@@ -36,6 +37,25 @@ export async function reconcileAutonomousJob({ store, execution, jobKey }) {
     store.finish({ jobKey, receipt });
     return store.get(jobKey).receipt;
   } catch { return uncertain(jobKey); }
+}
+
+// A closed issue/Draft pair narrows an explicit operator action; it is NOT proof
+// that the missing execution succeeded or that a provider is no longer running.
+export async function retireClosedAutonomousJob({ store, jobKey, expectedIntentRevision, readDisposition, apply = false }) {
+  const job = store.get(jobKey);
+  if (!job) return refuse('UnknownJob');
+  if (job.intent.intentRevision !== expectedIntentRevision) return refuse('IntentChanged');
+  if (typeof apply !== 'boolean') return refuse('InvalidApply');
+  if (job.state === 'COMPLETED') return job.receipt;
+  try {
+    const observation = await readDisposition(job.intent);
+    const receipt = { schema: 'gaia-autonomous-retirement/1', status: 'ABANDONED',
+      jobKey: job.jobKey, intentRevision: expectedIntentRevision,
+      idempotencyKey: job.idempotencyKey, observation };
+    const bound = JSON.parse(validateAutonomousReceipt(receipt, job));
+    if (!apply) return { status: 'RETIREMENT_PREVIEW', receipt: bound };
+    return store.retireClosed({ jobKey: job.jobKey, expectedIntentRevision, observation });
+  } catch (error) { return refuse(diagnosticCode(error, 'DispositionUnavailable')); }
 }
 
 /** Separate standing-authority composition; the interactive operator is unchanged. */
@@ -71,7 +91,7 @@ export async function runAutonomousFactory({
     if (existing) return reconcileAutonomousJob({ store, execution, jobKey });
     const transition = await factory.advance({ portfolio, grant: { grantId: jobKey } });
     if (!started) return transition;
-    if (!['CANDIDATE_READY', 'CANDIDATE_REJECTED'].includes(transition.status)) return uncertain(jobKey);
+    if (!['CANDIDATE_READY', 'CANDIDATE_REJECTED', 'NO_CANDIDATE'].includes(transition.status)) return uncertain(jobKey);
     const receipt = terminal(store.get(jobKey), transition.execution.receipt);
     store.finish({ jobKey, receipt });
     return store.get(jobKey).receipt;

@@ -15,6 +15,25 @@ export function realDirectory(path) {
   return realpathSync.native(path);
 }
 
+/** Two GETs, no GitHub mutation, retry, process launch, or execution replay. */
+export function readClosedJobDisposition(intent, run = runHost) {
+  if (!isAutonomousRepository(intent.repository)
+      || !Number.isSafeInteger(intent.itemNumber) || intent.itemNumber < 1
+      || !Number.isSafeInteger(intent.draft?.number) || intent.draft.number < 1) fail('InvalidIntent');
+  const issue = JSON.parse(run('gh', ['api', '--method', 'GET',
+    `repos/${intent.repository}/issues/${intent.itemNumber}`]));
+  const draft = JSON.parse(run('gh', ['api', '--method', 'GET',
+    `repos/${intent.repository}/pulls/${intent.draft.number}`]));
+  if (issue.pull_request || issue.repository_url?.toLowerCase() !== `https://api.github.com/repos/${intent.repository}`.toLowerCase()
+      || draft.base?.repo?.full_name?.toLowerCase() !== intent.repository.toLowerCase()
+      || draft.head?.repo?.full_name?.toLowerCase() !== intent.repository.toLowerCase()) fail('DispositionMismatch');
+  return { repository: intent.repository, itemId: issue.node_id, itemNumber: issue.number,
+    issueState: issue.state === 'closed' ? 'CLOSED' : 'OPEN',
+    issueStateReason: issue.state_reason === 'completed' ? 'COMPLETED' : 'UNKNOWN',
+    draftNumber: draft.number, draftState: draft.state === 'closed' ? 'CLOSED' : 'OPEN',
+    draftMerged: draft.merged, headRef: draft.head?.ref, headRevision: draft.head?.sha };
+}
+
 // Artifacts are expectations only. Application admission always reads GitHub again.
 // A bounded discovery window is deliberate; it is not an exhaustive historical queue.
 export function collectHostedDraftReceipts({ repository, cacheDir, run = runHost }) {
