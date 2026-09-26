@@ -3,7 +3,31 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { collectHostedDraftReceipts, prepareAutonomousWorktree } from '../src/autonomous-factory-host.mjs';
+import { collectHostedDraftReceipts, prepareAutonomousWorktree, readClosedJobDisposition } from '../src/autonomous-factory-host.mjs';
+
+test('closed disposition uses only exact scoped GETs and rejects cross-repository substitution', () => {
+  const intent = { repository: 'Example/app', itemNumber: 108, draft: { number: 156 } };
+  const issue = { node_id: 'issue-108', number: 108, state: 'closed', state_reason: 'completed',
+    repository_url: 'https://api.github.com/repos/Example/app' };
+  const draft = { number: 156, state: 'closed', merged: false,
+    base: { repo: { full_name: 'Example/app' } },
+    head: { ref: 'codex/fixture', sha: 'a'.repeat(40), repo: { full_name: 'Example/app' } } };
+  const calls = [];
+  const run = (file, args) => {
+    calls.push([file, args]); return JSON.stringify(args.at(-1).includes('/issues/') ? issue : draft);
+  };
+  const value = readClosedJobDisposition(intent, run);
+  assert.equal(value.headRevision, 'a'.repeat(40));
+  assert.equal(value.itemId, 'issue-108');
+  assert.deepEqual(calls, [
+    ['gh', ['api', '--method', 'GET', 'repos/Example/app/issues/108']],
+    ['gh', ['api', '--method', 'GET', 'repos/Example/app/pulls/156']],
+  ]);
+  draft.head.repo.full_name = 'Foreign/app';
+  assert.throws(() => readClosedJobDisposition(intent, run), /DispositionMismatch/);
+  draft.head.repo.full_name = 'Example/app'; issue.pull_request = {};
+  assert.throws(() => readClosedJobDisposition(intent, run), /DispositionMismatch/);
+});
 
 test('discovery only downloads successful trusted workflow runs into private per-run cache', () => {
   const root = mkdtempSync(join(tmpdir(), 'gaia-auto-discovery-'));

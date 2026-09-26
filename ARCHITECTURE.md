@@ -348,6 +348,19 @@ exclusion guarantee. Revocation prevents future starts, not already authorized e
 See [local autonomous continuation](docs/autonomous-factory.md) for the source-movement
 window, bounded hosted-artifact discovery, activation preconditions and recovery limits.
 
+A measured empty Git candidate terminates as `NO_CANDIDATE`, with worker evidence
+and a zero-byte, digest-validated change set, never approval or a reviewed rejection.
+Historical missing receipts still retain their slot. The explicit local operator
+`retire-closed` command previews by default; apply records a distinct `ABANDONED`
+receipt only for the original completed issue and closed, unmerged Draft at its
+original head/ref. It performs only scoped GitHub reads and a serialized local
+terminal write, never execution or a GitHub mutation. It is not automatic stale-job
+eviction or proof of past execution. The operator must first stop the old host and
+owned providers; no process cancellation is inferred from a closed Draft. Both new
+outcomes preserve spent budget and identity, omit candidate projections, and require
+a compatible reader on subsequent restarts. Conflicting terminal writers cannot
+overwrite the winner. The six coordination verbs and candidate review gates do not change.
+
 Resource ceilings are local safeguards, not billing authority: four supported live lanes,
 bounded outputs, timeouts, one-step drain transitions, and explicit cost/fanout limits where a
 factory request declares them. Gaia has no general quota service and no authority to start paid
