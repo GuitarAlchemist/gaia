@@ -381,3 +381,48 @@ test('R1 provider failures are typed and redact gh diagnostics', async () => {
       && !error.message.includes('secret'),
   );
 });
+
+function manyHeads(count) {
+  const stable = githubBoundary();
+  const heads = Array.from({ length: count }, (_, index) => ({
+    name: index === count - 1 ? 'codex/hosted-draft-pump-r0' : `feature/unrelated-${index}`,
+    revision: index === count - 1 ? 'b'.repeat(40) : index.toString(16).padStart(40, 'd'),
+  }));
+  const counters = { reads: 0, inFlight: 0, maxInFlight: 0, failOnce: null };
+  const github = {
+    ...stable,
+    async listHeadRefs() { return heads.map((head) => ({ ...head })); },
+    async readCommit({ revision }) {
+      counters.reads += 1;
+      counters.inFlight += 1;
+      counters.maxInFlight = Math.max(counters.maxInFlight, counters.inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      counters.inFlight -= 1;
+      if (counters.failOnce === revision) {
+        counters.failOnce = null;
+        throw new Error('transient provider failure');
+      }
+      return revision === 'b'.repeat(40) ? stable.readCommit() : { message: 'chore: unrelated' };
+    },
+  };
+  return { github, counters };
+}
+
+test('head commits are read once per intake run, in bounded parallel, and failures are not cached', async () => {
+  const { createHostedDraftCollector } = await api();
+  const { github, counters } = manyHeads(20);
+  const collector = createHostedDraftCollector({ github });
+
+  const first = await collector.collect(SELECTOR);
+  const second = await collector.collect(SELECTOR);
+  assert.deepEqual(second, first);
+  assert.equal(counters.reads, 20, 'each immutable commit is read once across collections');
+  assert.ok(counters.maxInFlight > 1 && counters.maxInFlight <= 8, `bounded fan-out (${counters.maxInFlight})`);
+
+  const fresh = manyHeads(20);
+  fresh.counters.failOnce = 'b'.repeat(40);
+  const retrying = createHostedDraftCollector({ github: fresh.github });
+  await assert.rejects(retrying.collect(SELECTOR));
+  await retrying.collect(SELECTOR);
+  assert.equal(fresh.counters.reads, 21, 'only the failed read is repeated');
+});

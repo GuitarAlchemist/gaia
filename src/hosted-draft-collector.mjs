@@ -301,18 +301,33 @@ function exactTrailer(message, name, expected) {
   return matches.length === 1;
 }
 
-async function selectHead(github, repository, issueNumber, queueReceiptRevision) {
+// Bounded fan-out over head commits: a serial read per branch made one intake cost
+// minutes per ready issue and outlive the normal-admission window.
+const COMMIT_READ_CONCURRENCY = 8;
+
+async function mapBounded(items, limit, mapper) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function lane() {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await mapper(items[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+  return results;
+}
+
+async function selectHead(github, repository, issueNumber, queueReceiptRevision, readMessage) {
   const rows = await github.listHeadRefs({ repository });
   if (!Array.isArray(rows)) fail('HeadObservationInvalid', 'head refs must be an array');
-  const matching = [];
-  for (const row of rows) {
+  const heads = rows.map((row) => {
     ownDataObject(row, ['name', 'revision'], 'HeadObservationInvalid');
-    const head = { name: text(row.name, 'HeadObservationInvalid'), revision: oid(row.revision, 'HeadObservationInvalid') };
-    const commit = await github.readCommit({ repository, revision: head.revision });
-    ownDataObject(commit, ['message'], 'CommitObservationInvalid');
-    if (exactTrailer(commit.message, 'Gaia-Issue', String(issueNumber))
-        && exactTrailer(commit.message, 'Gaia-Ready-Receipt', queueReceiptRevision)) matching.push(head);
-  }
+    return { name: text(row.name, 'HeadObservationInvalid'), revision: oid(row.revision, 'HeadObservationInvalid') };
+  });
+  const messages = await mapBounded(heads, COMMIT_READ_CONCURRENCY, (head) => readMessage(head.revision));
+  const matching = heads.filter((head, index) => exactTrailer(messages[index], 'Gaia-Issue', String(issueNumber))
+    && exactTrailer(messages[index], 'Gaia-Ready-Receipt', queueReceiptRevision));
   if (matching.some((head) => head.name === repository.defaultBranch)) {
     fail('DefaultBranchSourceRejected', 'the repository default branch cannot be a Draft source');
   }
@@ -342,6 +357,26 @@ export function createHostedDraftCollector({ github }) {
     fail('InvalidCollectorPorts', 'the closed GitHub observation port is required');
   }
 
+  // A Git commit is immutable, so its message is read at most once per collector (one
+  // intake run), whichever issue asks. Only successful reads are kept; a failed read is
+  // retried by the next caller and still fails that collection.
+  const commitMessages = new Map();
+  function commitReader(repository) {
+    return (revision) => {
+      const key = `${repository.nodeId}\0${revision}`;
+      if (!commitMessages.has(key)) {
+        const read = (async () => {
+          const commit = await github.readCommit({ repository, revision });
+          ownDataObject(commit, ['message'], 'CommitObservationInvalid');
+          return commit.message;
+        })();
+        commitMessages.set(key, read);
+        read.catch(() => { if (commitMessages.get(key) === read) commitMessages.delete(key); });
+      }
+      return commitMessages.get(key);
+    };
+  }
+
   return Object.freeze({
     async collect(selectorInput) {
       const selector = requireSelector(selectorInput);
@@ -366,7 +401,7 @@ export function createHostedDraftCollector({ github }) {
         readyLabelActorNodeId: issue.readyEvent.actor.nodeId,
       });
       const head = await selectHead(
-        github, repository, selector.workItem.number, queueReceiptRevision,
+        github, repository, selector.workItem.number, queueReceiptRevision, commitReader(repository),
       );
       const policy = await github.readPolicy({
         repository, baseRevision: repository.defaultBranchRevision,
