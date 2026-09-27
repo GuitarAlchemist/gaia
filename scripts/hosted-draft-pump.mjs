@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import {
   createDraftOperationPorts,
   createGitDataDraftOperationStore,
+  DraftOperationError,
   enqueueDraft,
   listUnsettledDrafts,
   reconcileDraft,
@@ -16,7 +17,7 @@ import {
   createGhDraftOperationProvider,
   createGhManagedRoundApi,
 } from '../src/gh-draft-operation-provider.mjs';
-import { createGhGitDataApi } from '../src/gh-git-data-adapter.mjs';
+import { createGhGitDataApi, GhGitDataError } from '../src/gh-git-data-adapter.mjs';
 import {
   createGitHubManagedRoundAdapter,
   createGitHubManagedRoundEvidencePort,
@@ -27,9 +28,10 @@ import {
 import {
   createGhDraftCollectorApi,
   createHostedDraftCollector,
+  HostedDraftCollectorError,
 } from '../src/hosted-draft-collector.mjs';
 import { createGitHubActionsDraftAdmission } from '../src/github-actions-draft-admission.mjs';
-import { runHostedDraftIntake } from '../src/hosted-draft-pump.mjs';
+import { HostedDraftPumpError, runHostedDraftIntake } from '../src/hosted-draft-pump.mjs';
 import { produceHostedDraftPumpObservation } from '../src/hosted-draft-pump-producer.mjs';
 import { createCanaryDraftAdmission,
   validateCanaryAdmissionPolicy } from '../src/canary-admission-policy.mjs';
@@ -522,6 +524,26 @@ function writeJson(stream, value) {
  * A refusal is named rather than swallowed, and no diagnostic text escapes with it: the receipt is
  * an uploaded artifact, and the existing error paths already redact provider and transport detail.
  */
+// A runtime failure may name its cause, but only from this closed vocabulary of Gaia codes.
+// Anything else, an unlisted code included, stays a bare OperationFailed: no message, stderr,
+// URL, or stack crosses the CLI boundary.
+const RUNTIME_FAILURE_CAUSES = Object.freeze([
+  [GhGitDataError, new Set(['GitHubGitDataUnavailable', 'GitDataProtocolViolation',
+    'LedgerProtectionUnavailable'])],
+  [DraftOperationError, new Set(['LedgerCorrupt', 'LedgerRegistryMissing',
+    'LedgerRegistryMismatch', 'LedgerWorkMissing', 'LedgerProtectionMissing', 'UnknownOperation'])],
+  [HostedDraftCollectorError, new Set(['GitHubObservationUnavailable', 'HeadIdentityAmbiguous',
+    'HeadObservationInvalid', 'CommitObservationInvalid', 'IssueObservationInvalid'])],
+  [HostedDraftPumpError, new Set(['InvalidUnsettledOperation', 'InvalidHostedDraftResult'])],
+]);
+
+function runtimeFailureCause(error) {
+  const known = RUNTIME_FAILURE_CAUSES.some(
+    ([ErrorType, codes]) => error instanceof ErrorType && codes.has(error.code),
+  );
+  return known ? { cause: error.code } : {};
+}
+
 const OBSERVATION_REFUSALS = new Set([
   'InvalidHostedDraftPumpReceipt', 'UnobservableHostedDraftPumpReceipt',
   'InvalidHostedDraftPump', 'IncoherentHostedDraftPump',
@@ -659,8 +681,11 @@ export async function main({
     }
     writeJson(stdout, receipt);
     return 0;
-  } catch {
-    writeJson(stderr, { schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'OperationFailed' });
+  } catch (error) {
+    writeJson(stderr, {
+      schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'OperationFailed',
+      ...runtimeFailureCause(error),
+    });
     return 1;
   }
 }
