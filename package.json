@@ -11,10 +11,12 @@
     "schema": "gaia-architecture-verification/1",
     "commit": "1ccd1dbc8558762c60812a0a62ed8ddab113b110",
     "date": "2026-09-26",
-    "contentRevision": "sha256:64524ba531323f139d86e2bb418125193ac458267206a6926b9d226da5036d92"
+    "contentRevision": "sha256:4391e58b3a7fd00caae3d8c61534eceeead2259364f7d86cbaf1b30f4447c8bc"
   },
   "scripts": {
     "test": "node --test",
+    "issues:audit": "node scripts/issue-consistency.mjs audit --repository GuitarAlchemist/gaia --policy .github/issue-policy.json",
+    "issues:repair": "node scripts/issue-consistency.mjs repair --repository GuitarAlchemist/gaia --policy .github/issue-policy.json",
     "doctor": "node scripts/gaia-interagent.mjs doctor",
     "verify": "node scripts/gaia-interagent.mjs verify",
     "architecture:verify": "node scripts/architecture-drift.mjs",
