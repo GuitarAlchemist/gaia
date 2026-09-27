@@ -301,6 +301,35 @@ function exactTrailer(message, name, expected) {
   return matches.length === 1;
 }
 
+/**
+ * The two trailer lines an evidence commit must carry, each exactly once. The seeder writes these
+ * and `findEvidenceHeads` reads them, so the producer cannot drift from the collector.
+ */
+export function evidenceTrailerLines(issueNumber, queueReceiptRevision) {
+  return [
+    `Gaia-Issue: ${positiveInteger(issueNumber, 'InvalidSelector')}`,
+    `Gaia-Ready-Receipt: ${text(queueReceiptRevision, 'InvalidSelector')}`,
+  ];
+}
+
+/**
+ * Every branch whose tip commit carries this issue's evidence trailers for this exact ready
+ * receipt. The collector requires exactly one; zero and several both refuse.
+ */
+export async function findEvidenceHeads(
+  github, repository, issueNumber, queueReceiptRevision, readMessage = directCommitReader(github, repository),
+) {
+  const rows = await github.listHeadRefs({ repository });
+  if (!Array.isArray(rows)) fail('HeadObservationInvalid', 'head refs must be an array');
+  const heads = rows.map((row) => {
+    ownDataObject(row, ['name', 'revision'], 'HeadObservationInvalid');
+    return { name: text(row.name, 'HeadObservationInvalid'), revision: oid(row.revision, 'HeadObservationInvalid') };
+  });
+  const messages = await mapBounded(heads, COMMIT_READ_CONCURRENCY, (head) => readMessage(head.revision));
+  return heads.filter((head, index) => exactTrailer(messages[index], 'Gaia-Issue', String(issueNumber))
+    && exactTrailer(messages[index], 'Gaia-Ready-Receipt', queueReceiptRevision));
+}
+
 // Bounded fan-out over head commits: a serial read per branch made one intake cost
 // minutes per ready issue and outlive the normal-admission window.
 const COMMIT_READ_CONCURRENCY = 8;
@@ -318,16 +347,16 @@ async function mapBounded(items, limit, mapper) {
   return results;
 }
 
+function directCommitReader(github, repository) {
+  return async (revision) => {
+    const commit = await github.readCommit({ repository, revision });
+    ownDataObject(commit, ['message'], 'CommitObservationInvalid');
+    return commit.message;
+  };
+}
+
 async function selectHead(github, repository, issueNumber, queueReceiptRevision, readMessage) {
-  const rows = await github.listHeadRefs({ repository });
-  if (!Array.isArray(rows)) fail('HeadObservationInvalid', 'head refs must be an array');
-  const heads = rows.map((row) => {
-    ownDataObject(row, ['name', 'revision'], 'HeadObservationInvalid');
-    return { name: text(row.name, 'HeadObservationInvalid'), revision: oid(row.revision, 'HeadObservationInvalid') };
-  });
-  const messages = await mapBounded(heads, COMMIT_READ_CONCURRENCY, (head) => readMessage(head.revision));
-  const matching = heads.filter((head, index) => exactTrailer(messages[index], 'Gaia-Issue', String(issueNumber))
-    && exactTrailer(messages[index], 'Gaia-Ready-Receipt', queueReceiptRevision));
+  const matching = await findEvidenceHeads(github, repository, issueNumber, queueReceiptRevision, readMessage);
   if (matching.some((head) => head.name === repository.defaultBranch)) {
     fail('DefaultBranchSourceRejected', 'the repository default branch cannot be a Draft source');
   }
@@ -350,6 +379,42 @@ async function requireStableHeadReadBack(github, repository, expectedHead) {
   }
 }
 
+/**
+ * The ready receipt that the latest `ready-for-agent` label event establishes, when that event's
+ * actor holds triage or stronger. The collector and the evidence-head seeder both derive
+ * `queueReceiptRevision` here, so a seeded branch always names the receipt the collector expects.
+ */
+export async function observeReadyReceipt(github, selectorInput) {
+  if (github === null || typeof github !== 'object'
+      || ['resolveRepository', 'readIssue', 'readPermission'].some(
+        (method) => typeof github[method] !== 'function',
+      )) {
+    fail('InvalidCollectorPorts', 'the closed GitHub observation port is required');
+  }
+  const selector = requireSelector(selectorInput);
+  const repository = requireRepository(await github.resolveRepository({
+    owner: selector.repository.owner, name: selector.repository.name,
+  }));
+  const issue = requireIssue(await github.readIssue({
+    repository, number: selector.workItem.number,
+  }), selector.workItem.number);
+  const permission = await github.readPermission({
+    repository, login: issue.readyEvent.actor.login,
+  });
+  if (!ALLOWED_PERMISSIONS.has(permission)) {
+    fail('ReadyActorUnauthorized', 'ready-label actor lacks triage permission');
+  }
+
+  const queueReceiptRevision = sha256({
+    schema: 'GaiaQueueReceiptRevisionV0',
+    issueNodeId: issue.nodeId,
+    readyLabelEventNodeId: issue.readyEvent.nodeId,
+    readyLabelEventAt: issue.readyEvent.createdAt,
+    readyLabelActorNodeId: issue.readyEvent.actor.nodeId,
+  });
+  return { selector, repository, issue, queueReceiptRevision };
+}
+
 export function createHostedDraftCollector({ github }) {
   ownDataObject({ github }, ['github'], 'InvalidCollectorPorts');
   if (github === null || typeof github !== 'object'
@@ -362,14 +427,11 @@ export function createHostedDraftCollector({ github }) {
   // retried by the next caller and still fails that collection.
   const commitMessages = new Map();
   function commitReader(repository) {
+    const direct = directCommitReader(github, repository);
     return (revision) => {
       const key = `${repository.nodeId}\0${revision}`;
       if (!commitMessages.has(key)) {
-        const read = (async () => {
-          const commit = await github.readCommit({ repository, revision });
-          ownDataObject(commit, ['message'], 'CommitObservationInvalid');
-          return commit.message;
-        })();
+        const read = direct(revision);
         commitMessages.set(key, read);
         read.catch(() => { if (commitMessages.get(key) === read) commitMessages.delete(key); });
       }
@@ -379,27 +441,9 @@ export function createHostedDraftCollector({ github }) {
 
   return Object.freeze({
     async collect(selectorInput) {
-      const selector = requireSelector(selectorInput);
-      const repository = requireRepository(await github.resolveRepository({
-        owner: selector.repository.owner, name: selector.repository.name,
-      }));
-      const issue = requireIssue(await github.readIssue({
-        repository, number: selector.workItem.number,
-      }), selector.workItem.number);
-      const permission = await github.readPermission({
-        repository, login: issue.readyEvent.actor.login,
-      });
-      if (!ALLOWED_PERMISSIONS.has(permission)) {
-        fail('ReadyActorUnauthorized', 'ready-label actor lacks triage permission');
-      }
-
-      const queueReceiptRevision = sha256({
-        schema: 'GaiaQueueReceiptRevisionV0',
-        issueNodeId: issue.nodeId,
-        readyLabelEventNodeId: issue.readyEvent.nodeId,
-        readyLabelEventAt: issue.readyEvent.createdAt,
-        readyLabelActorNodeId: issue.readyEvent.actor.nodeId,
-      });
+      const {
+        selector, repository, issue, queueReceiptRevision,
+      } = await observeReadyReceipt(github, selectorInput);
       const head = await selectHead(
         github, repository, selector.workItem.number, queueReceiptRevision, commitReader(repository),
       );
