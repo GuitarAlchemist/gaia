@@ -535,6 +535,11 @@ export function planRepairs(report) {
 
 export const ISSUE_REPAIR_SCHEMA = 'gaia-issue-repair/1';
 
+// The status labels the pump branches on, fixed from the code at load. `ready-for-agent` is the
+// operator's act of authority, so a repair may remove these from a closed issue but never adds
+// one, whatever an editable policy file maps a title type to.
+const MACHINE_STATUS_LABELS = Object.freeze(Object.keys(DEFAULT_POLICY.machineStatusLabels));
+
 const sameSet = (a, b) => a.length === b.length && a.every((value) => b.includes(value));
 
 /**
@@ -559,6 +564,13 @@ export async function executeRepairs({
   if (!Array.isArray(repairs)) throw new TypeError('repairs must be an array');
   if (typeof readIssue !== 'function') throw new TypeError('readIssue must be a function');
   if (apply && typeof editIssue !== 'function') throw new TypeError('editIssue must be a function');
+  const escalating = repairs.filter((repair) => (repair.addLabels ?? [])
+    .some((label) => MACHINE_STATUS_LABELS.includes(label)));
+  if (escalating.length > 0) {
+    // Refused before any read or write, so a bad plan touches no issue at all.
+    throw new TypeError('a repair never adds a machine status label: '
+      + escalating.map((repair) => `#${repair.number}`).join(', '));
+  }
 
   const startedAt = clock();
   const entries = [];

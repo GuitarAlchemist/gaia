@@ -246,6 +246,24 @@ test('a repair re-reads the issue before writing and reads the mutation back', a
   assert.deepEqual(result.entries[0].after.labels, []);
 });
 
+test('a repair never adds a machine status label, even when the policy maps one', async () => {
+  const report = audit([issue({ number: 7, title: 'feat: x', labels: [] })], {
+    policy: { typeLabels: { feat: 'ready-for-agent' } },
+  });
+  const repairs = planRepairs(report);
+  assert.ok(repairs.some((repair) => repair.addLabels.includes('ready-for-agent')),
+    'the misconfigured policy does propose the authority label');
+  for (const apply of [false, true]) {
+    const host = stubHost([live([])]);
+    await assert.rejects(
+      executeRepairs({ repairs, repository: REPO, apply, ...host }),
+      /never adds a machine status label: #7/u,
+    );
+    assert.equal(host.reads.length, 0, 'refused before any read');
+    assert.equal(host.writes.length, 0, 'refused before any write');
+  }
+});
+
 test('an issue that changed state since the audit is skipped, not written', async () => {
   const host = stubHost([live(['ready-for-agent'], { state: 'OPEN' })]);
   const result = await executeRepairs({

@@ -170,6 +170,14 @@ another issue's parent, no completion criteria, or an existing Draft or seeded b
 port that could label, seed or dispatch: applying `ready-for-agent` stays the operator's act of
 authority.
 
+Issue hygiene is audited by an operator-run rule engine (`scripts/issue-consistency.mjs`) that
+reads the same pure relationship parser as the pump, so it cannot drift from the contract it lints;
+conventions are data in `.github/issue-policy.json`. `repair` is a dry run unless `--apply`: it
+re-reads each issue before writing, reads every mutation back, and never replays an ambiguous write.
+Body edits only append machine-readable trailers for blocking relationships stated in prose; a
+`Parent:` link is never promoted to a dependency. A repair may remove a status label from a closed
+issue but never adds a label the pump branches on, whatever the policy maps.
+
 The hosted CLI validates the complete managed OPEN receipt and effect claim through the
 domain validators before constructing its runtime. Invalid configuration creates neither
 an admission record nor a provider effect; the CLI returns a closed argument error. This
