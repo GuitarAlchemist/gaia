@@ -814,6 +814,7 @@ test('immutable object cache evicts the oldest OID at its bound', async () => {
   const calls = [];
   const api = createGhGitDataApi({
     repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+    immutableObjectCacheLimit: 256,
     run: async args => { calls.push(args[1]); return readFixtureRun({ head })(args); },
   });
   await api.read('refs/heads/gaia-ledger/registry-v0');
@@ -826,4 +827,21 @@ test('immutable object cache evicts the oldest OID at its bound', async () => {
   head = '1'.repeat(40);
   await api.read('refs/heads/gaia-ledger/registry-v0');
   assert.equal(calls.filter(path => path.endsWith(firstCommitPath)).length, before + 1);
+});
+
+test('the default immutable cache holds a growing ledger working set without re-fetching', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  let head = '1'.repeat(40);
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+    run: async args => { calls.push(args[1]); return readFixtureRun({ head })(args); },
+  });
+  // More distinct records than the former 256-entry bound could hold, as a live ledger has.
+  const heads = Array.from({ length: 200 }, (_, i) => (i + 1).toString(16).padStart(40, '0'));
+  for (const oid of heads) { head = oid; await api.read('refs/heads/gaia-ledger/registry-v0'); }
+  const objectGets = () => calls.filter(path => /\/git\/(commits|trees|blobs)\//u.test(path)).length;
+  const before = objectGets();
+  for (const oid of heads) { head = oid; await api.read('refs/heads/gaia-ledger/registry-v0'); }
+  assert.equal(objectGets(), before, 'a second walk of the same objects costs no object GET');
 });

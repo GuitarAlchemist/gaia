@@ -208,3 +208,34 @@ test('unsettled Git Data projection fails closed on a corrupt durable chain', as
     (error) => error?.code === 'LedgerCorrupt',
   );
 });
+
+test('Git Data unsettled listing inspects work keys in bounded parallel and keeps their order', async () => {
+  const git = fakeGitData();
+  const writer = createGitDataDraftOperationStore({ gitData: git.port, config: git.config });
+  for (let number = 60; number < 72; number += 1) {
+    await enqueueDraft(selector(number), 'NONE', operationPorts(writer));
+  }
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const observed = Object.freeze({
+    ...git.port,
+    async read(ref) {
+      if (!ref.startsWith(WORK_REF_PREFIX)) return git.port.read(ref);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      inFlight -= 1;
+      return git.port.read(ref);
+    },
+  });
+  const reader = createGitDataDraftOperationStore({ gitData: observed, config: git.config });
+  const writesBefore = git.writes;
+
+  const projected = await listUnsettledDrafts(inertListingPorts(reader));
+
+  assert.equal(git.writes, writesBefore);
+  assert.equal(projected.length, 12);
+  assert.deepEqual(projected.map(({ workKey }) => workKey),
+    [...projected.map(({ workKey }) => workKey)].sort());
+  assert.ok(maxInFlight > 1 && maxInFlight <= 8, `bounded fan-out (${maxInFlight})`);
+});
