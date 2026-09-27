@@ -5,7 +5,7 @@
 // away from the contract it is linting. Every other rule is policy, and policy
 // is data — see `DEFAULT_POLICY` and `.github/issue-policy.json`.
 
-import { declaredRelationships } from './github-read-adapter.mjs';
+import { declaredRelationships } from './issue-relationships.mjs';
 
 export const ISSUE_CONSISTENCY_SCHEMA = 'gaia-issue-consistency/1';
 

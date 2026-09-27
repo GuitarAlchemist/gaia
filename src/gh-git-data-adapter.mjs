@@ -19,6 +19,10 @@ function fail(code) {
   throw new GhGitDataError(code);
 }
 
+function delay(milliseconds) {
+  return new Promise((resolve) => { setTimeout(resolve, milliseconds); });
+}
+
 function canonical(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -165,19 +169,33 @@ function receiptTransportMetadata(body, value, registryRecord, code = 'InvalidTr
   return { workRootOid: oid(value.workRootOid, code) };
 }
 
-export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run = runGh }) {
+export function createGhGitDataApi({
+  repository, pumpActor: pumpActorInput, run = runGh, immutableObjectCacheLimit = 4096,
+  immutableReadAttempts = 3, immutableReadBackoffMs = 1000, sleep = delay,
+}) {
   ownData(repository, 'InvalidRepository');
   const canonicalRepository = Object.freeze({
     owner: segment(repository.owner), name: segment(repository.name),
   });
   const pumpActor = configuredPumpActor(pumpActorInput);
   if (typeof run !== 'function') fail('InvalidGitDataAdapter');
+  if (!Number.isSafeInteger(immutableObjectCacheLimit) || immutableObjectCacheLimit <= 0) {
+    fail('InvalidGitDataAdapter');
+  }
+  if (!Number.isSafeInteger(immutableReadAttempts) || immutableReadAttempts < 1
+      || immutableReadAttempts > 5 || !Number.isSafeInteger(immutableReadBackoffMs)
+      || immutableReadBackoffMs < 0 || typeof sleep !== 'function') {
+    fail('InvalidGitDataAdapter');
+  }
   const repo = repositoryPath(canonicalRepository);
   // Git objects are immutable by OID. Refs, rulesets, and writes deliberately remain uncached.
   // Resident promises share concurrent reads. At capacity, eviction can cause a duplicate GET.
+  // The bound must exceed one run's distinct ledger objects: every listing re-walks the registry
+  // chain once per work key, and a bound below the working set (it was 256 for about 370 objects)
+  // evicts the registry before its next walk and multiplies the GETs past the admission window.
   // Rejected or parser-invalid reads are evicted by readRef.
   const immutableObjectCache = new Map();
-  const IMMUTABLE_OBJECT_CACHE_LIMIT = 256;
+  const IMMUTABLE_OBJECT_CACHE_LIMIT = immutableObjectCacheLimit;
   const immutableObjectPath = /^git\/(?:commits|trees|blobs)\/[a-f0-9]{40}$/u;
   const call = async (method, path, input) => {
     const args = ['api', `repos/${repo}/${path}`, '--method', method];
@@ -189,11 +207,26 @@ export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run 
     }
   };
 
+  // A GET by OID is content-addressed: repeating it cannot observe a different object, so a
+  // transient transport failure is retried a bounded number of times rather than failing a whole
+  // ledger listing. Ref reads, rulesets, and every write stay single-shot; a write is never
+  // repeated blind.
+  const readImmutable = async (path) => {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await call('GET', path);
+      } catch (error) {
+        if (attempt >= immutableReadAttempts) throw error;
+        await sleep(immutableReadBackoffMs * attempt);
+      }
+    }
+  };
+
   const immutableObject = async (path) => {
     if (!immutableObjectPath.test(path)) fail('GitDataProtocolViolation');
     const existing = immutableObjectCache.get(path);
     if (existing !== undefined) return structuredClone(await existing);
-    const pending = call('GET', path).then((value) => structuredClone(value));
+    const pending = readImmutable(path).then((value) => structuredClone(value));
     if (immutableObjectCache.size >= IMMUTABLE_OBJECT_CACHE_LIMIT) {
       immutableObjectCache.delete(immutableObjectCache.keys().next().value);
     }

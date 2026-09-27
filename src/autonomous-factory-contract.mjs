@@ -107,12 +107,35 @@ function validateRepair(value, terminalIdentity) {
     || value.initialCandidateIdentity === value.repairedCandidateIdentity
     || value.repairedCandidateIdentity !== terminalIdentity) fail('InvalidReceipt');
 }
-function validateChangeSet(value, head) {
+// The host-owned test run (#163). `passed` is recomputed from the observed facts
+// rather than trusted, and each record binds the exact candidate it measured.
+function validateVerification(value, evidenceRole, candidateIdentity) {
+  exact(value, ['authority', 'candidateIdentity', 'command', 'counts', 'evidence', 'exitCode',
+    'passed', 'runtime', 'schema', 'termination'], 'InvalidReceipt');
+  validateEvidence(value.evidence, [evidenceRole]);
+  exact(value.runtime, ['pinned', 'version'], 'InvalidReceipt');
+  if (value.counts !== null) exact(value.counts, ['fail', 'pass', 'tests'], 'InvalidReceipt');
+  const counted = value.counts !== null && nonnegative(value.counts.tests)
+    && nonnegative(value.counts.pass) && nonnegative(value.counts.fail);
+  if (value.schema !== 'gaia-factory-verification/1' || value.authority !== 'host-user-process'
+    || !text(value.command, 256) || !text(value.runtime.version, 64)
+    || !(value.runtime.pinned === null || text(value.runtime.pinned, 64))
+    || value.candidateIdentity !== candidateIdentity
+    || !['exit', 'timeout', 'output-limit'].includes(value.termination)
+    || !(value.exitCode === null || Number.isSafeInteger(value.exitCode))
+    || (value.counts !== null && !counted)
+    || value.passed !== (value.termination === 'exit' && value.exitCode === 0 && counted
+      && value.counts.tests > 0 && value.counts.fail === 0)) fail('InvalidReceipt');
+}
+function validateChangeSet(value, head, noChange = false) {
   exact(value, ['baseHead', 'files', 'identity', 'patchBytes', 'patchSha256',
     'statusBytes', 'statusSha256'], 'InvalidReceipt');
   if (value.baseHead !== head || !nonnegative(value.statusBytes) || !digest(value.statusSha256)
     || !nonnegative(value.patchBytes) || !digest(value.patchSha256) || !digest(value.identity)
-    || !Array.isArray(value.files) || value.files.length === 0 || value.files.length > 10000) fail('InvalidReceipt');
+    || !Array.isArray(value.files) || (!noChange && value.files.length === 0)
+    || value.files.length > 10000) fail('InvalidReceipt');
+  if (noChange && (value.files.length !== 0 || value.statusBytes !== 0 || value.patchBytes !== 0
+    || value.statusSha256 !== sha256('') || value.patchSha256 !== sha256(''))) fail('InvalidReceipt');
   const files = value.files.map(file => {
     exact(file, ['bytes', 'path', 'sha256', 'state'], 'InvalidReceipt');
     if (!text(file.path, 4096) || file.path.includes('\\') || file.path.startsWith('/')
@@ -130,43 +153,81 @@ function validateChangeSet(value, head) {
     patchSha256: value.patchSha256, files };
   if (sha256(`${JSON.stringify(body)}\n`) !== value.identity) fail('InvalidReceipt');
 }
-function validateReceipt(value, job) {
+function validateReceipt(value, job, { requireVerification = false } = {}) {
   const serialized = encode(value, 'InvalidReceipt');
   const receipt = JSON.parse(serialized);
+  if (receipt?.schema === 'gaia-autonomous-retirement/1') {
+    exact(receipt, ['schema', 'status', 'jobKey', 'intentRevision', 'idempotencyKey', 'observation'], 'InvalidReceipt');
+    if (receipt.status !== 'ABANDONED' || receipt.jobKey !== job.jobKey
+      || receipt.intentRevision !== job.intent.intentRevision || receipt.idempotencyKey !== job.idempotencyKey) fail('InvalidReceipt');
+    const observed = receipt.observation;
+    exact(observed, ['repository', 'itemId', 'itemNumber', 'issueState', 'issueStateReason',
+      'draftNumber', 'draftState', 'draftMerged', 'headRef', 'headRevision'], 'InvalidReceipt');
+    if (observed.repository !== job.intent.repository || observed.itemId !== job.intent.itemId
+      || observed.itemNumber !== job.intent.itemNumber || observed.issueState !== 'CLOSED'
+      || observed.issueStateReason !== 'COMPLETED' || observed.draftNumber !== job.intent.draft.number
+      || observed.draftState !== 'CLOSED' || observed.draftMerged !== false
+      || observed.headRef !== job.intent.draft.headRef || observed.headRevision !== job.intent.draft.headRevision) fail('InvalidReceipt');
+    return serialized;
+  }
   exact(receipt, ['schema', 'status', 'jobKey', 'intentRevision', 'idempotencyKey', 'factory'], 'InvalidReceipt');
   const factory = receipt.factory;
   if (receipt.schema !== 'gaia-autonomous-factory-receipt/1'
-    || !['CANDIDATE_READY', 'CANDIDATE_REJECTED'].includes(receipt.status)
+    || !['CANDIDATE_READY', 'CANDIDATE_REJECTED', 'NO_CANDIDATE'].includes(receipt.status)
     || receipt.jobKey !== job.jobKey || receipt.intentRevision !== job.intent.intentRevision
     || receipt.idempotencyKey !== job.idempotencyKey || !factory || typeof factory !== 'object'
     || Array.isArray(factory) || factory.schema !== 'gaia-agent-factory-receipt/1'
-    || factory.status !== (receipt.status === 'CANDIDATE_READY' ? 'completed' : 'rejected')
+    || factory.status !== (receipt.status === 'NO_CANDIDATE' ? 'no-change'
+      : receipt.status === 'CANDIDATE_READY' ? 'completed' : 'rejected')
     || factory.task !== job.intent.task) fail('InvalidReceipt');
   const repaired = Object.hasOwn(factory, 'repair') || Object.hasOwn(factory, 'reviews');
-  exact(factory, ['schema', 'status', 'task', 'base', 'worker', 'changeSet', 'reviewer',
-    ...(repaired ? ['repair', 'reviews'] : [])], 'InvalidReceipt');
+  const noChange = receipt.status === 'NO_CANDIDATE';
+  // Receipts stored before #163 carry no verification and stay readable; a new
+  // terminal receipt is bound with requireVerification.
+  const verified = Object.hasOwn(factory, 'verification') || Object.hasOwn(factory, 'verifications');
+  if (requireVerification && !noChange && !verified) fail('VerificationRequired');
+  exact(factory, ['schema', 'status', 'task', 'base', 'worker', 'changeSet',
+    ...(noChange ? ['reason'] : ['reviewer']),
+    ...(repaired ? ['repair', 'reviews'] : []),
+    ...(verified ? ['verification', ...(repaired ? ['verifications'] : [])] : [])], 'InvalidReceipt');
   exact(factory.base, ['executionBoundary', 'head', 'isolation'], 'InvalidReceipt');
   if (factory.base.head !== job.intent.draft.headRevision
     || factory.base.isolation !== 'caller-supplied-linked-git-worktree'
     || factory.base.executionBoundary !== 'host-user-process') fail('InvalidReceipt');
   validateWorker(factory.worker);
-  validateChangeSet(factory.changeSet, factory.base.head);
+  validateChangeSet(factory.changeSet, factory.base.head, noChange);
+  if (noChange) {
+    if (repaired || verified || factory.reason !== 'NoCandidateChange') fail('InvalidReceipt');
+    return serialized;
+  }
   if (!repaired) {
     validateReviewer(factory.reviewer, 'reviewer');
-    if (factory.status !== 'completed' || factory.reviewer.verdict !== 'APPROVE') {
+    if (verified) validateVerification(factory.verification, 'verification', factory.changeSet.identity);
+    // Unrepaired rejection exists only as an approval over a failing test run.
+    if (factory.reviewer.verdict !== 'APPROVE'
+      || factory.status !== (!verified || factory.verification.passed ? 'completed' : 'rejected')) {
       fail('InvalidReceipt');
     }
     return serialized;
   }
   exact(factory.reviews, ['final', 'initial'], 'InvalidReceipt');
   validateRepair(factory.repair, factory.changeSet.identity);
-  validateReviewer(factory.reviews.initial, 'reviewer');
+  // The factory names a REQUEST_CHANGES initial review `reviewer-initial`, as the
+  // publication gate already requires.
+  validateReviewer(factory.reviews.initial, 'reviewer-initial');
   validateReviewer(factory.reviews.final, 'reviewer-final');
   validateReviewer(factory.reviewer, 'reviewer-final');
+  if (verified) {
+    exact(factory.verifications, ['final', 'initial'], 'InvalidReceipt');
+    validateVerification(factory.verifications.initial, 'verification', factory.repair.initialCandidateIdentity);
+    validateVerification(factory.verifications.final, 'verification-final', factory.changeSet.identity);
+    if (encode(factory.verification, 'InvalidReceipt')
+      !== encode(factory.verifications.final, 'InvalidReceipt')) fail('InvalidReceipt');
+  }
+  const ready = factory.reviews.final.verdict === 'APPROVE' && (!verified || factory.verification.passed);
   if (factory.reviews.initial.verdict !== 'REQUEST_CHANGES'
     || encode(factory.reviewer, 'InvalidReceipt') !== encode(factory.reviews.final, 'InvalidReceipt')
-    || factory.reviews.final.verdict
-      !== (factory.status === 'completed' ? 'APPROVE' : 'REQUEST_CHANGES')) fail('InvalidReceipt');
+    || factory.status !== (ready ? 'completed' : 'rejected')) fail('InvalidReceipt');
   return serialized;
 }
 

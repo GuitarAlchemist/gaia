@@ -172,6 +172,7 @@ export function openAutonomousFactoryStore({ path: inputPath }) {
     },
     finish({ jobKey, receipt }) {
       if (!digest(jobKey)) fail('InvalidJob');
+      if (receipt?.schema === 'gaia-autonomous-retirement/1') fail('OperatorActionRequired');
       return transaction(() => {
         const job = readState().jobs.find(item => matchesJobKey(item, jobKey));
         if (!job) fail('JobMissing');
@@ -180,6 +181,24 @@ export function openAutonomousFactoryStore({ path: inputPath }) {
         if (job.state === 'STARTED') db.prepare("UPDATE autonomous_jobs SET state='COMPLETED', receipt_json=? WHERE job_key=?")
           .run(serialized, job.jobKey);
         return { ...job, state: 'COMPLETED', receipt: JSON.parse(serialized) };
+      });
+    },
+    // Explicit operator compensation, never called by normal watch/reconciliation.
+    // It preserves consumed identity/budget and fences late conflicting completion.
+    retireClosed({ jobKey, expectedIntentRevision, observation }) {
+      if (!digest(jobKey) || !digest(expectedIntentRevision)) fail('InvalidJob');
+      return transaction(() => {
+        const job = readState().jobs.find(item => matchesJobKey(item, jobKey));
+        if (!job) fail('JobMissing');
+        if (job.intent.intentRevision !== expectedIntentRevision) fail('IntentChanged');
+        const receipt = { schema: 'gaia-autonomous-retirement/1', status: 'ABANDONED',
+          jobKey: job.jobKey, intentRevision: expectedIntentRevision,
+          idempotencyKey: job.idempotencyKey, observation };
+        const serialized = validateReceipt(receipt, job);
+        if (job.state === 'COMPLETED' && encode(job.receipt, 'StoreCorrupt') !== serialized) fail('ReceiptConflict');
+        if (job.state === 'STARTED') db.prepare("UPDATE autonomous_jobs SET state='COMPLETED', receipt_json=? WHERE job_key=?")
+          .run(serialized, job.jobKey);
+        return JSON.parse(serialized);
       });
     },
     close() { if (!closed) { db.close(); closed = true; } },

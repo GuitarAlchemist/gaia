@@ -155,6 +155,21 @@ publishes the sealed observation, and its unsettled count is read again after th
 work a concurrent lane committed meanwhile is counted. That observation is a read model with no
 authority and cannot replace the durable Draft receipt chain.
 
+The evidence head that intake requires is produced by an operator-run seeder
+(`scripts/evidence-head.mjs`): after the operator applies `ready-for-agent`, it derives the ready
+receipt with the collector's own function, reuses one shared trailer-matching reader, and creates one
+branch whose single commit reuses the default branch tree. It is dry-run by default, never applies
+the label or admits work, and a failed read-back after a write is reported `AMBIGUOUS`, never as
+nothing written.
+
+Which issues to label next is proposed by an operator-run, read-only ranker
+(`scripts/pump-candidates.mjs`). It shares one pure declared-relationship parser
+(`src/issue-relationships.mjs`) with the read adapter, and refuses, with an exact reason, any
+issue carrying an excluded or `blocker:` label, a dependency or duplicate claim, an epic named as
+another issue's parent, no completion criteria, or an existing Draft or seeded branch. It has no
+port that could label, seed or dispatch: applying `ready-for-agent` stays the operator's act of
+authority.
+
 The hosted CLI validates the complete managed OPEN receipt and effect claim through the
 domain validators before constructing its runtime. Invalid configuration creates neither
 an admission record nor a provider effect; the CLI returns a closed argument error. This
@@ -194,6 +209,11 @@ policy replay and execution. Autonomous job identity folds repository spelling t
 independently enforces case-insensitive repository uniqueness, while captured intent, policy, receipt and
 legacy-key spelling remains immutable evidence. Repaired terminal receipts must bind repair evidence and
 both reviews to the terminal change-set identity; incomplete or contradictory lineage retains `STARTED`.
+Before a candidate may settle ready, the host itself runs `node --test` with the pinned runtime in the
+candidate worktree, bounded in time and output and without provider or GitHub credentials, and binds the
+observed exit code, counts and output evidence to that change-set identity; `CANDIDATE_READY` requires an
+approving review and a passing run, and a new terminal receipt without a run is refused. The run executes
+candidate code as the host user with network access: the same trust as the worker that wrote it.
 Results remain untrusted provider evidence; factory candidate validation and human-mediated authority are
 unchanged. This is not an OS sandbox guarantee.
 Real operator authorization and an operation-linked canary remain unproven; controlled
@@ -347,6 +367,19 @@ cross-host fencing or an OS sandbox. Manual runs and separate registries are out
 exclusion guarantee. Revocation prevents future starts, not already authorized execution.
 See [local autonomous continuation](docs/autonomous-factory.md) for the source-movement
 window, bounded hosted-artifact discovery, activation preconditions and recovery limits.
+
+A measured empty Git candidate terminates as `NO_CANDIDATE`, with worker evidence
+and a zero-byte, digest-validated change set, never approval or a reviewed rejection.
+Historical missing receipts still retain their slot. The explicit local operator
+`retire-closed` command previews by default; apply records a distinct `ABANDONED`
+receipt only for the original completed issue and closed, unmerged Draft at its
+original head/ref. It performs only scoped GitHub reads and a serialized local
+terminal write, never execution or a GitHub mutation. It is not automatic stale-job
+eviction or proof of past execution. The operator must first stop the old host and
+owned providers; no process cancellation is inferred from a closed Draft. Both new
+outcomes preserve spent budget and identity, omit candidate projections, and require
+a compatible reader on subsequent restarts. Conflicting terminal writers cannot
+overwrite the winner. The six coordination verbs and candidate review gates do not change.
 
 Resource ceilings are local safeguards, not billing authority: four supported live lanes,
 bounded outputs, timeouts, one-step drain transitions, and explicit cost/fanout limits where a
