@@ -735,6 +735,8 @@ test('object-cache failures are retryable and cache values are isolated', async 
   const fixture = readFixtureRun();
   const api = createGhGitDataApi({
     repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+    // One attempt isolates eviction: a failed read must never be served from the cache.
+    immutableReadAttempts: 1,
     run: async args => {
       calls.push(args[1]);
       if (args[1].includes('/git/blobs/') && failBlob) { failBlob = false; throw new Error('transient'); }
@@ -747,6 +749,103 @@ test('object-cache failures are retryable and cache values are isolated', async 
   const second = await api.read('refs/heads/gaia-ledger/registry-v0');
   assert.equal(second.records[0].body.kind, 'REGISTRY_ROOT');
   assert.equal(calls.filter(path => path.includes('/git/blobs/')).length, 2);
+});
+
+test('a transient failure on an immutable object read is retried with backoff', async () => {
+  const { createGhGitDataApi } = await import(MODULE_URL);
+  const fixture = readFixtureRun();
+  const calls = [];
+  const waits = [];
+  let failures = 2;
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+    sleep: async (ms) => { waits.push(ms); },
+    run: async args => {
+      calls.push(args[1]);
+      if (args[1].includes('/git/trees/') && failures > 0) {
+        failures -= 1;
+        throw new Error('dial tcp: connection attempt failed');
+      }
+      return fixture(args);
+    },
+  });
+  const read = await api.read('refs/heads/gaia-ledger/registry-v0');
+  assert.equal(read.records[0].body.kind, 'REGISTRY_ROOT');
+  assert.equal(calls.filter(path => path.includes('/git/trees/')).length, 3,
+    'the same content-addressed tree is fetched until it arrives, within the bound');
+  assert.deepEqual(waits, [1000, 2000], 'the backoff grows with each attempt');
+});
+
+test('a persistent immutable read failure still fails closed after the bound', async () => {
+  const { createGhGitDataApi, GhGitDataError } = await import(MODULE_URL);
+  const fixture = readFixtureRun();
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+    sleep: async () => {},
+    run: async args => {
+      calls.push(args[1]);
+      if (args[1].includes('/git/commits/')) throw new Error('token, path, and provider response');
+      return fixture(args);
+    },
+  });
+  await assert.rejects(
+    api.read('refs/heads/gaia-ledger/registry-v0'),
+    (error) => error instanceof GhGitDataError && error.code === 'GitHubGitDataUnavailable'
+      && !error.message.includes('token'),
+  );
+  assert.equal(calls.filter(path => path.includes('/git/commits/')).length, 3);
+});
+
+test('ref reads are never retried', async () => {
+  const { createGhGitDataApi, GhGitDataError } = await import(MODULE_URL);
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+    sleep: async () => { assert.fail('a ref read must not wait for a retry'); },
+    run: async args => { calls.push(args[1]); throw new Error('transient'); },
+  });
+  await assert.rejects(
+    api.read('refs/heads/gaia-ledger/registry-v0'),
+    (error) => error instanceof GhGitDataError && error.code === 'GitHubGitDataUnavailable',
+  );
+  assert.equal(calls.length, 1, 'a mutable ref is read once; its next value could differ');
+});
+
+test('a failed Git object write is never retried', async () => {
+  const { createGhGitDataApi, GhGitDataError } = await import(MODULE_URL);
+  const head = '1'.repeat(40);
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+    sleep: async () => { assert.fail('a write must not wait for a retry'); },
+    run: scriptedRun([
+      ...protectionResponses(), registryRows(head), ...protectionResponses(), LOST_ACK,
+    ], calls),
+  });
+  await assert.rejects(
+    api.compareAndAppend(REGISTRY_REF, head, reservedBody()),
+    (error) => error instanceof GhGitDataError && error.code === 'GitHubGitDataUnavailable',
+  );
+  assert.equal(calls.filter((call) => call.args[3] === 'POST').length, 1,
+    'the blob write is attempted once; the caller decides whether to write again');
+});
+
+test('the immutable read retry bound is validated', async () => {
+  const { createGhGitDataApi, GhGitDataError } = await import(MODULE_URL);
+  for (const options of [
+    { immutableReadAttempts: 0 }, { immutableReadAttempts: 6 }, { immutableReadAttempts: 1.5 },
+    { immutableReadBackoffMs: -1 }, { sleep: 'later' },
+  ]) {
+    assert.throws(
+      () => createGhGitDataApi({
+        repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+        run: async () => null, ...options,
+      }),
+      (error) => error instanceof GhGitDataError && error.code === 'InvalidGitDataAdapter',
+      JSON.stringify(options),
+    );
+  }
 });
 
 test('mutable protection is never served from the immutable object cache', async () => {

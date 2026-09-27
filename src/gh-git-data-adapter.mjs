@@ -19,6 +19,10 @@ function fail(code) {
   throw new GhGitDataError(code);
 }
 
+function delay(milliseconds) {
+  return new Promise((resolve) => { setTimeout(resolve, milliseconds); });
+}
+
 function canonical(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -167,6 +171,7 @@ function receiptTransportMetadata(body, value, registryRecord, code = 'InvalidTr
 
 export function createGhGitDataApi({
   repository, pumpActor: pumpActorInput, run = runGh, immutableObjectCacheLimit = 4096,
+  immutableReadAttempts = 3, immutableReadBackoffMs = 1000, sleep = delay,
 }) {
   ownData(repository, 'InvalidRepository');
   const canonicalRepository = Object.freeze({
@@ -175,6 +180,11 @@ export function createGhGitDataApi({
   const pumpActor = configuredPumpActor(pumpActorInput);
   if (typeof run !== 'function') fail('InvalidGitDataAdapter');
   if (!Number.isSafeInteger(immutableObjectCacheLimit) || immutableObjectCacheLimit <= 0) {
+    fail('InvalidGitDataAdapter');
+  }
+  if (!Number.isSafeInteger(immutableReadAttempts) || immutableReadAttempts < 1
+      || immutableReadAttempts > 5 || !Number.isSafeInteger(immutableReadBackoffMs)
+      || immutableReadBackoffMs < 0 || typeof sleep !== 'function') {
     fail('InvalidGitDataAdapter');
   }
   const repo = repositoryPath(canonicalRepository);
@@ -197,11 +207,26 @@ export function createGhGitDataApi({
     }
   };
 
+  // A GET by OID is content-addressed: repeating it cannot observe a different object, so a
+  // transient transport failure is retried a bounded number of times rather than failing a whole
+  // ledger listing. Ref reads, rulesets, and every write stay single-shot; a write is never
+  // repeated blind.
+  const readImmutable = async (path) => {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await call('GET', path);
+      } catch (error) {
+        if (attempt >= immutableReadAttempts) throw error;
+        await sleep(immutableReadBackoffMs * attempt);
+      }
+    }
+  };
+
   const immutableObject = async (path) => {
     if (!immutableObjectPath.test(path)) fail('GitDataProtocolViolation');
     const existing = immutableObjectCache.get(path);
     if (existing !== undefined) return structuredClone(await existing);
-    const pending = call('GET', path).then((value) => structuredClone(value));
+    const pending = readImmutable(path).then((value) => structuredClone(value));
     if (immutableObjectCache.size >= IMMUTABLE_OBJECT_CACHE_LIMIT) {
       immutableObjectCache.delete(immutableObjectCache.keys().next().value);
     }
