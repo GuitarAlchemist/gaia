@@ -277,6 +277,30 @@ test('each envelope refusal is published as its own typed blocker, and an unknow
   assert.match(refused.message, /SomethingNew/u);
 });
 
+test('a refusal raised before any provider call is published as REFUSED_BEFORE_PROVIDER', async () => {
+  const artifact = await produce({
+    receipt: receipt({
+      result: terminal({
+        outcome: 'REFUSED', effect: 'NONE', pullRequest: null,
+        refusal: 'BeforeProvider:NormalPolicyExpired',
+      }),
+    }),
+  });
+  const block = blockOf(artifact);
+  assert.equal(block.blocker, 'REFUSED_BEFORE_PROVIDER');
+  assert.equal(block.state, 'BLOCKED');
+  assert.equal(block.severity, 'blocked');
+
+  for (const refusal of ['BeforeProvider:', 'BeforeProvider:Not-A-Code', 'beforeprovider:X']) {
+    const refused = await refusalOf({
+      receipt: receipt({
+        result: terminal({ outcome: 'REFUSED', effect: 'NONE', pullRequest: null, refusal }),
+      }),
+    });
+    assert.equal(refused.code, 'InvalidHostedDraftPumpReceipt', refusal);
+  }
+});
+
 test('a receipt that is not a verified terminal or reconciled outcome performs no effect and refuses', async () => {
   const unobservable = [
     { kind: 'StaleRevision', currentCommittedRevision: COMMITTED },
@@ -321,6 +345,50 @@ test('an empty admission caused by a cross-generation skip reads BLOCKED, never 
     receipt: expectedNoneReceipt({ skipped: [{ number: 64, reason: 'IssueNotReady' }] }),
   });
   assert.equal(unknown.code, 'UnobservableHostedDraftPumpReceipt');
+});
+
+test('a quarantined ambiguous effect or an unresolved evidence head reads BLOCKED, not dark', async () => {
+  const ambiguous = await produce({
+    receipt: expectedNoneReceipt({
+      skipped: [
+        { number: 127, reason: 'EFFECT_AMBIGUOUS' },
+        { number: 93, reason: 'StaleRevision' },
+      ],
+    }),
+  });
+  assert.equal(blockOf(ambiguous).blocker, 'EFFECT_AMBIGUOUS');
+  assert.equal(blockOf(ambiguous).state, 'BLOCKED');
+
+  const unresolved = await produce({
+    receipt: expectedNoneReceipt({ skipped: [{ number: 104, reason: 'HeadIdentityAmbiguous' }] }),
+  });
+  assert.equal(blockOf(unresolved).blocker, 'EVIDENCE_HEAD_UNRESOLVED');
+  assert.equal(blockOf(unresolved).state, 'BLOCKED');
+
+  const stillUnexplained = await refusalOf({
+    receipt: expectedNoneReceipt({
+      skipped: [
+        { number: 127, reason: 'EFFECT_AMBIGUOUS' },
+        { number: 64, reason: 'IssueNotReady' },
+      ],
+    }),
+  });
+  assert.equal(stillUnexplained.code, 'UnobservableHostedDraftPumpReceipt',
+    'one unexplained skip still refuses, whatever else the tick explained');
+});
+
+test('several explained skips publish one blocker by fixed precedence, whatever their order', async () => {
+  const skips = [
+    { number: 104, reason: 'HeadIdentityAmbiguous' },
+    { number: 64, reason: 'CrossGenerationIntent' },
+    { number: 127, reason: 'EFFECT_AMBIGUOUS' },
+  ];
+  for (const skipped of [skips, [...skips].reverse()]) {
+    const artifact = await produce({ receipt: expectedNoneReceipt({ skipped }) });
+    assert.equal(blockOf(artifact).blocker, 'EFFECT_AMBIGUOUS');
+  }
+  const withoutAmbiguous = await produce({ receipt: expectedNoneReceipt({ skipped: skips.slice(0, 2) }) });
+  assert.equal(blockOf(withoutAmbiguous).blocker, 'CROSS_GENERATION_INTENT');
 });
 
 test('a mismatched receipt binding is refused rather than reconciled by the producer', async () => {

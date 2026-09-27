@@ -78,9 +78,25 @@ const REFUSAL_BLOCKERS = closedMap({
   NoEffectCapacity: 'NO_EFFECT_CAPACITY',
 });
 
+/**
+ * A refusal raised before any provider call (`guardDraftCreation`: admission policy, preparation).
+ * No effect was attempted; the code after the prefix is open-ended, so it maps to one blocker.
+ */
+const BEFORE_PROVIDER_REFUSAL = /^BeforeProvider:[A-Za-z]{1,64}$/u;
+
 /** Probing forward past a settled work key is the designed behaviour, not an obstruction. */
 const BENIGN_SKIP_REASON = 'StaleRevision';
-const CROSS_GENERATION_SKIP_REASON = 'CrossGenerationIntent';
+
+/**
+ * The skips whose meaning is settled, each with the blocker it publishes, in precedence order: when
+ * one tick skips for several of them, the first listed names the reading. An ambiguous effect comes
+ * first because a Draft may exist that the ledger cannot yet account for.
+ */
+const EXPLAINED_SKIP_BLOCKERS = Object.freeze([
+  ['EFFECT_AMBIGUOUS', 'EFFECT_AMBIGUOUS'],
+  ['CrossGenerationIntent', 'CROSS_GENERATION_INTENT'],
+  ['HeadIdentityAmbiguous', 'EVIDENCE_HEAD_UNRESOLVED'],
+]);
 
 export class HostedDraftPumpProducerError extends Error {
   constructor(code, message = code) {
@@ -154,6 +170,9 @@ function requireWorkItem(value) {
 }
 
 function refusalBlocker(refusal) {
+  if (typeof refusal === 'string' && BEFORE_PROVIDER_REFUSAL.test(refusal)) {
+    return 'REFUSED_BEFORE_PROVIDER';
+  }
   if (typeof refusal !== 'string' || !Object.hasOwn(REFUSAL_BLOCKERS, refusal)) {
     invalid(`the envelope refusal is not a recognised blocker: ${String(refusal)}`);
   }
@@ -168,21 +187,21 @@ function refusalBlocker(refusal) {
  */
 function emptyAdmissionBlocker(skipped) {
   if (!Array.isArray(skipped)) invalid('the receipt skip list must be an array');
-  let blocker = 'NONE';
+  let rank = EXPLAINED_SKIP_BLOCKERS.length;
   for (const entry of skipped) {
     const skip = plainObject(entry, 'a receipt skip entry');
     if (typeof skip.reason !== 'string') invalid('a receipt skip entry must carry a reason');
     if (skip.reason === BENIGN_SKIP_REASON) continue;
-    if (skip.reason === CROSS_GENERATION_SKIP_REASON) {
-      blocker = 'CROSS_GENERATION_INTENT';
-      continue;
+    const explained = EXPLAINED_SKIP_BLOCKERS.findIndex(([reason]) => reason === skip.reason);
+    if (explained === -1) {
+      unobservable(
+        `a tick that admitted nothing skipped #${String(skip.number)} for ${skip.reason}; `
+        + 'an unexplained empty admission may not be published as a healthy empty queue',
+      );
     }
-    unobservable(
-      `a tick that admitted nothing skipped #${String(skip.number)} for ${skip.reason}; `
-      + 'an unexplained empty admission may not be published as a healthy empty queue',
-    );
+    rank = Math.min(rank, explained);
   }
-  return blocker;
+  return rank === EXPLAINED_SKIP_BLOCKERS.length ? 'NONE' : EXPLAINED_SKIP_BLOCKERS[rank][1];
 }
 
 function actedTransition(receipt) {

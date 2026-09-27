@@ -137,9 +137,13 @@ body and neither derivable afterwards:
 
 The refusal map is exact-equality and closed: `ProviderUnavailable` to `PROVIDER_UNAVAILABLE`,
 `ProviderProtocolViolation` to `PROVIDER_PROTOCOL_VIOLATION`, `NoEffectCapacity` to
-`NO_EFFECT_CAPACITY`. An unrecognised refusal string refuses the whole observation rather than
-publishing `NONE`, because a blocker read as "no blocker" is the one direction this seam must never
-fail.
+`NO_EFFECT_CAPACITY`. A refusal raised before any provider call has the exact shape
+`BeforeProvider:<code>` (`guardDraftCreation`: admission policy or preparation refused, so no effect
+was attempted); its code is open-ended, so every such refusal publishes the one blocker
+`REFUSED_BEFORE_PROVIDER`. Before #172 it refused the whole observation, which is how the
+`NormalPolicyExpired` refusal that barred #102 never reached the Control Room. Any other
+unrecognised refusal string still refuses the whole observation rather than publishing `NONE`,
+because a blocker read as "no blocker" is the one direction this seam must never fail.
 
 **`Terminal` · `CANCELLED` refuses.** No shipped path calls `cancelDraft` — it has zero non-test
 callers — so this outcome is unreachable in production today. It is refused rather than mapped
@@ -155,10 +159,17 @@ the truth. Refusing is `no effect + typed refusal`, which is the contract.
 **Skips are read only where they are the whole story.** On `RESUME` / `ADMIT` the transition
 describes the operation that actually moved and an incidental skip is not part of it. On
 `EXPECTED_NONE` the skips *are* the run: a `StaleRevision` skip is the ordinary result of probing
-forward past settled work keys and stays benign, a `CrossGenerationIntent` skip publishes blocker
-`CROSS_GENERATION_INTENT` (so the reading is `BLOCKED`, not a reassuring healthy `EXPECTED_NONE`),
-and any other skip reason refuses. An unexplained empty admission must not read as a healthy empty
-queue — that is issue #70's motivating defect restated.
+forward past settled work keys and stays benign. Three skips have a settled meaning and each publishes
+a blocker, so the reading is `BLOCKED`, not a reassuring healthy `EXPECTED_NONE`:
+`EFFECT_AMBIGUOUS` (a quarantined ambiguous recovery, which the intake keeps nonterminal but inert)
+publishes `EFFECT_AMBIGUOUS`, `CrossGenerationIntent` publishes `CROSS_GENERATION_INTENT`, and
+`HeadIdentityAmbiguous` (a ready issue without exactly one evidence head) publishes
+`EVIDENCE_HEAD_UNRESOLVED`. When one tick carries several, that fixed order picks the one blocker,
+because an ambiguous effect may be a Draft the ledger cannot yet account for. Any other skip reason
+refuses. An unexplained empty admission must not read as a healthy empty queue — that is issue #70's
+motivating defect restated. Refusing on an *explained* skip was its own defect (#172): a permanently
+quarantined record made every later tick unobservable, and "no reading" is indistinguishable from
+"the pump is not running".
 
 ### Refusal codes
 
