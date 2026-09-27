@@ -155,6 +155,13 @@ publishes the sealed observation, and its unsettled count is read again after th
 work a concurrent lane committed meanwhile is counted. That observation is a read model with no
 authority and cannot replace the durable Draft receipt chain.
 
+The evidence head that intake requires is produced by an operator-run seeder
+(`scripts/evidence-head.mjs`): after the operator applies `ready-for-agent`, it derives the ready
+receipt with the collector's own function, reuses one shared trailer-matching reader, and creates one
+branch whose single commit reuses the default branch tree. It is dry-run by default, never applies
+the label or admits work, and a failed read-back after a write is reported `AMBIGUOUS`, never as
+nothing written.
+
 The hosted CLI validates the complete managed OPEN receipt and effect claim through the
 domain validators before constructing its runtime. Invalid configuration creates neither
 an admission record nor a provider effect; the CLI returns a closed argument error. This
