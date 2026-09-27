@@ -310,6 +310,47 @@ fails closed. The shared `isAutonomousRepository` predicate now gates policy, ho
 portfolio execution, avoiding narrower local regexes such as the one that rejected valid
 `Owner/.github`. Reversibility is unsafe without an equivalent provider-identity constraint.
 
+### Decision: the host runs the tests, the models only read the result (#163)
+
+Until #163 no step executed a test. The visible worker's tools are `Read,Write,Edit,Glob,Grep`,
+the reviewer is read-only, and the prompt told both that "tests are run separately by the
+supervisor", a step that did not exist. Issue 104's candidate settled `CANDIDATE_READY` with an
+`APPROVE` while one of its own tests and the README gate-count test failed. Giving the worker a
+shell was rejected: it widens provider authority and still leaves "tests passed" as model prose.
+
+**Selected:** `executeAgentFactory` accepts a `runVerification` adapter, and the autonomous
+composition always supplies `runNodeTestVerification`. After the worker, and again after the one
+repair, the host runs `node --test --test-reporter=spec` in the candidate worktree with
+`process.execPath`:
+
+- **Runtime.** A `.node-version` in the worktree must equal the host runtime, or the run refuses
+  with `VerificationRuntimeMismatch`. `watch` and `tick` check the trusted clone's pin before
+  consuming a run.
+- **Bounds.** 30 minutes and 8 MiB of combined output. A timeout or an output overflow kills the
+  process tree and is recorded as a failed run (`termination: timeout | output-limit`), not
+  thrown.
+- **Environment.** The same allow-list as the subscription providers, plus `NO_COLOR`, so GitHub
+  and provider credentials are not inherited. The candidate's code still runs as the host user,
+  with the network available: this is the same trust as the worker that wrote it, not a sandbox.
+- **Postcondition.** Git HEAD, the index, the change set and the worktree tree must be unchanged
+  afterwards, else `VerificationMutation`.
+
+The receipt gains `verification`: schema `gaia-factory-verification/1`, command, runtime version and
+pin, the measured `candidateIdentity`, termination, exit code, the `ℹ tests/pass/fail` counts, and
+the output as content-addressed evidence with role `verification` (`verification-final` after a
+repair, with both runs under `verifications.initial/final`). `passed` means a normal exit 0 with
+at least one test and zero failures; the contract recomputes it rather than trusting it. The
+reviewer receives the facts and, when the run failed, the last 16 KiB of output, as data. The
+repair worker receives that output appended to the review findings.
+
+Status: `completed`, hence `CANDIDATE_READY`, now needs an `APPROVE` **and** a passing run. An
+approval over a failing run is `rejected`; repair is still driven only by a `REQUEST_CHANGES`
+review, so the publication gate's repaired form is unchanged. `terminal()` validates new receipts
+with `requireVerification`, so a composition without the adapter cannot settle a candidate. Stored
+receipts from before #163 carry no verification and remain readable. The same change aligns the
+contract with the factory's `reviewer-initial` evidence role for a repaired receipt, which it
+previously refused.
+
 ## Ownership and recovery
 
 The application owns preview, authority consumption, execution and reconciliation.
@@ -324,7 +365,7 @@ actors receive `JobExists` or `HostBusy` without invoking the provider. The exec
 key binds that job key and fresh intent revision.
 
 Before new selection, a STARTED job is reconciled with its original intent/key. A bound
-completed/rejected factory receipt closes it. Missing, corrupt or mismatched evidence
+completed/rejected factory receipt or a measured `no-change` receipt closes it. Missing, corrupt or mismatched evidence
 returns `RECONCILIATION_REQUIRED`, retaining the slot. Even a crash before invocation
 cannot establish safe absence: there is no automatic lock stealing or blind relaunch.
 Before policy and budget gates or new selection, the host also replays every COMPLETED
@@ -339,6 +380,50 @@ another host and malicious OS-user modification are outside it. Reconcile prior
 manual jobs, especially #141/#145, before activation; an empty registry is not proof
 that no previous worker ran. Rollback is revoke and stop the owned watcher, retaining
 all state and candidate work.
+
+### No-candidate results and explicit retirement
+
+A successful worker invocation with no Git candidate now publishes a bound factory
+receipt with `status: no-change`, reason `NoCandidateChange`, its worker evidence,
+and the measured empty change set. The autonomous result is `NO_CANDIDATE`, not
+`CANDIDATE_READY` or a review rejection. Empty files alone are insufficient: both
+status and patch must have zero bytes and the empty-content digest, with the
+original base and recomputed change-set identity. There is no reviewer or repair
+claim. This does not prove the issue is implemented. The used run is not refunded.
+Candidate-sidecar recovery skips this non-candidate outcome.
+
+Older failures with only worker output remain unresolved; no receipt is synthesized
+from provider prose. For an obsolete job whose issue is completed and whose
+unmerged Draft is closed at the original head/ref, the operator may explicitly retire
+the job. First stop the old watcher and its owned provider processes and preserve
+a database backup plus the original worktree/evidence. This is an operator
+precondition, not a liveness inference made by the command. Closing a Draft does not
+cancel an already authorized process. Do not delete any candidate edits.
+
+```powershell
+node scripts/github-portfolio-autonomous.mjs retire-closed --state C:\Gaia\state --job <job-key> --intent-revision <original-intent-revision>
+# Inspect RETIREMENT_PREVIEW, then explicitly apply the same bounded request:
+node scripts/github-portfolio-autonomous.mjs retire-closed --state C:\Gaia\state --job <job-key> --intent-revision <original-intent-revision> --apply true
+```
+
+Each nonterminal invocation rereads only the exact issue and pull request through
+GitHub GETs. Wrong repository/id/number, open issue, non-completed closure, merged
+PR, moved head/ref or unavailable evidence refuses. Preview makes no terminal
+write. Apply records `gaia-autonomous-retirement/1`, status `ABANDONED`, with the
+original job/intent/execution identities and closed observations. It neither runs
+an agent nor writes GitHub, and is never invoked by watch. No past success,
+review, absence of effects, or reconciliation of a hosted Draft operation is claimed.
+
+The SQLite `BEGIN IMMEDIATE` transaction serializes retirement against completion:
+one terminal wins, same-result repeats replay, conflicting late results refuse.
+The row remains COMPLETED (meaning *job terminal*), its budget remains consumed,
+and the same issue/Draft cannot run again. No candidate sidecar is minted.
+
+These additive terminal contracts require this reader revision or newer on restart;
+old readers fail closed rather than understand them. Do not erase state to roll
+back or re-enable authority. Preserve the original database backup as evidence,
+not as a way to restore spent capacity. Design alternatives and the incident are
+in [the bounded repair intent](../intent/pump-no-candidate/intent.md).
 
 ## Verification and artifact chain
 

@@ -6,6 +6,8 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, edited]
+  # The merge queue runs this on the merged result before it lands on main
+  merge_group:
 
 permissions:
   contents: read

@@ -165,19 +165,27 @@ function receiptTransportMetadata(body, value, registryRecord, code = 'InvalidTr
   return { workRootOid: oid(value.workRootOid, code) };
 }
 
-export function createGhGitDataApi({ repository, pumpActor: pumpActorInput, run = runGh }) {
+export function createGhGitDataApi({
+  repository, pumpActor: pumpActorInput, run = runGh, immutableObjectCacheLimit = 4096,
+}) {
   ownData(repository, 'InvalidRepository');
   const canonicalRepository = Object.freeze({
     owner: segment(repository.owner), name: segment(repository.name),
   });
   const pumpActor = configuredPumpActor(pumpActorInput);
   if (typeof run !== 'function') fail('InvalidGitDataAdapter');
+  if (!Number.isSafeInteger(immutableObjectCacheLimit) || immutableObjectCacheLimit <= 0) {
+    fail('InvalidGitDataAdapter');
+  }
   const repo = repositoryPath(canonicalRepository);
   // Git objects are immutable by OID. Refs, rulesets, and writes deliberately remain uncached.
   // Resident promises share concurrent reads. At capacity, eviction can cause a duplicate GET.
+  // The bound must exceed one run's distinct ledger objects: every listing re-walks the registry
+  // chain once per work key, and a bound below the working set (it was 256 for about 370 objects)
+  // evicts the registry before its next walk and multiplies the GETs past the admission window.
   // Rejected or parser-invalid reads are evicted by readRef.
   const immutableObjectCache = new Map();
-  const IMMUTABLE_OBJECT_CACHE_LIMIT = 256;
+  const IMMUTABLE_OBJECT_CACHE_LIMIT = immutableObjectCacheLimit;
   const immutableObjectPath = /^git\/(?:commits|trees|blobs)\/[a-f0-9]{40}$/u;
   const call = async (method, path, input) => {
     const args = ['api', `repos/${repo}/${path}`, '--method', method];
