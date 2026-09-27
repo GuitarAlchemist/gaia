@@ -6,6 +6,7 @@ import {
   createHostedDraftPumpRuntime,
   main,
 } from '../scripts/hosted-draft-pump.mjs';
+import { GhGitDataError } from '../src/gh-git-data-adapter.mjs';
 
 const OPERATION_ID = 'a'.repeat(64);
 const WORK_KEY = 'b'.repeat(64);
@@ -252,6 +253,50 @@ test('invalid arguments and provider failures return only closed redacted errors
       schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'OperationFailed',
     });
     assert.ok(!errors.text().includes(secret));
+  });
+
+  await context.test('a known ledger failure names its closed cause', async () => {
+    const output = sink();
+    const errors = sink();
+    const exitCode = await main({
+      argv: [...commonArgs('list-unsettled')],
+      env: {}, stdout: output.stream, stderr: errors.stream,
+      runtimeFactory() {
+        return Object.freeze({
+          async enqueue() { assert.fail(); },
+          async reconcile() { assert.fail(); },
+          async listUnsettled() {
+            throw new GhGitDataError('GitHubGitDataUnavailable', 'dial tcp ghp_do-not-leak');
+          },
+        });
+      },
+    });
+    assert.equal(exitCode, 1);
+    assert.equal(output.text(), '');
+    assert.deepEqual(errors.json(), {
+      schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'OperationFailed',
+      cause: 'GitHubGitDataUnavailable',
+    });
+    assert.ok(!errors.text().includes('ghp_do-not-leak'));
+  });
+
+  await context.test('an unlisted code on a known error type stays a bare failure', async () => {
+    const errors = sink();
+    const exitCode = await main({
+      argv: [...commonArgs('list-unsettled')],
+      env: {}, stdout: sink().stream, stderr: errors.stream,
+      runtimeFactory() {
+        return Object.freeze({
+          async enqueue() { assert.fail(); },
+          async reconcile() { assert.fail(); },
+          async listUnsettled() { throw new GhGitDataError('ghp_do-not-leak'); },
+        });
+      },
+    });
+    assert.equal(exitCode, 1);
+    assert.deepEqual(errors.json(), {
+      schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'OperationFailed',
+    });
   });
 
   assert.equal(new HostedDraftPumpCliError('InvalidArguments').message, 'InvalidArguments');
