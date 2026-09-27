@@ -5,7 +5,7 @@
 // first, and the exact refusals for the rest; it has no port that could label,
 // seed or dispatch anything.
 
-import { declaredRelationships } from './github-read-adapter.mjs';
+import { declaredRelationships } from './issue-relationships.mjs';
 
 export const PUMP_CANDIDATES_SCHEMA = 'GaiaPumpCandidatesV0';
 

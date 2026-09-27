@@ -163,11 +163,12 @@ the label or admits work, and a failed read-back after a write is reported `AMBI
 nothing written.
 
 Which issues to label next is proposed by an operator-run, read-only ranker
-(`scripts/pump-candidates.mjs`). It reuses the read adapter's declared-relationship parser and
-refuses, with an exact reason, any issue carrying an excluded or `blocker:` label, a dependency or
-duplicate claim, an epic named as another issue's parent, no completion criteria, or an existing
-Draft or seeded branch. It has no port that could label, seed or dispatch: applying
-`ready-for-agent` stays the operator's act of authority.
+(`scripts/pump-candidates.mjs`). It shares one pure declared-relationship parser
+(`src/issue-relationships.mjs`) with the read adapter, and refuses, with an exact reason, any
+issue carrying an excluded or `blocker:` label, a dependency or duplicate claim, an epic named as
+another issue's parent, no completion criteria, or an existing Draft or seeded branch. It has no
+port that could label, seed or dispatch: applying `ready-for-agent` stays the operator's act of
+authority.
 
 The hosted CLI validates the complete managed OPEN receipt and effect claim through the
 domain validators before constructing its runtime. Invalid configuration creates neither
