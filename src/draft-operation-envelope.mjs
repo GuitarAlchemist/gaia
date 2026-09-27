@@ -479,6 +479,8 @@ function validateOperationRecord(record, identity, envelope, previous) {
   throw new DraftOperationError('LedgerCorrupt');
 }
 
+const UNSETTLED_INSPECTION_CONCURRENCY = 8;
+
 class GitDataDraftOperationStore {
   #gitData;
   #config;
@@ -730,12 +732,23 @@ class GitDataDraftOperationStore {
 
   async #listUnsettled() {
     const registry = await this.#registry();
-    const unsettled = [];
-    for (const workKey of [...registry.entries.keys()].sort()) {
-      const snapshot = await this.#inspectByWork(workKey);
-      if (snapshot && !snapshot.terminal) unsettled.push(snapshot);
-    }
-    return Object.freeze(unsettled);
+    // Every registered work key is re-read on each listing, terminal ones included, so the cost
+    // grows with the ledger. The inspections are independent reads over immutable objects;
+    // bounded fan-out keeps a growing ledger inside the intake's admission window. The result
+    // keeps the sorted work-key order, and any failed inspection still fails the listing.
+    const workKeys = [...registry.entries.keys()].sort();
+    const snapshots = new Array(workKeys.length);
+    let next = 0;
+    const lane = async () => {
+      while (next < workKeys.length) {
+        const index = next++;
+        snapshots[index] = await this.#inspectByWork(workKeys[index]);
+      }
+    };
+    await Promise.all(Array.from(
+      { length: Math.min(UNSETTLED_INSPECTION_CONCURRENCY, workKeys.length) }, lane,
+    ));
+    return Object.freeze(snapshots.filter((snapshot) => snapshot && !snapshot.terminal));
   }
 
   async #stateByOperation(operationId) {
