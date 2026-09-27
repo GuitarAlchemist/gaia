@@ -37,7 +37,8 @@ export const HOSTED_DRAFT_PUMP_STATES = Object.freeze([
 /** Typed blockers — closed. An unrecognised token fails closed rather than rendering as a state. */
 export const HOSTED_DRAFT_PUMP_BLOCKERS = Object.freeze([
   'NONE', 'PROVIDER_UNAVAILABLE', 'PROVIDER_PROTOCOL_VIOLATION', 'NO_EFFECT_CAPACITY',
-  'EFFECT_AMBIGUOUS', 'CROSS_GENERATION_INTENT',
+  'EFFECT_AMBIGUOUS', 'CROSS_GENERATION_INTENT', 'EVIDENCE_HEAD_UNRESOLVED',
+  'REFUSED_BEFORE_PROVIDER',
 ]);
 
 /**
