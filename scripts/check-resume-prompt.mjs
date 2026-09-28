@@ -11,18 +11,19 @@
  *   --subject   the worktree root the lane will work in;
  *   --commit    the full commit (the generation) the prompt says that worktree is at;
  *   --base      the base the prompt pins, with --base-pin the literal commit it pins;
- *   --upstream  every prior-round artifact that may block this prompt (reviews, handoffs).
+ *   --upstream  every prior-round artifact this prompt must account for (reviews, handoffs);
+ *               each one that names the commit must then be cited by the prompt.
  *
  * Git reads the subject (HEAD, `status --porcelain`) and resolves the base on its remote with
  * `ls-remote`; the upstream files are read. The prompt must cite the subject path, the full
  * commit and the base pin; the subject must be at that commit and clean; the pin must equal the
- * base now; every upstream artifact naming the commit with a verdict or a completion marker must
- * be cited by file name. Nothing is written, and agreement grants no authority.
+ * base now; every declared upstream artifact naming the commit must be cited by file name.
+ * Nothing is written, and agreement grants no authority.
  *
- * Exit codes: 0 RESUME_AGREED · 2 usage error · 3 refused or fail-closed (every disagreement is
- * a named refusal; an unobservable world is RESUME_OBSERVATION_UNAVAILABLE, never agreement).
- * There is no exit 1: a prompt that disagrees with its world is not launched, so a refusal here
- * is always fail-closed.
+ * Exit codes: 0 RESUME_AGREED · 1 RESUME_REFUSED (the check completed and the prompt disagrees
+ * with its world: fix the prompt, retrying cannot help) · 2 usage error · 3 fail-closed (the check
+ * could not complete: an unobservable world is RESUME_OBSERVATION_UNAVAILABLE, never agreement).
+ * Anything but 0 means the lane is not launched.
  */
 
 import { resolve } from 'node:path';
@@ -100,13 +101,14 @@ function render(report) {
 }
 
 function main(argv) {
-  if (argv.includes('--help')) { process.stdout.write(USAGE); return 0; }
+  // Help only on its own: 0 is agreement, so `--help` beside a check must not report success.
+  if (argv.length === 1 && argv[0] === '--help') { process.stdout.write(USAGE); return 0; }
   const flags = parse(argv);
   const manifest = declare(flags);
   const promptText = readResumePrompt(resolve(flags.prompt));
   const report = checkResumePrompt({ promptText, manifest, observation: observeResumeWorld(manifest) });
   process.stdout.write(flags.json ? `${JSON.stringify(report)}\n` : render(report));
-  return report.verdict === 'RESUME_AGREED' ? 0 : 3;
+  return report.verdict === 'RESUME_AGREED' ? 0 : 1;
 }
 
 try {

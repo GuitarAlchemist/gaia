@@ -135,10 +135,10 @@ A lane prompt is checked against its world before the lane is spawned or resumed
 (`scripts/check-resume-prompt.mjs`). The prompt's structured declaration — subject worktree, full
 generation, optional base pin and upstream artifacts — is compared with one fresh read-only
 observation: the worktree must be at that generation and clean, the pin must equal the base
-resolved on its remote at check time, every upstream verdict or completion marker naming the
-generation must be cited, and the text must carry each declared binding. Confidence never comes
-from repeated text. The core is pure over the supplied observation, reports every disagreement as
-a named refusal, writes nothing and grants nothing. It is the single entrypoint for the lane runner
+resolved on its remote at check time, every declared upstream artifact naming the generation
+must be cited whatever its verdict shape, and the text must carry each declared binding.
+Confidence never comes from repeated text. The core is pure over the supplied observation,
+reports every disagreement as a named refusal, writes nothing and grants nothing. It is the single entrypoint for the lane runner
 that issue #103 brings into the repository; until then an operator runs it before the out-of-tree
 launcher, and no runtime here spawns a lane from a prompt file.
 

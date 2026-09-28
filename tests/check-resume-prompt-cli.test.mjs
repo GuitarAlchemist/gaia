@@ -85,12 +85,12 @@ test('CLI: a prompt that agrees with its worktree exits 0 and writes nothing', (
   assert.equal(git(world.subject, 'status', '--porcelain'), '');
 });
 
-test('CLI: a worktree that moved past the declared commit is refused with exit 3', () => {
+test('CLI: a worktree that moved past the declared commit is refused with exit 1', () => {
   const world = fixture('moved');
   const prompt = writePrompt(world.dir, bindingPrompt(world));
   const moved = commit(world.subject, 'candidate.txt', 'moved\n', 'moved');
   const result = run('--prompt', prompt, '--subject', world.subject, '--commit', world.head);
-  assert.equal(result.code, 3);
+  assert.equal(result.code, 1);
   assert.deepEqual(lines(result.out, 'refusal='), [
     `refusal=RESUME_SUBJECT_COMMIT_MISMATCH declared=${world.head} observed=${moved}`]);
 });
@@ -100,7 +100,7 @@ test('CLI: an untracked file makes the subject dirty and refuses the prompt', ()
   const prompt = writePrompt(world.dir, bindingPrompt(world));
   writeFileSync(join(world.subject, 'stray.txt'), 'left behind\n', 'utf8');
   const result = run('--prompt', prompt, '--subject', world.subject, '--commit', world.head);
-  assert.equal(result.code, 3);
+  assert.equal(result.code, 1);
   assert.deepEqual(lines(result.out, 'refusal='), ['refusal=RESUME_SUBJECT_DIRTY']);
 });
 
@@ -122,7 +122,7 @@ test('CLI: the base pin is compared with the live remote, not the stale local tr
 
   const result = run('--prompt', prompt, '--subject', world.subject, '--commit', world.head,
     '--base', 'origin/main', '--base-pin', pinned);
-  assert.equal(result.code, 3);
+  assert.equal(result.code, 1);
   assert.deepEqual(lines(result.out, 'refusal='), [
     `refusal=RESUME_BASE_PIN_STALE ref=origin/main pinned=${pinned} resolved=${merged}`]);
 });
@@ -135,7 +135,7 @@ test('CLI: an uncited verdict on the entry commit blocks until the prompt cites 
   const omitted = writePrompt(world.dir, bindingPrompt(world));
   const refused = run('--prompt', omitted, '--subject', world.subject, '--commit', world.head,
     '--upstream', review);
-  assert.equal(refused.code, 3);
+  assert.equal(refused.code, 1);
   assert.deepEqual(lines(refused.out, 'refusal='), [`refusal=RESUME_BLOCKING_INPUT_OMITTED `
     + `artifact=${review} verdict=REQUEST_CHANGES marker=SPEC_REVIEW_COMPLETE`]);
 
@@ -158,11 +158,17 @@ test('CLI: a malformed command line is a usage error with exit 2', () => {
     ['--prompt', prompt, '--subject', world.subject, '--commit', world.head, '--base', 'origin/main'],
     ['--prompt', prompt, '--subject', world.subject, '--commit', world.head, '--force'],
     ['--prompt', prompt, '--subject', world.subject, '--commit', world.head, '--commit', world.head],
+    // Help beside anything else is not help: exit 0 means agreement, and nothing was checked.
+    ['--prompt', prompt, '--subject', world.subject, '--commit', world.head, '--help'],
+    ['--upstream', '--help'],
   ]) {
     const result = run(...args);
     assert.equal(result.code, 2, `${args.join(' ')}\n${result.err}`);
     assert.match(result.err, /^usage error: /u);
   }
+  const help = run('--help');
+  assert.equal(help.code, 0);
+  assert.match(help.out, /^usage: /u);
 });
 
 test('CLI: an unobservable world fails closed with exit 3, never agreement', () => {
@@ -170,6 +176,10 @@ test('CLI: an unobservable world fails closed with exit 3, never agreement', () 
   const plain = join(world.dir, 'not-a-repository');
   mkdirSync(plain);
   mkdirSync(join(world.subject, 'nested'));
+  const oversized = join(world.dir, 'oversized-review.md');
+  writeFileSync(oversized, Buffer.alloc(1_048_577, 0x61));
+  const notUtf8 = join(world.dir, 'latin1-review.md');
+  writeFileSync(notUtf8, Buffer.from([0x52, 0xe9, 0x76, 0x69, 0x73, 0x69, 0x6f, 0x6e, 0x0a]));
   const cases = [
     [['--subject', plain, '--commit', world.head], 'SUBJECT_NOT_WORKTREE_ROOT'],
     [['--subject', join(world.subject, 'nested'), '--commit', world.head], 'SUBJECT_NOT_WORKTREE_ROOT'],
@@ -180,6 +190,10 @@ test('CLI: an unobservable world fails closed with exit 3, never agreement', () 
       '--base-pin', world.head], 'BASE_UNRESOLVED'],
     [['--subject', world.subject, '--commit', world.head, '--upstream',
       join(world.dir, 'missing.md')], 'UPSTREAM_UNREADABLE'],
+    [['--subject', world.subject, '--commit', world.head, '--upstream', oversized],
+      'UPSTREAM_TOO_LARGE'],
+    [['--subject', world.subject, '--commit', world.head, '--upstream', notUtf8],
+      'UPSTREAM_UNREADABLE'],
   ];
   for (const [args, detail] of cases) {
     const prompt = writePrompt(world.dir, bindingPrompt({ subject: args[1], head: world.head }));

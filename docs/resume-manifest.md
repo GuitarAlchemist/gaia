@@ -49,7 +49,8 @@ a heuristic with false negatives of its own. The declaration is given as structu
 [`src/resume-manifest.mjs`](../src/resume-manifest.mjs) is pure and imports only `node:crypto`.
 
 - `buildResumeManifest({ subjectPath, declaredCommit, baseRef, basePin, upstreamArtifacts })`
-  returns a frozen `gaia-resume-manifest/1` declaration. Paths are absolute; the commit is a full
+  returns a frozen `gaia-resume-manifest/1` declaration. Paths are absolute drive or POSIX paths
+  (a UNC path such as `\\server\share\lane` is refused as a usage error); the commit is a full
   lowercase 40-hex identifier and is never expanded from an abbreviation; the base is
   `<remote>/<branch>` plus its pin, both or neither; upstream artifacts have distinct file names,
   because the prompt cites them by name.
@@ -78,7 +79,16 @@ Every rule is decided and every refusal is reported, so one run lists everything
 | `RESUME_SUBJECT_COMMIT_MISMATCH` | `HEAD` of the subject worktree equals the declared commit. | Y1 |
 | `RESUME_SUBJECT_DIRTY` | The subject worktree has no staged, unstaged or untracked change. | Y1's "verified clean at spawn" |
 | `RESUME_BASE_PIN_STALE` | The pin equals the base resolved on its remote at check time, not the local tracking ref. | Y2 |
-| `RESUME_BLOCKING_INPUT_OMITTED` | Every upstream artifact that names the declared commit (in full or by a 7-to-40-hex abbreviation) and carries a verdict line (`APPROVE` or `REQUEST_CHANGES`, Markdown emphasis ignored) or a trailing `<NAME>_COMPLETE` marker is cited by file name. | B16/B19 |
+| `RESUME_BLOCKING_INPUT_OMITTED` | Every declared upstream artifact that names the declared commit (in full or by a 7-to-40-hex abbreviation) is cited by file name. A recognised verdict line (`APPROVE` or `REQUEST_CHANGES`, Markdown emphasis ignored) and a trailing `<NAME>_COMPLETE` marker are reported, never required. | B16/B19 |
+
+Blocking does not wait for a recognised verdict. Checked against the 77 recorded
+`REQUEST_CHANGES` reviews, three wrote theirs in shapes a verdict parser misses
+(`## Verdict: REQUEST_CHANGES (this slice only)` closed by a `_DONE` marker, and
+`REQUEST_CHANGES — not because…`). With the verdict required, a repair prompt that omitted one of
+them would agree: B16/B19 again. The operator's declaration bounds the set, so an artifact is
+declared because the prompt must account for it; one that names the entry commit must be cited,
+whatever it says. The PR #85 R2 prompt agrees with both R1 reviews declared. Declaring the R1
+repair handoff as well (it names the same head) makes the prompt cite it too.
 
 Issue #104 says a blocking artifact cites "the predecessor head". In every recorded resume the
 prior round's verdicts judged exactly the head the next lane starts from: the R0 reviews judged
@@ -91,9 +101,11 @@ adapter, `RESUME_OBSERVATION_UNAVAILABLE` with one of `SUBJECT_UNREADABLE`,
 `SUBJECT_NOT_WORKTREE_ROOT`, `BASE_REMOTE_UNKNOWN`, `BASE_UNRESOLVED`, `UPSTREAM_UNREADABLE`,
 `UPSTREAM_TOO_LARGE`. An unobservable world is never agreement.
 
-Exit codes: `0` agreed · `2` usage error, including a malformed declaration such as an
-abbreviated commit · `3` refused or fail-closed. There is no `1`: a prompt that disagrees with its
-world is not launched, so every refusal is fail-closed.
+Exit codes follow the repository's: `0` agreed · `1` refused, the check completed and the prompt
+disagrees with its world (fix the prompt; retrying cannot help) · `2` usage error, including a
+malformed declaration such as an abbreviated commit, or `--help` beside any other argument · `3`
+fail-closed, the check could not complete (a Git timeout or an unreadable artifact may clear on a
+retry). A runner can therefore retry `3` and stop on `1` without parsing output.
 
 ## Entrypoint
 
@@ -142,9 +154,14 @@ Each residual names the observation that would show it matters.
   reviewer prompt over a repaired head. Falsifier: a resumed reviewer that missed a verdict on the
   head immediately before its subject.
 - A verdict word inside a sentence, or a marker that is not the last non-empty line, is not
-  recognised.
-- An artifact that does not exist yet is not seen. B16/B19's Spec review was still being written
-  when R1 was spawned; waiting for a pending reviewer is an operator decision, not a file.
+  recognised, so the report shows no verdict for it. It still blocks: blocking needs only the
+  commit.
+- An artifact that does not exist yet, or that the operator does not declare, is not seen. In
+  B16/B19 the finished Spec review already existed when R1 was spawned (written at 22:09:18, the
+  R1 prompt at 22:11:38), and the check refuses R1 once it is declared. Declared from memory with
+  only the Standards review, R1 agrees: the same omission. That is why #103's runner must derive
+  the declaration from its launch parameters. Waiting for a reviewer still running is an operator
+  decision, not a file.
 - Agreement is one observation at one instant. It is not authority, not approval, and not proof
   that the artifacts were right. The check writes nothing.
 

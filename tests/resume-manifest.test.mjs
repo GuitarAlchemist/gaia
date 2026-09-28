@@ -320,9 +320,28 @@ test('MECHANISM REVERT: without the live base comparison, Y2 agrees', async () =
 
 test('MECHANISM REVERT: without blocking classification, B16/B19 agrees', async () => {
   const module = await mutant('mr-omitted',
-    'blocking: namesCommit(text, manifest.subject.commit) && (verdict !== null || marker !== null),',
-    'blocking: false,');
+    'blocking: namesCommit(text, manifest.subject.commit),', 'blocking: false,');
   assert.equal(check(...CASES.omitted, module).verdict, 'RESUME_AGREED');
+});
+
+test('MECHANISM REVERT: requiring a recognised verdict shape lets an omitted blocker agree', async () => {
+  // A real fleet review shape (PR #121 Spec): a qualified verdict and a `_DONE` marker, neither of
+  // which the verdict and marker parsers recognise.
+  const original = UPSTREAM['pr85-r0-spec-review.md'];
+  UPSTREAM['pr85-r0-spec-review.md'] = [
+    '# PR #85 — R0 Spec review', '', `- Subject reviewed: \`${PR85_R0_HEAD}\``, '',
+    '## Verdict: REQUEST_CHANGES (this slice only)', '', 'PR85_R0_SPEC_DONE', '',
+  ].join('\n');
+  try {
+    const report = check(...CASES.omitted);
+    assert.deepEqual(report.refusals, [{ code: 'RESUME_BLOCKING_INPUT_OMITTED',
+      artifact: artifact('pr85-r0-spec-review.md'), verdict: null, marker: null }]);
+    const module = await mutant('mr-shape', 'blocking: namesCommit(text, manifest.subject.commit),',
+      'blocking: namesCommit(text, manifest.subject.commit) && (verdict !== null || marker !== null),');
+    assert.equal(check(...CASES.omitted, module).verdict, 'RESUME_AGREED');
+  } finally {
+    UPSTREAM['pr85-r0-spec-review.md'] = original;
+  }
 });
 
 test('MECHANISM REVERT: without the cleanliness rule, a dirty subject agrees', async () => {
@@ -335,6 +354,17 @@ test('MECHANISM REVERT: without the citation rule, a text naming another worktre
     /if \(!citesPath\(promptText, manifest\.subject\.path\)\) \{[\s\S]*?if \(!citesCommit\(promptText, manifest\.subject\.commit\)\) \{/u,
     'if (false) {\n  }\n  if (false) {');
   assert.equal(check(...CASES.uncited, module).verdict, 'RESUME_AGREED');
+});
+
+test('MECHANISM REVERT: without the base-pin citation, a text pinning an abbreviation agrees', async () => {
+  const abbreviated = [PR92_R4_CORRECTED.replace(MAIN_AFTER_PR85, MAIN_AFTER_PR85.slice(0, 12)),
+    { subject: PR92_R4_TREE, commit: PR92_LIVE_HEAD, base: MAIN_AFTER_PR85 },
+    { head: PR92_LIVE_HEAD, main: MAIN_AFTER_PR85 }];
+  assert.deepEqual(check(...abbreviated).refusals,
+    [{ code: 'RESUME_BINDING_NOT_CITED', binding: 'BASE_PIN' }]);
+  const module = await mutant('mr-uncited-pin',
+    'if (manifest.base !== null && !citesCommit(promptText, manifest.base.pin)) {', 'if (false) {');
+  assert.equal(check(...abbreviated, module).verdict, 'RESUME_AGREED');
 });
 
 // -------------------------------------------------------------------------------------------------
@@ -364,7 +394,7 @@ test('a citation is a whole token: prefixes, longer names and abbreviations do n
   assert.equal(cited(`${PR85_TREE} ${PR85_R0_HEAD} read pr85-r0-spec-review.md.bak`), false);
 });
 
-test('an upstream artifact blocks only if it names the entry generation and carries a verdict', () => {
+test('a declared upstream artifact blocks when it names the entry generation, in any shape', () => {
   const declaration = { subject: PR85_TREE, commit: PR85_R0_HEAD, upstream: ['notes.md'] };
   const blocking = (text) => {
     UPSTREAM['notes.md'] = text;
@@ -376,13 +406,36 @@ test('an upstream artifact blocks only if it names the entry generation and carr
   };
   assert.equal(blocking(`Reviewed ${PR85_R0_HEAD.slice(0, 7)}.\n\n## Verdict: **APPROVE**\n`), true,
     'an abbreviation names the generation; a labelled, emphasised verdict still counts');
-  assert.equal(blocking(`Reviewed ${PR85_R0_HEAD}. Return APPROVE or REQUEST_CHANGES.\n`), false,
-    'a verdict word inside prose is not a verdict');
+  // Real fleet shapes the verdict and marker parsers do not recognise (PR #134 Standards, PR #121
+  // Spec). A shape the parser misses must not let an omitted blocker through.
+  assert.equal(blocking(`Reviewed ${PR85_R0_HEAD}.\n\nREQUEST_CHANGES — not because the slice is wrong\n`),
+    true, 'a qualified verdict blocks');
+  assert.equal(blocking(`Reviewed ${PR85_R0_HEAD}.\n\n## Verdict: REQUEST_CHANGES (this slice only)\n\n`
+    + 'PR121_91B7493_SPEC_DONE\n'), true, 'a `_DONE` marker blocks');
+  assert.equal(blocking(`Notes on ${PR85_R0_HEAD}, still being written.\n`), true,
+    'an unfinished review blocks: the prompt cites it, or waits for it');
   assert.equal(blocking(`Reviewed ${PR85_R1_HEAD}.\n\nREQUEST_CHANGES\n`), false,
     'a verdict on another generation does not block this one');
   assert.equal(blocking(`Reviewed ${'0'.repeat(24)}${PR85_R0_HEAD}.\n\nAPPROVE\n`), false,
     'a digest that merely contains the commit does not name it');
-  assert.equal(blocking(`Notes on ${PR85_R0_HEAD}.\n\nNOTES_COMPLETE_SOON\n`), false,
+});
+
+test('the verdict and marker are reported as recognised, and never decide blocking', () => {
+  const declaration = { subject: PR85_TREE, commit: PR85_R0_HEAD, upstream: ['notes.md'] };
+  const reported = (text) => {
+    UPSTREAM['notes.md'] = text;
+    try {
+      const [entry] = check(PR85_R1_REPAIR, declaration, { head: PR85_R0_HEAD }).upstream;
+      return [entry.verdict, entry.marker];
+    } finally {
+      delete UPSTREAM['notes.md'];
+    }
+  };
+  assert.deepEqual(reported(`Reviewed ${PR85_R0_HEAD}.\n\n**REQUEST_CHANGES**\n\nPR85_SPEC_COMPLETE\n`),
+    ['REQUEST_CHANGES', 'PR85_SPEC_COMPLETE']);
+  assert.deepEqual(reported(`Reviewed ${PR85_R0_HEAD}. Return APPROVE or REQUEST_CHANGES.\n`),
+    [null, null], 'a verdict word inside prose is not a verdict');
+  assert.deepEqual(reported(`Notes on ${PR85_R0_HEAD}.\n\nNOTES_COMPLETE_SOON\n`), [null, null],
     'only a trailing <NAME>_COMPLETE line is a completion marker');
 });
 
@@ -442,6 +495,12 @@ test('the verdict is frozen, authority-free, digest-bound and never carries the 
 
 test('the core is pure: it imports node:crypto and nothing else', () => {
   const source = readFileSync(join(ROOT, 'src', 'resume-manifest.mjs'), 'utf8');
-  assert.deepEqual([...source.matchAll(/^import .* from '([^']+)';$/gmu)].map((match) => match[1]),
-    ['node:crypto']);
+  // Any static import, single- or multi-line, with or without bindings; and no dynamic import.
+  const specifiers = [...source.matchAll(/^import\s+(?:[^;'"]*?\s+from\s+)?['"]([^'"]+)['"]/gmu)]
+    .map((match) => match[1]);
+  assert.deepEqual(specifiers, ['node:crypto']);
+  assert.doesNotMatch(source, /\bimport\s*\(/u, 'no dynamic import');
+  const multiLine = "import {\n  readFileSync,\n} from 'node:fs';\nimport 'node:path';\n";
+  assert.deepEqual([...multiLine.matchAll(/^import\s+(?:[^;'"]*?\s+from\s+)?['"]([^'"]+)['"]/gmu)]
+    .map((match) => match[1]), ['node:fs', 'node:path'], 'the gate sees multi-line and bare imports');
 });

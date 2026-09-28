@@ -276,14 +276,17 @@ export function checkResumePrompt({ promptText, manifest, observation } = {}) {
     refusals.push({ code: 'RESUME_BASE_PIN_STALE', ref: manifest.base.ref,
       pinned: manifest.base.pin, resolved: observation.base.head });
   }
-  // An upstream artifact blocks this prompt when it names the generation the lane starts from
-  // and carries a verdict or a completion marker. Every such artifact must be cited.
+  // A declared upstream artifact blocks this prompt when it names the generation the lane starts
+  // from, and every such artifact must be cited. The verdict and the completion marker are
+  // reported, never required: reviews write their verdicts in more shapes than any parser here
+  // recognises (`REQUEST_CHANGES (this slice only)`, `REQUEST_CHANGES — because…`, `_DONE`
+  // markers), and an unrecognised shape must not turn an omitted blocker back into agreement.
   const upstream = observation.upstream.map(({ path, text }) => {
     const verdict = verdictOf(text);
     const marker = markerOf(text);
     return {
       path,
-      blocking: namesCommit(text, manifest.subject.commit) && (verdict !== null || marker !== null),
+      blocking: namesCommit(text, manifest.subject.commit),
       cited: citesFileName(promptText, path),
       verdict,
       marker,
