@@ -19,6 +19,22 @@ on:
         description: Restrict a manual normal-policy run to exactly one issue number; empty keeps the repository-wide funnel
         type: string
         default: ''
+      readmit_operation:
+        description: Re-admit one effect-free refused operation (its operation id); no Draft, provider call or admission
+        type: string
+        default: ''
+      readmit_revision:
+        description: The refused operation's current committed revision, as the operator read it
+        type: string
+        default: ''
+      readmit_reason:
+        description: Why this refusal may be followed by another admission; recorded in the ledger
+        type: string
+        default: ''
+      readmit_apply:
+        description: Write the successor admission; unchecked is a dry run that writes nothing
+        type: boolean
+        default: false
   issues:
     types: [labeled]
   schedule:
@@ -52,6 +68,9 @@ jobs:
           GAIA_NORMAL_POLICY_DISPATCH: ${{ github.event_name == 'workflow_dispatch' && inputs.normal_policy }}
           GAIA_NORMAL_POLICY_VAR: ${{ github.event_name != 'workflow_dispatch' && vars.GAIA_NORMAL_POLICY_ENABLED == 'true' }}
           GAIA_TARGET_ISSUE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_issue || '' }}
+          GAIA_READMIT_OPERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.readmit_operation || '' }}
+          GAIA_READMIT_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.readmit_revision || '' }}
+          GAIA_READMIT_REASON: ${{ github.event_name == 'workflow_dispatch' && inputs.readmit_reason || '' }}
         run: |
           # Normal selection is computed once, here, and published as this step's only output so
           # every later step reads the same decision instead of re-deriving it from inputs/vars.
@@ -86,13 +105,29 @@ jobs:
               throw 'An issue selector is incompatible with canary execution and preparation.'
             }
           }
+          # A re-admission is an operator decision about one refused operation, so it runs alone:
+          # no canary, no normal admission, no preparation and no issue selector beside it. Both
+          # identifiers are checked for shape here, before any token exists; eligibility, the
+          # expected revision and the reason are re-checked against the ledger by the CLI.
+          $readmit = [bool]$env:GAIA_READMIT_OPERATION
+          if ($readmit -or $env:GAIA_READMIT_REVISION -or $env:GAIA_READMIT_REASON) {
+            if (!$readmit -or !$env:GAIA_READMIT_REVISION -or [string]::IsNullOrWhiteSpace($env:GAIA_READMIT_REASON)) {
+              throw 'A re-admission names one operation, its revision and a written reason.'
+            }
+            if ($env:GAIA_READMIT_OPERATION -cnotmatch '^[a-f0-9]{64}\z' -or $env:GAIA_READMIT_REVISION -cnotmatch '^[a-f0-9]{64}\z') {
+              throw 'A re-admission names an operation id and a committed revision.'
+            }
+            if ($env:GAIA_ONE_CANARY -eq 'true' -or $normalSelected -or $env:GAIA_PREPARE_ISSUE -or $target) {
+              throw 'A re-admission runs alone.'
+            }
+          }
           $required = @(
             $env:GAIA_PUMP_APP_ID,
             $env:GAIA_PUMP_APP_PRIVATE_KEY,
             $env:GAIA_PUMP_ACTOR_ID,
             $env:GAIA_REPOSITORY_NODE_ID
           )
-          if ($env:GAIA_ONE_CANARY -ne 'true' -and !$normalSelected -and !$env:GAIA_PREPARE_ISSUE) {
+          if ($env:GAIA_ONE_CANARY -ne 'true' -and !$normalSelected -and !$env:GAIA_PREPARE_ISSUE -and !$readmit) {
             $required += $env:GAIA_MANAGED_ROUND_JSON
           }
           if ($required.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
@@ -100,6 +135,7 @@ jobs:
           }
           "normal_policy=$(if ($normalSelected) { 'true' } else { 'false' })" | Out-File $env:GITHUB_OUTPUT -Append
           "target_issue=$target" | Out-File $env:GITHUB_OUTPUT -Append
+          "readmit=$(if ($readmit) { 'true' } else { 'false' })" | Out-File $env:GITHUB_OUTPUT -Append
 
       - name: Mint a bounded pump App token
         id: pump-token
@@ -171,8 +207,39 @@ jobs:
             exit $exitCode
           }
 
+      - name: Re-admit one effect-free refusal
+        # Operator authority only: a manual dispatch naming one refused operation, and nothing
+        # else, reaches this step. It opens a successor admission (a dry run unless readmit_apply)
+        # and never admits work, calls a provider or publishes an observation. The reason reaches
+        # the CLI through env:, never interpolated into the script.
+        if: steps.identity.outputs.readmit == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ steps.pump-token.outputs.token }}
+          GAIA_PUMP_ACTOR_ID: ${{ vars.GAIA_PUMP_ACTOR_ID }}
+          GAIA_LEDGER_ROOT_OID: ${{ steps.policy.outputs.oid }}
+          GAIA_LEDGER_ROOT_REVISION: ${{ steps.policy.outputs.revision }}
+          GAIA_READMIT_OPERATION: ${{ inputs.readmit_operation }}
+          GAIA_READMIT_REVISION: ${{ inputs.readmit_revision }}
+          GAIA_READMIT_REASON: ${{ inputs.readmit_reason }}
+          GAIA_READMIT_APPLY: ${{ inputs.readmit_apply }}
+          GAIA_RECEIPT_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-receipt.json
+          GAIA_ERROR_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-error.json
+        run: |
+          & node scripts/hosted-draft-pump.mjs readmit `
+            --repository $env:GITHUB_REPOSITORY `
+            --pump-actor-id $env:GAIA_PUMP_ACTOR_ID `
+            --ledger-root-oid $env:GAIA_LEDGER_ROOT_OID `
+            --ledger-root-revision $env:GAIA_LEDGER_ROOT_REVISION `
+            1> $env:GAIA_RECEIPT_PATH 2> $env:GAIA_ERROR_PATH
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+            Move-Item -LiteralPath $env:GAIA_ERROR_PATH -Destination $env:GAIA_RECEIPT_PATH -Force
+            exit $exitCode
+          }
+
       - name: Resume or admit exactly one Draft operation
-        if: github.event_name != 'workflow_dispatch' || !inputs.prepare_issue
+        if: steps.identity.outputs.readmit != 'true' && (github.event_name != 'workflow_dispatch' || !inputs.prepare_issue)
         shell: pwsh
         # GAIA_OBSERVATION_PATH below is empty for a labeled issue run, which the CLI reads as an
         # absent value. `sequence` on a published reading is the Actions run id, and run ids

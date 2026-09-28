@@ -29,6 +29,7 @@ const OPERATION_ID = 'a'.repeat(64);
 const WORK_KEY = 'b'.repeat(64);
 const COMMITTED = 'c'.repeat(64);
 const ROOT_OID = 'd'.repeat(40);
+const READMIT_REASON = 'Admission window expired before #166; the create call never ran.';
 const ROOT_REVISION = 'e'.repeat(64);
 const GENERATION_KEY = 'f'.repeat(64);
 const LABELLED_ISSUE = 70;
@@ -57,6 +58,10 @@ function workflowText() {
 function expressions(event, temp) {
   return new Map([
     ['inputs.prepare_issue', event === 'prepare' ? String(LABELLED_ISSUE) : ''],
+    ['inputs.readmit_operation', event === 'readmit' ? OPERATION_ID : ''],
+    ['inputs.readmit_revision', event === 'readmit' ? COMMITTED : ''],
+    ['inputs.readmit_reason', event === 'readmit' ? READMIT_REASON : ''],
+    ['inputs.readmit_apply', event === 'readmit' ? 'true' : 'false'],
     ['github.event.issue.number', event.endsWith('issues') ? String(LABELLED_ISSUE) : ''],
     // The issue identity binding, in its three readings. A manual run publishes a validated
     // selection or the empty string; only when it is empty does the labelled issue show through.
@@ -101,6 +106,7 @@ function runnerEnvironment() {
     GITHUB_REPOSITORY: 'GuitarAlchemist/gaia',
     GITHUB_RUN_ID: '9001',
     GITHUB_RUN_ATTEMPT: '1',
+    GITHUB_TRIGGERING_ACTOR: 'spareilleux',
   };
 }
 
@@ -171,12 +177,13 @@ function runCommands(block) {
 /** The exact argv the runner would hand the CLI, with `$env:` reads resolved against `env`. */
 function invocation(workflow, event, temp) {
   const table = expressions(event, temp);
-  const block = intakeStepLines(workflow, event === 'prepare' ? 'enqueue' : 'intake');
+  const command = { prepare: 'enqueue', readmit: 'readmit' }[event] ?? 'intake';
+  const block = intakeStepLines(workflow, command);
   const environment = { ...runnerEnvironment(), ...stepEnvironment(block, table) };
-  const command = runCommands(block).find((line) => line.includes(SCRIPT_PATH));
-  assert.ok(command, `the run: block must invoke ${SCRIPT_PATH}`);
+  const invocationLine = runCommands(block).find((line) => line.includes(SCRIPT_PATH));
+  assert.ok(invocationLine, `the run: block must invoke ${SCRIPT_PATH}`);
 
-  const tokens = command.split(/\s+/u);
+  const tokens = invocationLine.split(/\s+/u);
   const redirect = tokens.findIndex((piece) => /^\d?[<>]/u.test(piece));
   const invoked = redirect === -1 ? tokens : tokens.slice(0, redirect);
   assert.deepEqual(invoked.slice(0, 3), ['&', 'node', SCRIPT_PATH],
@@ -297,7 +304,7 @@ test('preparation dispatch enqueues the exact issue without managed data or reco
   const bad = [...argv]; bad[bad.indexOf('--issue') + 1] = '0';
   assert.equal(await main({ argv: bad, env: environment, stdout: sink().stream,
     stderr: sink().stream, runtimeFactory: () => assert.fail('invalid input entered runtime') }), 2);
-  assert.match(workflow, /if: github.event_name != 'workflow_dispatch' \|\| !inputs.prepare_issue/u);
+  assert.match(workflow, /if: steps\.identity\.outputs\.readmit != 'true' && \(github\.event_name != 'workflow_dispatch' \|\| !inputs\.prepare_issue\)/u);
   assert.match(workflow, /GAIA_ONE_CANARY -eq 'true'.*GAIA_PREPARE_ISSUE/u);
 });
 
@@ -597,4 +604,31 @@ test('revert control: an unconditional observation path re-arms the cross-lane r
     (error) => error.code === 'IncoherentHostedDraftPump',
     'without the exclusion a healthy lane reading is refused; the gate above must fail',
   );
+});
+
+test('a re-admission dispatch reaches the CLI as the operator decision and admits nothing', async () => {
+  const workflow = workflowText();
+  const { argv, environment } = invocation(workflow, 'readmit', tmpdir());
+  assert.equal(argv[0], 'readmit');
+  for (const name of ['GAIA_MANAGED_ROUND_JSON', 'GAIA_CANARY_POLICY', 'GAIA_NORMAL_POLICY',
+    'GAIA_OBSERVATION_PATH', 'GAIA_ISSUE_NUMBER']) {
+    assert.equal(environment[name], undefined, name);
+  }
+  const seen = [];
+  const output = sink();
+  const code = await main({ argv, env: environment, stdout: output.stream, stderr: sink().stream,
+    runtimeFactory: (configuration) => {
+      assert.equal(configuration.command, 'readmit');
+      return {
+        async readmit(request) { seen.push(request); return { kind: 'Readmitted' }; },
+        async enqueue() { assert.fail('a re-admission admits nothing'); },
+        async reconcile() { assert.fail('a re-admission reconciles nothing'); },
+      };
+    } });
+  assert.equal(code, 0);
+  assert.deepEqual(seen, [{
+    operationId: OPERATION_ID, expectedRevision: COMMITTED, apply: true,
+    provenance: { reason: READMIT_REASON, runId: 9001, runAttempt: 1, triggeringActor: 'spareilleux' },
+  }]);
+  assert.equal(output.json().command, 'readmit');
 });

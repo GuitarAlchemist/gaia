@@ -141,3 +141,23 @@ test('intake reuses the pump identity and carries one data-only managed-round co
   assert.match(workflow, /ref: \$\{\{ github\.workflow_sha \}\}/u);
   assert.doesNotMatch(workflow, /docker/iu);
 });
+
+test('a re-admission runs alone on a manual dispatch, a dry run unless applied, its reason through env', () => {
+  const workflow = intake();
+  for (const input of ['readmit_operation', 'readmit_revision', 'readmit_reason']) {
+    assert.match(workflow, new RegExp(`^ {6}${input}:\n(?: {8}.+\n)*? {8}type: string\n {8}default: ''$`, 'mu'));
+  }
+  assert.match(workflow, /^ {6}readmit_apply:\n(?: {8}.+\n)*? {8}type: boolean\n {8}default: false$/mu);
+  assert.match(workflow, /throw 'A re-admission runs alone\.'/u);
+
+  const step = workflow.match(/^ {6}- name: Re-admit one effect-free refusal\n([\s\S]*?)(?=^ {6}- )/mu)?.[1];
+  assert.ok(step, 'one re-admission step');
+  assert.match(step, /^ {8}if: steps\.identity\.outputs\.readmit == 'true'$/mu);
+  assert.match(step, /hosted-draft-pump\.mjs readmit/u);
+  const run = step.slice(step.indexOf('run: |'));
+  assert.doesNotMatch(run, /\$\{\{/u, 'dispatch inputs reach the CLI through env:, never the script');
+  assert.doesNotMatch(step, /GAIA_OBSERVATION_PATH|GAIA_MANAGED_ROUND_JSON|GAIA_NORMAL_POLICY|GAIA_CANARY_POLICY/u);
+
+  assert.match(workflow, /^ {8}if: steps\.identity\.outputs\.readmit != 'true' && \(github\.event_name != 'workflow_dispatch' \|\| !inputs\.prepare_issue\)$/mu,
+    'a re-admission run admits nothing');
+});
