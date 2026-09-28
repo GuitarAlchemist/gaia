@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 2248 gates
+node --test                                   # 2266 gates
 ```
 
 Use the single Node.js version in `.node-version` (26.8.1, the latest Current release
@@ -700,7 +700,7 @@ authoritative for their named contracts.
 | `src/resume-manifest.mjs` | Pure resume-prompt check: compares a prompt's declared subject worktree, full commit, base pin and the upstream artifacts naming its entry with one observation, and refuses every disagreement by name. Repetition carries no weight; `authority: NONE`. |
 | `src/resume-manifest-git.mjs` | The check's observation adapter: worktree `HEAD` and cleanliness, the base resolved live on its remote, bounded upstream artifact text. Measures only; writes nothing, not even the index. |
 | `scripts/check-resume-prompt.mjs` | The single resume entrypoint: run before a lane is spawned or resumed from a prompt file. Exit `0` agreed / `1` refused / `2` usage / `3` fail-closed. See [`docs/resume-manifest.md`](docs/resume-manifest.md). |
-| `tests/` | 2248 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 2266 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

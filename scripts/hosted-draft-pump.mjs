@@ -11,6 +11,7 @@ import {
   DraftOperationError,
   enqueueDraft,
   listUnsettledDrafts,
+  readmitDraft,
   reconcileDraft,
 } from '../src/draft-operation-envelope.mjs';
 import {
@@ -54,7 +55,8 @@ function readNormalPolicy(path) {
 }
 const GIT_OID = /^[a-f0-9]{40}$/u;
 const REPOSITORY = /^([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)$/u;
-const COMMANDS = new Set(['enqueue', 'reconcile', 'list-unsettled', 'intake']);
+const COMMANDS = new Set(['enqueue', 'reconcile', 'list-unsettled', 'intake', 'readmit']);
+const READMISSION_REASON_LIMIT = 500;
 // Sealed per command. Never a flag and never environment-derived: a caller that could name its
 // own workflow here would mint effect authority for a run it controls.
 const ADMISSION_WORKFLOW_PATH = Object.freeze({
@@ -85,6 +87,9 @@ const COMMAND_FLAGS = Object.freeze({
     ...COMMON_FLAGS, 'issue', 'repository-node-id', 'owner', 'gate', 'check', 'eta-minutes',
     'observation-out', 'run-id', 'canary-policy', 'normal-policy',
   ]),
+  // The dispatch identity (run id, attempt, triggering actor) is read from the Actions
+  // environment only: it is who re-admitted, and a flag would let a caller name someone else.
+  readmit: new Set([...COMMON_FLAGS, 'operation-id', 'expected-revision', 'reason', 'apply']),
 });
 
 export class HostedDraftPumpCliError extends Error {
@@ -261,6 +266,23 @@ function parseConfiguration(argv, env) {
       flags, 'managed-round', env, 'GAIA_MANAGED_ROUND_JSON', 64 * 1024,
     ));
   }
+  if (command === 'readmit') {
+    configuration.operationId = sha256(flagOrEnv(
+      flags, 'operation-id', env, 'GAIA_READMIT_OPERATION',
+    ));
+    configuration.expectedRevision = sha256(flagOrEnv(
+      flags, 'expected-revision', env, 'GAIA_READMIT_REVISION',
+    ));
+    const apply = optionalFlagOrEnv(flags, 'apply', env, 'GAIA_READMIT_APPLY') ?? 'false';
+    if (apply !== 'true' && apply !== 'false') fail();
+    configuration.apply = apply === 'true';
+    configuration.provenance = Object.freeze({
+      reason: flagOrEnv(flags, 'reason', env, 'GAIA_READMIT_REASON', READMISSION_REASON_LIMIT),
+      runId: positiveInteger(envValue(env, 'GITHUB_RUN_ID')),
+      runAttempt: positiveInteger(envValue(env, 'GITHUB_RUN_ATTEMPT')),
+      triggeringActor: configuredText(envValue(env, 'GITHUB_TRIGGERING_ACTOR'), 64),
+    });
+  }
   if (command === 'intake') {
     const issue = optionalFlagOrEnv(flags, 'issue', env, 'GAIA_ISSUE_NUMBER');
     if (issue !== undefined) configuration.issue = positiveInteger(issue);
@@ -368,6 +390,7 @@ const DEFAULT_DEPENDENCIES = Object.freeze({
   reconcileDraft,
   executeManagedRoundUpdate,
   listUnsettledDrafts,
+  readmitDraft,
   readWorkflowAdmission,
   now: () => new Date().toISOString(),
 });
@@ -495,6 +518,12 @@ export function createHostedDraftPumpRuntime(
       });
       return Object.freeze({ ...result, managedRoundUpdate });
     },
+    async readmit({ operationId, expectedRevision, provenance, apply }) {
+      // The ledger store only: re-admission needs no collector, provider or effect admission.
+      return dependencies.readmitDraft(
+        operationId, expectedRevision, provenance, { store, telemetry }, { apply },
+      );
+    },
     async listUnsettled() {
       // Intake selects the policy's issue; retain the complete list for its global count.
       // The policy binding in reconcile rejects any other operation before mutation.
@@ -531,7 +560,8 @@ const RUNTIME_FAILURE_CAUSES = Object.freeze([
   [GhGitDataError, new Set(['GitHubGitDataUnavailable', 'GitDataProtocolViolation',
     'LedgerProtectionUnavailable'])],
   [DraftOperationError, new Set(['LedgerCorrupt', 'LedgerRegistryMissing',
-    'LedgerRegistryMismatch', 'LedgerWorkMissing', 'LedgerProtectionMissing', 'UnknownOperation'])],
+    'LedgerRegistryMismatch', 'LedgerWorkMissing', 'LedgerProtectionMissing', 'UnknownOperation',
+    'InvalidReadmission'])],
   [HostedDraftCollectorError, new Set(['GitHubObservationUnavailable', 'HeadIdentityAmbiguous',
     'HeadObservationInvalid', 'CommitObservationInvalid', 'IssueObservationInvalid'])],
   [HostedDraftPumpError, new Set(['InvalidUnsettledOperation', 'InvalidHostedDraftResult'])],
@@ -672,6 +702,19 @@ export async function main({
           };
         }
       }
+    } else if (configuration.command === 'readmit') {
+      const result = cloneJson(await runtime.readmit({
+        operationId: configuration.operationId,
+        expectedRevision: configuration.expectedRevision,
+        provenance: configuration.provenance,
+        apply: configuration.apply,
+      }));
+      receipt = {
+        schema: 'GaiaHostedDraftPumpCliReceiptV0', command: 'readmit',
+        operationId: configuration.operationId, apply: configuration.apply,
+        result,
+        telemetry: cloneJson(telemetry.events),
+      };
     } else {
       receipt = {
         schema: 'GaiaHostedDraftPumpCliReceiptV0', command: 'list-unsettled',

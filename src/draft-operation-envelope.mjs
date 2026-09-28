@@ -4,6 +4,11 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const GIT_OID = /^[a-f0-9]{40}$/u;
 const TERMINAL = new Set(['CREATED', 'REUSED', 'REFUSED', 'CANCELLED']);
 const EPOCH_STATES = new Set(['CLAIMED', 'INTENT', 'EFFECT_STARTED']);
+// The create call is reachable only after EFFECT_STARTED, so a refusal from these states never ran it.
+const PRE_EFFECT_STATES = new Set(['ENQUEUED', 'CLAIMED', 'INTENT']);
+const READMISSION_REASON_LIMIT = 500;
+const READMISSION_ATTEMPTS = 3;
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u;
 const notInvokedWitnesses = new WeakMap();
 
 /** Trusted preparation must be effect-free; invocation errors never attest non-invocation. */
@@ -205,6 +210,149 @@ function validateExpectedRevision(value) {
   return value;
 }
 
+/**
+ * The storage key of the chain that follows a re-admitted refusal.
+ *
+ * A first admission is stored under its work key. A successor is stored under a key derived from
+ * the refused chain it follows, so one refused terminal can have at most one successor: admissions
+ * form a line, never a fork. The key is storage only; records keep carrying the issue's work key.
+ */
+function successorAdmissionKey(predecessorAdmissionKey, predecessorTerminalRevision) {
+  return contentRevision({
+    schema: 'GaiaDraftSuccessorAdmissionKeyV0',
+    predecessorAdmissionKey, predecessorTerminalRevision,
+  });
+}
+
+/**
+ * Whether a settled chain provably never reached the create call.
+ *
+ * The ledger grammar already rejects a REFUSED after EFFECT_STARTED that lacks the NOT_INVOKED
+ * witness. This states the rule again on its own, so a later grammar change cannot widen
+ * re-admission by accident.
+ */
+function isEffectFreeRefusal(terminal) {
+  if (terminal?.outcome !== 'REFUSED') return false;
+  if (PRE_EFFECT_STATES.has(terminal.refusedFrom)) return true;
+  return terminal.refusedFrom === 'EFFECT_STARTED' && terminal.effectBoundary === 'NOT_INVOKED';
+}
+
+/**
+ * The latest operation on an admission line: past each re-admitted refusal to the successor that
+ * holds an operation. A successor opened but not yet enqueued holds none, so the refusal before it
+ * stays the head.
+ */
+async function lineHead(snapshot, inspectAdmission) {
+  let current = snapshot;
+  while (current && isEffectFreeRefusal(current.terminal)) {
+    const successor = await inspectAdmission(successorAdmissionKey(
+      current.admission.key, current.terminal.committedRevision,
+    ));
+    if (successor.state !== 'PRESENT') break;
+    current = successor.snapshot;
+  }
+  return current;
+}
+
+function firstAdmission(workKey) {
+  return closedObject([['key', workKey], ['spentGenerationKeys', Object.freeze([])]]);
+}
+
+function validateReadmissionProvenance(input) {
+  const code = 'InvalidReadmission';
+  requireExactKeys(input, ['reason', 'runId', 'runAttempt', 'triggeringActor'], code);
+  const reason = requireString(input.reason, code);
+  if (reason.trim() !== reason || reason.length > READMISSION_REASON_LIMIT) {
+    throw new DraftOperationError(code);
+  }
+  if (!Number.isSafeInteger(input.runId) || input.runId <= 0
+    || !Number.isSafeInteger(input.runAttempt) || input.runAttempt <= 0
+    || typeof input.triggeringActor !== 'string'
+    || !GITHUB_LOGIN.test(input.triggeringActor)) throw new DraftOperationError(code);
+  return closedObject([
+    ['reason', reason],
+    ['runId', input.runId],
+    ['runAttempt', input.runAttempt],
+    ['triggeringActor', input.triggeringActor],
+  ]);
+}
+
+/** The root of a successor chain, built from the refused snapshot it follows. */
+function successorRoot(predecessor, readmission) {
+  const admissionKey = successorAdmissionKey(
+    predecessor.admission.key, predecessor.terminal.committedRevision,
+  );
+  return closedObject([
+    ['schema', 'GaiaDraftWorkRootV1'],
+    ['priorCommittedRevision', 'NONE'],
+    ['kind', 'WORK_ROOT'],
+    ['workKey', predecessor.identity.workKey],
+    ['admissionKey', admissionKey],
+    ['predecessor', closedObject([
+      ['admissionKey', predecessor.admission.key],
+      ['operationId', predecessor.identity.operationId],
+      ['terminalCommittedRevision', predecessor.terminal.committedRevision],
+      ['refusal', predecessor.terminal.refusal],
+    ])],
+    ['spentGenerationKeys', Object.freeze([
+      ...predecessor.admission.spentGenerationKeys, predecessor.identity.generationKey,
+    ])],
+    ['readmission', readmission],
+  ]);
+}
+
+/**
+ * A work root read back from storage: V0 for a first admission, V1 for a successor.
+ * Returns the base work key and the admission it opens, or throws LedgerCorrupt.
+ */
+function parseWorkRoot(body, admissionKey) {
+  const code = 'LedgerCorrupt';
+  if (body?.schema === 'GaiaDraftWorkRootV0') {
+    requireExactKeys(body, ['schema', 'priorCommittedRevision', 'kind', 'workKey'], code);
+    if (body.priorCommittedRevision !== 'NONE' || body.kind !== 'WORK_ROOT'
+      || body.workKey !== admissionKey) throw new DraftOperationError(code);
+    return { workKey: body.workKey, admission: firstAdmission(body.workKey) };
+  }
+  requireExactKeys(body, [
+    'schema', 'priorCommittedRevision', 'kind', 'workKey', 'admissionKey', 'predecessor',
+    'spentGenerationKeys', 'readmission',
+  ], code);
+  requireExactKeys(body.predecessor, [
+    'admissionKey', 'operationId', 'terminalCommittedRevision', 'refusal',
+  ], code);
+  if (body.schema !== 'GaiaDraftWorkRootV1' || body.priorCommittedRevision !== 'NONE'
+    || body.kind !== 'WORK_ROOT' || body.admissionKey !== admissionKey
+    || body.admissionKey !== successorAdmissionKey(
+      requireRevision(body.predecessor.admissionKey, code),
+      requireRevision(body.predecessor.terminalCommittedRevision, code),
+    )) throw new DraftOperationError(code);
+  requireRevision(body.workKey, code);
+  requireRevision(body.predecessor.operationId, code);
+  requireString(body.predecessor.refusal, code);
+  if (!Array.isArray(body.spentGenerationKeys) || body.spentGenerationKeys.length === 0
+    || new Set(body.spentGenerationKeys).size !== body.spentGenerationKeys.length) {
+    throw new DraftOperationError(code);
+  }
+  for (const key of body.spentGenerationKeys) requireRevision(key, code);
+  // The refused operation spent the line's last generation, so its id is re-derivable here.
+  if (body.predecessor.operationId !== contentRevision({
+    schema: 'GaiaDraftOperationIdV0', workKey: body.workKey,
+    generationKey: body.spentGenerationKeys.at(-1),
+  })) throw new DraftOperationError(code);
+  try {
+    validateReadmissionProvenance(body.readmission);
+  } catch {
+    throw new DraftOperationError(code);
+  }
+  return {
+    workKey: body.workKey,
+    admission: closedObject([
+      ['key', admissionKey],
+      ['spentGenerationKeys', Object.freeze([...body.spentGenerationKeys])],
+    ]),
+  };
+}
+
 function makeRecord(kind, priorCommittedRevision, identity, payload = {}) {
   const entries = [
     ['schema', 'GaiaDraftOperationReceiptV0'],
@@ -221,8 +369,10 @@ function makeRecord(kind, priorCommittedRevision, identity, payload = {}) {
 const draftStoreCapabilities = new WeakMap();
 
 class MemoryDraftOperationStore {
+  // Chains are keyed by admission key: the work key for a first admission, a derived key after.
   #work = new Map();
   #operations = new Map();
+  #openSuccessors = new Map();
   #locks = new Map();
   #executors = new Map();
 
@@ -231,9 +381,12 @@ class MemoryDraftOperationStore {
       bootstrapAndEnqueue: this.#bootstrapAndEnqueue.bind(this),
       append: this.#append.bind(this),
       withExecutor: this.#withExecutor.bind(this),
-      inspectByWork: this.#inspectByWork.bind(this),
+      inspectByWork: this.#inspectByAdmission.bind(this),
       inspectByOperation: this.#inspectByOperation.bind(this),
       listUnsettled: this.#listUnsettled.bind(this),
+      inspectAdmission: this.#inspectAdmission.bind(this),
+      openSuccessor: this.#openSuccessor.bind(this),
+      enqueueSuccessor: this.#enqueueSuccessor.bind(this),
     }));
   }
 
@@ -277,7 +430,7 @@ class MemoryDraftOperationStore {
         ['operationId', identity.operationId],
       ]);
       const work = {
-        identity: storedIdentity, envelope, records: [
+        identity: storedIdentity, envelope, admission: firstAdmission(identity.workKey), records: [
           { body: rootBody, committedRevision: rootRevision },
           { body: enqueued, committedRevision },
         ],
@@ -292,27 +445,98 @@ class MemoryDraftOperationStore {
     });
   }
 
-  async #inspectByWork(workKey) {
-    return this.#exclusive(this.#locks, workKey, async () => this.#snapshot(this.#work.get(workKey)));
+  async #inspectAdmission(admissionKey) {
+    return this.#exclusive(this.#locks, admissionKey, async () => {
+      const work = this.#work.get(admissionKey);
+      if (work) return Object.freeze({ state: 'PRESENT', snapshot: this.#snapshot(work) });
+      const open = this.#openSuccessors.get(admissionKey);
+      if (open) {
+        return Object.freeze({
+          state: 'OPEN', workKey: open.workKey, admission: open.admission,
+          committedRevision: open.committedRevision,
+        });
+      }
+      return Object.freeze({ state: 'ABSENT' });
+    });
+  }
+
+  async #openSuccessor(rootBody) {
+    const admissionKey = rootBody.admissionKey;
+    return this.#exclusive(this.#locks, admissionKey, async () => {
+      if (this.#work.has(admissionKey) || this.#openSuccessors.has(admissionKey)) {
+        return { opened: false };
+      }
+      const { workKey, admission } = parseWorkRoot(rootBody, admissionKey);
+      const committedRevision = contentRevision(rootBody);
+      this.#openSuccessors.set(admissionKey, {
+        body: rootBody, committedRevision, workKey, admission,
+      });
+      return { opened: true, committedRevision };
+    });
+  }
+
+  async #enqueueSuccessor(admissionKey, identity, envelope) {
+    return this.#exclusive(this.#locks, admissionKey, async () => {
+      const open = this.#openSuccessors.get(admissionKey);
+      if (!open) {
+        return {
+          stale: true,
+          currentCommittedRevision: this.#work.get(admissionKey)?.committedRevision ?? 'NONE',
+        };
+      }
+      if (open.workKey !== identity.workKey) throw new DraftOperationError('LedgerCorrupt');
+      if (open.admission.spentGenerationKeys.includes(identity.generationKey)
+        || this.#operations.has(identity.operationId)) {
+        return { stale: true, currentCommittedRevision: open.committedRevision };
+      }
+      const enqueued = makeRecord('ENQUEUED', open.committedRevision, identity, { envelope });
+      const committedRevision = contentRevision(enqueued);
+      this.#openSuccessors.delete(admissionKey);
+      this.#work.set(admissionKey, {
+        identity: closedObject([
+          ['workKey', identity.workKey],
+          ['generationKey', identity.generationKey],
+          ['operationId', identity.operationId],
+        ]),
+        envelope,
+        admission: open.admission,
+        records: [
+          { body: open.body, committedRevision: open.committedRevision },
+          { body: enqueued, committedRevision },
+        ],
+        committedRevision,
+        state: 'ENQUEUED',
+        executorEpoch: null,
+        terminal: null,
+      });
+      this.#operations.set(identity.operationId, admissionKey);
+      return { stale: false, committedRevision };
+    });
+  }
+
+  async #inspectByAdmission(admissionKey) {
+    return this.#exclusive(
+      this.#locks, admissionKey, async () => this.#snapshot(this.#work.get(admissionKey)),
+    );
   }
 
   async #inspectByOperation(operationId) {
-    const workKey = this.#operations.get(operationId);
-    if (!workKey) return null;
-    return this.#inspectByWork(workKey);
+    const admissionKey = this.#operations.get(operationId);
+    if (!admissionKey) return null;
+    return this.#inspectByAdmission(admissionKey);
   }
 
   async #listUnsettled() {
     const unsettled = [];
-    for (const workKey of [...this.#work.keys()].sort()) {
-      const snapshot = await this.#inspectByWork(workKey);
+    for (const admissionKey of [...this.#work.keys()].sort()) {
+      const snapshot = await this.#inspectByAdmission(admissionKey);
       if (snapshot && !snapshot.terminal) unsettled.push(snapshot);
     }
     return Object.freeze(unsettled);
   }
 
   async inspectByWork(workKey) {
-    return this.#inspectByWork(workKey);
+    return this.#inspectByAdmission(workKey);
   }
 
   async inspectByOperation(operationId) {
@@ -320,26 +544,36 @@ class MemoryDraftOperationStore {
   }
 
   async #append(operationId, expectedCommittedRevision, kind, payload = {}) {
-    const workKey = this.#operations.get(operationId);
-    if (!workKey) throw new DraftOperationError('UnknownOperation');
-    return this.#exclusive(this.#locks, workKey, async () => {
-      const work = this.#work.get(workKey);
+    const admissionKey = this.#operations.get(operationId);
+    if (!admissionKey) throw new DraftOperationError('UnknownOperation');
+    return this.#exclusive(this.#locks, admissionKey, async () => {
+      const work = this.#work.get(admissionKey);
       if (work.committedRevision !== expectedCommittedRevision) {
         return { stale: true, current: this.#snapshot(work) };
       }
       const body = makeRecord(kind, expectedCommittedRevision, work.identity, payload);
       const committedRevision = contentRevision(body);
+      const refusedFrom = work.state;
       work.records.push({ body, committedRevision });
       work.committedRevision = committedRevision;
       work.state = kind;
       if (EPOCH_STATES.has(kind)) work.executorEpoch = payload.executorEpoch;
-      if (TERMINAL.has(kind)) work.terminal = { ...payload, outcome: kind, committedRevision };
+      if (kind === 'REFUSED') {
+        work.terminal = {
+          outcome: kind, refusal: payload.refusal, refusedFrom,
+          effectBoundary: payload.effectBoundary ?? null, committedRevision,
+        };
+      } else if (TERMINAL.has(kind)) {
+        work.terminal = { ...payload, outcome: kind, committedRevision };
+      }
       return { stale: false, current: this.#snapshot(work) };
     });
   }
 
   async readHead(workKey) {
-    const snapshot = await this.#inspectByWork(workKey);
+    const snapshot = await lineHead(
+      await this.#inspectByAdmission(workKey), this.#inspectAdmission.bind(this),
+    );
     if (!snapshot) return Object.freeze({ state: 'UNSEEN' });
     return Object.freeze({
       state: 'PRESENT', committedRevision: snapshot.committedRevision,
@@ -352,6 +586,7 @@ class MemoryDraftOperationStore {
     return deepOwnedFrozen({
       identity: work.identity,
       envelope: work.envelope,
+      admission: work.admission,
       committedRevision: work.committedRevision,
       state: work.state,
       executorEpoch: work.executorEpoch,
@@ -469,6 +704,7 @@ function validateOperationRecord(record, identity, envelope, previous) {
     }
     return {
       outcome: 'REFUSED', refusal: requireString(body.refusal, 'LedgerCorrupt'),
+      refusedFrom: previous, effectBoundary: body.effectBoundary ?? null,
       committedRevision: record.committedRevision,
     };
   }
@@ -502,11 +738,14 @@ class GitDataDraftOperationStore {
     });
     draftStoreCapabilities.set(this, Object.freeze({
       bootstrapAndEnqueue: this.#bootstrapAndEnqueue.bind(this),
-      inspectByWork: this.#inspectByWork.bind(this),
+      inspectByWork: this.#inspectByAdmission.bind(this),
       append: this.#appendOperation.bind(this),
       withExecutor: this.#withExecutor.bind(this),
       inspectByOperation: this.#inspectByOperation.bind(this),
       listUnsettled: this.#listUnsettled.bind(this),
+      inspectAdmission: this.#inspectAdmission.bind(this),
+      openSuccessor: this.#openSuccessor.bind(this),
+      enqueueSuccessor: this.#enqueueSuccessor.bind(this),
     }));
   }
 
@@ -543,27 +782,38 @@ class GitDataDraftOperationStore {
       || root.committedRevision !== this.#config.ledgerRegistryRootRevision
       || root.body.schema !== 'GaiaDraftRegistryRootV0'
       || root.body.kind !== 'REGISTRY_ROOT') throw new DraftOperationError('LedgerRegistryMismatch');
+    // Entries are keyed by admission key. A first admission's receipt names only its work key,
+    // which is its admission key; a successor's receipt also names the admission key it opens.
     const entries = new Map();
+    const admissionKeyOf = (body) => {
+      const successor = Object.hasOwn(body, 'admissionKey');
+      requireRevision(body.workKey, 'LedgerCorrupt');
+      return successor ? requireRevision(body.admissionKey, 'LedgerCorrupt') : body.workKey;
+    };
     for (const record of snapshot.records.slice(1)) {
+      const successor = Object.hasOwn(record.body, 'admissionKey');
       if (record.body.kind === 'RESERVED') {
         requireExactKeys(record.body, [
           'schema', 'priorCommittedRevision', 'kind', 'workKey',
+          ...(successor ? ['admissionKey'] : []),
         ], 'LedgerCorrupt');
-        requireRevision(record.body.workKey, 'LedgerCorrupt');
-        if (entries.has(record.body.workKey)) throw new DraftOperationError('LedgerCorrupt');
-        entries.set(record.body.workKey, { state: 'RESERVED' });
+        const admissionKey = admissionKeyOf(record.body);
+        if (entries.has(admissionKey)) throw new DraftOperationError('LedgerCorrupt');
+        entries.set(admissionKey, { state: 'RESERVED', workKey: record.body.workKey });
       } else if (record.body.kind === 'CONFIRMED') {
         requireExactKeys(record.body, [
           'schema', 'priorCommittedRevision', 'kind', 'workKey',
-          'bootstrapCommittedRevision',
+          ...(successor ? ['admissionKey'] : []), 'bootstrapCommittedRevision',
         ], 'LedgerCorrupt');
-        requireRevision(record.body.workKey, 'LedgerCorrupt');
+        const admissionKey = admissionKeyOf(record.body);
         requireRevision(record.body.bootstrapCommittedRevision, 'LedgerCorrupt');
-        if (entries.get(record.body.workKey)?.state !== 'RESERVED') {
+        const reserved = entries.get(admissionKey);
+        if (reserved?.state !== 'RESERVED' || reserved.workKey !== record.body.workKey) {
           throw new DraftOperationError('LedgerCorrupt');
         }
-        entries.set(record.body.workKey, {
+        entries.set(admissionKey, {
           state: 'CONFIRMED',
+          workKey: record.body.workKey,
           bootstrapCommittedRevision: record.body.bootstrapCommittedRevision,
           bootstrapOid: record.transportMetadata.workRootOid,
         });
@@ -574,15 +824,11 @@ class GitDataDraftOperationStore {
     return { ...snapshot, entries };
   }
 
-  #parseWorkSnapshot(workKey, snapshotInput) {
+  #parseWorkSnapshot(admissionKey, snapshotInput) {
     const snapshot = validateGitDataSnapshot(snapshotInput);
     if (snapshot.state === 'UNSEEN') return null;
     const root = snapshot.records[0];
-    requireExactKeys(root.body, [
-      'schema', 'priorCommittedRevision', 'kind', 'workKey',
-    ], 'LedgerCorrupt');
-    if (root.body.schema !== 'GaiaDraftWorkRootV0' || root.body.kind !== 'WORK_ROOT'
-      || root.body.workKey !== workKey) throw new DraftOperationError('LedgerCorrupt');
+    const { workKey, admission } = parseWorkRoot(root.body, admissionKey);
     const enqueued = snapshot.records[1];
     if (!enqueued) throw new DraftOperationError('LedgerCorrupt');
     requireExactKeys(enqueued.body, [
@@ -605,7 +851,10 @@ class GitDataDraftOperationStore {
     const identity = validateEnvelope(enqueued.body.envelope, validateSelector(selector));
     if (identity.workKey !== workKey
       || identity.generationKey !== enqueued.body.generationKey
-      || identity.operationId !== enqueued.body.operationId) throw new DraftOperationError('LedgerCorrupt');
+      || identity.operationId !== enqueued.body.operationId
+      || admission.spentGenerationKeys.includes(identity.generationKey)) {
+      throw new DraftOperationError('LedgerCorrupt');
+    }
     let state = 'ENQUEUED';
     let executorEpoch = null;
     let terminal = null;
@@ -632,6 +881,7 @@ class GitDataDraftOperationStore {
         operationId: identity.operationId,
       },
       envelope: identity.envelope,
+      admission,
       bootstrapCommittedRevision: root.committedRevision,
       bootstrapOid: root.oid,
       headOid: snapshot.headOid,
@@ -642,29 +892,26 @@ class GitDataDraftOperationStore {
     };
   }
 
-  async #readWork(workKey) {
+  async #readWork(admissionKey) {
     return this.#parseWorkSnapshot(
-      workKey, await this.#gitData.read(`${WORK_REF_PREFIX}${workKey}`),
+      admissionKey, await this.#gitData.read(`${WORK_REF_PREFIX}${admissionKey}`),
     );
   }
 
-  async #readBootstrapRoot(workKey) {
+  async #readBootstrapRoot(admissionKey) {
     const snapshot = validateGitDataSnapshot(
-      await this.#gitData.read(`${WORK_REF_PREFIX}${workKey}`),
+      await this.#gitData.read(`${WORK_REF_PREFIX}${admissionKey}`),
     );
     if (snapshot.state === 'UNSEEN') return null;
     const root = snapshot.records[0];
-    requireExactKeys(root.body, [
-      'schema', 'priorCommittedRevision', 'kind', 'workKey',
-    ], 'LedgerCorrupt');
-    if (root.body.schema !== 'GaiaDraftWorkRootV0'
-      || root.body.priorCommittedRevision !== 'NONE'
-      || root.body.kind !== 'WORK_ROOT'
-      || root.body.workKey !== workKey) throw new DraftOperationError('LedgerCorrupt');
+    const { workKey, admission } = parseWorkRoot(root.body, admissionKey);
     return {
       oid: root.oid,
       committedRevision: root.committedRevision,
       rootOnly: snapshot.records.length === 1,
+      successor: root.body.schema === 'GaiaDraftWorkRootV1',
+      workKey,
+      admission,
     };
   }
 
@@ -673,6 +920,7 @@ class GitDataDraftOperationStore {
     return deepOwnedFrozen({
       identity: work.identity,
       envelope: work.envelope,
+      admission: work.admission,
       committedRevision: work.committedRevision,
       state: work.state,
       executorEpoch: work.executorEpoch,
@@ -680,9 +928,11 @@ class GitDataDraftOperationStore {
     });
   }
 
-  async #stateByWork(workKey) {
-    const [registry, work] = await Promise.all([this.#registry(), this.#readWork(workKey)]);
-    const entry = registry.entries.get(workKey);
+  async #stateByAdmission(admissionKey) {
+    const [registry, work] = await Promise.all([
+      this.#registry(), this.#readWork(admissionKey),
+    ]);
+    const entry = registry.entries.get(admissionKey);
     if (!work && entry) throw new DraftOperationError('LedgerWorkMissing');
     if (work && entry?.state !== 'CONFIRMED') throw new DraftOperationError('LedgerCorrupt');
     if (work && entry.bootstrapCommittedRevision !== work.bootstrapCommittedRevision) {
@@ -696,7 +946,7 @@ class GitDataDraftOperationStore {
 
   #validateRegisteredWork(registry, work) {
     if (!work) return null;
-    const entry = registry.entries.get(work.identity.workKey);
+    const entry = registry.entries.get(work.admission.key);
     if (entry?.state !== 'CONFIRMED'
       || entry.bootstrapCommittedRevision !== work.bootstrapCommittedRevision
       || entry.bootstrapOid !== work.bootstrapOid) {
@@ -705,16 +955,16 @@ class GitDataDraftOperationStore {
     return work;
   }
 
-  async #inspectByWork(workKey) {
+  async #inspectByAdmission(admissionKey) {
     const registry = await this.#registry();
-    const entry = registry.entries.get(workKey);
+    const entry = registry.entries.get(admissionKey);
     if (entry?.state === 'RESERVED') {
-      const root = await this.#readBootstrapRoot(workKey);
+      const root = await this.#readBootstrapRoot(admissionKey);
       if (root && !root.rootOnly) throw new DraftOperationError('LedgerCorrupt');
       return null;
     }
     if (entry?.state === 'CONFIRMED') {
-      const root = await this.#readBootstrapRoot(workKey);
+      const root = await this.#readBootstrapRoot(admissionKey);
       if (root?.rootOnly) {
         if (entry.bootstrapCommittedRevision !== root.committedRevision) {
           throw new DraftOperationError('LedgerCorrupt');
@@ -723,7 +973,7 @@ class GitDataDraftOperationStore {
         return null;
       }
     }
-    return this.#snapshot(await this.#stateByWork(workKey));
+    return this.#snapshot(await this.#stateByAdmission(admissionKey));
   }
 
   async #inspectByOperation(operationId) {
@@ -732,21 +982,21 @@ class GitDataDraftOperationStore {
 
   async #listUnsettled() {
     const registry = await this.#registry();
-    // Every registered work key is re-read on each listing, terminal ones included, so the cost
-    // grows with the ledger. The inspections are independent reads over immutable objects;
+    // Every registered admission key is re-read on each listing, terminal ones included, so the
+    // cost grows with the ledger. The inspections are independent reads over immutable objects;
     // bounded fan-out keeps a growing ledger inside the intake's admission window. The result
-    // keeps the sorted work-key order, and any failed inspection still fails the listing.
-    const workKeys = [...registry.entries.keys()].sort();
-    const snapshots = new Array(workKeys.length);
+    // keeps the sorted admission-key order, and any failed inspection still fails the listing.
+    const admissionKeys = [...registry.entries.keys()].sort();
+    const snapshots = new Array(admissionKeys.length);
     let next = 0;
     const lane = async () => {
-      while (next < workKeys.length) {
+      while (next < admissionKeys.length) {
         const index = next++;
-        snapshots[index] = await this.#inspectByWork(workKeys[index]);
+        snapshots[index] = await this.#inspectByAdmission(admissionKeys[index]);
       }
     };
     await Promise.all(Array.from(
-      { length: Math.min(UNSETTLED_INSPECTION_CONCURRENCY, workKeys.length) }, lane,
+      { length: Math.min(UNSETTLED_INSPECTION_CONCURRENCY, admissionKeys.length) }, lane,
     ));
     return Object.freeze(snapshots.filter((snapshot) => snapshot && !snapshot.terminal));
   }
@@ -755,9 +1005,11 @@ class GitDataDraftOperationStore {
     const observed = await this.#gitData.readByOperation(operationId);
     const located = validateGitDataSnapshot(observed);
     if (located.state === 'UNSEEN') return null;
-    const workKey = located.records[0]?.body?.workKey;
-    requireRevision(workKey, 'LedgerCorrupt');
-    const work = this.#parseWorkSnapshot(workKey, observed);
+    const rootBody = located.records[0]?.body;
+    const admissionKey = rootBody?.schema === 'GaiaDraftWorkRootV1'
+      ? rootBody.admissionKey : rootBody?.workKey;
+    requireRevision(admissionKey, 'LedgerCorrupt');
+    const work = this.#parseWorkSnapshot(admissionKey, observed);
     if (work.identity.operationId !== operationId) throw new DraftOperationError('LedgerCorrupt');
     return this.#validateRegisteredWork(await this.#registry(), work);
   }
@@ -794,20 +1046,126 @@ class GitDataDraftOperationStore {
     requireRevision(expectedCommittedRevision);
     const located = await this.#stateByOperation(operationId);
     if (!located) throw new DraftOperationError('UnknownOperation');
-    const workKey = located.identity.workKey;
-    return this.#exclusive(workKey, async () => {
-      const work = await this.#stateByWork(workKey);
+    const admissionKey = located.admission.key;
+    return this.#exclusive(admissionKey, async () => {
+      const work = await this.#stateByAdmission(admissionKey);
       if (work.committedRevision !== expectedCommittedRevision) {
         return { stale: true, current: this.#snapshot(work) };
       }
       const body = makeRecord(kind, expectedCommittedRevision, work.identity, payload);
       const appended = await this.#append(
-        `${WORK_REF_PREFIX}${workKey}`, work.headOid, body,
+        `${WORK_REF_PREFIX}${admissionKey}`, work.headOid, body,
       );
       if (appended.stale) {
-        return { stale: true, current: this.#snapshot(await this.#stateByWork(workKey)) };
+        return { stale: true, current: this.#snapshot(await this.#stateByAdmission(admissionKey)) };
       }
-      return { stale: false, current: this.#snapshot(await this.#stateByWork(workKey)) };
+      return { stale: false, current: this.#snapshot(await this.#stateByAdmission(admissionKey)) };
+    });
+  }
+
+  /** Where a successor stands: never opened, half-opened, open for a generation, or in use. */
+  async #inspectAdmission(admissionKey) {
+    // The registry is read before the work ref, so a writer landing between the two reads (an
+    // operator opening this successor, or intake enqueueing on it) can leave the work ref ahead
+    // of the registry that was read. Every work-ref write follows the registry write that allows
+    // it, so a registry read after the work ref closes that gap; one that survives is corruption.
+    let registry = await this.#registry();
+    const root = await this.#readBootstrapRoot(admissionKey);
+    const ahead = (entry) => (!entry && root)
+      || (entry?.state === 'RESERVED' && root && !root.rootOnly);
+    if (ahead(registry.entries.get(admissionKey))) registry = await this.#registry();
+    const entry = registry.entries.get(admissionKey);
+    if (ahead(entry)) throw new DraftOperationError('LedgerCorrupt');
+    if (!entry) return Object.freeze({ state: 'ABSENT' });
+    if (root && (!root.successor || root.workKey !== entry.workKey)) {
+      throw new DraftOperationError('LedgerCorrupt');
+    }
+    if (entry.state === 'RESERVED') return Object.freeze({ state: 'PENDING' });
+    if (!root) throw new DraftOperationError('LedgerWorkMissing');
+    if (entry.bootstrapCommittedRevision !== root.committedRevision
+      || entry.bootstrapOid !== root.oid) throw new DraftOperationError('LedgerCorrupt');
+    if (root.rootOnly) {
+      return Object.freeze({
+        state: 'OPEN', workKey: root.workKey, admission: root.admission,
+        committedRevision: root.committedRevision,
+      });
+    }
+    return Object.freeze({
+      state: 'PRESENT', snapshot: this.#snapshot(await this.#stateByAdmission(admissionKey)),
+    });
+  }
+
+  /**
+   * Reserve, root and confirm one successor: the same resumable protocol as a first admission.
+   * A root left by an earlier interrupted run for the same predecessor is confirmed as it stands,
+   * so the first dispatcher stays the recorded one.
+   */
+  async #openSuccessor(rootBody) {
+    const admissionKey = rootBody.admissionKey;
+    const workRef = `${WORK_REF_PREFIX}${admissionKey}`;
+    return this.#exclusive(admissionKey, async () => {
+      let registry = await this.#registry();
+      let entry = registry.entries.get(admissionKey);
+      let root = await this.#readBootstrapRoot(admissionKey);
+      if (entry?.state === 'CONFIRMED') return { opened: false };
+      if (!entry) {
+        if (root) throw new DraftOperationError('LedgerCorrupt');
+        const reserved = await this.#append(REGISTRY_REF, registry.headOid, closedObject([
+          ['schema', 'GaiaDraftRegistryReceiptV0'],
+          ['priorCommittedRevision', registry.committedRevision],
+          ['kind', 'RESERVED'],
+          ['workKey', rootBody.workKey],
+          ['admissionKey', admissionKey],
+        ]));
+        if (reserved.stale) return { stale: true };
+        registry = await this.#registry();
+        entry = registry.entries.get(admissionKey);
+      }
+      if (entry?.state !== 'RESERVED' || entry.workKey !== rootBody.workKey) {
+        throw new DraftOperationError('LedgerCorrupt');
+      }
+      if (!root) {
+        const appendedRoot = await this.#append(workRef, 'NONE', rootBody);
+        root = appendedRoot.stale ? await this.#readBootstrapRoot(admissionKey) : {
+          oid: appendedRoot.oid, committedRevision: appendedRoot.committedRevision,
+          rootOnly: true, successor: true, workKey: rootBody.workKey,
+        };
+      }
+      if (!root?.rootOnly || !root.successor || root.workKey !== rootBody.workKey) {
+        throw new DraftOperationError('LedgerCorrupt');
+      }
+      registry = await this.#registry();
+      const confirmed = await this.#append(REGISTRY_REF, registry.headOid, closedObject([
+        ['schema', 'GaiaDraftRegistryReceiptV0'],
+        ['priorCommittedRevision', registry.committedRevision],
+        ['kind', 'CONFIRMED'],
+        ['workKey', rootBody.workKey],
+        ['admissionKey', admissionKey],
+        ['bootstrapCommittedRevision', root.committedRevision],
+      ]), closedObject([['workRootOid', root.oid]]));
+      if (confirmed.stale) return { stale: true };
+      return { opened: true, committedRevision: root.committedRevision };
+    });
+  }
+
+  async #enqueueSuccessor(admissionKey, identity, envelope) {
+    return this.#exclusive(admissionKey, async () => {
+      const opened = await this.#inspectAdmission(admissionKey);
+      if (opened.state === 'PRESENT') {
+        return { stale: true, currentCommittedRevision: opened.snapshot.committedRevision };
+      }
+      if (opened.state !== 'OPEN') return { stale: true, currentCommittedRevision: 'NONE' };
+      if (opened.workKey !== identity.workKey) throw new DraftOperationError('LedgerCorrupt');
+      if (opened.admission.spentGenerationKeys.includes(identity.generationKey)) {
+        return { stale: true, currentCommittedRevision: opened.committedRevision };
+      }
+      const root = await this.#readBootstrapRoot(admissionKey);
+      const enqueuedBody = makeRecord('ENQUEUED', root.committedRevision, identity, { envelope });
+      const enqueued = await this.#append(
+        `${WORK_REF_PREFIX}${admissionKey}`, root.oid, enqueuedBody,
+      );
+      if (enqueued.stale) return { stale: true, currentCommittedRevision: root.committedRevision };
+      return { stale: false, committedRevision: enqueued.committedRevision };
     });
   }
 
@@ -897,7 +1255,9 @@ class GitDataDraftOperationStore {
 
   async readHead(workKey) {
     requireRevision(workKey, 'InvalidWorkKey');
-    const work = await this.#inspectByWork(workKey);
+    const work = await lineHead(
+      await this.#inspectByAdmission(workKey), this.#inspectAdmission.bind(this),
+    );
     if (!work) return Object.freeze({ state: 'UNSEEN' });
     return Object.freeze({
       state: 'PRESENT', committedRevision: work.committedRevision, recordKind: work.state,
@@ -1006,7 +1366,30 @@ export async function enqueueDraft(selectorInput, expectedCommittedRevision, por
   validateExpectedRevision(expectedCommittedRevision);
   const observed = await ports.collector.collect(selector);
   const identity = validateEnvelope(observed, selector);
-  const current = await storeCapabilities(ports.store).inspectByWork(identity.workKey);
+  const capabilities = storeCapabilities(ports.store);
+  let current = await capabilities.inspectByWork(identity.workKey);
+  // Walk the admission line: past each re-admitted refusal to the chain an operator opened after
+  // it. A refusal nobody re-admitted ends the walk, and the answer stays StaleRevision.
+  while (current && isEffectFreeRefusal(current.terminal)) {
+    const admissionKey = successorAdmissionKey(
+      current.admission.key, current.terminal.committedRevision,
+    );
+    const successor = await capabilities.inspectAdmission(admissionKey);
+    if (successor.state === 'OPEN') {
+      if (expectedCommittedRevision !== 'NONE') return stale(current);
+      const committed = await capabilities.enqueueSuccessor(
+        admissionKey, identity, identity.envelope,
+      );
+      if (committed.stale) return stale({ committedRevision: committed.currentCommittedRevision });
+      await emit(ports, { kind: 'ENQUEUED', operationId: identity.operationId });
+      return {
+        kind: 'Enqueued', operationId: identity.operationId, workKey: identity.workKey,
+        generationKey: identity.generationKey, committedRevision: committed.committedRevision,
+      };
+    }
+    if (successor.state !== 'PRESENT') break;
+    current = successor.snapshot;
+  }
   if (current) {
     if (expectedCommittedRevision === 'NONE'
       || expectedCommittedRevision !== current.committedRevision) return stale(current);
@@ -1028,6 +1411,53 @@ export async function enqueueDraft(selectorInput, expectedCommittedRevision, por
     kind: 'Enqueued', operationId: identity.operationId, workKey: identity.workKey,
     generationKey: identity.generationKey, committedRevision: committed.committedRevision,
   };
+}
+
+/**
+ * Open one successor admission after an effect-free refusal. Dry run unless `apply` is true.
+ *
+ * The refused chain is never touched: nothing is appended after a terminal record. The operator's
+ * written reason and the dispatch that carried it become the successor root's content. The only
+ * caller is an operator-dispatched run; intake has no path that reaches this function.
+ */
+export async function readmitDraft(operationId, expectedCommittedRevision, provenance, ports,
+  { apply = false } = {}) {
+  requireRevision(operationId, 'InvalidOperationId');
+  requireRevision(expectedCommittedRevision);
+  const readmission = validateReadmissionProvenance(provenance);
+  if (typeof apply !== 'boolean') throw new DraftOperationError('InvalidReadmission');
+  const capabilities = storeCapabilities(ports?.store);
+  const snapshot = await capabilities.inspectByOperation(operationId);
+  if (!snapshot) throw new DraftOperationError('UnknownOperation');
+  if (snapshot.committedRevision !== expectedCommittedRevision) return stale(snapshot);
+  if (!isEffectFreeRefusal(snapshot.terminal)) {
+    return {
+      kind: 'NotReadmissible', operationId, state: snapshot.state,
+      outcome: snapshot.terminal?.outcome ?? null, committedRevision: snapshot.committedRevision,
+    };
+  }
+  const root = successorRoot(snapshot, readmission);
+  const planned = {
+    operationId, workKey: snapshot.identity.workKey, refusal: snapshot.terminal.refusal,
+    committedRevision: snapshot.committedRevision, admissionKey: root.admissionKey,
+  };
+  const existing = await capabilities.inspectAdmission(root.admissionKey);
+  if (existing.state === 'OPEN' || existing.state === 'PRESENT') {
+    return { kind: 'AlreadyReadmitted', ...planned };
+  }
+  if (!apply) return { kind: 'ReadmissionPlanned', ...planned };
+  // The refused chain is terminal and cannot move, so a stale write here only means another
+  // admission moved the shared registry first. Opening resumes from whatever landed, so it is
+  // retried a bounded number of times before the run reports the contention.
+  let opened;
+  for (let attempt = 1; attempt <= READMISSION_ATTEMPTS; attempt += 1) {
+    opened = await capabilities.openSuccessor(root);
+    if (!opened.stale) break;
+  }
+  if (opened.stale) return { kind: 'ReadmissionContended', ...planned };
+  if (!opened.opened) return { kind: 'AlreadyReadmitted', ...planned };
+  await emit(ports, { kind: 'READMITTED', operationId, admissionKey: root.admissionKey });
+  return { kind: 'Readmitted', ...planned, successorRootRevision: opened.committedRevision };
 }
 
 function providerRequest(snapshot) {
