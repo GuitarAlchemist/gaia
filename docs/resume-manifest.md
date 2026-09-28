@@ -104,8 +104,11 @@ adapter, `RESUME_OBSERVATION_UNAVAILABLE` with one of `SUBJECT_UNREADABLE`,
 Exit codes follow the repository's: `0` agreed · `1` refused, the check completed and the prompt
 disagrees with its world (fix the prompt; retrying cannot help) · `2` usage error, including a
 malformed declaration such as an abbreviated commit, or `--help` beside any other argument · `3`
-fail-closed, the check could not complete (a Git timeout or an unreadable artifact may clear on a
-retry). A runner can therefore retry `3` and stop on `1` without parsing output.
+fail-closed, the check could not complete. A runner can stop on `1` without parsing output. Only
+some `3` causes are transient (a Git timeout, `BASE_UNRESOLVED` on a flaky network, a file still
+being written); others never clear (`UPSTREAM_TOO_LARGE`, a non-UTF-8 artifact or prompt,
+`SUBJECT_NOT_WORKTREE_ROOT`, `BASE_REMOTE_UNKNOWN`). So a runner that retries `3` bounds its
+retries and treats the stderr detail as final once they run out.
 
 ## Entrypoint
 

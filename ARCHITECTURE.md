@@ -78,7 +78,7 @@ only in the final column and must not escape in a result or refusal.
 | Factory telemetry | `record(phase)`; `replay(events) -> lifecycle or refusal` | Closed evidence events and freshness projection | local evidence log; wmux/Claude sensor; deterministic fixtures |
 | Continuity successor tracer | `accept(input) -> receipt or refusal`; `replace(input) -> receipt or refusal`; `deliverWake(input) -> receipt or refusal`; `consume(input) -> portable receipt or refusal`; `inspect(input) -> projection or refusal` | One Work Identity owns one successor slot; only generation 0 may be replaced by generation 1. Revisioned transitions replay exact response bytes, evidence age never moves backward, and no decision is admitted before one exact bus wake is durably reconciled. The post-consumption receipt is authority-empty and cannot grant implementation or merge authority | Node SQLite WAL store with serialized transitions; bus evidence cursor/checkpoint/idempotent-send adapter over the existing event log; ecosystem-neutral JSON Schema and bounded fixtures; Demerzel read-only validator |
 | Lane generation bootstrap | `bootstrapLaneGeneration(manifest, ports) -> receipt or refusal`; `verifyLaneLaunchReceipt(receipt) -> receipt or refusal` | Work-scoped execution exclusion, topology before spawn, verified launch receipt, and recoverable CAS cleanup intent | deterministic shared-instance in-memory generation store; deterministic lane-adapter fixture; production exclusion not shipped |
-| Resume-prompt check | `checkResumePrompt(prompt, manifest, observation) -> verdict or refusal`; `observeResumeWorld(manifest) -> observation or refusal` | A lane prompt's declared subject worktree, generation, base pin and blocking upstream verdicts are compared with one fresh observation before any spawn or resume. The text must carry each declared binding, repeated text carries no weight, every disagreement is a named refusal, and agreement grants no authority | read-only Git worktree, live remote and artifact-file observation adapter; read-only CLI; deterministic in-memory fixtures |
+| Resume-prompt check | `checkResumePrompt(prompt, manifest, observation) -> verdict or refusal`; `observeResumeWorld(manifest) -> observation or refusal` | A lane prompt's declared subject worktree, generation, base pin and the upstream artifacts naming its entry are compared with one fresh observation before any spawn or resume. The text must carry each declared binding, repeated text carries no weight, every disagreement is a named refusal, and agreement grants no authority | read-only Git worktree, live remote and artifact-file observation adapter; read-only CLI; deterministic in-memory fixtures |
 | Control room | `render(snapshot, observed instant) -> read model` | Authority-free operator projection | static HTML/dashboard; in-memory snapshots |
 | Hybrid search | `index(corpus)`; `query(request) -> matches or refusal` | Advisory retrieval with provenance | local JavaScript engine; optional IX embedding input |
 | Architecture drift | `checkArchitectureDrift(inventory) -> report or refusal` | Normalized repository inventory | filesystem inventory; deterministic in-memory inventory |
@@ -138,9 +138,10 @@ observation: the worktree must be at that generation and clean, the pin must equ
 resolved on its remote at check time, every declared upstream artifact naming the generation
 must be cited whatever its verdict shape, and the text must carry each declared binding.
 Confidence never comes from repeated text. The core is pure over the supplied observation,
-reports every disagreement as a named refusal, writes nothing and grants nothing. It is the single entrypoint for the lane runner
-that issue #103 brings into the repository; until then an operator runs it before the out-of-tree
-launcher, and no runtime here spawns a lane from a prompt file.
+reports every disagreement as a named refusal, writes nothing and grants nothing. It is the
+single entrypoint for the lane runner that issue #103 brings into the repository; until then an
+operator runs it before the out-of-tree launcher, and no runtime here spawns a lane from a prompt
+file.
 
 The principal operation lifecycle is observation -> eligible claim -> intent -> effect started ->
 reconciliation -> terminal receipt. Draft operations preserve `ENQUEUED`, `CLAIMED`, `INTENT`,
