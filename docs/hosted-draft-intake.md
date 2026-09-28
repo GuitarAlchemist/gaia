@@ -464,12 +464,23 @@ run admits no work, calls no provider and publishes no observation. Scheduled an
 reach it, and the pump has no code path that opens a successor on its own. Whoever may dispatch the
 workflow may re-admit, and the ledger records who did.
 
+The identity gate refuses a re-admission that is incomplete or combined with anything else, and it
+also refuses `readmit_apply` ticked with no operation, so a mistaken dispatch never falls through to
+an ordinary intake run. A green run means `ReadmissionPlanned`, `Readmitted` or `AlreadyReadmitted`.
+Every other result (`NotReadmissible`, `StaleRevision`, `ReadmissionContended`) fails the run, and
+the receipt that names it is still uploaded. `ReadmissionContended` means other admissions kept
+moving the shared registry: opening is retried three times from whatever already landed, and the
+next dispatch resumes it. Nothing is admitted in the meantime.
+
 **What intake does with a successor.** `enqueueDraft` walks the admission line. It reads the base work
 key, and while the current chain is a re-admissible terminal whose successor exists, it moves to the
 successor. A root-only successor receives the new generation's `ENQUEUED` under the same `NONE`
 contract as a first admission, unless that generation is spent, in which case the result is
 `StaleRevision`. A missing successor also leaves the result `StaleRevision`, exactly as before:
-waiting never re-admits anything. `CrossGenerationIntent` is decided on the resolved chain.
+waiting never re-admits anything. `CrossGenerationIntent` is decided on the resolved chain. An intake
+that reads a successor while an operator is opening it can see the work ref before the registry
+entry that allows it. The store re-reads the registry once before calling that corruption, so the
+intake sees the successor pending or open.
 
 ## Starvation: why the schedule must admit, and why probing is mandatory
 

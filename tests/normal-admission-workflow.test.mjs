@@ -67,7 +67,8 @@ function runIdentityScript(scriptBody, env) {
         GAIA_PUMP_APP_ID: '', GAIA_PUMP_APP_PRIVATE_KEY: '', GAIA_PUMP_ACTOR_ID: '',
         GAIA_REPOSITORY_NODE_ID: '', GAIA_MANAGED_ROUND_JSON: '', GAIA_ONE_CANARY: '',
         GAIA_PREPARE_ISSUE: '', GAIA_NORMAL_POLICY_DISPATCH: '', GAIA_NORMAL_POLICY_VAR: '',
-        GAIA_TARGET_ISSUE: '',
+        GAIA_TARGET_ISSUE: '', GAIA_READMIT_OPERATION: '', GAIA_READMIT_REVISION: '',
+        GAIA_READMIT_REASON: '', GAIA_READMIT_APPLY: '',
         GITHUB_OUTPUT: outputPath, ...env },
     });
     let outputs = {};
@@ -454,4 +455,85 @@ test('the selector reaches the CLI through the environment, never through shell 
     workflow, /--issue \$\{\{/u,
     'a selector spliced into the command line is a shell injection seam, not an argument',
   );
+});
+
+const READMISSION = Object.freeze({
+  ...REQUIRED_IDENTITY,
+  GAIA_READMIT_OPERATION: 'a'.repeat(64),
+  GAIA_READMIT_REVISION: 'b'.repeat(64),
+  GAIA_READMIT_REASON: 'Admission window expired before #166; the create call never ran.',
+  GAIA_READMIT_APPLY: 'false',
+});
+
+test('a re-admission runs alone, names all three fields, and apply alone is refused', PWSH, () => {
+  const alone = runIdentityScript(identityScript(), READMISSION);
+  assert.equal(alone.status, 0, alone.stderr);
+  assert.equal(alone.outputs.readmit, 'true', 'a re-admission needs no managed-round data');
+
+  const control = runIdentityScript(identityScript(), {
+    ...REQUIRED_IDENTITY, GAIA_MANAGED_ROUND_JSON: '{"fixture":true}', GAIA_READMIT_APPLY: 'false',
+  });
+  assert.equal(control.status, 0, control.stderr);
+  assert.equal(control.outputs.readmit, 'false', 'the unticked apply box selects nothing');
+
+  const refusals = {
+    'apply ticked with no operation': {
+      ...REQUIRED_IDENTITY, GAIA_MANAGED_ROUND_JSON: '{"fixture":true}', GAIA_READMIT_APPLY: 'true',
+    },
+    'no reason': { ...READMISSION, GAIA_READMIT_REASON: '  ' },
+    'no revision': { ...READMISSION, GAIA_READMIT_REVISION: '' },
+    'a malformed operation id': { ...READMISSION, GAIA_READMIT_OPERATION: 'A'.repeat(64) },
+    'beside the canary': { ...READMISSION, GAIA_ONE_CANARY: 'true' },
+    'beside normal admission': { ...READMISSION, GAIA_NORMAL_POLICY_DISPATCH: 'true' },
+    'beside preparation': { ...READMISSION, GAIA_PREPARE_ISSUE: '93' },
+    'beside an issue selector': {
+      ...READMISSION, GAIA_TARGET_ISSUE: '93', GAIA_NORMAL_POLICY_DISPATCH: 'true',
+    },
+  };
+  for (const [name, env] of Object.entries(refusals)) {
+    const { status, outputs } = runIdentityScript(identityScript(), env);
+    assert.notEqual(status, 0, `${name} is refused`);
+    assert.equal(outputs.readmit, undefined, `${name} publishes no selection`);
+  }
+});
+
+/** Runs the re-admission step's body with `node` standing in for the CLI, printing `receipt`. */
+function runReadmitStep(receipt) {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-readmit-step-'));
+  try {
+    const scriptPath = join(scratch, 'readmit.ps1');
+    const receiptPath = join(scratch, 'receipt.json');
+    const body = runBody(stepBlock(workflowText(), 'Re-admit one effect-free refusal'));
+    writeFileSync(scriptPath, [
+      `function node { $global:LASTEXITCODE = 0; '${JSON.stringify(receipt)}' }`, body,
+    ].join('\n'), 'utf8');
+    const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', scriptPath], {
+      encoding: 'utf8',
+      timeout: 30000,
+      env: { ...process.env,
+        GITHUB_REPOSITORY: 'GuitarAlchemist/gaia', GAIA_PUMP_ACTOR_ID: '1234',
+        GAIA_LEDGER_ROOT_OID: '1'.repeat(40), GAIA_LEDGER_ROOT_REVISION: 'c'.repeat(64),
+        GAIA_RECEIPT_PATH: receiptPath, GAIA_ERROR_PATH: join(scratch, 'error.json') },
+    });
+    return {
+      status: result.status, stderr: result.stderr,
+      receipt: JSON.parse(readFileSync(receiptPath, 'utf8')),
+    };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+test('a refused re-admission fails its run and still leaves the receipt for upload', PWSH, () => {
+  for (const kind of ['ReadmissionPlanned', 'Readmitted', 'AlreadyReadmitted']) {
+    const { status, stderr, receipt } = runReadmitStep({ command: 'readmit', result: { kind } });
+    assert.equal(status, 0, `${kind}: ${stderr}`);
+    assert.equal(receipt.result.kind, kind);
+  }
+  for (const kind of ['NotReadmissible', 'StaleRevision', 'ReadmissionContended']) {
+    const { status, stderr, receipt } = runReadmitStep({ command: 'readmit', result: { kind } });
+    assert.notEqual(status, 0, `${kind} fails the run`);
+    assert.ok(stderr.includes(`The re-admission was refused: ${kind}.`), stderr);
+    assert.equal(receipt.result.kind, kind, `${kind}: the receipt is what gets uploaded`);
+  }
 });

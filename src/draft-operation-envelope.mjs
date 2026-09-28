@@ -7,6 +7,7 @@ const EPOCH_STATES = new Set(['CLAIMED', 'INTENT', 'EFFECT_STARTED']);
 // The create call is reachable only after EFFECT_STARTED, so a refusal from these states never ran it.
 const PRE_EFFECT_STATES = new Set(['ENQUEUED', 'CLAIMED', 'INTENT']);
 const READMISSION_REASON_LIMIT = 500;
+const READMISSION_ATTEMPTS = 3;
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u;
 const notInvokedWitnesses = new WeakMap();
 
@@ -236,6 +237,23 @@ function isEffectFreeRefusal(terminal) {
   return terminal.refusedFrom === 'EFFECT_STARTED' && terminal.effectBoundary === 'NOT_INVOKED';
 }
 
+/**
+ * The latest operation on an admission line: past each re-admitted refusal to the successor that
+ * holds an operation. A successor opened but not yet enqueued holds none, so the refusal before it
+ * stays the head.
+ */
+async function lineHead(snapshot, inspectAdmission) {
+  let current = snapshot;
+  while (current && isEffectFreeRefusal(current.terminal)) {
+    const successor = await inspectAdmission(successorAdmissionKey(
+      current.admission.key, current.terminal.committedRevision,
+    ));
+    if (successor.state !== 'PRESENT') break;
+    current = successor.snapshot;
+  }
+  return current;
+}
+
 function firstAdmission(workKey) {
   return closedObject([['key', workKey], ['spentGenerationKeys', Object.freeze([])]]);
 }
@@ -316,6 +334,11 @@ function parseWorkRoot(body, admissionKey) {
     throw new DraftOperationError(code);
   }
   for (const key of body.spentGenerationKeys) requireRevision(key, code);
+  // The refused operation spent the line's last generation, so its id is re-derivable here.
+  if (body.predecessor.operationId !== contentRevision({
+    schema: 'GaiaDraftOperationIdV0', workKey: body.workKey,
+    generationKey: body.spentGenerationKeys.at(-1),
+  })) throw new DraftOperationError(code);
   try {
     validateReadmissionProvenance(body.readmission);
   } catch {
@@ -358,7 +381,7 @@ class MemoryDraftOperationStore {
       bootstrapAndEnqueue: this.#bootstrapAndEnqueue.bind(this),
       append: this.#append.bind(this),
       withExecutor: this.#withExecutor.bind(this),
-      inspectByWork: this.#inspectByWork.bind(this),
+      inspectByWork: this.#inspectByAdmission.bind(this),
       inspectByOperation: this.#inspectByOperation.bind(this),
       listUnsettled: this.#listUnsettled.bind(this),
       inspectAdmission: this.#inspectAdmission.bind(this),
@@ -491,27 +514,29 @@ class MemoryDraftOperationStore {
     });
   }
 
-  async #inspectByWork(workKey) {
-    return this.#exclusive(this.#locks, workKey, async () => this.#snapshot(this.#work.get(workKey)));
+  async #inspectByAdmission(admissionKey) {
+    return this.#exclusive(
+      this.#locks, admissionKey, async () => this.#snapshot(this.#work.get(admissionKey)),
+    );
   }
 
   async #inspectByOperation(operationId) {
-    const workKey = this.#operations.get(operationId);
-    if (!workKey) return null;
-    return this.#inspectByWork(workKey);
+    const admissionKey = this.#operations.get(operationId);
+    if (!admissionKey) return null;
+    return this.#inspectByAdmission(admissionKey);
   }
 
   async #listUnsettled() {
     const unsettled = [];
-    for (const workKey of [...this.#work.keys()].sort()) {
-      const snapshot = await this.#inspectByWork(workKey);
+    for (const admissionKey of [...this.#work.keys()].sort()) {
+      const snapshot = await this.#inspectByAdmission(admissionKey);
       if (snapshot && !snapshot.terminal) unsettled.push(snapshot);
     }
     return Object.freeze(unsettled);
   }
 
   async inspectByWork(workKey) {
-    return this.#inspectByWork(workKey);
+    return this.#inspectByAdmission(workKey);
   }
 
   async inspectByOperation(operationId) {
@@ -546,7 +571,9 @@ class MemoryDraftOperationStore {
   }
 
   async readHead(workKey) {
-    const snapshot = await this.#inspectByWork(workKey);
+    const snapshot = await lineHead(
+      await this.#inspectByAdmission(workKey), this.#inspectAdmission.bind(this),
+    );
     if (!snapshot) return Object.freeze({ state: 'UNSEEN' });
     return Object.freeze({
       state: 'PRESENT', committedRevision: snapshot.committedRevision,
@@ -711,7 +738,7 @@ class GitDataDraftOperationStore {
     });
     draftStoreCapabilities.set(this, Object.freeze({
       bootstrapAndEnqueue: this.#bootstrapAndEnqueue.bind(this),
-      inspectByWork: this.#inspectByWork.bind(this),
+      inspectByWork: this.#inspectByAdmission.bind(this),
       append: this.#appendOperation.bind(this),
       withExecutor: this.#withExecutor.bind(this),
       inspectByOperation: this.#inspectByOperation.bind(this),
@@ -901,7 +928,7 @@ class GitDataDraftOperationStore {
     });
   }
 
-  async #stateByWork(admissionKey) {
+  async #stateByAdmission(admissionKey) {
     const [registry, work] = await Promise.all([
       this.#registry(), this.#readWork(admissionKey),
     ]);
@@ -928,16 +955,16 @@ class GitDataDraftOperationStore {
     return work;
   }
 
-  async #inspectByWork(workKey) {
+  async #inspectByAdmission(admissionKey) {
     const registry = await this.#registry();
-    const entry = registry.entries.get(workKey);
+    const entry = registry.entries.get(admissionKey);
     if (entry?.state === 'RESERVED') {
-      const root = await this.#readBootstrapRoot(workKey);
+      const root = await this.#readBootstrapRoot(admissionKey);
       if (root && !root.rootOnly) throw new DraftOperationError('LedgerCorrupt');
       return null;
     }
     if (entry?.state === 'CONFIRMED') {
-      const root = await this.#readBootstrapRoot(workKey);
+      const root = await this.#readBootstrapRoot(admissionKey);
       if (root?.rootOnly) {
         if (entry.bootstrapCommittedRevision !== root.committedRevision) {
           throw new DraftOperationError('LedgerCorrupt');
@@ -946,7 +973,7 @@ class GitDataDraftOperationStore {
         return null;
       }
     }
-    return this.#snapshot(await this.#stateByWork(workKey));
+    return this.#snapshot(await this.#stateByAdmission(admissionKey));
   }
 
   async #inspectByOperation(operationId) {
@@ -955,21 +982,21 @@ class GitDataDraftOperationStore {
 
   async #listUnsettled() {
     const registry = await this.#registry();
-    // Every registered work key is re-read on each listing, terminal ones included, so the cost
-    // grows with the ledger. The inspections are independent reads over immutable objects;
+    // Every registered admission key is re-read on each listing, terminal ones included, so the
+    // cost grows with the ledger. The inspections are independent reads over immutable objects;
     // bounded fan-out keeps a growing ledger inside the intake's admission window. The result
-    // keeps the sorted work-key order, and any failed inspection still fails the listing.
-    const workKeys = [...registry.entries.keys()].sort();
-    const snapshots = new Array(workKeys.length);
+    // keeps the sorted admission-key order, and any failed inspection still fails the listing.
+    const admissionKeys = [...registry.entries.keys()].sort();
+    const snapshots = new Array(admissionKeys.length);
     let next = 0;
     const lane = async () => {
-      while (next < workKeys.length) {
+      while (next < admissionKeys.length) {
         const index = next++;
-        snapshots[index] = await this.#inspectByWork(workKeys[index]);
+        snapshots[index] = await this.#inspectByAdmission(admissionKeys[index]);
       }
     };
     await Promise.all(Array.from(
-      { length: Math.min(UNSETTLED_INSPECTION_CONCURRENCY, workKeys.length) }, lane,
+      { length: Math.min(UNSETTLED_INSPECTION_CONCURRENCY, admissionKeys.length) }, lane,
     ));
     return Object.freeze(snapshots.filter((snapshot) => snapshot && !snapshot.terminal));
   }
@@ -1021,7 +1048,7 @@ class GitDataDraftOperationStore {
     if (!located) throw new DraftOperationError('UnknownOperation');
     const admissionKey = located.admission.key;
     return this.#exclusive(admissionKey, async () => {
-      const work = await this.#stateByWork(admissionKey);
+      const work = await this.#stateByAdmission(admissionKey);
       if (work.committedRevision !== expectedCommittedRevision) {
         return { stale: true, current: this.#snapshot(work) };
       }
@@ -1030,28 +1057,30 @@ class GitDataDraftOperationStore {
         `${WORK_REF_PREFIX}${admissionKey}`, work.headOid, body,
       );
       if (appended.stale) {
-        return { stale: true, current: this.#snapshot(await this.#stateByWork(admissionKey)) };
+        return { stale: true, current: this.#snapshot(await this.#stateByAdmission(admissionKey)) };
       }
-      return { stale: false, current: this.#snapshot(await this.#stateByWork(admissionKey)) };
+      return { stale: false, current: this.#snapshot(await this.#stateByAdmission(admissionKey)) };
     });
   }
 
   /** Where a successor stands: never opened, half-opened, open for a generation, or in use. */
   async #inspectAdmission(admissionKey) {
-    const registry = await this.#registry();
-    const entry = registry.entries.get(admissionKey);
+    // The registry is read before the work ref, so a writer landing between the two reads (an
+    // operator opening this successor, or intake enqueueing on it) can leave the work ref ahead
+    // of the registry that was read. Every work-ref write follows the registry write that allows
+    // it, so a registry read after the work ref closes that gap; one that survives is corruption.
+    let registry = await this.#registry();
     const root = await this.#readBootstrapRoot(admissionKey);
-    if (!entry) {
-      if (root) throw new DraftOperationError('LedgerCorrupt');
-      return Object.freeze({ state: 'ABSENT' });
-    }
+    const ahead = (entry) => (!entry && root)
+      || (entry?.state === 'RESERVED' && root && !root.rootOnly);
+    if (ahead(registry.entries.get(admissionKey))) registry = await this.#registry();
+    const entry = registry.entries.get(admissionKey);
+    if (ahead(entry)) throw new DraftOperationError('LedgerCorrupt');
+    if (!entry) return Object.freeze({ state: 'ABSENT' });
     if (root && (!root.successor || root.workKey !== entry.workKey)) {
       throw new DraftOperationError('LedgerCorrupt');
     }
-    if (entry.state === 'RESERVED') {
-      if (root && !root.rootOnly) throw new DraftOperationError('LedgerCorrupt');
-      return Object.freeze({ state: 'PENDING' });
-    }
+    if (entry.state === 'RESERVED') return Object.freeze({ state: 'PENDING' });
     if (!root) throw new DraftOperationError('LedgerWorkMissing');
     if (entry.bootstrapCommittedRevision !== root.committedRevision
       || entry.bootstrapOid !== root.oid) throw new DraftOperationError('LedgerCorrupt');
@@ -1062,7 +1091,7 @@ class GitDataDraftOperationStore {
       });
     }
     return Object.freeze({
-      state: 'PRESENT', snapshot: this.#snapshot(await this.#stateByWork(admissionKey)),
+      state: 'PRESENT', snapshot: this.#snapshot(await this.#stateByAdmission(admissionKey)),
     });
   }
 
@@ -1226,7 +1255,9 @@ class GitDataDraftOperationStore {
 
   async readHead(workKey) {
     requireRevision(workKey, 'InvalidWorkKey');
-    const work = await this.#inspectByWork(workKey);
+    const work = await lineHead(
+      await this.#inspectByAdmission(workKey), this.#inspectAdmission.bind(this),
+    );
     if (!work) return Object.freeze({ state: 'UNSEEN' });
     return Object.freeze({
       state: 'PRESENT', committedRevision: work.committedRevision, recordKind: work.state,
@@ -1415,8 +1446,15 @@ export async function readmitDraft(operationId, expectedCommittedRevision, prove
     return { kind: 'AlreadyReadmitted', ...planned };
   }
   if (!apply) return { kind: 'ReadmissionPlanned', ...planned };
-  const opened = await capabilities.openSuccessor(root);
-  if (opened.stale) return { kind: 'StaleRevision', currentCommittedRevision: snapshot.committedRevision };
+  // The refused chain is terminal and cannot move, so a stale write here only means another
+  // admission moved the shared registry first. Opening resumes from whatever landed, so it is
+  // retried a bounded number of times before the run reports the contention.
+  let opened;
+  for (let attempt = 1; attempt <= READMISSION_ATTEMPTS; attempt += 1) {
+    opened = await capabilities.openSuccessor(root);
+    if (!opened.stale) break;
+  }
+  if (opened.stale) return { kind: 'ReadmissionContended', ...planned };
   if (!opened.opened) return { kind: 'AlreadyReadmitted', ...planned };
   await emit(ports, { kind: 'READMITTED', operationId, admissionKey: root.admissionKey });
   return { kind: 'Readmitted', ...planned, successorRootRevision: opened.committedRevision };

@@ -71,6 +71,7 @@ jobs:
           GAIA_READMIT_OPERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.readmit_operation || '' }}
           GAIA_READMIT_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.readmit_revision || '' }}
           GAIA_READMIT_REASON: ${{ github.event_name == 'workflow_dispatch' && inputs.readmit_reason || '' }}
+          GAIA_READMIT_APPLY: ${{ github.event_name == 'workflow_dispatch' && inputs.readmit_apply }}
         run: |
           # Normal selection is computed once, here, and published as this step's only output so
           # every later step reads the same decision instead of re-deriving it from inputs/vars.
@@ -108,9 +109,10 @@ jobs:
           # A re-admission is an operator decision about one refused operation, so it runs alone:
           # no canary, no normal admission, no preparation and no issue selector beside it. Both
           # identifiers are checked for shape here, before any token exists; eligibility, the
-          # expected revision and the reason are re-checked against the ledger by the CLI.
+          # expected revision and the reason are re-checked against the ledger by the CLI. Ticking
+          # apply alone is a mistaken re-admission, never a request for an ordinary intake run.
           $readmit = [bool]$env:GAIA_READMIT_OPERATION
-          if ($readmit -or $env:GAIA_READMIT_REVISION -or $env:GAIA_READMIT_REASON) {
+          if ($readmit -or $env:GAIA_READMIT_REVISION -or $env:GAIA_READMIT_REASON -or $env:GAIA_READMIT_APPLY -eq 'true') {
             if (!$readmit -or !$env:GAIA_READMIT_REVISION -or [string]::IsNullOrWhiteSpace($env:GAIA_READMIT_REASON)) {
               throw 'A re-admission names one operation, its revision and a written reason.'
             }
@@ -236,6 +238,13 @@ jobs:
           if ($exitCode -ne 0) {
             Move-Item -LiteralPath $env:GAIA_ERROR_PATH -Destination $env:GAIA_RECEIPT_PATH -Force
             exit $exitCode
+          }
+          # A refused re-admission is a legitimate, typed outcome, so the CLI reports it with exit 0
+          # and the receipt is kept for upload. The run itself still fails, so an operator sees the
+          # refusal on the run rather than only inside the artifact.
+          $kind = (Get-Content -Raw -LiteralPath $env:GAIA_RECEIPT_PATH | ConvertFrom-Json).result.kind
+          if ($kind -cnotin @('ReadmissionPlanned', 'Readmitted', 'AlreadyReadmitted')) {
+            throw "The re-admission was refused: $kind. The uploaded receipt names the refusal."
           }
 
       - name: Resume or admit exactly one Draft operation

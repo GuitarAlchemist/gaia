@@ -149,6 +149,10 @@ test('a re-admission runs alone on a manual dispatch, a dry run unless applied, 
   }
   assert.match(workflow, /^ {6}readmit_apply:\n(?: {8}.+\n)*? {8}type: boolean\n {8}default: false$/mu);
   assert.match(workflow, /throw 'A re-admission runs alone\.'/u);
+  assert.match(workflow,
+    /^ {10}GAIA_READMIT_APPLY: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.readmit_apply \}\}$/mu,
+    'the identity gate sees the apply box, so ticking it alone is refused rather than run as intake');
+  assert.match(workflow, /-or \$env:GAIA_READMIT_APPLY -eq 'true'\) \{/u);
 
   const step = workflow.match(/^ {6}- name: Re-admit one effect-free refusal\n([\s\S]*?)(?=^ {6}- )/mu)?.[1];
   assert.ok(step, 'one re-admission step');
@@ -157,6 +161,8 @@ test('a re-admission runs alone on a manual dispatch, a dry run unless applied, 
   const run = step.slice(step.indexOf('run: |'));
   assert.doesNotMatch(run, /\$\{\{/u, 'dispatch inputs reach the CLI through env:, never the script');
   assert.doesNotMatch(step, /GAIA_OBSERVATION_PATH|GAIA_MANAGED_ROUND_JSON|GAIA_NORMAL_POLICY|GAIA_CANARY_POLICY/u);
+  assert.match(run, /-cnotin @\('ReadmissionPlanned', 'Readmitted', 'AlreadyReadmitted'\)/u,
+    'a refused re-admission fails the run; its receipt is still uploaded');
 
   assert.match(workflow, /^ {8}if: steps\.identity\.outputs\.readmit != 'true' && \(github\.event_name != 'workflow_dispatch' \|\| !inputs\.prepare_issue\)$/mu,
     'a re-admission run admits nothing');

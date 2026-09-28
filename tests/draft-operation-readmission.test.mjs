@@ -81,12 +81,20 @@ function fakeGitData() {
   }]]]);
   let nextOid = 3;
   let failOnce = null;
+  let beforeRead = null;
+  let contention = null;
   let writes = 0;
+  let rivals = 0;
   return {
     registryRootRevision: sha256(registryRoot),
     port: Object.freeze({
       async verifyProtection() { return true; },
       async read(ref) {
+        if (beforeRead && beforeRead.ref === ref) {
+          const { action } = beforeRead;
+          beforeRead = null;
+          await action();
+        }
         const records = refs.get(ref);
         return records ? { state: 'PRESENT', records: structuredClone(records) }
           : { state: 'UNSEEN' };
@@ -104,6 +112,20 @@ function fakeGitData() {
           failOnce = null;
           throw new Error('simulated process loss');
         }
+        if (contention && contention.times > 0 && contention.predicate(ref, body)) {
+          // Another admission lands on the shared registry first.
+          contention.times -= 1;
+          const head = refs.get(REGISTRY_REF).at(-1);
+          rivals += 1;
+          const rival = {
+            schema: 'GaiaDraftRegistryReceiptV0', priorCommittedRevision: head.committedRevision,
+            kind: 'RESERVED', workKey: sha256({ rival: rivals }),
+          };
+          refs.set(REGISTRY_REF, [...refs.get(REGISTRY_REF), {
+            oid: (nextOid++).toString(16).padStart(40, '0'), body: rival,
+            committedRevision: sha256(rival),
+          }]);
+        }
         const records = refs.get(ref) ?? [];
         const current = records.at(-1)?.oid ?? 'NONE';
         if (current !== expectedHeadOid) return { kind: 'STALE', currentHeadOid: current };
@@ -119,6 +141,8 @@ function fakeGitData() {
       },
     }),
     failNext(predicate) { failOnce = predicate; },
+    contend(predicate, times) { contention = { predicate, times }; },
+    beforeReading(ref, action) { beforeRead = { ref, action }; },
     writes: () => writes,
     kinds: (ref) => (refs.get(ref) ?? []).map((record) => record.body.kind),
     records: (ref) => structuredClone(refs.get(ref) ?? []),
@@ -437,7 +461,7 @@ test('an interrupted re-admission resumes on the next apply and admits nothing m
   }
 });
 
-test('a successor chain that reuses a spent generation, or a forged successor key, fails closed', async () => {
+test('a successor that reuses a spent generation, forges its key or misnames its predecessor fails closed', async () => {
   const [, make] = STORES[1];
   const { store, git } = make();
   const first = await settle(store, 1, PROVIDERS.expired());
@@ -463,4 +487,123 @@ test('a successor chain that reuses a spent generation, or a forged successor ke
   forged[1].committedRevision = sha256(forged[1].body);
   git.replace(ref, forged);
   await assert.rejects(store.inspectByOperation(accepted.operationId), { code: 'LedgerCorrupt' });
+
+  const misnamed = structuredClone(pristine);
+  misnamed[0].body.predecessor.operationId = SHA_A;
+  misnamed[0].committedRevision = sha256(misnamed[0].body);
+  misnamed[1].body.priorCommittedRevision = misnamed[0].committedRevision;
+  misnamed[1].committedRevision = sha256(misnamed[1].body);
+  // The registry is re-confirmed on the forged root, so only the root's own content can refuse it.
+  const registry = git.records(REGISTRY_REF);
+  const confirmed = structuredClone(registry);
+  assert.equal(confirmed.at(-1).body.admissionKey, admissionKey);
+  confirmed.at(-1).body.bootstrapCommittedRevision = misnamed[0].committedRevision;
+  confirmed.at(-1).committedRevision = sha256(confirmed.at(-1).body);
+  git.replace(REGISTRY_REF, confirmed);
+  git.replace(ref, misnamed);
+  await assert.rejects(store.inspectByOperation(accepted.operationId), { code: 'LedgerCorrupt' });
+
+  git.replace(REGISTRY_REF, registry);
+  git.replace(ref, pristine);
+  assert.equal((await store.inspectByOperation(accepted.operationId)).state, 'ENQUEUED',
+    'the pristine chain still reads: each rejection above is the forgery, not the fixture');
+});
+
+test('readHead follows the line to the successor that holds an operation', async () => {
+  for (const [name, make] of STORES) {
+    const { store } = make();
+    const first = await settle(store, 1, PROVIDERS.expired());
+    const refusedHead = {
+      state: 'PRESENT', committedRevision: first.result.committedRevision, recordKind: 'REFUSED',
+    };
+    assert.deepEqual(await store.readHead(WORK_KEY), refusedHead, name);
+    await readmitDraft(first.accepted.operationId, first.result.committedRevision, PROVENANCE,
+      { store }, { apply: true });
+    assert.deepEqual(await store.readHead(WORK_KEY), refusedHead,
+      `${name}: an open successor holds no operation yet`);
+    const second = await enqueue(store, 2);
+    assert.deepEqual(await store.readHead(WORK_KEY), {
+      state: 'PRESENT', committedRevision: second.committedRevision, recordKind: 'ENQUEUED',
+    }, `${name}: the head is the successor's operation`);
+  }
+});
+
+test('a re-admission is reported once, and intake never enqueues on it at a supplied revision', async () => {
+  for (const [name, make] of STORES) {
+    const { store } = make();
+    const first = await settle(store, 1, PROVIDERS.expired());
+    const events = [];
+    const ports = { store, telemetry: { async append(event) { events.push(event); } } };
+    const readmit = (options) => readmitDraft(
+      first.accepted.operationId, first.result.committedRevision, PROVENANCE, ports, options,
+    );
+    assert.equal((await readmit()).kind, 'ReadmissionPlanned', name);
+    assert.deepEqual(events, [], `${name}: a dry run reports nothing`);
+    const applied = await readmit({ apply: true });
+    assert.deepEqual(events, [{
+      kind: 'READMITTED', operationId: first.accepted.operationId,
+      admissionKey: applied.admissionKey,
+    }], name);
+    assert.equal((await readmit({ apply: true })).kind, 'AlreadyReadmitted', name);
+    assert.equal(events.length, 1, `${name}: a repeat apply reports nothing new`);
+
+    const supplied = await enqueueDraft(SELECTOR, first.result.committedRevision,
+      portsFor(store, readyEvent(2)));
+    assert.deepEqual(supplied, {
+      kind: 'StaleRevision', currentCommittedRevision: first.result.committedRevision,
+    }, `${name}: an open successor is claimed only as a new admission`);
+    assert.equal((await enqueue(store, 2)).kind, 'Enqueued', `${name}: nothing was taken`);
+  }
+});
+
+test('registry contention is retried from what landed, then reported as contended', async () => {
+  const [, make] = STORES[1];
+  const opens = (admissionKey) => (ref, body) => ref === REGISTRY_REF
+    && body.admissionKey === admissionKey;
+  for (const [times, expected] of [[2, 'Readmitted'], [3, 'ReadmissionContended']]) {
+    const { store, git } = make();
+    const first = await settle(store, 1, PROVIDERS.expired());
+    const admissionKey = successorKey(WORK_KEY, first.result.committedRevision);
+    git.contend(opens(admissionKey), times);
+    const result = await readmitDraft(first.accepted.operationId, first.result.committedRevision,
+      PROVENANCE, { store }, { apply: true });
+    assert.equal(result.kind, expected, `${times} rival writes`);
+    assert.equal(result.admissionKey, admissionKey);
+    if (expected === 'ReadmissionContended') {
+      assert.equal(result.committedRevision, first.result.committedRevision);
+      assert.equal((await enqueue(store, 2)).kind, 'StaleRevision', 'a contended run admits nothing');
+      const resumed = await readmitDraft(first.accepted.operationId,
+        first.result.committedRevision, PROVENANCE, { store }, { apply: true });
+      assert.equal(resumed.kind, 'Readmitted', 'the next dispatch resumes');
+    }
+    assert.equal((await enqueue(store, 2)).kind, 'Enqueued', `${times} rival writes`);
+  }
+
+  const { store, git } = make();
+  const first = await settle(store, 1, PROVIDERS.expired());
+  const admissionKey = successorKey(WORK_KEY, first.result.committedRevision);
+  git.contend((ref, body) => ref === REGISTRY_REF && body.kind === 'CONFIRMED'
+    && body.admissionKey === admissionKey, 1);
+  const resumed = await readmitDraft(first.accepted.operationId, first.result.committedRevision,
+    PROVENANCE, { store }, { apply: true });
+  assert.equal(resumed.kind, 'Readmitted', 'a lost confirmation resumes from the written root');
+  assert.equal(git.records(`${WORK_PREFIX}${admissionKey}`).length, 1, 'one root, never two');
+});
+
+test('an intake that reads a successor while it is being opened sees it open, never corrupt', async () => {
+  const [, make] = STORES[1];
+  const { store, git, config } = make();
+  const first = await settle(store, 1, PROVIDERS.expired());
+  const admissionKey = successorKey(WORK_KEY, first.result.committedRevision);
+  const operator = createGitDataDraftOperationStore({ gitData: git.port, config });
+  // Intake has read the registry and finds no successor; the operator's whole opening lands
+  // before intake reads the successor's work ref.
+  git.beforeReading(`${WORK_PREFIX}${admissionKey}`, async () => {
+    const opened = await readmitDraft(first.accepted.operationId, first.result.committedRevision,
+      PROVENANCE, { store: operator }, { apply: true });
+    assert.equal(opened.kind, 'Readmitted');
+  });
+  const accepted = await enqueue(store, 2);
+  assert.equal(accepted.kind, 'Enqueued');
+  assert.equal((await store.inspectByOperation(accepted.operationId)).admission.key, admissionKey);
 });

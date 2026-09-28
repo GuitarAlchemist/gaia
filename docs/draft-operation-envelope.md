@@ -232,9 +232,14 @@ and its root is `GaiaDraftWorkRootV1`, which carries the base `workKey`, that `a
 `predecessor`, the line's `spentGenerationKeys` and the `readmission` provenance. The registry
 receipts for a successor carry `admissionKey` beside `workKey`. Every operation record on a
 successor still carries the base work key, so `workKey`, `generationKey` and `operationId` keep the
-preimages above. An `ENQUEUED` whose generation key is already spent is `LedgerCorrupt`.
+preimages above. An `ENQUEUED` whose generation key is already spent is `LedgerCorrupt`, and so is a
+V1 root whose `predecessor.operationId` does not derive from its work key and its last spent
+generation.
 
-The public durable store exposes `readHead(workKey)` for observation; enqueue, reconcile, and cancel
+The public durable store exposes `readHead(workKey)` for observation. It reports the latest operation
+on the work key's admission line: past each re-admitted refusal to the successor that holds an
+operation. A successor that is open but not yet enqueued holds none, so the refusal stays the head
+until it does. Enqueue, reconcile, and cancel
 hold its mutation capabilities privately in the module's `WeakMap`. The concrete Git Data transport
 behind that store exposes only:
 
