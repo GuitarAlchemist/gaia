@@ -570,3 +570,70 @@ test('intake admission is sealed to the intake workflow path, with no CLI or env
   }
   assert.equal(paths.at(-1), '.github/workflows/hosted-draft-pump-effect.yml');
 });
+
+test('readmit names its dispatcher from the Actions environment and is a dry run unless applied', async () => {
+  const actions = {
+    GITHUB_RUN_ID: '9101', GITHUB_RUN_ATTEMPT: '2', GITHUB_TRIGGERING_ACTOR: 'spareilleux',
+    GAIA_READMIT_OPERATION: OPERATION_ID, GAIA_READMIT_REVISION: REVISION,
+    GAIA_READMIT_REASON: 'Window expired before #166; NOT_INVOKED.',
+  };
+  for (const [apply, expected] of [[undefined, false], ['false', false], ['true', true]]) {
+    const output = sink();
+    const calls = [];
+    const exitCode = await main({
+      argv: commonArgs('readmit'),
+      env: apply === undefined ? actions : { ...actions, GAIA_READMIT_APPLY: apply },
+      stdout: output.stream, stderr: sink().stream,
+      runtimeFactory(configuration) {
+        assert.equal(configuration.command, 'readmit');
+        return {
+          async readmit(request) {
+            calls.push(request);
+            return { kind: expected ? 'Readmitted' : 'ReadmissionPlanned' };
+          },
+        };
+      },
+    });
+    assert.equal(exitCode, 0);
+    assert.deepEqual(calls, [{
+      operationId: OPERATION_ID, expectedRevision: REVISION, apply: expected,
+      provenance: {
+        reason: 'Window expired before #166; NOT_INVOKED.',
+        runId: 9101, runAttempt: 2, triggeringActor: 'spareilleux',
+      },
+    }]);
+    assert.deepEqual(output.json(), {
+      schema: 'GaiaHostedDraftPumpCliReceiptV0', command: 'readmit', operationId: OPERATION_ID,
+      apply: expected, result: { kind: expected ? 'Readmitted' : 'ReadmissionPlanned' },
+      telemetry: [],
+    });
+  }
+});
+
+test('readmit refuses an absent dispatcher, a malformed apply or a dispatcher flag before the runtime starts', async () => {
+  const actions = {
+    GITHUB_RUN_ID: '9101', GITHUB_RUN_ATTEMPT: '1', GITHUB_TRIGGERING_ACTOR: 'spareilleux',
+    GAIA_READMIT_OPERATION: OPERATION_ID, GAIA_READMIT_REVISION: REVISION,
+    GAIA_READMIT_REASON: 'reason',
+  };
+  const without = (name) => Object.fromEntries(Object.entries(actions).filter(([key]) => key !== name));
+  for (const [name, argv, env] of [
+    ['no run id', commonArgs('readmit'), without('GITHUB_RUN_ID')],
+    ['no triggering actor', commonArgs('readmit'), without('GITHUB_TRIGGERING_ACTOR')],
+    ['no reason', commonArgs('readmit'), without('GAIA_READMIT_REASON')],
+    ['padded reason', commonArgs('readmit'), { ...actions, GAIA_READMIT_REASON: ' reason' }],
+    ['long reason', commonArgs('readmit'), { ...actions, GAIA_READMIT_REASON: 'x'.repeat(501) }],
+    ['apply yes', commonArgs('readmit'), { ...actions, GAIA_READMIT_APPLY: 'yes' }],
+    ['short operation', commonArgs('readmit'), { ...actions, GAIA_READMIT_OPERATION: 'abc' }],
+    ['actor flag', [...commonArgs('readmit'), '--triggering-actor', 'someone'], actions],
+    ['issue flag', [...commonArgs('readmit'), '--issue', '93'], actions],
+  ]) {
+    const errors = sink();
+    const exitCode = await main({
+      argv, env, stdout: sink().stream, stderr: errors.stream,
+      runtimeFactory() { assert.fail(`${name}: the runtime must not start`); },
+    });
+    assert.equal(exitCode, 2, name);
+    assert.deepEqual(errors.json(), { schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'InvalidArguments' }, name);
+  }
+});

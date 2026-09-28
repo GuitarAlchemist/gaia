@@ -372,7 +372,10 @@ The dangerous window is `EFFECT_STARTED` committed, create issued, response lost
 5. Restart with no in-memory state is safe: the in-process executor lock is an optimisation, and
    every guard is a CAS on durable state.
 
-There is no re-enqueue path and no new-generation path, and this design adds neither.
+There is no re-enqueue path and no automatic new-generation path. The one way back for a work item
+is an operator re-admission of a refusal that provably created nothing, and it opens a new chain
+rather than reopening the refused one (see
+[Re-admitting an effect-free refusal](#re-admitting-an-effect-free-refusal--decided-167)).
 
 ### The weakened cross-workflow invariant — stated, not inherited
 
@@ -393,6 +396,92 @@ Mitigation: `hosted-draft-pump-effect.yml` becomes manual break-glass only, with
 the normal path. This is a documentation and operational change; the effect workflow file and its
 tests are not touched.
 
+## Re-admitting an effect-free refusal — decided (#167)
+
+A refusal is terminal, and the base work key is the issue. So a transient, host-side refusal that
+provably produced no GitHub effect removed its issue from the pump for good, with no operator path
+back. Observed: #93 and #102 refused `BeforeProvider:NormalPolicyExpired` with
+`effectBoundary: NOT_INVOKED` (run 36266028228 for #93) because the admission window expired, not
+because of anything about the work. After #165/#166 fixed the cause, every later ready event for them
+returns `StaleRevision`. #52 (`ProviderUnavailable`) is the same case.
+
+**Designed twice.**
+
+- *Automatic supersession by a new generation.* Rejected. It turns "terminal" into "terminal until the
+  next ready event", so a refusal stops being an outcome and becomes a delay. It also has the pump
+  widening its own admission from its own records, which ENG-04 forbids.
+- *Terminal forever, re-file under a new issue number.* Not chosen as the path. It spends a human
+  issue on every host incident and cuts the work off from its history. It needs no code and remains
+  available.
+- *Explicit operator re-admission.* **Selected.** The refusal stays terminal. A human decides, in
+  writing, that one specific refused operation may be followed by another admission.
+
+**A successor admission, never a reopened chain.** Nothing is ever appended after a terminal record.
+Each chain is stored under an *admission key*. A first admission's key is its work key, so every
+existing ref is unchanged. Re-admission opens a successor chain whose admission key derives from
+the refused one:
+
+```text
+successorAdmissionKey = sha256(canonical({
+  schema: 'GaiaDraftSuccessorAdmissionKeyV0',
+  predecessorAdmissionKey, predecessorTerminalRevision
+}))
+```
+
+The registry reserves each key once, so a refused terminal has at most one successor: admissions form
+a line, never a fork. The successor's root is `GaiaDraftWorkRootV1`: the V0 root, plus
+`admissionKey`, `predecessor { admissionKey, operationId, terminalCommittedRevision, refusal }`,
+`spentGenerationKeys`, and `readmission { reason, runId, runAttempt, triggeringActor }`. The reason
+and the dispatcher are durable ledger content, not workflow log text.
+
+The admission key is storage only. Every record on every chain still carries the issue's work key.
+`workKey`, `generationKey`, `operationId` and the Draft marker are derived exactly as before. So the
+pump receipt, the Draft admission check that re-derives them (`src/github-draft-admission.mjs`) and
+the effect-capacity claim need no change.
+
+What keeps operation ids unique is the generation, not a new key. A successor accepts only a
+generation that no chain on its line has used. The root carries those generation keys as
+`spentGenerationKeys`, and an `ENQUEUED` that reuses one is ledger corruption. The refused generation
+is spent for good: re-admission admits the **next** ready event, not the refused one. #93 already has
+one (occurrence 3, `gaia/issue-93-ready-3`). For any other issue, re-applying `ready-for-agent`
+creates one.
+
+**Eligibility is structural.** Only a `REFUSED` terminal whose create call provably never ran is
+re-admissible. That means refused from `ENQUEUED`, `CLAIMED` or `INTENT` (the create call is reachable
+only after `EFFECT_STARTED`), or refused from `EFFECT_STARTED` with `effectBoundary: NOT_INVOKED`.
+`CREATED`, `REUSED`, `CANCELLED`, `EFFECT_AMBIGUOUS` and every nonterminal state are refused with
+`NotReadmissible`. Ambiguity is still never retried, and a work key that produced or may have produced
+a Draft is never re-admitted. The ledger grammar already rejects a post-provider `REFUSED`; the check
+states the rule again on its own, so a later grammar change cannot widen re-admission by accident.
+
+**The dispatch is the authority, and the only one.** Only the pump App can write the ledger, so
+re-admission runs in this sealed workflow on `workflow_dispatch`, with inputs `readmit_operation`,
+`readmit_revision` (the expected terminal committed revision), `readmit_reason` (required, bounded)
+and `readmit_apply` (default `false`). Without `readmit_apply` the run is a dry run: it checks
+eligibility and reports the successor key it would open, and writes nothing. With it, the pump runs
+the same resumable reservation, root and confirmation protocol as a first admission. A re-admission
+run admits no work, calls no provider and publishes no observation. Scheduled and labelled runs never
+reach it, and the pump has no code path that opens a successor on its own. Whoever may dispatch the
+workflow may re-admit, and the ledger records who did.
+
+The identity gate refuses a re-admission that is incomplete or combined with anything else, and it
+also refuses `readmit_apply` ticked with no operation, so a mistaken dispatch never falls through to
+an ordinary intake run. A green run means `ReadmissionPlanned`, `Readmitted` or `AlreadyReadmitted`.
+Every other result (`NotReadmissible`, `StaleRevision`, `ReadmissionContended`) fails the run, and
+the receipt that names it is still uploaded. `ReadmissionContended` means other admissions kept
+moving the shared registry: opening is retried three times from whatever already landed, and the
+next dispatch resumes it. Nothing is admitted in the meantime.
+
+**What intake does with a successor.** `enqueueDraft` walks the admission line. It reads the base work
+key, and while the current chain is a re-admissible terminal whose successor exists, it moves to the
+successor. A root-only successor receives the new generation's `ENQUEUED` under the same `NONE`
+contract as a first admission, unless that generation is spent, in which case the result is
+`StaleRevision`. A missing successor also leaves the result `StaleRevision`, exactly as before:
+waiting never re-admits anything. `CrossGenerationIntent` is decided on the resolved chain. An intake
+that reads a successor while an operator is opening it can see the work ref before the registry
+entry that allows it. The store re-reads the registry once before calling that corruption, so the
+intake sees the successor pending or open.
+
 ## Starvation: why the schedule must admit, and why probing is mandatory
 
 Two facts make a recovery-only schedule and a lowest-numbered selector both wrong.
@@ -402,8 +491,9 @@ inside one issue group. Independent issue labels no longer coalesce with each ot
 still the recovery path for work whose label event predated this policy or whose run never reached
 durable enqueue, so it remains an **admission** path, not merely a recovery path.
 
-**A refusal is terminal for a work key forever.** `enqueueDraft` returns `StaleRevision` for any work
-key that already carries a record when the expected committed revision is `NONE`. Verified live at
+**A refusal is terminal for its chain forever.** `enqueueDraft` returns `StaleRevision` for any work
+key that already carries a record when the expected committed revision is `NONE`, unless an operator
+has re-admitted an effect-free refusal on that key (see above). Verified live at
 base: of the three open `ready-for-agent` issues, #51 is terminal `CREATED` and #52 is terminal
 `REFUSED` with refusal `ProviderUnavailable`. A naive lowest-numbered selector picks #51, receives
 `StaleRevision`, and admits nothing forever — starving #70 itself.

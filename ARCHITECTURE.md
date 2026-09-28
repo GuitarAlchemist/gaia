@@ -143,6 +143,13 @@ receipts do not qualify. The normal-admission composition uses this boundary so 
 policy is not mistaken for an ambiguous provider write. A crash before the refusal receipt
 is durable still fails closed. New receipts require the compatible reader; old executor
 revisions must not resume against them. No policy or effect authority is added.
+A terminal record is never appended to. An operator may re-admit a `REFUSED` whose create call
+provably never ran by opening a successor chain, stored under an admission key derived from
+the refused terminal. The successor's root records the written reason and the dispatching run,
+and the generations its line has already spent. Work key, operation identity and Draft marker
+derive exactly as before, and a spent generation can never enqueue again. Only an
+operator-dispatched run of the sealed intake workflow reaches this path; intake only follows a
+successor that already exists.
 The Hosted Draft intake is one concrete pump. An issue-triggered run remains bound to its issue and
 fails closed on its unsettled operation. A scheduled run probes a bounded, deterministic prefix of
 the unsettled queue before it may admit one eligible issue. When reconciliation returns the same
