@@ -140,6 +140,17 @@ test('the seeder never labels: an unlabelled, closed or untrusted issue refuses'
   }
 });
 
+test('an unreachable or rate-limited GitHub fails closed, never as a refusal of the issue', async () => {
+  const { HostedDraftCollectorError } = await import('../src/hosted-draft-collector.mjs');
+  for (const code of ['GitHubObservationUnavailable', 'GitHubRateLimited']) {
+    const world = fakeGitHub();
+    world.github.readIssue = async () => { throw new HostedDraftCollectorError(code); };
+    await assert.rejects(seedEvidenceHead({ ...world, selector: SELECTOR, apply: true }),
+      (error) => error instanceof HostedDraftCollectorError && error.code === code);
+    assert.deepEqual(world.writes, [], code);
+  }
+});
+
 test('a branch name already taken by another commit refuses before any write', async () => {
   const world = fakeGitHub();
   world.commits.set('3'.repeat(40), 'unrelated');

@@ -254,6 +254,14 @@ nothing; several refuse. After writing, the read-back decides the result: `CREAT
 automatically. Exit codes: `0` planned, present, or created · `1` refused, failed, or ambiguous ·
 `2` usage · `3` fail-closed.
 
+Proving "exactly one" means reading the tip of every branch. The `gh` adapter lists all branches
+with their tip commit messages in one paginated GraphQL query, a hundred per page, and
+`readCommit` answers a listed tip from that listing: a commit is immutable, so the message cannot
+differ. It used to read each tip over REST, one call per branch per issue. On 2026-09-29, with 115
+branches, eleven intake runs in half an hour were followed by two that failed as
+`GitHubGitDataUnavailable`, most likely on the pump App's hourly quota; the redacted error could not
+say, which is why a rate limit now has its own cause. The listing now costs two calls.
+
 ### Choosing what to feed
 
 `ready-for-agent` is an act of authority: the collector binds the receipt to the label event and
@@ -339,6 +347,13 @@ read together with legal-transition and epoch-monotonicity checks.
 `force: false`, against a commit created with the expected head as its sole parent, after a head
 re-read. It is a genuine compare-and-swap; a lost race reports `STALE` and is never retried in place.
 Everything else is downstream of that one call.
+
+**Shared registry.** A first admission appends to the one registry ref before its own work ref
+exists, so first admissions of *different* issues contend there. Labelling several issues at once
+starts one intake per issue, and on 2026-09-29 two of four simultaneous first admissions lost that
+CAS and admitted nothing. `enqueueDraft` therefore re-reads the admission line and retries, three
+attempts in all. The re-read is what keeps it safe: a work key that landed meanwhile answers
+`StaleRevision` as before and is never enqueued twice.
 
 **Stale loser performs no effect.** A lost CAS is converted to a `StaleRevision` result carrying the
 current committed revision, without any provider call. Two intake processes reading `ENQUEUED` at
@@ -536,7 +551,9 @@ Every failure mode denies rather than proceeds, and every denial is a typed, red
 | Forged or mislabelled webhook payload | job gate plus full API re-derivation | payload carries no authority |
 | Label events dropped by coalescing | — | schedule re-admits |
 | Terminal work key re-selected | `enqueueDraft` returns `StaleRevision` | skipped; probe continues |
-| `gh` absent or rate limited | typed collector and transport errors | redacted CLI error, exit 1, receipt still uploaded |
+| First admissions of distinct issues race on the registry | registry CAS, line re-read | retried, three attempts in all; then `StaleRevision` |
+| GitHub rate limit, primary or secondary | `gh` stderr classified, then discarded | cause `GitHubRateLimited`; never retried into the same quota |
+| `gh` absent or GitHub unreachable | typed collector and transport errors | redacted CLI error, exit 1, receipt still uploaded |
 
 No path produces a duplicate Draft.
 
@@ -638,15 +655,14 @@ a live proof that one labelled issue and one recovery replay create no duplicate
 
 ## Residual risks
 
-1. **Admission under the new event types is unproven in production.** The adapter requires
-   `head_sha` to equal `GITHUB_WORKFLOW_SHA` and the run status to be `in_progress`. Both `issues`
-   and `schedule` run the workflow from default-branch HEAD, so these should coincide, but the
-   mechanism has only been exercised for `workflow_dispatch`. If it does not hold, admission returns
-   `ZERO` and the operation is terminally `REFUSED` — unrecoverable for that issue. **Prove it with
-   one throwaway run on a scratch issue before relying on it, never on live work.**
-2. **Terminal refusal is unrecoverable per issue.** A `ProviderUnavailable` or `NoEffectCapacity`
-   refusal permanently settles a work key, exactly as observed live on issue #52. There is
-   deliberately no re-enqueue path; recovering such an issue is a human decision outside this design.
+1. **Admission under the new event types** — proven on 2026-09-29. The adapter requires `head_sha`
+   to equal `GITHUB_WORKFLOW_SHA` and the run status to be `in_progress`; both hold for `issues`
+   and `schedule`. `issues` run 36517680576 admitted #183 (Draft #188), and `schedule` runs
+   36527648771 and 36571339460 admitted #93 (Draft #189) and #102 (Draft #190).
+2. **A terminal refusal settles its line.** A `ProviderUnavailable` or `NoEffectCapacity` refusal
+   settles a work key's current line, as observed live on issue #52. Since #167 an operator can
+   re-admit an effect-free refusal by dispatch (above); a refusal after an invoked effect is never
+   re-admitted.
 3. **Scheduled triggers are disabled after 60 days of repository inactivity**, and cron is
    best-effort and can be delayed under load. The pump would go quiet with no error surface. The
    design must not assume punctuality; the Control Room's transition age is the detector.

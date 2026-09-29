@@ -797,6 +797,30 @@ test('a persistent immutable read failure still fails closed after the bound', a
   assert.equal(calls.filter(path => path.includes('/git/commits/')).length, 3);
 });
 
+test('a rate-limited immutable read is named and never retried into the same quota', async () => {
+  const { createGhGitDataApi, GhGitDataError } = await import(MODULE_URL);
+  const { ghFailure } = await import('../src/gh-failure.mjs');
+  const fixture = readFixtureRun();
+  const calls = [];
+  const api = createGhGitDataApi({
+    repository: { owner: 'GuitarAlchemist', name: 'gaia' }, pumpActor: PUMP_ACTOR,
+    sleep: async () => { assert.fail('a rate limit outlasts any backoff'); },
+    run: async args => {
+      calls.push(args[1]);
+      if (args[1].includes('/git/commits/')) {
+        throw ghFailure('gh: API rate limit exceeded for installation ID 9173. (HTTP 403)');
+      }
+      return fixture(args);
+    },
+  });
+  await assert.rejects(
+    api.read('refs/heads/gaia-ledger/registry-v0'),
+    (error) => error instanceof GhGitDataError && error.code === 'GitHubRateLimited'
+      && !/installation|9173|HTTP/u.test(error.message),
+  );
+  assert.equal(calls.filter(path => path.includes('/git/commits/')).length, 1);
+});
+
 test('ref reads are never retried', async () => {
   const { createGhGitDataApi, GhGitDataError } = await import(MODULE_URL);
   const calls = [];

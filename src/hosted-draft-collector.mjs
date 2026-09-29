@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
+import { ghFailure, isRateLimited } from './gh-failure.mjs';
 import { isExactInstant } from './local-lane-observation.mjs';
 
 const GIT_OID = /^[a-f0-9]{40}$/u;
@@ -121,9 +122,14 @@ function requireRepository(value) {
 }
 
 async function runGh(args) {
-  const { stdout } = await execFileAsync('gh', args, {
-    encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, windowsHide: true,
-  });
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync('gh', args, {
+      encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, windowsHide: true,
+    }));
+  } catch (error) {
+    throw ghFailure(error?.stderr);
+  }
   const output = stdout.trim();
   if (output.length === 0) return null;
   return JSON.parse(output);
@@ -143,14 +149,58 @@ function flattenPages(value, code) {
   return value.flat();
 }
 
+/**
+ * Every branch with its tip commit's message, a page of one hundred per GraphQL call. The collector
+ * must see every tip to prove exactly one carries the evidence trailers; reading each tip over REST
+ * cost one call per branch per issue, and a busy evening of intakes spent the pump App's hourly
+ * quota on it.
+ */
+const HEAD_COMMITS_QUERY = [
+  'query($owner: String!, $name: String!, $endCursor: String) {',
+  '  repository(owner: $owner, name: $name) {',
+  '    refs(refPrefix: "refs/heads/", first: 100, after: $endCursor) {',
+  '      pageInfo { hasNextPage endCursor }',
+  '      nodes { name target { __typename oid ... on Commit { message } } }',
+  '    }',
+  '  }',
+  '}',
+].join('\n');
+
+function headCommitNodes(pages) {
+  const code = 'HeadObservationInvalid';
+  if (!Array.isArray(pages)) fail(code, code);
+  return pages.flatMap((page) => {
+    const nodes = page?.data?.repository?.refs?.nodes;
+    if (!Array.isArray(nodes)) fail(code, code);
+    return nodes;
+  });
+}
+
+// Bounds the messages one adapter keeps; a single intake run lists far fewer branches than this.
+const COMMIT_MESSAGE_CACHE_LIMIT = 4096;
+
 export function createGhDraftCollectorApi({ run = runGh } = {}) {
   if (typeof run !== 'function') fail('InvalidGhAdapter', 'run must be a function');
   const call = async (args) => {
     try {
       return await run(args);
-    } catch {
+    } catch (error) {
+      if (isRateLimited(error)) fail('GitHubRateLimited', 'GitHub rate limit reached');
       fail('GitHubObservationUnavailable', 'GitHub observation is unavailable');
     }
+  };
+
+  // A commit is immutable, so the message the head listing returned for a tip is the message a
+  // later read of that commit would return. `readCommit` answers from here and reaches GitHub only
+  // for a revision no listing named.
+  const commitMessages = new Map();
+  const messageKey = (repository, revision) => `${repositoryPath(repository)}\0${revision}`;
+  const rememberMessage = (key, message) => {
+    if (commitMessages.has(key)) return;
+    if (commitMessages.size >= COMMIT_MESSAGE_CACHE_LIMIT) {
+      commitMessages.delete(commitMessages.keys().next().value);
+    }
+    commitMessages.set(key, message);
   };
 
   return Object.freeze({
@@ -212,19 +262,32 @@ export function createGhDraftCollectorApi({ run = runGh } = {}) {
     },
 
     async listHeadRefs({ repository }) {
-      const pages = flattenPages(await call([
-        'api', `repos/${repositoryPath(repository)}/git/matching-refs/heads/?per_page=100`,
-        '--paginate', '--slurp',
-      ]), 'HeadObservationInvalid');
-      return pages.map((row) => ({
-        name: text(row?.ref, 'HeadObservationInvalid').replace(/^refs\/heads\//u, ''),
-        revision: oid(row?.object?.sha, 'HeadObservationInvalid'),
-      }));
+      const nodes = headCommitNodes(await call([
+        'api', 'graphql', '--paginate', '--slurp',
+        '-f', `owner=${githubSegment(repository.owner, 'HeadObservationInvalid')}`,
+        '-f', `name=${githubSegment(repository.name, 'HeadObservationInvalid')}`,
+        '-f', `query=${HEAD_COMMITS_QUERY}`,
+      ]));
+      const heads = nodes.map((node) => {
+        const target = requireRawObject(node?.target, 'HeadObservationInvalid');
+        if (target.__typename !== 'Commit') fail('HeadObservationInvalid', 'HeadObservationInvalid');
+        return {
+          name: text(node.name, 'HeadObservationInvalid'),
+          revision: oid(target.oid, 'HeadObservationInvalid'),
+          message: commitMessage(target.message),
+        };
+      });
+      for (const head of heads) rememberMessage(messageKey(repository, head.revision), head.message);
+      return heads.map(({ name, revision }) => ({ name, revision }));
     },
 
     async readCommit({ repository, revision }) {
+      const known = commitMessages.get(
+        messageKey(repository, oid(revision, 'CommitObservationInvalid')),
+      );
+      if (known !== undefined) return { message: known };
       const raw = requireRawObject(await call([
-        'api', `repos/${repositoryPath(repository)}/git/commits/${oid(revision, 'CommitObservationInvalid')}`,
+        'api', `repos/${repositoryPath(repository)}/git/commits/${revision}`,
       ]), 'CommitObservationInvalid');
       return { message: commitMessage(raw.message) };
     },

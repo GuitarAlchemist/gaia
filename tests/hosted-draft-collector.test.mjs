@@ -248,6 +248,21 @@ test('R1 a unique distinct matching branch remains accepted as a Draft source', 
   assert.equal(envelope.generation.headRef, 'codex/hosted-draft-pump-r0');
 });
 
+const EVIDENCE_MESSAGE = [
+  'feat: begin hosted pump', '',
+  'Gaia-Issue: 60',
+  'Gaia-Ready-Receipt: 797eabd4b579944ec4634babd5c018815481b0c8bf0170d90cdaf90353f8e494',
+].join('\n');
+
+/** `gh api graphql --paginate --slurp`: one object per page of branch tips. */
+const headPages = (...pages) => pages.map((nodes) => ({
+  data: { repository: { refs: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } },
+}));
+
+const tip = (name, revision, message, typename = 'Commit') => ({
+  name, target: { __typename: typename, oid: revision, message },
+});
+
 test('R1 concrete gh observations feed the same collector seam', async () => {
   const { createGhDraftCollectorApi, createHostedDraftCollector } = await api();
   assert.equal(typeof createGhDraftCollectorApi, 'function');
@@ -272,23 +287,19 @@ test('R1 concrete gh observations feed the same collector seam', async () => {
       },
     ]],
     { permission: 'triage' },
-    [[{ ref: 'refs/heads/codex/hosted-draft-pump-r0', object: { sha: 'b'.repeat(40) } }]],
-    {
-      message: [
-        'feat: begin hosted pump', '',
-        'Gaia-Issue: 60',
-        'Gaia-Ready-Receipt: 797eabd4b579944ec4634babd5c018815481b0c8bf0170d90cdaf90353f8e494',
-      ].join('\n'),
-    },
+    // The tip's message arrives with the listing, so no per-commit read follows it.
+    headPages([tip('codex/hosted-draft-pump-r0', 'b'.repeat(40), EVIDENCE_MESSAGE)]),
     { sha: 'c'.repeat(40) },
     {
       node_id: 'R_kgDTest', name: 'gaia', owner: { login: 'GuitarAlchemist' },
       default_branch: 'main',
     },
     { sha: 'a'.repeat(40) },
-    [[{ ref: 'refs/heads/codex/hosted-draft-pump-r0', object: { sha: 'b'.repeat(40) } }]],
+    headPages([tip('codex/hosted-draft-pump-r0', 'b'.repeat(40), EVIDENCE_MESSAGE)]),
   ];
-  const run = async () => {
+  const calls = [];
+  const run = async (args) => {
+    calls.push(args);
     assert.ok(responses.length > 0, 'gh adapter made only the bounded expected reads');
     return structuredClone(responses.shift());
   };
@@ -304,6 +315,88 @@ test('R1 concrete gh observations feed the same collector seam', async () => {
     '1f9efd37f156b4ab51a50f885414f851095aafab1ac3c2a2b8b8ffc271efd69e');
   assert.equal(envelope.generation.headRevision, 'b'.repeat(40));
   assert.equal(responses.length, 0);
+  assert.ok(!calls.some((args) => args.some((arg) => arg.includes('/git/commits/'))),
+    'no commit is read one by one');
+});
+
+test('the gh adapter lists every branch tip with its message in one paginated GraphQL query', async () => {
+  const { createGhDraftCollectorApi } = await api();
+  const repository = { owner: 'GuitarAlchemist', name: 'gaia' };
+  const unlisted = 'e'.repeat(40);
+  const calls = [];
+  const github = createGhDraftCollectorApi({
+    async run(args) {
+      calls.push(args);
+      if (args[1] === 'graphql') {
+        return headPages(
+          [tip('main', 'a'.repeat(40), 'chore: base'), tip('gaia/issue-60-ready-2', 'b'.repeat(40), EVIDENCE_MESSAGE)],
+          [tip('feature/x', 'd'.repeat(40), 'feat: x')],
+        );
+      }
+      assert.equal(args[1], `repos/GuitarAlchemist/gaia/git/commits/${unlisted}`);
+      return { message: 'chore: read over REST' };
+    },
+  });
+
+  assert.deepEqual(await github.listHeadRefs({ repository }), [
+    { name: 'main', revision: 'a'.repeat(40) },
+    { name: 'gaia/issue-60-ready-2', revision: 'b'.repeat(40) },
+    { name: 'feature/x', revision: 'd'.repeat(40) },
+  ]);
+  assert.equal(calls.length, 1);
+  const [query] = calls[0].filter((arg) => arg.startsWith('query='));
+  assert.match(query, /refs\(refPrefix: "refs\/heads\/", first: 100, after: \$endCursor\)/u);
+  assert.match(query, /pageInfo \{ hasNextPage endCursor \}/u, 'gh --paginate needs the cursor');
+  assert.deepEqual(calls[0].slice(0, 4), ['api', 'graphql', '--paginate', '--slurp']);
+
+  assert.deepEqual(await github.readCommit({ repository, revision: 'b'.repeat(40) }),
+    { message: EVIDENCE_MESSAGE });
+  assert.equal(calls.length, 1, 'a listed tip is answered from the listing');
+  assert.deepEqual(await github.readCommit({ repository, revision: unlisted }),
+    { message: 'chore: read over REST' });
+  assert.equal(calls.length, 2, 'only a revision no listing named reaches GitHub');
+  const elsewhere = { owner: 'GuitarAlchemist', name: 'other' };
+  await assert.rejects(github.readCommit({ repository: elsewhere, revision: 'b'.repeat(40) }));
+  assert.equal(calls.length, 3, 'a listing answers only for its own repository');
+});
+
+test('a head listing that is not a page of commit tips refuses the observation', async () => {
+  const { createGhDraftCollectorApi, HostedDraftCollectorError } = await api();
+  const repository = { owner: 'GuitarAlchemist', name: 'gaia' };
+  for (const [label, response] of [
+    ['a tip that is not a commit', headPages([tip('v1', 'a'.repeat(40), 'tag', 'Tag')])],
+    ['a tip without an object id', headPages([tip('main', 'short', 'chore: base')])],
+    ['a tip without a message', headPages([tip('main', 'a'.repeat(40), '')])],
+    ['a page without nodes', [{ data: { repository: null } }]],
+    ['an unpaged response', { data: { repository: { refs: { nodes: [] } } } }],
+  ]) {
+    const github = createGhDraftCollectorApi({ async run() { return structuredClone(response); } });
+    await assert.rejects(github.listHeadRefs({ repository }),
+      (error) => error instanceof HostedDraftCollectorError
+        && ['HeadObservationInvalid', 'CommitObservationInvalid'].includes(error.code), label);
+  }
+});
+
+test('a GitHub rate limit is named, and nothing else of the gh diagnostic leaves the adapter', async () => {
+  const { createGhDraftCollectorApi, HostedDraftCollectorError } = await api();
+  const { ghFailure } = await import('../src/gh-failure.mjs');
+  for (const [stderr, code] of [
+    ['gh: API rate limit exceeded for installation ID 4788836. (HTTP 403)', 'GitHubRateLimited'],
+    ['gh: You have exceeded a secondary rate limit. Please wait a few minutes. (HTTP 403)',
+      'GitHubRateLimited'],
+    ['GraphQL: API rate limit already exceeded for installation ID 4788836.', 'GitHubRateLimited'],
+    ['gh: Too Many Requests (HTTP 429)', 'GitHubRateLimited'],
+    ['gh: Not Found (HTTP 404)', 'GitHubObservationUnavailable'],
+    [undefined, 'GitHubObservationUnavailable'],
+  ]) {
+    const github = createGhDraftCollectorApi({ async run() { throw ghFailure(stderr); } });
+    await assert.rejects(
+      github.resolveRepository({ owner: 'GuitarAlchemist', name: 'gaia' }),
+      (error) => error instanceof HostedDraftCollectorError && error.code === code
+        && !/installation|HTTP|4788836/u.test(error.message),
+      String(stderr),
+    );
+  }
 });
 
 test('R1 concrete gh timestamps normalize provider precision without widening parsing', async (context) => {

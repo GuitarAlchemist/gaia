@@ -557,13 +557,14 @@ function writeJson(stream, value) {
 // Anything else, an unlisted code included, stays a bare OperationFailed: no message, stderr,
 // URL, or stack crosses the CLI boundary.
 const RUNTIME_FAILURE_CAUSES = Object.freeze([
-  [GhGitDataError, new Set(['GitHubGitDataUnavailable', 'GitDataProtocolViolation',
-    'LedgerProtectionUnavailable'])],
+  [GhGitDataError, new Set(['GitHubGitDataUnavailable', 'GitHubRateLimited',
+    'GitDataProtocolViolation', 'LedgerProtectionUnavailable'])],
   [DraftOperationError, new Set(['LedgerCorrupt', 'LedgerRegistryMissing',
     'LedgerRegistryMismatch', 'LedgerWorkMissing', 'LedgerProtectionMissing', 'UnknownOperation',
     'InvalidReadmission'])],
-  [HostedDraftCollectorError, new Set(['GitHubObservationUnavailable', 'HeadIdentityAmbiguous',
-    'HeadObservationInvalid', 'CommitObservationInvalid', 'IssueObservationInvalid'])],
+  [HostedDraftCollectorError, new Set(['GitHubObservationUnavailable', 'GitHubRateLimited',
+    'HeadIdentityAmbiguous', 'HeadObservationInvalid', 'CommitObservationInvalid',
+    'IssueObservationInvalid'])],
   [HostedDraftPumpError, new Set(['InvalidUnsettledOperation', 'InvalidHostedDraftResult'])],
 ]);
 

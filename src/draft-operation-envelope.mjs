@@ -7,7 +7,7 @@ const EPOCH_STATES = new Set(['CLAIMED', 'INTENT', 'EFFECT_STARTED']);
 // The create call is reachable only after EFFECT_STARTED, so a refusal from these states never ran it.
 const PRE_EFFECT_STATES = new Set(['ENQUEUED', 'CLAIMED', 'INTENT']);
 const READMISSION_REASON_LIMIT = 500;
-const READMISSION_ATTEMPTS = 3;
+const REGISTRY_WRITE_ATTEMPTS = 3;
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u;
 const notInvokedWitnesses = new WeakMap();
 
@@ -1367,50 +1367,59 @@ export async function enqueueDraft(selectorInput, expectedCommittedRevision, por
   const observed = await ports.collector.collect(selector);
   const identity = validateEnvelope(observed, selector);
   const capabilities = storeCapabilities(ports.store);
-  let current = await capabilities.inspectByWork(identity.workKey);
-  // Walk the admission line: past each re-admitted refusal to the chain an operator opened after
-  // it. A refusal nobody re-admitted ends the walk, and the answer stays StaleRevision.
-  while (current && isEffectFreeRefusal(current.terminal)) {
-    const admissionKey = successorAdmissionKey(
-      current.admission.key, current.terminal.committedRevision,
-    );
-    const successor = await capabilities.inspectAdmission(admissionKey);
-    if (successor.state === 'OPEN') {
-      if (expectedCommittedRevision !== 'NONE') return stale(current);
-      const committed = await capabilities.enqueueSuccessor(
-        admissionKey, identity, identity.envelope,
+  // A first admission writes the registry that every other first admission writes too, so a lost
+  // compare-and-swap there usually means another issue was admitted in the same moment: labelling
+  // several issues at once starts one intake per issue. The line is read again before each retry,
+  // so a work key that did land meanwhile still answers StaleRevision and is never enqueued twice.
+  for (let attempt = 1; ; attempt += 1) {
+    let current = await capabilities.inspectByWork(identity.workKey);
+    // Walk the admission line: past each re-admitted refusal to the chain an operator opened after
+    // it. A refusal nobody re-admitted ends the walk, and the answer stays StaleRevision.
+    while (current && isEffectFreeRefusal(current.terminal)) {
+      const admissionKey = successorAdmissionKey(
+        current.admission.key, current.terminal.committedRevision,
       );
-      if (committed.stale) return stale({ committedRevision: committed.currentCommittedRevision });
-      await emit(ports, { kind: 'ENQUEUED', operationId: identity.operationId });
-      return {
-        kind: 'Enqueued', operationId: identity.operationId, workKey: identity.workKey,
-        generationKey: identity.generationKey, committedRevision: committed.committedRevision,
-      };
+      const successor = await capabilities.inspectAdmission(admissionKey);
+      if (successor.state === 'OPEN') {
+        if (expectedCommittedRevision !== 'NONE') return stale(current);
+        const committed = await capabilities.enqueueSuccessor(
+          admissionKey, identity, identity.envelope,
+        );
+        if (committed.stale) return stale({ committedRevision: committed.currentCommittedRevision });
+        await emit(ports, { kind: 'ENQUEUED', operationId: identity.operationId });
+        return {
+          kind: 'Enqueued', operationId: identity.operationId, workKey: identity.workKey,
+          generationKey: identity.generationKey, committedRevision: committed.committedRevision,
+        };
+      }
+      if (successor.state !== 'PRESENT') break;
+      current = successor.snapshot;
     }
-    if (successor.state !== 'PRESENT') break;
-    current = successor.snapshot;
-  }
-  if (current) {
-    if (expectedCommittedRevision === 'NONE'
-      || expectedCommittedRevision !== current.committedRevision) return stale(current);
-    if (current.identity.generationKey !== identity.generationKey && !current.terminal) {
-      return {
-        kind: 'CrossGenerationIntent', workKey: identity.workKey,
-        currentOperationId: current.identity.operationId,
-        currentCommittedRevision: current.committedRevision,
-      };
+    if (current) {
+      if (expectedCommittedRevision === 'NONE'
+        || expectedCommittedRevision !== current.committedRevision) return stale(current);
+      if (current.identity.generationKey !== identity.generationKey && !current.terminal) {
+        return {
+          kind: 'CrossGenerationIntent', workKey: identity.workKey,
+          currentOperationId: current.identity.operationId,
+          currentCommittedRevision: current.committedRevision,
+        };
+      }
+      return stale(current);
     }
-    return stale(current);
+    const committed = await capabilities.bootstrapAndEnqueue(
+      identity, identity.envelope, expectedCommittedRevision,
+    );
+    if (committed.stale) {
+      if (expectedCommittedRevision === 'NONE' && attempt < REGISTRY_WRITE_ATTEMPTS) continue;
+      return stale({ committedRevision: committed.currentCommittedRevision });
+    }
+    await emit(ports, { kind: 'ENQUEUED', operationId: identity.operationId });
+    return {
+      kind: 'Enqueued', operationId: identity.operationId, workKey: identity.workKey,
+      generationKey: identity.generationKey, committedRevision: committed.committedRevision,
+    };
   }
-  const committed = await storeCapabilities(ports.store).bootstrapAndEnqueue(
-    identity, identity.envelope, expectedCommittedRevision,
-  );
-  if (committed.stale) return stale({ committedRevision: committed.currentCommittedRevision });
-  await emit(ports, { kind: 'ENQUEUED', operationId: identity.operationId });
-  return {
-    kind: 'Enqueued', operationId: identity.operationId, workKey: identity.workKey,
-    generationKey: identity.generationKey, committedRevision: committed.committedRevision,
-  };
 }
 
 /**
@@ -1450,7 +1459,7 @@ export async function readmitDraft(operationId, expectedCommittedRevision, prove
   // admission moved the shared registry first. Opening resumes from whatever landed, so it is
   // retried a bounded number of times before the run reports the contention.
   let opened;
-  for (let attempt = 1; attempt <= READMISSION_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= REGISTRY_WRITE_ATTEMPTS; attempt += 1) {
     opened = await capabilities.openSuccessor(root);
     if (!opened.stale) break;
   }

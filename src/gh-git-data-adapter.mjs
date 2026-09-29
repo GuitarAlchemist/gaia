@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
+import { ghFailure, isRateLimited } from './gh-failure.mjs';
+
 const GIT_OID = /^[a-f0-9]{40}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const LEDGER_PREFIX = 'refs/heads/gaia-ledger/';
@@ -88,12 +90,16 @@ async function runGh(args, input) {
   return new Promise((resolve, reject) => {
     const child = spawn('gh', args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     const stdout = [];
+    // Only the head of stderr is kept, and only long enough to classify the failure.
+    let stderr = '';
     child.stdout.on('data', (chunk) => stdout.push(chunk));
-    child.stderr.on('data', () => {});
+    child.stderr.on('data', (chunk) => {
+      if (stderr.length < 4096) stderr += chunk.toString('utf8');
+    });
     child.on('error', reject);
     child.on('close', (code) => {
       if (code !== 0) {
-        reject(new Error('GitHub Git Data request failed'));
+        reject(ghFailure(stderr));
         return;
       }
       try {
@@ -202,21 +208,22 @@ export function createGhGitDataApi({
     if (input !== undefined) args.push('--input', '-');
     try {
       return await run(args, input);
-    } catch {
-      fail('GitHubGitDataUnavailable');
+    } catch (error) {
+      fail(isRateLimited(error) ? 'GitHubRateLimited' : 'GitHubGitDataUnavailable');
     }
   };
 
   // A GET by OID is content-addressed: repeating it cannot observe a different object, so a
   // transient transport failure is retried a bounded number of times rather than failing a whole
   // ledger listing. Ref reads, rulesets, and every write stay single-shot; a write is never
-  // repeated blind.
+  // repeated blind. A rate limit is not retried: it lasts until the window resets, far beyond
+  // any backoff here, and each retry spends the quota it is waiting for.
   const readImmutable = async (path) => {
     for (let attempt = 1; ; attempt += 1) {
       try {
         return await call('GET', path);
       } catch (error) {
-        if (attempt >= immutableReadAttempts) throw error;
+        if (attempt >= immutableReadAttempts || error.code === 'GitHubRateLimited') throw error;
         await sleep(immutableReadBackoffMs * attempt);
       }
     }
