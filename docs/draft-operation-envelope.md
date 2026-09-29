@@ -282,7 +282,10 @@ updates the ref with `force: false`. Two candidates from the same parent are sib
 fast-forward succeeds, the other update is non-fast-forward and must fail as `StaleRevision` before
 any Draft effect. The adapter rereads but never silently rebases an effect-bearing record. Work-ref
 bootstrap creates one root record after registry reservation; concurrent bootstrap losers reread
-the winning ref. Missing, deleted,
+the winning ref. Two runs may bootstrap one admission together, so each step reads again what it
+acts on: a confirmation that landed meanwhile is adopted, never appended a second time (a second
+`CONFIRMED` would leave the registry unreadable for every work key), and a work ref found ahead of
+the registry just read gets one registry re-read before it counts as corruption. Missing, deleted,
 force-rewritten, multi-parent, non-canonical, discontinuous, or corrupt history fails closed and
 alerts. The adapter validates the private Git parent chain separately; Git OIDs never enter the
 canonical body or `committedRevision`. The registry, ruleset, branches, and their commit chains are

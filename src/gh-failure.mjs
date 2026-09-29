@@ -8,8 +8,9 @@
  */
 
 // Primary limits say "API rate limit exceeded", secondary ones "exceeded a secondary rate limit";
-// both arrive as HTTP 403, and a secondary limit may also arrive as a bare HTTP 429.
-const RATE_LIMITED = /\brate limit\b|\(HTTP 429\)/iu;
+// both arrive as HTTP 403. A secondary limit may also arrive as a 429, which gh prints as
+// "(HTTP 429)" after a message or as a bare "gh: HTTP 429" when the body carries none.
+const RATE_LIMITED = /\brate limit\b|\bHTTP 429\b/iu;
 
 /** A redacted failure for a `gh` call that exited non-zero, from the stderr it wrote. */
 export function ghFailure(stderr) {

@@ -640,12 +640,14 @@ test('a first admission whose confirmation is lost resumes from its own root', a
   assert.deepEqual(git.kinds(REGISTRY_REF).filter((kind) => kind === 'CONFIRMED'), ['CONFIRMED']);
 });
 
-test('a retry never enqueues a work key that another intake admitted meanwhile', async () => {
+test('two intakes of one issue that both lose to a third admission still admit it exactly once', async () => {
   const [, make] = STORES[1];
   const { store, git, config } = make();
   const rival = createGitDataDraftOperationStore({ gitData: git.port, config });
   let admittedByRival = null;
-  // The rival intake admits this same issue while this run's reservation is being written.
+  // A third issue's reservation lands first, so both first reservations of this issue go stale;
+  // without the retry neither run admits it. Gated interleavings of the two runs inside one
+  // bootstrap live in tests/draft-operation-concurrent-bootstrap.test.mjs.
   git.contend((ref, body) => {
     if (ref !== REGISTRY_REF || body.kind !== 'RESERVED' || body.workKey !== WORK_KEY) return false;
     return admittedByRival === null;

@@ -260,7 +260,8 @@ with their tip commit messages in one paginated GraphQL query, a hundred per pag
 differ. It used to read each tip over REST, one call per branch per issue. On 2026-09-29, with 115
 branches, eleven intake runs in half an hour were followed by two that failed as
 `GitHubGitDataUnavailable`, most likely on the pump App's hourly quota; the redacted error could not
-say, which is why a rate limit now has its own cause. The listing now costs two calls.
+say, which is why a rate limit now has its own cause. A collection lists twice, to select and then
+to read back, at one GraphQL call per hundred branches: four calls today instead of about 119.
 
 ### Choosing what to feed
 
@@ -354,6 +355,14 @@ starts one intake per issue, and on 2026-09-29 two of four simultaneous first ad
 CAS and admitted nothing. `enqueueDraft` therefore re-reads the admission line and retries, three
 attempts in all. The re-read is what keeps it safe: a work key that landed meanwhile answers
 `StaleRevision` as before and is never enqueued twice.
+
+**One work key, two bootstraps.** A labelled run and a recovery run sit in different concurrency
+groups, so both can bootstrap the same issue, and the retry above makes the loser of such a race
+resume the winner's bootstrap. Every bootstrap step therefore reads again what it acts on. A
+confirmation that landed meanwhile is adopted rather than appended a second time: two `CONFIRMED`
+records for one key make the registry unreadable, which would stop every intake until the ledger
+was repaired by hand. A work ref found ahead of the registry just read gets one registry re-read
+before it counts as corruption. Both windows predate the retry; gated tests pin each one.
 
 **Stale loser performs no effect.** A lost CAS is converted to a `StaleRevision` result carrying the
 current committed revision, without any provider call. Two intake processes reading `ENQUEUED` at
@@ -552,7 +561,7 @@ Every failure mode denies rather than proceeds, and every denial is a typed, red
 | Label events dropped by coalescing | — | schedule re-admits |
 | Terminal work key re-selected | `enqueueDraft` returns `StaleRevision` | skipped; probe continues |
 | First admissions of distinct issues race on the registry | registry CAS, line re-read | retried, three attempts in all; then `StaleRevision` |
-| GitHub rate limit, primary or secondary | `gh` stderr classified, then discarded | cause `GitHubRateLimited`; never retried into the same quota |
+| GitHub rate limit, primary or secondary | `gh` stderr classified, then discarded | cause `GitHubRateLimited`; the tick ends, never retried into the same quota |
 | `gh` absent or GitHub unreachable | typed collector and transport errors | redacted CLI error, exit 1, receipt still uploaded |
 
 No path produces a duplicate Draft.
@@ -680,3 +689,11 @@ a live proof that one labelled issue and one recovery replay create no duplicate
    under-count described above, and it can render `healthy` until the next tick. Closing the remainder
    requires a denominator the lane can serialize against, which the per-issue groups deliberately gave
    up.
+7. **Every intake re-reads the whole ledger, and the pump App's quota bounds the throughput.**
+   Listing unsettled work re-reads every registered admission, terminal ones included, and walks each
+   chain as commit, tree and blob reads. Measured read-only on 2026-09-29: one listing made 551 GitHub
+   calls in 86 seconds (158 records, three objects each, plus 77 ref reads). With collection and
+   reconciliation on top, an hourly installation quota of 5,000 holds roughly five to seven intake
+   runs, and labelling more issues than that within one hour exhausts it. The cost grows with every
+   admission. Reading a chain in one GraphQL query, or skipping terminal lines, would change how the
+   ledger is validated, so it needs its own design.

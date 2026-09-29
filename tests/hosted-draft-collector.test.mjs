@@ -386,6 +386,8 @@ test('a GitHub rate limit is named, and nothing else of the gh diagnostic leaves
       'GitHubRateLimited'],
     ['GraphQL: API rate limit already exceeded for installation ID 4788836.', 'GitHubRateLimited'],
     ['gh: Too Many Requests (HTTP 429)', 'GitHubRateLimited'],
+    ['gh: HTTP 429', 'GitHubRateLimited'],
+    ['gh: HTTP 4290 is not a status', 'GitHubObservationUnavailable'],
     ['gh: Not Found (HTTP 404)', 'GitHubObservationUnavailable'],
     [undefined, 'GitHubObservationUnavailable'],
   ]) {
