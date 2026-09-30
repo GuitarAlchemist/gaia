@@ -1,0 +1,17 @@
+{
+  "schema": "GaiaDraftMarkerLookupV0",
+  "repository": {
+    "nodeId": "R_kgDOT3lpUg",
+    "owner": "GuitarAlchemist",
+    "name": "gaia"
+  },
+  "headRef": "gaia/issue-4242-ready-1",
+  "marker": "6de23016fee768e524e62b1fe504b50a74caae8f2095ff186bb0e0f2c9cd6335",
+  "search": {
+    "state": "all",
+    "limit": 100
+  },
+  "observedAt": "2026-09-30T23:00:00Z",
+  "outcome": "COMPLETE",
+  "candidates": []
+}

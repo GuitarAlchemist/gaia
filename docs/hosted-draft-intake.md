@@ -426,6 +426,69 @@ Mitigation: `hosted-draft-pump-effect.yml` becomes manual break-glass only, with
 the normal path. This is a documentation and operational change; the effect workflow file and its
 tests are not touched.
 
+## Settling an ambiguous Draft — the decision only (#176)
+
+Step 3 above leaves `EFFECT_AMBIGUOUS` one exit, `REUSED`, and `reconcileDraft` takes it only when its
+lookup finds the marked Draft. When the lookup finds nothing, the operation stays pending for ever:
+nothing tells "found nothing" apart from "searched badly". The #127 operation has sat there since at
+least 2026-09-15 (#161). `src/draft-ambiguity-settlement.mjs` makes that call from a saved lookup, and
+only that call. It reads no network, no clock and no ledger, and it never creates, retries or cancels
+an effect.
+
+**The lookup** is the provider's own search, saved as a `GaiaDraftMarkerLookupV0` record. It holds
+the repository, the head branch, the marker, the search bounds (`state: all` and a `limit`), when it
+ran, whether it completed (`COMPLETE`, `PARTIAL` or `ERRORED`), and the rows exactly as this command
+returns them:
+
+```bash
+gh pr list --repo OWNER/NAME --state all --head HEAD_REF --limit 100 \
+  --json number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body
+```
+
+**Why an empty search proves absence.** The provider creates a Draft only with `--head` on the
+operation's own head branch. A pull request's head branch never changes, and a pull request is never
+deleted. So a complete search of that head, in every state, that returns no pull request at all
+proves the Draft was never created. The proof rests on those two GitHub properties, and on nothing
+the pump itself writes.
+
+**The decision**, `decideAmbiguousSettlement({ operation, lookup })`:
+
+| Lookup | Decision | Reason |
+| --- | --- | --- |
+| errored, partial, or as many rows as its limit | `STAY_UNSETTLED` | `LookupErrored`, `LookupPartial`, `LookupTruncated` |
+| complete, no pull request on the head | `SETTLE_ABANDONED` | `MarkerProvablyAbsent` |
+| more than one pull request on the head | `STAY_UNSETTLED` | `SeveralPullRequestsOnHead` |
+| one pull request, marker absent or repeated | `STAY_UNSETTLED` | `UnmarkedPullRequestOnHead` |
+| one marked pull request `reconcileDraft` would not adopt (merged, closed, ready, moved) | `STAY_UNSETTLED` | `MarkedPullRequestNotAdoptable` |
+| one marked open Draft on the request | `SETTLE_REUSED` | `MarkedDraftFound` |
+
+`SETTLE_REUSED` agrees with the existing adoption and does not replace it: a test runs the real
+provider over the same rows, and it adopts exactly what is called `SETTLE_REUSED`. A merged Draft
+is left to `reconcileDraft`, which proves the merge with its own reads.
+
+**Refusals.** An operation that is not `EFFECT_AMBIGUOUS` is refused as `OperationNotAmbiguous`. So
+is a lookup of another marker (`LookupMarkerMismatch`) or of another head or repository
+(`LookupScopeMismatch`). A malformed input is refused as `InvalidOperation` or `InvalidLookup`.
+
+**Evidence.** Every decision carries the record a settlement would write. It names the operation and
+the ambiguous revision it was decided at, the lookup's own content revision and bounds, the pull
+request found if any, and its own content revision.
+
+**Dry run.**
+
+```bash
+npm run draft:settle-ambiguous -- --operation operation.json --lookup lookup.json [--json]
+```
+
+- **Exit codes:** `0` a decision was made, whichever it is · `1` refused · `2` usage · `3`
+  fail-closed, meaning a file could not be read.
+- **No `--apply`.** The operator write, a new `ABANDONED` transition in the envelope, and what
+  becomes of the evidence branch all stay on #161.
+- **The #127 operation.** On 2026-09-30 the dry run found no pull request on
+  `codex/issue127-normal-admission-live` and decided `SETTLE_ABANDONED` (`MarkerProvablyAbsent`). The
+  operation is `e700fd9b…` at revision `02bd6009…`. It read the operation from the hosted ledger and
+  ran the search above with the user's own `gh`; nothing was written.
+
 ## Re-admitting an effect-free refusal — decided (#167)
 
 A refusal is terminal, and the base work key is the issue. So a transient, host-side refusal that
