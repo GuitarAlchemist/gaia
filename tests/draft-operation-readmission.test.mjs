@@ -609,22 +609,29 @@ test('an intake that reads a successor while it is being opened sees it open, ne
   assert.equal((await store.inspectByOperation(accepted.operationId)).admission.key, admissionKey);
 });
 
-test('a first admission that loses the shared registry is retried, then reported stale', async () => {
+test('a first admission that loses the shared registry is retried, then reported contended', async () => {
   const [, make] = STORES[1];
   const reserves = (ref, body) => ref === REGISTRY_REF && body.kind === 'RESERVED'
     && body.workKey === WORK_KEY;
-  for (const [times, expected] of [[2, 'Enqueued'], [3, 'StaleRevision']]) {
+  for (const [times, expected] of [[2, 'Enqueued'], [3, 'AdmissionContended']]) {
     const { store, git } = make();
     // Labelling several issues at once starts one intake per issue, all writing one registry.
     git.contend(reserves, times);
     const result = await enqueue(store, 1);
     assert.equal(result.kind, expected, `${times} rival admissions`);
-    if (expected === 'StaleRevision') {
-      assert.equal(result.currentCommittedRevision, 'NONE');
+    if (expected === 'AdmissionContended') {
+      // Not StaleRevision: that would read as a settled issue in a healthy empty queue.
+      assert.deepEqual(result, { kind: 'AdmissionContended', workKey: WORK_KEY });
       assert.deepEqual(git.kinds(`${WORK_PREFIX}${WORK_KEY}`), [], 'a contended run writes no work');
       assert.equal((await enqueue(store, 1)).kind, 'Enqueued', 'the next run admits it');
     }
     assert.deepEqual(git.kinds(`${WORK_PREFIX}${WORK_KEY}`), ['WORK_ROOT', 'ENQUEUED']);
+  }
+  // Only a first admission is retried. A supplied revision that no record carries is plain stale.
+  for (const [name, makeStore] of STORES) {
+    const { store } = makeStore();
+    const supplied = await enqueueDraft(SELECTOR, 'e'.repeat(64), portsFor(store, readyEvent(1)));
+    assert.deepEqual(supplied, { kind: 'StaleRevision', currentCommittedRevision: 'NONE' }, name);
   }
 });
 

@@ -439,6 +439,29 @@ test('a rate-limited candidate ends the tick instead of spending the quota on th
   assert.deepEqual(enqueued, [64], 'no later candidate is probed');
 });
 
+test('a contended candidate is skipped by name and the next candidate is still probed', async () => {
+  const run = await intake();
+  const enqueued = [];
+  const receipt = await run({ repository: REPOSITORY, candidates: [64, 65] }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return []; },
+    async enqueueDraft(selector) {
+      enqueued.push(selector.workItem.number);
+      return selector.workItem.number === 64
+        ? { kind: 'AdmissionContended', workKey: SHA_D }
+        : { kind: 'StaleRevision', currentCommittedRevision: SHA_D };
+    },
+    async reconcileDraft() { assert.fail('nothing was admitted'); },
+  });
+  assert.deepEqual(enqueued, [64, 65]);
+  assert.equal(receipt.phase, 'EXPECTED_NONE');
+  assert.deepEqual(receipt.skipped, [
+    { number: 64, reason: 'AdmissionContended' }, { number: 65, reason: 'StaleRevision' },
+  ]);
+});
+
 test('probing is bounded and stops without admitting when every candidate is terminal', async () => {
   const run = await intake();
   const enqueued = [];

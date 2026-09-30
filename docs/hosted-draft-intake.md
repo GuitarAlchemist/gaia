@@ -354,7 +354,10 @@ exists, so first admissions of *different* issues contend there. Labelling sever
 starts one intake per issue, and on 2026-09-29 two of four simultaneous first admissions lost that
 CAS and admitted nothing. `enqueueDraft` therefore re-reads the admission line and retries, three
 attempts in all. The re-read is what keeps it safe: a work key that landed meanwhile answers
-`StaleRevision` as before and is never enqueued twice.
+`StaleRevision` as before and is never enqueued twice. An issue that loses all three attempts reads its
+line once more. If its work key landed, the answer is still `StaleRevision`. Otherwise it answers
+`AdmissionContended` with nothing admitted. That is a skip the observation does not explain, so the
+tick is never published as a healthy empty queue while the issue waits for the next one.
 
 **One work key, two bootstraps.** A labelled run and a recovery run sit in different concurrency
 groups, so both can bootstrap the same issue, and the retry above makes the loser of such a race
@@ -560,7 +563,7 @@ Every failure mode denies rather than proceeds, and every denial is a typed, red
 | Forged or mislabelled webhook payload | job gate plus full API re-derivation | payload carries no authority |
 | Label events dropped by coalescing | — | schedule re-admits |
 | Terminal work key re-selected | `enqueueDraft` returns `StaleRevision` | skipped; probe continues |
-| First admissions of distinct issues race on the registry | registry CAS, line re-read | retried, three attempts in all; then `StaleRevision` |
+| First admissions of distinct issues race on the registry | registry CAS, line re-read | retried, three attempts in all; then `AdmissionContended`, or `StaleRevision` if the work key landed |
 | GitHub rate limit, primary or secondary | `gh` stderr classified, then discarded | cause `GitHubRateLimited`; the tick ends, never retried into the same quota |
 | `gh` absent or GitHub unreachable | typed collector and transport errors | redacted CLI error, exit 1, receipt still uploaded |
 

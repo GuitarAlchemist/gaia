@@ -1394,7 +1394,8 @@ export async function enqueueDraft(selectorInput, expectedCommittedRevision, por
   // A first admission writes the registry that every other first admission writes too, so a lost
   // compare-and-swap there usually means another issue was admitted in the same moment: labelling
   // several issues at once starts one intake per issue. The line is read again before each retry,
-  // so a work key that did land meanwhile still answers StaleRevision and is never enqueued twice.
+  // so a work key that did land meanwhile still answers StaleRevision and is never enqueued twice;
+  // one that loses every attempt answers AdmissionContended.
   for (let attempt = 1; ; attempt += 1) {
     let current = await capabilities.inspectByWork(identity.workKey);
     // Walk the admission line: past each re-admitted refusal to the chain an operator opened after
@@ -1435,8 +1436,16 @@ export async function enqueueDraft(selectorInput, expectedCommittedRevision, por
       identity, identity.envelope, expectedCommittedRevision,
     );
     if (committed.stale) {
-      if (expectedCommittedRevision === 'NONE' && attempt < REGISTRY_WRITE_ATTEMPTS) continue;
-      return stale({ committedRevision: committed.currentCommittedRevision });
+      if (expectedCommittedRevision !== 'NONE') {
+        return stale({ committedRevision: committed.currentCommittedRevision });
+      }
+      if (attempt < REGISTRY_WRITE_ATTEMPTS) continue;
+      // Every attempt lost the registry. A work key that landed meanwhile was admitted, and its
+      // answer is StaleRevision as ever. One that did not was never admitted: it lost the race
+      // each time, and a StaleRevision would read as a settled issue in a healthy empty queue.
+      const landed = await capabilities.inspectByWork(identity.workKey);
+      if (landed) return stale(landed);
+      return { kind: 'AdmissionContended', workKey: identity.workKey };
     }
     await emit(ports, { kind: 'ENQUEUED', operationId: identity.operationId });
     return {

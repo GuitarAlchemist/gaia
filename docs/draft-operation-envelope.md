@@ -300,7 +300,8 @@ it runs the registry reservation/`WORK_ROOT`/confirmation protocol internally an
 `ENQUEUED` from the returned bootstrap content revision. Every first admission appends to the one
 registry, so a lost registry CAS is usually another issue's admission: the caller re-reads its line
 and retries, three attempts in all. A caller whose own work key landed meanwhile returns
-`StaleRevision`, and so does one still contended after the third attempt, having written nothing or
+`StaleRevision`. A caller still contended after the third attempt reads its line once more: it returns
+`StaleRevision` if the work key landed, and otherwise `AdmissionContended`, having written nothing or
 a reservation the next caller resumes. No caller supplies or observes a Git OID. On a present work ref,
 `NONE` is stale and cannot rebootstrap. Only then does it CAS-append `ENQUEUED`.
 Only after that accepted append may an explicit dispatcher request a workflow. A failed,

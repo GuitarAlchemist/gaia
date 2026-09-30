@@ -375,6 +375,15 @@ test('a quarantined ambiguous effect or an unresolved evidence head reads BLOCKE
   });
   assert.equal(stillUnexplained.code, 'UnobservableHostedDraftPumpReceipt',
     'one unexplained skip still refuses, whatever else the tick explained');
+
+  // An issue that lost the registry on every attempt was never admitted: the tick is not healthy.
+  const contended = await refusalOf({
+    receipt: expectedNoneReceipt({
+      skipped: [{ number: 176, reason: 'AdmissionContended' }, { number: 64, reason: 'StaleRevision' }],
+    }),
+  });
+  assert.equal(contended.code, 'UnobservableHostedDraftPumpReceipt',
+    'a contended admission is never published as a healthy empty queue');
 });
 
 test('several explained skips publish one blocker by fixed precedence, whatever their order', async () => {
