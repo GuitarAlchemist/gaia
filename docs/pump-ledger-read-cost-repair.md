@@ -58,13 +58,20 @@ cache is filled:
 
 - When a walk reaches a commit the cache does not hold, the adapter asks GraphQL for up to a hundred
   of that commit's ancestors, with each tree and receipt blob.
-- It seeds the cache with the REST shapes those objects stand for. Anything that does not translate
-  exactly is left for a REST read: a parent count that disagrees with the parents listed, a binary or
-  truncated blob, or a malformed entry.
+- It seeds the cache with the REST shapes those objects stand for, but only a tree or blob whose
+  translated bytes hash back to the id Git stored for it. That check matters: gh rewrites control
+  characters in the JSON it prints, so a receipt quoting a terminal escape would otherwise be read
+  as different bytes, and a GraphQL tree listing carries no truncation flag.
+- Anything that does not verify or translate exactly is left for a REST read: a parent count that
+  disagrees with the parents listed, a binary or truncated blob, or a malformed entry. Commits cannot
+  be rehashed without their raw header, so their tree and parents are taken as given, as REST takes
+  them.
 - Receipt validation, head reads, protection checks and writes are unchanged.
 - The first GraphQL failure, or an answer without the commit asked for, turns the prefetch off for
   that adapter, so a broken GraphQL path costs one call, not one per step.
+- Concurrent walks that reach the same unseen commit share one query.
 
-A read-only live comparison of both paths returned identical records for all 34 ledger refs. The
-listing went from 81 ref reads plus 498 object reads (109 s) to 81 ref reads plus 21 GraphQL queries
-(8 s).
+A read-only live comparison of both paths returned identical records for all 34 ledger refs, and
+every live tree and blob verified. The listing went from 81 ref reads plus 498 object reads (109 s)
+to 81 ref reads plus 21 GraphQL queries (8 s). The query count follows the refs whose heads are not
+cached, not the record count.

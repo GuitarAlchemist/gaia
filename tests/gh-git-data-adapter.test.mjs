@@ -972,52 +972,67 @@ test('the default immutable cache holds a growing ledger working set without re-
 const REGISTRY = 'refs/heads/gaia-ledger/registry-v0';
 const REPOSITORY = Object.freeze({ owner: 'GuitarAlchemist', name: 'gaia' });
 
-// A linear ledger chain served both ways: REST objects by OID, and GraphQL history pages of at most
-// one hundred commits from any commit. `node` may rewrite what GraphQL says about a commit.
-function chainFixture(length, { node: rewrite = (value) => value, graphql } = {}) {
-  const hex = (prefix, index) => `${prefix}${index.toString(16).padStart(39, '0')}`;
-  const commits = Array.from({ length }, (_, index) => {
+const gitObjectId = (type, bytes) => createHash('sha1')
+  .update(`${type} ${bytes.length}\0`).update(bytes).digest('hex');
+
+// A linear ledger chain served both ways, with real Git ids for its trees and blobs: REST objects
+// by id, and GraphQL history pages of at most one hundred commits from any commit.
+// - `stored` changes what the chain holds, so REST and GraphQL both see it.
+// - `view` changes only what GraphQL says, as a lossy transport would.
+// - `graphql` replaces the GraphQL answer entirely.
+function chainFixture(length, { stored = () => {}, view = (node) => node, graphql } = {}) {
+  const commits = [];
+  for (let index = 0; index < length; index += 1) {
     const body = { schema: 'GaiaTestReceiptV0', kind: 'NOTE', index };
-    return {
-      oid: hex('a', index), tree: hex('b', index), blob: hex('c', index),
-      parent: index === 0 ? null : hex('a', index - 1),
-      text: canonical({ body, committedRevision: revision(body) }),
+    const record = {
+      text: canonical({ body, committedRevision: revision(body) }), mode: '100644', extra: false,
+      parents: index === 0 ? [] : [commits[index - 1].oid],
     };
-  });
+    stored(record, index);
+    const blob = gitObjectId('blob', Buffer.from(record.text, 'utf8'));
+    const entries = [
+      ...(record.extra ? [{ path: 'extra.json', mode: '100644', type: 'blob', sha: blob }] : []),
+      { path: 'receipt.json', mode: record.mode, type: 'blob', sha: blob },
+    ];
+    const tree = gitObjectId('tree', Buffer.concat(entries.flatMap((entry) => [
+      Buffer.from(`${entry.mode} ${entry.path}\0`), Buffer.from(entry.sha, 'hex'),
+    ])));
+    commits.push({ oid: `a${index.toString(16).padStart(39, '0')}`, tree, blob, entries, ...record });
+  }
   const find = (key, value) => commits.find((commit) => commit[key] === value);
-  const historyNode = (commit) => rewrite({
+  const historyNode = (commit) => view(structuredClone({
     oid: commit.oid,
-    parents: { totalCount: commit.parent ? 1 : 0, nodes: commit.parent ? [{ oid: commit.parent }] : [] },
-    tree: { oid: commit.tree, entries: [{
-      name: 'receipt.json', mode: 0o100644, type: 'blob', oid: commit.blob,
-      object: { __typename: 'Blob', oid: commit.blob, isBinary: false, isTruncated: false, text: commit.text },
-    }] },
-  });
+    parents: { totalCount: commit.parents.length, nodes: commit.parents.map((oid) => ({ oid })) },
+    tree: { oid: commit.tree, entries: commit.entries.map((entry) => ({
+      name: entry.path, mode: Number.parseInt(entry.mode, 8), type: entry.type, oid: entry.sha,
+      object: { __typename: 'Blob', oid: entry.sha, isBinary: false, isTruncated: false, text: commit.text },
+    })) },
+  }));
   const run = async (args) => {
     const path = args[1];
     if (path === 'graphql') {
       if (graphql) return graphql(args);
       const nodes = [];
       for (let commit = find('oid', args.find((arg) => arg.startsWith('oid=')).slice(4));
-        commit && nodes.length < 100; commit = find('oid', commit.parent)) nodes.push(historyNode(commit));
+        commit && nodes.length < 100; commit = find('oid', commit.parents[0])) nodes.push(historyNode(commit));
       return { data: { repository: { object: { history: { nodes } } } } };
     }
     if (path.includes('matching-refs')) return [{ ref: REGISTRY, object: { sha: commits.at(-1).oid } }];
     const [, kind, id] = /git\/(commits|trees|blobs)\/([a-f0-9]{40})$/u.exec(path) ?? [];
     if (kind === 'commits') {
       const commit = find('oid', id);
-      return { sha: commit.oid, tree: { sha: commit.tree }, parents: commit.parent ? [{ sha: commit.parent }] : [] };
+      return { sha: commit.oid, tree: { sha: commit.tree }, parents: commit.parents.map((sha) => ({ sha })) };
     }
-    if (kind === 'trees') {
-      return { truncated: false, tree: [{ path: 'receipt.json', mode: '100644', type: 'blob', sha: find('tree', id).blob }] };
+    if (kind === 'trees') return { truncated: false, tree: structuredClone(find('tree', id).entries) };
+    if (kind === 'blobs') {
+      return { encoding: 'base64', content: Buffer.from(find('blob', id).text, 'utf8').toString('base64') };
     }
-    if (kind === 'blobs') return { encoding: 'base64', content: Buffer.from(find('blob', id).text).toString('base64') };
     throw new Error(`unexpected fixture path: ${path}`);
   };
   return { run };
 }
 
-async function chainApis(fixture, options = {}) {
+async function chainApis(fixture) {
   const { createGhGitDataApi } = await import(MODULE_URL);
   const restCalls = [];
   const calls = [];
@@ -1026,24 +1041,38 @@ async function chainApis(fixture, options = {}) {
     run: async (args) => { restCalls.push(args[1]); return fixture.run(args); },
   });
   const prefetched = createGhGitDataApi({
-    repository: REPOSITORY, pumpActor: PUMP_ACTOR, historyPrefetch: true, ...options,
+    repository: REPOSITORY, pumpActor: PUMP_ACTOR, historyPrefetch: true,
     run: async (args) => { calls.push(args[1]); return fixture.run(args); },
   });
-  const objectReads = () => calls.filter((path) => /\/git\/(commits|trees|blobs)\//u.test(path)).length;
-  return { rest, restCalls, prefetched, calls, objectReads };
+  const count = (pattern) => calls.filter((path) => pattern.test(path)).length;
+  return {
+    rest, restCalls, prefetched, calls,
+    graphqlQueries: () => count(/^graphql$/u),
+    objectReads: () => count(/\/git\/(commits|trees|blobs)\//u),
+    reads: (kind) => count(new RegExp(`/git/${kind}/`, 'u')),
+  };
+}
+
+// The same verdict both ways: the snapshot, or the refusal code.
+async function outcome(read) {
+  try {
+    return await read;
+  } catch (error) {
+    return { refused: error?.code };
+  }
 }
 
 test('the history prefetch reads a chain in one GraphQL query and returns the REST snapshot', async () => {
-  const { rest, restCalls, prefetched, calls, objectReads } = await chainApis(chainFixture(3));
-  const expected = await rest.read(REGISTRY);
+  const api = await chainApis(chainFixture(3));
+  const expected = await api.rest.read(REGISTRY);
   assert.equal(expected.records.length, 3);
-  assert.ok(!restCalls.includes('graphql'), 'the prefetch is off unless asked for');
+  assert.ok(!api.restCalls.includes('graphql'), 'the prefetch is off unless asked for');
 
-  assert.deepEqual(await prefetched.read(REGISTRY), expected);
-  assert.deepEqual(await prefetched.read(REGISTRY), expected);
-  assert.equal(calls.filter((path) => path === 'graphql').length, 1);
-  assert.equal(objectReads(), 0);
-  assert.equal(calls.filter((path) => path.includes('matching-refs')).length, 2,
+  assert.deepEqual(await api.prefetched.read(REGISTRY), expected);
+  assert.deepEqual(await api.prefetched.read(REGISTRY), expected);
+  assert.equal(api.graphqlQueries(), 1);
+  assert.equal(api.objectReads(), 0);
+  assert.equal(api.calls.filter((path) => path.includes('matching-refs')).length, 2,
     'the head is still read over REST on every read');
 
   const { createGhGitDataApi } = await import(MODULE_URL);
@@ -1053,79 +1082,101 @@ test('the history prefetch reads a chain in one GraphQL query and returns the RE
 });
 
 test('a chain longer than one GraphQL page continues from its first unseen ancestor', async () => {
-  const { rest, prefetched, calls, objectReads } = await chainApis(chainFixture(150));
-  const expected = await rest.read(REGISTRY);
-  assert.deepEqual(await prefetched.read(REGISTRY), expected);
-  assert.equal(calls.filter((path) => path === 'graphql').length, 2);
-  assert.equal(objectReads(), 0);
+  const api = await chainApis(chainFixture(150));
+  assert.deepEqual(await api.prefetched.read(REGISTRY), await api.rest.read(REGISTRY));
+  assert.equal(api.graphqlQueries(), 2);
+  assert.equal(api.objectReads(), 0);
 });
 
-test('a prefetched receipt still passes the validation a REST receipt does', async () => {
-  const entry = (node) => node.tree.entries[0];
+test('concurrent walks of one unseen head share one GraphQL query', async () => {
+  const api = await chainApis(chainFixture(3));
+  const [first, second] = await Promise.all([
+    api.prefetched.read(REGISTRY), api.prefetched.read(REGISTRY),
+  ]);
+  assert.deepEqual(first, second);
+  assert.equal(api.graphqlQueries(), 1);
+  assert.equal(api.objectReads(), 0);
+});
+
+test('a prefetched receipt is refused exactly where a REST receipt is', async () => {
   const cases = [
-    ['a receipt that is not byte-canonical', (node) => {
-      entry(node).object.text = ` ${entry(node).object.text}`;
-      return node;
-    }],
-    ['an executable receipt', (node) => { entry(node).mode = 0o100755; return node; }],
-    ['a second tree entry', (node) => {
-      node.tree.entries.push({ ...entry(node), name: 'extra.json' });
-      return node;
-    }],
-    ['a merge commit', (node) => {
-      node.parents = { totalCount: 2, nodes: [{ oid: 'd'.repeat(40) }, { oid: 'e'.repeat(40) }] };
-      return node;
-    }],
+    ['a receipt that is not byte-canonical', (record) => { record.text = ` ${record.text}`; }],
+    ['an executable receipt', (record) => { record.mode = '100755'; }],
+    ['a second tree entry', (record) => { record.extra = true; }],
+    ['a merge commit', (record) => { record.parents = [...record.parents, 'd'.repeat(40)]; }],
+    // GraphQL need not list entries in Git's order; the tree still verifies once they are sorted.
+    ['a second tree entry listed out of order', (record) => { record.extra = true; },
+      (node) => { node.tree.entries.reverse(); return node; }],
   ];
-  for (const [name, node] of cases) {
-    const { prefetched, calls, objectReads } = await chainApis(chainFixture(2, { node }));
-    await assert.rejects(prefetched.read(REGISTRY),
-      (error) => error?.code === 'GitDataProtocolViolation', name);
-    assert.equal(calls.filter((path) => path === 'graphql').length, 1, name);
-    assert.equal(objectReads(), 0, `${name} is refused from the prefetched objects`);
+  for (const [name, stored, view] of cases) {
+    const api = await chainApis(chainFixture(2, { stored, view }));
+    assert.deepEqual(await outcome(api.prefetched.read(REGISTRY)),
+      { refused: 'GitDataProtocolViolation' }, name);
+    assert.deepEqual(await outcome(api.rest.read(REGISTRY)),
+      { refused: 'GitDataProtocolViolation' }, name);
+    assert.equal(api.objectReads(), 0, `${name} is refused from verified prefetched objects`);
   }
 });
 
-test('what GraphQL cannot give exactly is read over REST', async () => {
-  const truncated = await chainApis(chainFixture(3, { node: (node) => {
-    node.tree.entries[0].object.isTruncated = true;
-    return node;
-  } }));
-  assert.deepEqual(await truncated.prefetched.read(REGISTRY), await truncated.rest.read(REGISTRY));
-  assert.equal(truncated.calls.filter((path) => path.includes('/git/blobs/')).length, 3);
-  assert.equal(truncated.calls.filter((path) => /\/git\/(commits|trees)\//u.test(path)).length, 0);
+test('an object GraphQL does not give byte for byte is read over REST', async () => {
+  // A receipt quoting a terminal escape, as a pull request body can: canonical JSON stores it as
+  // the six characters \u001b, and gh prints the GraphQL text back with the escape rewritten.
+  const escape = (record, index) => {
+    const body = { schema: 'GaiaTestReceiptV0', kind: 'NOTE', index, note: 'colour \u001b[31m' };
+    record.text = canonical({ body, committedRevision: revision(body) });
+  };
+  const blob = (change) => (node) => { change(node.tree.entries[0].object); return node; };
+  const entry = (change) => (node) => { change(node.tree.entries[0]); return node; };
+  const cases = [
+    ['a control character gh rewrote', escape,
+      blob((object) => { object.text = object.text.replaceAll('\\u001b', '\\^['); }), { blobs: 3 }],
+    ['a truncated blob', undefined, blob((object) => { object.isTruncated = true; }), { blobs: 3 }],
+    ['a binary blob', undefined, blob((object) => { object.isBinary = true; }), { blobs: 3 }],
+    ['a blob that is not its entry', undefined,
+      blob((object) => { object.oid = 'f'.repeat(40); }), { blobs: 3 }],
+    ['a mode the tree does not hold', undefined, entry((value) => { value.mode = 0o100755; }), { trees: 3 }],
+    ['an entry the tree does not hold', undefined, (node) => {
+      node.tree.entries.push({ ...node.tree.entries[0], name: 'extra.json' });
+      return node;
+    }, { trees: 3 }],
+    ['a malformed entry', undefined, entry((value) => { value.mode = null; }), { trees: 3 }],
+  ];
+  for (const [name, stored, view, expected] of cases) {
+    const api = await chainApis(chainFixture(3, { stored, view }));
+    const snapshot = await api.rest.read(REGISTRY);
+    assert.equal(snapshot.state, 'PRESENT', name);
+    assert.deepEqual(await api.prefetched.read(REGISTRY), snapshot, name);
+    assert.equal(api.reads('commits'), 0, name);
+    assert.equal(api.reads('trees'), expected.trees ?? 0, name);
+    assert.equal(api.reads('blobs'), expected.blobs ?? 0, name);
+  }
 
-  const binary = await chainApis(chainFixture(3, { node: (node) => {
-    node.tree.entries[0].object.isBinary = true;
-    return node;
-  } }));
-  assert.deepEqual(await binary.prefetched.read(REGISTRY), await binary.rest.read(REGISTRY));
-  assert.equal(binary.calls.filter((path) => path.includes('/git/blobs/')).length, 3);
-
-  const foreignBlob = await chainApis(chainFixture(3, { node: (node) => {
-    node.tree.entries[0].object.oid = 'f'.repeat(40);
-    return node;
-  } }));
-  assert.deepEqual(await foreignBlob.prefetched.read(REGISTRY), await foreignBlob.rest.read(REGISTRY));
-  assert.equal(foreignBlob.calls.filter((path) => path.includes('/git/blobs/')).length, 3);
-
-  const malformedEntry = await chainApis(chainFixture(3, { node: (node) => {
-    node.tree.entries[0].mode = null;
-    return node;
-  } }));
-  assert.deepEqual(await malformedEntry.prefetched.read(REGISTRY),
-    await malformedEntry.rest.read(REGISTRY));
-  assert.equal(malformedEntry.calls.filter((path) => /\/git\/(trees|blobs)\//u.test(path)).length, 6);
-  assert.equal(malformedEntry.calls.filter((path) => path.includes('/git/commits/')).length, 0);
-
-  const miscounted = await chainApis(chainFixture(3, { node: (node) => {
-    node.parents.totalCount += 1;
-    return node;
-  } }));
+  const miscounted = await chainApis(chainFixture(3, {
+    view: (node) => { node.parents.totalCount += 1; return node; },
+  }));
   assert.deepEqual(await miscounted.prefetched.read(REGISTRY), await miscounted.rest.read(REGISTRY));
   assert.equal(miscounted.objectReads(), 9);
-  assert.equal(miscounted.calls.filter((path) => path === 'graphql').length, 1,
+  assert.equal(miscounted.graphqlQueries(), 1,
     'a history without the commit asked for is not asked again at each step');
+});
+
+test('a receipt REST refuses is never accepted from what gh printed', async () => {
+  // Stored with a raw NUL, which no JSON parser accepts. gh prints it as ^@, and the printed text
+  // is a canonical receipt whose revision matches: only the object id tells the two apart.
+  const nul = (record, index) => {
+    const body = { schema: 'GaiaTestReceiptV0', kind: 'NOTE', index, note: '^@' };
+    record.text = canonical({ body, committedRevision: revision(body) }).replace('^@', '\u0000');
+  };
+  const api = await chainApis(chainFixture(2, {
+    stored: nul,
+    view: (node) => {
+      for (const entry of node.tree.entries) entry.object.text = entry.object.text.replace('\u0000', '^@');
+      return node;
+    },
+  }));
+  assert.deepEqual(await outcome(api.rest.read(REGISTRY)), { refused: 'GitDataProtocolViolation' });
+  assert.deepEqual(await outcome(api.prefetched.read(REGISTRY)), { refused: 'GitDataProtocolViolation' });
+  assert.equal(api.reads('blobs'), 1, 'the head receipt is read over REST and refused there');
 });
 
 test('a failed or malformed GraphQL answer leaves every read to REST', async () => {
@@ -1139,9 +1190,9 @@ test('a failed or malformed GraphQL answer leaves every read to REST', async () 
     ['an answer without a history', async () => ({ data: { repository: { object: null } } })],
   ];
   for (const [name, graphql] of answers) {
-    const { rest, prefetched, calls, objectReads } = await chainApis(chainFixture(3, { graphql }));
-    assert.deepEqual(await prefetched.read(REGISTRY), await rest.read(REGISTRY), name);
-    assert.equal(calls.filter((path) => path === 'graphql').length, 1, name);
-    assert.equal(objectReads(), 9, name);
+    const api = await chainApis(chainFixture(3, { graphql }));
+    assert.deepEqual(await api.prefetched.read(REGISTRY), await api.rest.read(REGISTRY), name);
+    assert.equal(api.graphqlQueries(), 1, name);
+    assert.equal(api.objectReads(), 9, name);
   }
 });

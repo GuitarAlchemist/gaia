@@ -83,9 +83,19 @@ function oid(value, code = 'GitDataProtocolViolation') {
 
 const isOid = (value) => typeof value === 'string' && GIT_OID.test(value);
 
-// The REST objects one GraphQL history node stands for, keyed by their REST path. Only what
-// translates exactly is returned; anything else is left for a REST read. Nothing here validates a
-// receipt: readRecord still does, on these same shapes.
+// Git's object id for a body of this type: what a translated tree or blob must hash back to.
+const gitObjectId = (type, bytes) => createHash('sha1')
+  .update(`${type} ${bytes.length}\0`, 'utf8').update(bytes).digest('hex');
+
+// Git orders tree entries by name, comparing a directory as if its name ended in '/'.
+const treeOrder = (entry) => Buffer.from(entry.mode === 0o40000 ? `${entry.name}/` : entry.name, 'utf8');
+
+// The REST objects one GraphQL history node stands for, keyed by their REST path. A tree or blob
+// is returned only when its translated bytes hash back to the object id Git stored, so nothing the
+// transport altered is ever seeded: gh rewrites control characters in the JSON it prints, and a
+// GraphQL tree listing carries no truncation flag. Whatever does not verify is left for a REST
+// read. A commit cannot be rehashed without its raw header; its tree and parents are taken as
+// given, exactly as the REST path takes them. Nothing here validates a receipt: readRecord does.
 function historyObjects(node) {
   const parents = node?.parents;
   const tree = node?.tree;
@@ -96,24 +106,29 @@ function historyObjects(node) {
   const objects = [[`git/commits/${node.oid}`, {
     sha: node.oid, tree: { sha: tree.oid }, parents: parents.nodes.map(({ oid: sha }) => ({ sha })),
   }]];
+  for (const { oid: sha, object } of tree.entries) {
+    if (object?.__typename !== 'Blob' || object.oid !== sha || !isOid(sha)
+        || object.isBinary !== false || object.isTruncated !== false
+        || typeof object.text !== 'string') continue;
+    const bytes = Buffer.from(object.text, 'utf8');
+    if (gitObjectId('blob', bytes) !== sha) continue;
+    objects.push([`git/blobs/${sha}`, { encoding: 'base64', content: bytes.toString('base64') }]);
+  }
   if (!tree.entries.every((entry) => typeof entry?.name === 'string'
       && Number.isSafeInteger(entry.mode) && entry.mode >= 0
       && typeof entry.type === 'string' && isOid(entry.oid))) return objects;
-  // GraphQL gives a mode as a number and never marks a tree truncated; REST gives the octal string.
+  const entries = [...tree.entries].sort((a, b) => Buffer.compare(treeOrder(a), treeOrder(b)));
+  const treeBytes = Buffer.concat(entries.flatMap((entry) => [
+    Buffer.from(`${entry.mode.toString(8)} ${entry.name}\0`, 'utf8'), Buffer.from(entry.oid, 'hex'),
+  ]));
+  if (gitObjectId('tree', treeBytes) !== tree.oid) return objects;
+  // A tree that hashes back is complete. REST gives each mode as a six-digit octal string.
   objects.push([`git/trees/${tree.oid}`, {
     truncated: false,
-    tree: tree.entries.map((entry) => ({
+    tree: entries.map((entry) => ({
       path: entry.name, mode: entry.mode.toString(8).padStart(6, '0'), type: entry.type, sha: entry.oid,
     })),
   }]);
-  for (const { oid: sha, object } of tree.entries) {
-    if (object?.__typename === 'Blob' && object.oid === sha && object.isBinary === false
-        && object.isTruncated === false && typeof object.text === 'string') {
-      objects.push([`git/blobs/${sha}`, {
-        encoding: 'base64', content: Buffer.from(object.text, 'utf8').toString('base64'),
-      }]);
-    }
-  }
   return objects;
 }
 
@@ -313,8 +328,10 @@ export function createGhGitDataApi({
   // reaches a commit it has not seen first asks GraphQL for that commit's ancestors and seeds the
   // object cache with them. Heads are still read over REST on every read, and every record still
   // passes readRecord. Once GraphQL fails, or answers without the commit asked for, REST does
-  // every remaining read for this adapter instead of asking again at each step.
+  // every remaining read for this adapter instead of asking again at each step. Concurrent walks
+  // that reach the same commit share one query, as they share one REST read.
   let prefetchAvailable = historyPrefetch;
+  const prefetches = new Map();
   const seedImmutable = (path, value) => {
     if (immutableObjectCache.has(path)) return;
     if (immutableObjectCache.size >= IMMUTABLE_OBJECT_CACHE_LIMIT) {
@@ -322,7 +339,7 @@ export function createGhGitDataApi({
     }
     immutableObjectCache.set(path, Promise.resolve(value));
   };
-  const prefetchHistory = async (commitOid) => {
+  const fetchHistory = async (commitOid) => {
     let response;
     try {
       response = await run(['api', 'graphql',
@@ -341,6 +358,14 @@ export function createGhGitDataApi({
       for (const [path, value] of historyObjects(node)) seedImmutable(path, value);
     }
     if (!immutableObjectCache.has(`git/commits/${commitOid}`)) prefetchAvailable = false;
+  };
+  const prefetchHistory = (commitOid) => {
+    let pending = prefetches.get(commitOid);
+    if (pending === undefined) {
+      pending = fetchHistory(commitOid).finally(() => prefetches.delete(commitOid));
+      prefetches.set(commitOid, pending);
+    }
+    return pending;
   };
 
   async function currentHead(ref) {
