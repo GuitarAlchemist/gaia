@@ -343,6 +343,8 @@ export async function runHostedDraftIntake({
       );
       enqueued = result(await deps.enqueueDraft(canonicalSelector, 'NONE', enqueuePorts));
     } catch (error) {
+      // Every later candidate would spend the same exhausted quota, so a rate limit ends the tick.
+      if (error?.code === 'GitHubRateLimited') throw error;
       skipped.push({ number, reason: skipReason(error) });
       continue;
     }

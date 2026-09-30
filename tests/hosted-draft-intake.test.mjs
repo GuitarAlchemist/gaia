@@ -421,6 +421,24 @@ test('a typed collection failure skips the candidate and never admits a second o
   assert.deepEqual(receipt.skipped, [{ number: 64, reason: 'IssueNotReady' }]);
 });
 
+test('a rate-limited candidate ends the tick instead of spending the quota on the next ones', async () => {
+  const run = await intake();
+  const enqueued = [];
+  const rateLimited = Object.assign(new Error('GitHub rate limit reached'), { code: 'GitHubRateLimited' });
+  await assert.rejects(run({ repository: REPOSITORY, candidates: [64, 65, 66] }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return []; },
+    async enqueueDraft(selector) {
+      enqueued.push(selector.workItem.number);
+      throw rateLimited;
+    },
+    async reconcileDraft() { assert.fail('nothing was admitted'); },
+  }), (error) => error === rateLimited);
+  assert.deepEqual(enqueued, [64], 'no later candidate is probed');
+});
+
 test('probing is bounded and stops without admitting when every candidate is terminal', async () => {
   const run = await intake();
   const enqueued = [];

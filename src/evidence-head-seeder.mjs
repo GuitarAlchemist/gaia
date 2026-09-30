@@ -85,7 +85,9 @@ export async function seedEvidenceHead({ github, writer = null, selector, apply 
   try {
     observed = await observeReadyReceipt(github, selector);
   } catch (error) {
-    if (error instanceof HostedDraftCollectorError && error.code !== 'GitHubObservationUnavailable') {
+    // An unreachable or rate-limited GitHub is not a refusal of this issue: it fails closed.
+    if (error instanceof HostedDraftCollectorError
+      && !['GitHubObservationUnavailable', 'GitHubRateLimited'].includes(error.code)) {
       return Object.freeze({ schema: EVIDENCE_HEAD_SCHEMA, status: 'REFUSED', reason: error.code });
     }
     throw error;

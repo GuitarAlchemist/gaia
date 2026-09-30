@@ -7,7 +7,7 @@ const EPOCH_STATES = new Set(['CLAIMED', 'INTENT', 'EFFECT_STARTED']);
 // The create call is reachable only after EFFECT_STARTED, so a refusal from these states never ran it.
 const PRE_EFFECT_STATES = new Set(['ENQUEUED', 'CLAIMED', 'INTENT']);
 const READMISSION_REASON_LIMIT = 500;
-const READMISSION_ATTEMPTS = 3;
+const REGISTRY_WRITE_ATTEMPTS = 3;
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u;
 const notInvokedWitnesses = new WeakMap();
 
@@ -955,23 +955,34 @@ class GitDataDraftOperationStore {
     return work;
   }
 
-  async #inspectByAdmission(admissionKey) {
-    const registry = await this.#registry();
+  /**
+   * The registry entry and bootstrap root of one admission, read in that order.
+   *
+   * Another run may be bootstrapping the same admission: a labelled intake and a recovery intake
+   * run in different concurrency groups. Its root can land between the two reads, leaving the work
+   * ref ahead of the registry that was read. Every work-ref write follows the registry write that
+   * allows it, so one registry re-read closes that window; a work ref still ahead is corruption.
+   */
+  async #bootstrapState(admissionKey) {
+    let registry = await this.#registry();
+    const root = await this.#readBootstrapRoot(admissionKey);
+    const ahead = (entry) => (!entry && root)
+      || (entry?.state === 'RESERVED' && root && !root.rootOnly);
+    if (ahead(registry.entries.get(admissionKey))) registry = await this.#registry();
     const entry = registry.entries.get(admissionKey);
-    if (entry?.state === 'RESERVED') {
-      const root = await this.#readBootstrapRoot(admissionKey);
-      if (root && !root.rootOnly) throw new DraftOperationError('LedgerCorrupt');
-      return null;
-    }
-    if (entry?.state === 'CONFIRMED') {
-      const root = await this.#readBootstrapRoot(admissionKey);
-      if (root?.rootOnly) {
-        if (entry.bootstrapCommittedRevision !== root.committedRevision) {
-          throw new DraftOperationError('LedgerCorrupt');
-        }
-        if (entry.bootstrapOid !== root.oid) throw new DraftOperationError('LedgerCorrupt');
-        return null;
+    if (ahead(entry)) throw new DraftOperationError('LedgerCorrupt');
+    return { registry, entry, root };
+  }
+
+  async #inspectByAdmission(admissionKey) {
+    const { entry, root } = await this.#bootstrapState(admissionKey);
+    if (!entry || entry.state === 'RESERVED') return null;
+    if (entry.state === 'CONFIRMED' && root?.rootOnly) {
+      if (entry.bootstrapCommittedRevision !== root.committedRevision) {
+        throw new DraftOperationError('LedgerCorrupt');
       }
+      if (entry.bootstrapOid !== root.oid) throw new DraftOperationError('LedgerCorrupt');
+      return null;
     }
     return this.#snapshot(await this.#stateByAdmission(admissionKey));
   }
@@ -1104,12 +1115,9 @@ class GitDataDraftOperationStore {
     const admissionKey = rootBody.admissionKey;
     const workRef = `${WORK_REF_PREFIX}${admissionKey}`;
     return this.#exclusive(admissionKey, async () => {
-      let registry = await this.#registry();
-      let entry = registry.entries.get(admissionKey);
-      let root = await this.#readBootstrapRoot(admissionKey);
+      let { registry, entry, root } = await this.#bootstrapState(admissionKey);
       if (entry?.state === 'CONFIRMED') return { opened: false };
       if (!entry) {
-        if (root) throw new DraftOperationError('LedgerCorrupt');
         const reserved = await this.#append(REGISTRY_REF, registry.headOid, closedObject([
           ['schema', 'GaiaDraftRegistryReceiptV0'],
           ['priorCommittedRevision', registry.committedRevision],
@@ -1118,8 +1126,8 @@ class GitDataDraftOperationStore {
           ['admissionKey', admissionKey],
         ]));
         if (reserved.stale) return { stale: true };
-        registry = await this.#registry();
-        entry = registry.entries.get(admissionKey);
+        ({ registry, entry, root } = await this.#bootstrapState(admissionKey));
+        if (entry?.state === 'CONFIRMED') return { opened: false };
       }
       if (entry?.state !== 'RESERVED' || entry.workKey !== rootBody.workKey) {
         throw new DraftOperationError('LedgerCorrupt');
@@ -1131,10 +1139,23 @@ class GitDataDraftOperationStore {
           rootOnly: true, successor: true, workKey: rootBody.workKey,
         };
       }
-      if (!root?.rootOnly || !root.successor || root.workKey !== rootBody.workKey) {
+      if (!root?.successor || root.workKey !== rootBody.workKey) {
         throw new DraftOperationError('LedgerCorrupt');
       }
+      // A concurrent opening of this successor may have confirmed it since the registry was read:
+      // that confirmation is adopted, never written a second time.
       registry = await this.#registry();
+      entry = registry.entries.get(admissionKey);
+      if (entry?.state === 'CONFIRMED') {
+        if (entry.bootstrapOid !== root.oid
+          || entry.bootstrapCommittedRevision !== root.committedRevision) {
+          throw new DraftOperationError('LedgerCorrupt');
+        }
+        return { opened: false };
+      }
+      if (entry?.state !== 'RESERVED' || !root.rootOnly) {
+        throw new DraftOperationError('LedgerCorrupt');
+      }
       const confirmed = await this.#append(REGISTRY_REF, registry.headOid, closedObject([
         ['schema', 'GaiaDraftRegistryReceiptV0'],
         ['priorCommittedRevision', registry.committedRevision],
@@ -1174,8 +1195,6 @@ class GitDataDraftOperationStore {
       if (expectedCommittedRevision !== 'NONE') {
         return { stale: true, currentCommittedRevision: 'NONE' };
       }
-      let registry = await this.#registry();
-      let entry = registry.entries.get(identity.workKey);
       const rootBody = closedObject([
         ['schema', 'GaiaDraftWorkRootV0'],
         ['priorCommittedRevision', 'NONE'],
@@ -1183,9 +1202,10 @@ class GitDataDraftOperationStore {
         ['workKey', identity.workKey],
       ]);
       const workRef = `${WORK_REF_PREFIX}${identity.workKey}`;
-      let root = await this.#readBootstrapRoot(identity.workKey);
+      // Another run may be bootstrapping this same work key. Each step reads again what it acts on,
+      // so this run either completes that bootstrap or yields to it, and never confirms twice.
+      let { registry, entry, root } = await this.#bootstrapState(identity.workKey);
       if (!entry) {
-        if (root) throw new DraftOperationError('LedgerCorrupt');
         const reservedBody = closedObject([
           ['schema', 'GaiaDraftRegistryReceiptV0'],
           ['priorCommittedRevision', registry.committedRevision],
@@ -1194,10 +1214,9 @@ class GitDataDraftOperationStore {
         ]);
         const reserved = await this.#append(REGISTRY_REF, registry.headOid, reservedBody);
         if (reserved.stale) return { stale: true, currentCommittedRevision: 'NONE' };
-        registry = await this.#registry();
-        entry = registry.entries.get(identity.workKey);
+        ({ registry, entry, root } = await this.#bootstrapState(identity.workKey));
       }
-      if (entry.state === 'RESERVED') {
+      if (entry?.state === 'RESERVED') {
         if (!root) {
           const appendedRoot = await this.#append(workRef, 'NONE', rootBody);
           if (appendedRoot.stale) root = await this.#readBootstrapRoot(identity.workKey);
@@ -1207,10 +1226,15 @@ class GitDataDraftOperationStore {
             rootOnly: true,
           };
         }
-        if (!root?.rootOnly || root.committedRevision !== contentRevision(rootBody)) {
+        if (!root || root.committedRevision !== contentRevision(rootBody)) {
           throw new DraftOperationError('LedgerCorrupt');
         }
         registry = await this.#registry();
+        entry = registry.entries.get(identity.workKey);
+      }
+      // A confirmation that landed since the registry was read is adopted, never written again.
+      if (entry?.state === 'RESERVED') {
+        if (!root.rootOnly) throw new DraftOperationError('LedgerCorrupt');
         const confirmedBody = closedObject([
           ['schema', 'GaiaDraftRegistryReceiptV0'],
           ['priorCommittedRevision', registry.committedRevision],
@@ -1231,7 +1255,7 @@ class GitDataDraftOperationStore {
           bootstrapOid: root.oid,
         };
       }
-      if (entry.state !== 'CONFIRMED' || !root
+      if (entry?.state !== 'CONFIRMED' || !root
         || entry.bootstrapCommittedRevision !== root.committedRevision
         || entry.bootstrapOid !== root.oid) {
         throw new DraftOperationError('LedgerCorrupt');
@@ -1367,50 +1391,59 @@ export async function enqueueDraft(selectorInput, expectedCommittedRevision, por
   const observed = await ports.collector.collect(selector);
   const identity = validateEnvelope(observed, selector);
   const capabilities = storeCapabilities(ports.store);
-  let current = await capabilities.inspectByWork(identity.workKey);
-  // Walk the admission line: past each re-admitted refusal to the chain an operator opened after
-  // it. A refusal nobody re-admitted ends the walk, and the answer stays StaleRevision.
-  while (current && isEffectFreeRefusal(current.terminal)) {
-    const admissionKey = successorAdmissionKey(
-      current.admission.key, current.terminal.committedRevision,
-    );
-    const successor = await capabilities.inspectAdmission(admissionKey);
-    if (successor.state === 'OPEN') {
-      if (expectedCommittedRevision !== 'NONE') return stale(current);
-      const committed = await capabilities.enqueueSuccessor(
-        admissionKey, identity, identity.envelope,
+  // A first admission writes the registry that every other first admission writes too, so a lost
+  // compare-and-swap there usually means another issue was admitted in the same moment: labelling
+  // several issues at once starts one intake per issue. The line is read again before each retry,
+  // so a work key that did land meanwhile still answers StaleRevision and is never enqueued twice.
+  for (let attempt = 1; ; attempt += 1) {
+    let current = await capabilities.inspectByWork(identity.workKey);
+    // Walk the admission line: past each re-admitted refusal to the chain an operator opened after
+    // it. A refusal nobody re-admitted ends the walk, and the answer stays StaleRevision.
+    while (current && isEffectFreeRefusal(current.terminal)) {
+      const admissionKey = successorAdmissionKey(
+        current.admission.key, current.terminal.committedRevision,
       );
-      if (committed.stale) return stale({ committedRevision: committed.currentCommittedRevision });
-      await emit(ports, { kind: 'ENQUEUED', operationId: identity.operationId });
-      return {
-        kind: 'Enqueued', operationId: identity.operationId, workKey: identity.workKey,
-        generationKey: identity.generationKey, committedRevision: committed.committedRevision,
-      };
+      const successor = await capabilities.inspectAdmission(admissionKey);
+      if (successor.state === 'OPEN') {
+        if (expectedCommittedRevision !== 'NONE') return stale(current);
+        const committed = await capabilities.enqueueSuccessor(
+          admissionKey, identity, identity.envelope,
+        );
+        if (committed.stale) return stale({ committedRevision: committed.currentCommittedRevision });
+        await emit(ports, { kind: 'ENQUEUED', operationId: identity.operationId });
+        return {
+          kind: 'Enqueued', operationId: identity.operationId, workKey: identity.workKey,
+          generationKey: identity.generationKey, committedRevision: committed.committedRevision,
+        };
+      }
+      if (successor.state !== 'PRESENT') break;
+      current = successor.snapshot;
     }
-    if (successor.state !== 'PRESENT') break;
-    current = successor.snapshot;
-  }
-  if (current) {
-    if (expectedCommittedRevision === 'NONE'
-      || expectedCommittedRevision !== current.committedRevision) return stale(current);
-    if (current.identity.generationKey !== identity.generationKey && !current.terminal) {
-      return {
-        kind: 'CrossGenerationIntent', workKey: identity.workKey,
-        currentOperationId: current.identity.operationId,
-        currentCommittedRevision: current.committedRevision,
-      };
+    if (current) {
+      if (expectedCommittedRevision === 'NONE'
+        || expectedCommittedRevision !== current.committedRevision) return stale(current);
+      if (current.identity.generationKey !== identity.generationKey && !current.terminal) {
+        return {
+          kind: 'CrossGenerationIntent', workKey: identity.workKey,
+          currentOperationId: current.identity.operationId,
+          currentCommittedRevision: current.committedRevision,
+        };
+      }
+      return stale(current);
     }
-    return stale(current);
+    const committed = await capabilities.bootstrapAndEnqueue(
+      identity, identity.envelope, expectedCommittedRevision,
+    );
+    if (committed.stale) {
+      if (expectedCommittedRevision === 'NONE' && attempt < REGISTRY_WRITE_ATTEMPTS) continue;
+      return stale({ committedRevision: committed.currentCommittedRevision });
+    }
+    await emit(ports, { kind: 'ENQUEUED', operationId: identity.operationId });
+    return {
+      kind: 'Enqueued', operationId: identity.operationId, workKey: identity.workKey,
+      generationKey: identity.generationKey, committedRevision: committed.committedRevision,
+    };
   }
-  const committed = await storeCapabilities(ports.store).bootstrapAndEnqueue(
-    identity, identity.envelope, expectedCommittedRevision,
-  );
-  if (committed.stale) return stale({ committedRevision: committed.currentCommittedRevision });
-  await emit(ports, { kind: 'ENQUEUED', operationId: identity.operationId });
-  return {
-    kind: 'Enqueued', operationId: identity.operationId, workKey: identity.workKey,
-    generationKey: identity.generationKey, committedRevision: committed.committedRevision,
-  };
 }
 
 /**
@@ -1450,7 +1483,7 @@ export async function readmitDraft(operationId, expectedCommittedRevision, prove
   // admission moved the shared registry first. Opening resumes from whatever landed, so it is
   // retried a bounded number of times before the run reports the contention.
   let opened;
-  for (let attempt = 1; attempt <= READMISSION_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= REGISTRY_WRITE_ATTEMPTS; attempt += 1) {
     opened = await capabilities.openSuccessor(root);
     if (!opened.stale) break;
   }

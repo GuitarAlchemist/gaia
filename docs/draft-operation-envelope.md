@@ -282,7 +282,10 @@ updates the ref with `force: false`. Two candidates from the same parent are sib
 fast-forward succeeds, the other update is non-fast-forward and must fail as `StaleRevision` before
 any Draft effect. The adapter rereads but never silently rebases an effect-bearing record. Work-ref
 bootstrap creates one root record after registry reservation; concurrent bootstrap losers reread
-the winning ref. Missing, deleted,
+the winning ref. Two runs may bootstrap one admission together, so each step reads again what it
+acts on: a confirmation that landed meanwhile is adopted, never appended a second time (a second
+`CONFIRMED` would leave the registry unreadable for every work key), and a work ref found ahead of
+the registry just read gets one registry re-read before it counts as corruption. Missing, deleted,
 force-rewritten, multi-parent, non-canonical, discontinuous, or corrupt history fails closed and
 alerts. The adapter validates the private Git parent chain separately; Git OIDs never enter the
 canonical body or `committedRevision`. The registry, ruleset, branches, and their commit chains are
@@ -294,8 +297,11 @@ seal the observed envelope, derives `workKey`, refuses a
 different generation while that work has a nonterminal generation, and requires the public expected
 revision to be either `NONE` for first use or the exact current 64-hex content revision. On `NONE`,
 it runs the registry reservation/`WORK_ROOT`/confirmation protocol internally and then CAS-appends
-`ENQUEUED` from the returned bootstrap content revision. A racing first caller loses registry CAS
-and returns `StaleRevision`; no caller supplies or observes a Git OID. On a present work ref,
+`ENQUEUED` from the returned bootstrap content revision. Every first admission appends to the one
+registry, so a lost registry CAS is usually another issue's admission: the caller re-reads its line
+and retries, three attempts in all. A caller whose own work key landed meanwhile returns
+`StaleRevision`, and so does one still contended after the third attempt, having written nothing or
+a reservation the next caller resumes. No caller supplies or observes a Git OID. On a present work ref,
 `NONE` is stale and cannot rebootstrap. Only then does it CAS-append `ENQUEUED`.
 Only after that accepted append may an explicit dispatcher request a workflow. A failed,
 cancelled, or replaced dispatch therefore leaves durable unsettled work. The implemented

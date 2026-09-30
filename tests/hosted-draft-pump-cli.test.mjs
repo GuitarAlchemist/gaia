@@ -280,6 +280,32 @@ test('invalid arguments and provider failures return only closed redacted errors
     assert.ok(!errors.text().includes('ghp_do-not-leak'));
   });
 
+  await context.test('an exhausted GitHub quota is its own cause, from either adapter', async () => {
+    const { HostedDraftCollectorError } = await import('../src/hosted-draft-collector.mjs');
+    for (const error of [
+      new GhGitDataError('GitHubRateLimited'),
+      new HostedDraftCollectorError('GitHubRateLimited', 'GitHub rate limit reached'),
+    ]) {
+      const errors = sink();
+      const exitCode = await main({
+        argv: [...commonArgs('list-unsettled')],
+        env: {}, stdout: sink().stream, stderr: errors.stream,
+        runtimeFactory() {
+          return Object.freeze({
+            async enqueue() { assert.fail(); },
+            async reconcile() { assert.fail(); },
+            async listUnsettled() { throw error; },
+          });
+        },
+      });
+      assert.equal(exitCode, 1);
+      assert.deepEqual(errors.json(), {
+        schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'OperationFailed',
+        cause: 'GitHubRateLimited',
+      }, error.name);
+    }
+  });
+
   await context.test('an unlisted code on a known error type stays a bare failure', async () => {
     const errors = sink();
     const exitCode = await main({

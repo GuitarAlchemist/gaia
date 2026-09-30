@@ -1,5 +1,6 @@
 /**
- * Operator re-admission of an effect-free refusal (Gaia issue #167, docs/hosted-draft-intake.md).
+ * Operator re-admission of an effect-free refusal (Gaia issue #167, docs/hosted-draft-intake.md),
+ * and the shared-registry contention every admission line meets.
  *
  * Every scenario runs against the memory store and against a fake Git Data API implementing the
  * real ref/commit protocol, because the successor chain is a storage change and both stores own it.
@@ -606,4 +607,55 @@ test('an intake that reads a successor while it is being opened sees it open, ne
   const accepted = await enqueue(store, 2);
   assert.equal(accepted.kind, 'Enqueued');
   assert.equal((await store.inspectByOperation(accepted.operationId)).admission.key, admissionKey);
+});
+
+test('a first admission that loses the shared registry is retried, then reported stale', async () => {
+  const [, make] = STORES[1];
+  const reserves = (ref, body) => ref === REGISTRY_REF && body.kind === 'RESERVED'
+    && body.workKey === WORK_KEY;
+  for (const [times, expected] of [[2, 'Enqueued'], [3, 'StaleRevision']]) {
+    const { store, git } = make();
+    // Labelling several issues at once starts one intake per issue, all writing one registry.
+    git.contend(reserves, times);
+    const result = await enqueue(store, 1);
+    assert.equal(result.kind, expected, `${times} rival admissions`);
+    if (expected === 'StaleRevision') {
+      assert.equal(result.currentCommittedRevision, 'NONE');
+      assert.deepEqual(git.kinds(`${WORK_PREFIX}${WORK_KEY}`), [], 'a contended run writes no work');
+      assert.equal((await enqueue(store, 1)).kind, 'Enqueued', 'the next run admits it');
+    }
+    assert.deepEqual(git.kinds(`${WORK_PREFIX}${WORK_KEY}`), ['WORK_ROOT', 'ENQUEUED']);
+  }
+});
+
+test('a first admission whose confirmation is lost resumes from its own root', async () => {
+  const [, make] = STORES[1];
+  const { store, git } = make();
+  git.contend((ref, body) => ref === REGISTRY_REF && body.kind === 'CONFIRMED'
+    && body.workKey === WORK_KEY, 1);
+  const result = await enqueue(store, 1);
+  assert.equal(result.kind, 'Enqueued');
+  assert.deepEqual(git.kinds(`${WORK_PREFIX}${WORK_KEY}`), ['WORK_ROOT', 'ENQUEUED'],
+    'one root, never two');
+  assert.deepEqual(git.kinds(REGISTRY_REF).filter((kind) => kind === 'CONFIRMED'), ['CONFIRMED']);
+});
+
+test('two intakes of one issue that both lose to a third admission still admit it exactly once', async () => {
+  const [, make] = STORES[1];
+  const { store, git, config } = make();
+  const rival = createGitDataDraftOperationStore({ gitData: git.port, config });
+  let admittedByRival = null;
+  // A third issue's reservation lands first, so both first reservations of this issue go stale;
+  // without the retry neither run admits it. Gated interleavings of the two runs inside one
+  // bootstrap live in tests/draft-operation-concurrent-bootstrap.test.mjs.
+  git.contend((ref, body) => {
+    if (ref !== REGISTRY_REF || body.kind !== 'RESERVED' || body.workKey !== WORK_KEY) return false;
+    return admittedByRival === null;
+  }, 1);
+  const rivalRun = enqueue(rival, 1).then((result) => { admittedByRival = result; });
+  const result = await enqueue(store, 1);
+  await rivalRun;
+  const enqueued = [admittedByRival, result].filter((run) => run.kind === 'Enqueued');
+  assert.equal(enqueued.length, 1, 'exactly one of the two runs admits the issue');
+  assert.deepEqual(git.kinds(`${WORK_PREFIX}${WORK_KEY}`), ['WORK_ROOT', 'ENQUEUED']);
 });
