@@ -515,10 +515,12 @@ npm run draft:settle-ambiguous -- --operation operation.json --lookup lookup.jso
   fail-closed, meaning a file could not be read.
 - **No `--apply`.** The operator write, a new `ABANDONED` transition in the envelope, and what
   becomes of the evidence branch all stay on #161.
-- **The #127 operation.** On 2026-09-30 the dry run found no pull request on
-  `codex/issue127-normal-admission-live` and decided `SETTLE_ABANDONED` (`MarkerProvablyAbsent`). The
-  operation is `e700fd9b…` at revision `02bd6009…`. It read the operation from the hosted ledger and
-  ran the search above with the user's own `gh`; nothing was written.
+- **The #127 operation.** Dry run at 2026-09-30T22:54:15Z, in the format above, with nothing written:
+  - The operation (`e700fd9b…`) was read from the hosted ledger at its ambiguous revision
+    (`02bd6009…`). Its identity recomputes from its envelope.
+  - The repository identity check and the search above then ran with the user's own `gh`.
+  - They found no pull request on `codex/issue127-normal-admission-live`.
+  - The decision was `SETTLE_ABANDONED` (`MarkerProvablyAbsent`).
 
 ## Re-admitting an effect-free refusal — decided (#167)
 
