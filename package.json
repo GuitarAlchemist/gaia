@@ -9,9 +9,9 @@
   },
   "gaiaArchitectureVerification": {
     "schema": "gaia-architecture-verification/1",
-    "commit": "a85cf6c2fc76d5f8686477574f9872786a950e98",
+    "commit": "1f06e120b20eb5fb29004ca14bd555f210b3089a",
     "date": "2026-09-28",
-    "contentRevision": "sha256:46ead75152681f38fe4f23158c4af2e92fcee574815123006bc297a5ee1222c0"
+    "contentRevision": "sha256:a6bc9e53cd67d1336015fb272702f334c04b859f8be2f638c14aed2cb5735354"
   },
   "scripts": {
     "test": "node --test",
@@ -35,6 +35,7 @@
     "portfolio:autonomous": "node scripts/github-portfolio-autonomous.mjs",
     "draft:seed-evidence": "node scripts/evidence-head.mjs seed --repository GuitarAlchemist/gaia",
     "pump:candidates": "node scripts/pump-candidates.mjs --repository GuitarAlchemist/gaia",
+    "resume:check": "node scripts/check-resume-prompt.mjs",
     "test:autonomy": "node --test tests/autonomous-factory.test.mjs tests/autonomous-factory-store.test.mjs tests/autonomous-factory-host.test.mjs tests/autonomous-factory-no-change.test.mjs tests/autonomous-factory-errors.test.mjs tests/github-portfolio-execution.test.mjs tests/factory-agent.test.mjs tests/factory-headless-claude.test.mjs tests/factory-visible-claude.test.mjs tests/factory-streaming-claude.test.mjs tests/artifact-chain.test.mjs tests/artifact-chain-bounds.test.mjs tests/artifact-chain-cli.test.mjs",
     "pr-review:watch": "node scripts/pr-review-thread-supervisor.mjs",
     "lanes:sensor": "node scripts/local-lane-sensor.mjs",
