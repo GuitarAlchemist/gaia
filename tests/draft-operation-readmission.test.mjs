@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import {
+  admissionRetryPauseMs,
   cancelDraft,
   createDraftOperationPorts,
   createGitDataDraftOperationStore,
@@ -201,7 +202,13 @@ const PROVIDERS = {
   }),
 };
 
-function portsFor(store, envelope, provider = PROVIDERS.creates()) {
+// The pause between admission attempts is recorded, never waited: no test depends on elapsed time.
+function pauses() {
+  const waited = [];
+  return { waited, async pause(milliseconds) { waited.push(milliseconds); } };
+}
+
+function portsFor(store, envelope, provider = PROVIDERS.creates(), pause = pauses().pause) {
   return createDraftOperationPorts({
     collector: { async collect() { return structuredClone(envelope); } },
     provider,
@@ -209,11 +216,12 @@ function portsFor(store, envelope, provider = PROVIDERS.creates()) {
     executorEpoch: { runId: 7101, runAttempt: 1 },
     telemetry: { async append() {} },
     store,
+    pause,
   });
 }
 
-const enqueue = (store, occurrence) => enqueueDraft(
-  SELECTOR, 'NONE', portsFor(store, readyEvent(occurrence)),
+const enqueue = (store, occurrence, pause) => enqueueDraft(
+  SELECTOR, 'NONE', portsFor(store, readyEvent(occurrence), undefined, pause),
 );
 
 async function settle(store, occurrence, provider) {
@@ -613,25 +621,36 @@ test('a first admission that loses the shared registry is retried, then reported
   const [, make] = STORES[1];
   const reserves = (ref, body) => ref === REGISTRY_REF && body.kind === 'RESERVED'
     && body.workKey === WORK_KEY;
+  // A pause before each retry, none after the last attempt: 2–4 s, then 4–8 s.
+  const backoff = [admissionRetryPauseMs(WORK_KEY, 1), admissionRetryPauseMs(WORK_KEY, 2)];
+  assert.ok(backoff[0] >= 2000 && backoff[0] < 4000 && backoff[1] >= 4000 && backoff[1] < 8000,
+    `${backoff}`);
   for (const [times, expected] of [[2, 'Enqueued'], [3, 'AdmissionContended']]) {
     const { store, git } = make();
     // Labelling several issues at once starts one intake per issue, all writing one registry.
     git.contend(reserves, times);
-    const result = await enqueue(store, 1);
+    const clock = pauses();
+    const result = await enqueue(store, 1, clock.pause);
     assert.equal(result.kind, expected, `${times} rival admissions`);
+    assert.deepEqual(clock.waited, backoff, `${times} rival admissions`);
     if (expected === 'AdmissionContended') {
       // Not StaleRevision: that would read as a settled issue in a healthy empty queue.
       assert.deepEqual(result, { kind: 'AdmissionContended', workKey: WORK_KEY });
       assert.deepEqual(git.kinds(`${WORK_PREFIX}${WORK_KEY}`), [], 'a contended run writes no work');
-      assert.equal((await enqueue(store, 1)).kind, 'Enqueued', 'the next run admits it');
+      const next = pauses();
+      assert.equal((await enqueue(store, 1, next.pause)).kind, 'Enqueued', 'the next run admits it');
+      assert.deepEqual(next.waited, [], 'an uncontended admission never waits');
     }
     assert.deepEqual(git.kinds(`${WORK_PREFIX}${WORK_KEY}`), ['WORK_ROOT', 'ENQUEUED']);
   }
   // Only a first admission is retried. A supplied revision that no record carries is plain stale.
   for (const [name, makeStore] of STORES) {
     const { store } = makeStore();
-    const supplied = await enqueueDraft(SELECTOR, 'e'.repeat(64), portsFor(store, readyEvent(1)));
+    const clock = pauses();
+    const supplied = await enqueueDraft(SELECTOR, 'e'.repeat(64),
+      portsFor(store, readyEvent(1), undefined, clock.pause));
     assert.deepEqual(supplied, { kind: 'StaleRevision', currentCommittedRevision: 'NONE' }, name);
+    assert.deepEqual(clock.waited, [], `${name}: nothing to retry, nothing to wait for`);
   }
 });
 

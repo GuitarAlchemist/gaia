@@ -353,8 +353,11 @@ Everything else is downstream of that one call.
 exists, so first admissions of *different* issues contend there. Labelling several issues at once
 starts one intake per issue, and on 2026-09-29 two of four simultaneous first admissions lost that
 CAS and admitted nothing. `enqueueDraft` therefore re-reads the admission line and retries, three
-attempts in all. The re-read is what keeps it safe: a work key that landed meanwhile answers
-`StaleRevision` as before and is never enqueued twice. An issue that loses all three attempts reads its
+attempts in all. It pauses before each retry, 2–4 s and then 4–8 s, for a wait derived from the
+work key, so issues labelled together spread out instead of re-racing in the same instant. A
+contended issue costs its intake at most 12 s more. Whether the pause lowers contention on the live
+registry has not been measured (#197). The re-read is what keeps it safe: a work key that landed
+meanwhile answers `StaleRevision` as before and is never enqueued twice. An issue that loses all three attempts reads its
 line once more. If its work key landed, the answer is still `StaleRevision`. Otherwise it answers
 `AdmissionContended` with nothing admitted. That is a skip the observation does not explain, so the
 tick is never published as a healthy empty queue while the issue waits for the next one.
@@ -563,7 +566,7 @@ Every failure mode denies rather than proceeds, and every denial is a typed, red
 | Forged or mislabelled webhook payload | job gate plus full API re-derivation | payload carries no authority |
 | Label events dropped by coalescing | — | schedule re-admits |
 | Terminal work key re-selected | `enqueueDraft` returns `StaleRevision` | skipped; probe continues |
-| First admissions of distinct issues race on the registry | registry CAS, line re-read | retried, three attempts in all; then `AdmissionContended`, or `StaleRevision` if the work key landed |
+| First admissions of distinct issues race on the registry | registry CAS, line re-read | retried after a 2–4 s, then a 4–8 s pause, three attempts in all; then `AdmissionContended`, or `StaleRevision` if the work key landed |
 | GitHub rate limit, primary or secondary | `gh` stderr classified, then discarded | cause `GitHubRateLimited`; the tick ends, never retried into the same quota |
 | `gh` absent or GitHub unreachable | typed collector and transport errors | redacted CLI error, exit 1, receipt still uploaded |
 

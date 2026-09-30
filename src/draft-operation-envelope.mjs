@@ -8,8 +8,34 @@ const EPOCH_STATES = new Set(['CLAIMED', 'INTENT', 'EFFECT_STARTED']);
 const PRE_EFFECT_STATES = new Set(['ENQUEUED', 'CLAIMED', 'INTENT']);
 const READMISSION_REASON_LIMIT = 500;
 const REGISTRY_WRITE_ATTEMPTS = 3;
+const ADMISSION_RETRY_PAUSE_MS = 2000;
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u;
 const notInvokedWitnesses = new WeakMap();
+
+/**
+ * How long a first admission that lost the shared registry waits before its next attempt.
+ *
+ * Losers that retry at once re-race each other in lockstep, so the wait doubles per attempt and a
+ * fraction derived from the work key spreads different issues across it: 2–4 s before the second
+ * attempt, 4–8 s before the third. Derived rather than random, so a replay waits exactly as the
+ * original run did; two intakes of one issue share a wait, and only one of them can land anyway.
+ */
+export function admissionRetryPauseMs(workKey, attempt) {
+  if (typeof workKey !== 'string' || !SHA256.test(workKey)
+      || !Number.isSafeInteger(attempt) || attempt < 1) {
+    throw new DraftOperationError('InvalidRetryPause');
+  }
+  const base = ADMISSION_RETRY_PAUSE_MS * 2 ** (attempt - 1);
+  const spread = Number.parseInt(
+    createHash('sha256').update(`${workKey}:${attempt}`, 'utf8').digest('hex').slice(0, 8), 16,
+  ) / 0x100000000;
+  return base + Math.floor(spread * base);
+}
+
+/** The ports' default pause: the one real wait in this module, injected everywhere it is used. */
+function waitMs(milliseconds) {
+  return new Promise((resolve) => { setTimeout(resolve, milliseconds); });
+}
 
 /** Trusted preparation must be effect-free; invocation errors never attest non-invocation. */
 export function guardDraftCreation({ prepare, invoke }) {
@@ -1305,16 +1331,17 @@ export function createMemoryDraftOperationStore() {
 
 function createOperationPorts(options, memoryOnly) {
   const code = 'InvalidPorts';
-  const keys = ownDataKeys(options, code).sort();
-  const withoutStore = ['admission', 'collector', 'executorEpoch', 'provider', 'telemetry'];
-  const withStore = [...withoutStore, 'store'].sort();
-  const allowed = keys.length === withoutStore.length
-    && keys.every((key, index) => key === withoutStore[index])
-    || keys.length === withStore.length
-    && keys.every((key, index) => key === withStore[index]);
+  const keys = ownDataKeys(options, code);
+  const required = ['admission', 'collector', 'executorEpoch', 'provider', 'telemetry'];
+  const optional = ['pause', 'store'];
+  const allowed = required.every((key) => keys.includes(key))
+    && keys.every((key) => required.includes(key) || optional.includes(key));
   if (!allowed) throw new DraftOperationError(code);
   const store = options.store ?? createMemoryDraftOperationStore();
-  if (typeof options.collector?.collect !== 'function'
+  // Tests pass their own pause; everything else waits for real, so production cannot forget to.
+  const pause = Object.hasOwn(options, 'pause') ? options.pause : waitMs;
+  if (typeof pause !== 'function'
+    || typeof options.collector?.collect !== 'function'
     || typeof options.provider?.lookupExact !== 'function'
     || typeof options.provider?.createDraft !== 'function'
     || typeof options.admission?.reserveEffect !== 'function'
@@ -1337,6 +1364,7 @@ function createOperationPorts(options, memoryOnly) {
     ]),
     telemetry: options.telemetry,
     store,
+    pause,
   });
 }
 
@@ -1439,7 +1467,10 @@ export async function enqueueDraft(selectorInput, expectedCommittedRevision, por
       if (expectedCommittedRevision !== 'NONE') {
         return stale({ committedRevision: committed.currentCommittedRevision });
       }
-      if (attempt < REGISTRY_WRITE_ATTEMPTS) continue;
+      if (attempt < REGISTRY_WRITE_ATTEMPTS) {
+        await (ports.pause ?? waitMs)(admissionRetryPauseMs(identity.workKey, attempt));
+        continue;
+      }
       // Every attempt lost the registry. A work key that landed meanwhile was admitted, and its
       // answer is StaleRevision as ever. One that did not was never admitted: it lost the race
       // each time, and a StaleRevision would read as a settled issue in a healthy empty queue.
