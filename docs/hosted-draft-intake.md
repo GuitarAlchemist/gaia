@@ -689,11 +689,18 @@ a live proof that one labelled issue and one recovery replay create no duplicate
    under-count described above, and it can render `healthy` until the next tick. Closing the remainder
    requires a denominator the lane can serialize against, which the per-issue groups deliberately gave
    up.
-7. **Every intake re-reads the whole ledger, and the pump App's quota bounds the throughput.**
-   Listing unsettled work re-reads every registered admission, terminal ones included, and walks each
-   chain as commit, tree and blob reads. Measured read-only on 2026-09-29: one listing made 551 GitHub
-   calls in 86 seconds (158 records, three objects each, plus 77 ref reads). With collection and
-   reconciliation on top, an hourly installation quota of 5,000 holds roughly five to seven intake
-   runs, and labelling more issues than that within one hour exhausts it. The cost grows with every
-   admission. Reading a chain in one GraphQL query, or skipping terminal lines, would change how the
-   ledger is validated, so it needs its own design.
+7. **Every intake re-reads the whole ledger.** Listing unsettled work re-reads every registered
+   admission, terminal ones included. Over REST, each record costs a commit, a tree and a blob read.
+   Measured read-only on 2026-09-29, one listing made 551 GitHub calls in 86 seconds (158 records plus
+   77 ref reads). A few hours later the same listing made 579 calls in 109 seconds. At that rate an
+   hourly installation quota of 5,000 held roughly five to seven intake runs.
+
+   The pump now reads each chain's history through GraphQL, which has its own hourly quota: one query
+   per hundred records, whose objects fill the same cache that REST reads fill, and every record still
+   passes the same receipt validation. The same live listing then made 81 REST ref reads and
+   21 GraphQL queries in 8 seconds, and the records read from all 34 ledger refs were identical under
+   both paths. Two costs remain:
+   - Ref heads are still read over REST on every read, so the REST cost still grows with admissions,
+     at about a seventh of the former rate.
+   - If GraphQL fails, or answers without the commit asked for, the adapter falls back to REST for the
+     rest of the run, at the former cost.

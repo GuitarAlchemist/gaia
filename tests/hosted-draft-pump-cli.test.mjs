@@ -418,6 +418,8 @@ test('the production runtime composition wires existing collector, Git Data, pro
   assert.deepEqual(calls.filter(([kind]) => kind.endsWith('-core')).map(([kind]) => kind), [
     'enqueue-core', 'reconcile-core', 'list-core',
   ]);
+  assert.equal(calls.find(([kind]) => kind === 'git-data')[1].historyPrefetch, true,
+    'the pump reads ledger history through GraphQL, not three REST reads per record');
   assert.equal(calls.find(([kind]) => kind === 'store')[1].gitData, gitData);
   assert.equal(calls.find(([kind]) => kind === 'provider')[1].expectedRepository.nodeId,
     'R_kgDOGaia');
