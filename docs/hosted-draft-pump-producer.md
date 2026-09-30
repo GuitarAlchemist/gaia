@@ -167,7 +167,9 @@ publishes `EFFECT_AMBIGUOUS`, `CrossGenerationIntent` publishes `CROSS_GENERATIO
 `EVIDENCE_HEAD_UNRESOLVED`. When one tick carries several, that fixed order picks the one blocker,
 because an ambiguous effect may be a Draft the ledger cannot yet account for. Any other skip reason
 refuses. An unexplained empty admission must not read as a healthy empty queue — that is issue #70's
-motivating defect restated. Refusing on an *explained* skip was its own defect (#172): a permanently
+motivating defect restated. `AdmissionContended` (an issue that lost the shared registry on every
+attempt and was not admitted) is deliberately left unexplained. It names no blocker the observation
+vocabulary has, and publishing it as healthy would hide an issue that is still waiting. Refusing on an *explained* skip was its own defect (#172): a permanently
 quarantined record made every later tick unobservable, and "no reading" is indistinguishable from
 "the pump is not running".
 

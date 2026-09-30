@@ -113,8 +113,21 @@ function sharedLedger() {
     },
   });
   const config = { ledgerRegistryRootOid: OID_A, ledgerRegistryRootRevision: sha256(registryRoot) };
+  let rivals = 0;
   return {
     hooks,
+    /** Another issue's reservation lands on the shared registry. */
+    rival() {
+      const head = refs.get(REGISTRY_REF).at(-1);
+      rivals += 1;
+      const body = {
+        schema: 'GaiaDraftRegistryReceiptV0', priorCommittedRevision: head.committedRevision,
+        kind: 'RESERVED', workKey: sha256({ rival: rivals }),
+      };
+      refs.set(REGISTRY_REF, [...refs.get(REGISTRY_REF), {
+        oid: (nextOid++).toString(16).padStart(40, '0'), body, committedRevision: sha256(body),
+      }]);
+    },
     store: (run) => createGitDataDraftOperationStore({ gitData: port(run), config }),
     kinds: (ref) => (refs.get(ref) ?? []).map((record) => record.body.kind),
     confirmations: (key) => (refs.get(REGISTRY_REF) ?? []).filter((record) => record.body.kind === 'CONFIRMED'
@@ -191,6 +204,37 @@ test('a run that reads the registry before a whole rival admission lands reports
     assert.equal(late, 'StaleRevision', `window ${window}`);
     assert.equal(ledger.confirmations(WORK_KEY), 1, `window ${window}`);
     assert.deepEqual(ledger.kinds(WORK_REF), ['WORK_ROOT', 'ENQUEUED'], `window ${window}`);
+  }
+});
+
+test('an admission that loses every attempt is contended, unless its own work key landed', async () => {
+  for (const lastRivalIsThisIssue of [false, true]) {
+    const ledger = sharedLedger();
+    let reservations = 0;
+    ledger.hooks.beforeAppend = async (run, ref, body) => {
+      if (run !== 'contended' || ref !== REGISTRY_REF || body.kind !== 'RESERVED') return;
+      reservations += 1;
+      // Before each of this run's reservations, a rival lands on the registry first. The last
+      // rival is either another issue or another intake of this same issue.
+      if (reservations === 3 && lastRivalIsThisIssue) {
+        assert.equal(await outcome(enqueue(ledger.store('rival'))), 'Enqueued');
+      } else {
+        ledger.rival();
+      }
+    };
+    const result = await enqueue(ledger.store('contended'));
+    assert.equal(reservations, 3, 'three attempts in all');
+    if (lastRivalIsThisIssue) {
+      assert.equal(result.kind, 'StaleRevision', 'an issue admitted meanwhile is settled');
+      assert.deepEqual(ledger.kinds(WORK_REF), ['WORK_ROOT', 'ENQUEUED']);
+    } else {
+      assert.deepEqual(result, { kind: 'AdmissionContended', workKey: WORK_KEY },
+        'an issue never admitted is not reported as settled');
+      assert.deepEqual(ledger.kinds(WORK_REF), []);
+      ledger.hooks.beforeAppend = async () => {};
+      assert.equal(await outcome(enqueue(ledger.store('next'))), 'Enqueued', 'the next run admits it');
+    }
+    assert.equal(ledger.confirmations(WORK_KEY), 1);
   }
 });
 
