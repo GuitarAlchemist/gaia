@@ -403,6 +403,7 @@ export function createHostedDraftPumpRuntime(
   const gitData = dependencies.createGhGitDataApi({
     repository: configuration.repository,
     pumpActor: { actorId: configuration.pumpActorId, actorType: 'Integration' },
+    historyPrefetch: true,
   });
   const store = dependencies.createGitDataDraftOperationStore({
     gitData,
