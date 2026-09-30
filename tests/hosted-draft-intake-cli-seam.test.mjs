@@ -30,6 +30,7 @@ const WORK_KEY = 'b'.repeat(64);
 const COMMITTED = 'c'.repeat(64);
 const ROOT_OID = 'd'.repeat(40);
 const READMIT_REASON = 'Admission window expired before #166; the create call never ran.';
+const SETTLE_REASON = 'The create response for #127 was lost; nothing is on its head.';
 const ROOT_REVISION = 'e'.repeat(64);
 const GENERATION_KEY = 'f'.repeat(64);
 const LABELLED_ISSUE = 70;
@@ -62,6 +63,10 @@ function expressions(event, temp) {
     ['inputs.readmit_revision', event === 'readmit' ? COMMITTED : ''],
     ['inputs.readmit_reason', event === 'readmit' ? READMIT_REASON : ''],
     ['inputs.readmit_apply', event === 'readmit' ? 'true' : 'false'],
+    ['inputs.settle_operation', event === 'settle' ? OPERATION_ID : ''],
+    ['inputs.settle_revision', event === 'settle' ? COMMITTED : ''],
+    ['inputs.settle_reason', event === 'settle' ? SETTLE_REASON : ''],
+    ['inputs.settle_apply', event === 'settle' ? 'true' : 'false'],
     ['github.event.issue.number', event.endsWith('issues') ? String(LABELLED_ISSUE) : ''],
     // The issue identity binding, in its three readings. A manual run publishes a validated
     // selection or the empty string; only when it is empty does the labelled issue show through.
@@ -177,7 +182,7 @@ function runCommands(block) {
 /** The exact argv the runner would hand the CLI, with `$env:` reads resolved against `env`. */
 function invocation(workflow, event, temp) {
   const table = expressions(event, temp);
-  const command = { prepare: 'enqueue', readmit: 'readmit' }[event] ?? 'intake';
+  const command = { prepare: 'enqueue', readmit: 'readmit', settle: 'settle' }[event] ?? 'intake';
   const block = intakeStepLines(workflow, command);
   const environment = { ...runnerEnvironment(), ...stepEnvironment(block, table) };
   const invocationLine = runCommands(block).find((line) => line.includes(SCRIPT_PATH));
@@ -304,7 +309,7 @@ test('preparation dispatch enqueues the exact issue without managed data or reco
   const bad = [...argv]; bad[bad.indexOf('--issue') + 1] = '0';
   assert.equal(await main({ argv: bad, env: environment, stdout: sink().stream,
     stderr: sink().stream, runtimeFactory: () => assert.fail('invalid input entered runtime') }), 2);
-  assert.match(workflow, /if: steps\.identity\.outputs\.readmit != 'true' && \(github\.event_name != 'workflow_dispatch' \|\| !inputs\.prepare_issue\)/u);
+  assert.match(workflow, /if: steps\.identity\.outputs\.readmit != 'true' && steps\.identity\.outputs\.settle != 'true' && \(github\.event_name != 'workflow_dispatch' \|\| !inputs\.prepare_issue\)/u);
   assert.match(workflow, /GAIA_ONE_CANARY -eq 'true'.*GAIA_PREPARE_ISSUE/u);
 });
 
@@ -604,6 +609,42 @@ test('revert control: an unconditional observation path re-arms the cross-lane r
     (error) => error.code === 'IncoherentHostedDraftPump',
     'without the exclusion a healthy lane reading is refused; the gate above must fail',
   );
+});
+
+test('a settlement dispatch reaches the CLI as the operator decision, bound to this repository, and admits nothing', async () => {
+  const workflow = workflowText();
+  const { argv, environment } = invocation(workflow, 'settle', tmpdir());
+  assert.equal(argv[0], 'settle');
+  assert.equal(environment.GAIA_REPOSITORY_NODE_ID, 'R_kgDOGaia');
+  for (const name of ['GAIA_MANAGED_ROUND_JSON', 'GAIA_CANARY_POLICY', 'GAIA_NORMAL_POLICY',
+    'GAIA_OBSERVATION_PATH', 'GAIA_ISSUE_NUMBER', 'GAIA_READMIT_OPERATION']) {
+    assert.equal(environment[name], undefined, name);
+  }
+  const seen = [];
+  const output = sink();
+  const code = await main({ argv, env: environment, stdout: output.stream, stderr: sink().stream,
+    runtimeFactory: (configuration) => {
+      assert.equal(configuration.command, 'settle');
+      assert.equal(configuration.repositoryNodeId, 'R_kgDOGaia');
+      return {
+        async settle(request) { seen.push(request); return { kind: 'Abandoned' }; },
+        async readmit() { assert.fail('a settlement re-admits nothing'); },
+        async enqueue() { assert.fail('a settlement admits nothing'); },
+        async reconcile() { assert.fail('a settlement reconciles nothing'); },
+      };
+    } });
+  assert.equal(code, 0);
+  assert.deepEqual(seen, [{
+    operationId: OPERATION_ID, expectedRevision: COMMITTED, apply: true,
+    provenance: { reason: SETTLE_REASON, runId: 9001, runAttempt: 1, triggeringActor: 'spareilleux' },
+  }]);
+  assert.equal(output.json().command, 'settle');
+
+  // Without the repository identity binding the search could not be checked, so nothing runs.
+  const unbound = withoutLines(workflow, (line) => line.trim()
+    === 'GAIA_REPOSITORY_NODE_ID: ${{ vars.GAIA_REPOSITORY_NODE_ID }}');
+  assert.throws(() => invocation(unbound, 'settle', tmpdir()),
+    /is read by the run: body but bound by neither the step nor the runner/u);
 });
 
 test('a re-admission dispatch reaches the CLI as the operator decision and admits nothing', async () => {

@@ -146,8 +146,9 @@ file.
 The principal operation lifecycle is observation -> eligible claim -> intent -> effect started ->
 reconciliation -> terminal receipt. Draft operations preserve `ENQUEUED`, `CLAIMED`, `INTENT`,
 `EFFECT_STARTED`, and `EFFECT_AMBIGUOUS` as nonterminal distinctions. `CREATED`, `REUSED`,
-`REFUSED`, and `CANCELLED` are terminal only when exact evidence supports them. Ambiguous remote
-effects remain nonterminal until reconciled; elapsed time and retries cannot manufacture truth.
+`REFUSED`, `CANCELLED`, and `ABANDONED` are terminal only when exact evidence supports them.
+Ambiguous remote effects remain nonterminal until reconciled; elapsed time and retries cannot
+manufacture truth.
 The application can attest that preparation refused before provider invocation through
 `guardDraftCreation`. Its in-process witness is bound to the exact request and consumed
 once. Only that witness permits `EFFECT_STARTED` to append `REFUSED` with
@@ -163,6 +164,14 @@ and the generations its line has already spent. Work key, operation identity and
 derive exactly as before, and a spent generation can never enqueue again. Only an
 operator-dispatched run of the sealed intake workflow reaches this path; intake only follows a
 successor that already exists.
+An operator may also settle one `EFFECT_AMBIGUOUS` operation. That run reads it at a named revision,
+then searches its marker the way the provider does: repository identity first, then every pull
+request on its head. It writes `ABANDONED` only when that search is complete and finds no pull
+request, which proves the Draft was never created. The write is a compare-and-swap at the revision it
+read. The record carries that evidence and the dispatch, and every ledger read re-derives the
+evidence from the operation. A Draft the search finds is left to reconciliation, the only writer of
+`REUSED`. `ABANDONED` has no effect and is not re-admissible. Only an operator-dispatched run of the
+sealed intake workflow reaches this path.
 The Hosted Draft intake is one concrete pump. An issue-triggered run remains bound to its issue and
 fails closed on its unsettled operation. A scheduled run probes a bounded, deterministic prefix of
 the unsettled queue before it may admit one eligible issue. When reconciliation returns the same

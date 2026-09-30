@@ -443,3 +443,78 @@ export function createGhManagedRoundApi({ expectedRepository, run = defaultRun }
     },
   });
 }
+
+/**
+ * The marker search an ambiguous operation is settled from (#161), as the provider itself runs it.
+ *
+ * The same two reads as `lookupExact`, in the same order: the repository identity, then every pull
+ * request on the operation's head branch in every state, bounded at the provider's 100. Nothing is
+ * judged here: the rows are handed back as `gh` returned them, with the identity observed and the
+ * instant the search finished, as a `GaiaDraftMarkerLookupV0` for decideAmbiguousSettlement. A read
+ * that fails, or answers something other than JSON of the expected shape, yields an `ERRORED` lookup
+ * with no rows, which can only ever leave the operation unsettled. Read-only: no write, no effect.
+ */
+export function createGhMarkerLookup({ expectedRepository, now, run = defaultRun } = {}) {
+  const expected = repository(expectedRepository, 'InvalidConfiguration');
+  if (typeof run !== 'function' || typeof now !== 'function') fail('InvalidAdapter');
+  const repositoryName = `${expected.owner}/${expected.name}`;
+  const invoke = async (...args) => {
+    try {
+      const result = await run('gh', args, {
+        encoding: 'utf8', maxBuffer: 1024 * 1024, windowsHide: true,
+      });
+      return String(result?.stdout ?? '');
+    } catch {
+      fail('ProviderUnavailable');
+    }
+  };
+  const observedAt = () => {
+    const instant = new Date(now());
+    if (!Number.isFinite(instant.getTime())) fail('InvalidClock');
+    return instant.toISOString().replace(/\.\d{3}Z$/u, 'Z');
+  };
+  return Object.freeze({
+    async search(requestInput) {
+      const code = 'InvalidRequest';
+      exactKeys(requestInput, ['committedRevision', 'repository', 'headRef', 'marker'], code);
+      if (typeof requestInput.committedRevision !== 'string'
+        || !SHA256.test(requestInput.committedRevision)) fail(code);
+      if (!sameRepository(repository(requestInput.repository, code), expected)) {
+        fail('RequestBindingMismatch');
+      }
+      const headRef = branch(requestInput.headRef, code);
+      const marker = operationMarker(requestInput.marker, code);
+      const lookup = (repositoryCheck, outcome, candidates) => Object.freeze({
+        schema: 'GaiaDraftMarkerLookupV0',
+        committedRevision: requestInput.committedRevision,
+        repository: { nodeId: expected.nodeId, owner: expected.owner, name: expected.name },
+        repositoryCheck,
+        headRef,
+        marker,
+        search: { state: 'all', limit: 100 },
+        observedAt: observedAt(),
+        outcome,
+        candidates,
+      });
+      let repositoryCheck = null;
+      try {
+        const observed = parseJson(await invoke(
+          'repo', 'view', repositoryName, '--json', 'id,nameWithOwner',
+        ));
+        exactKeys(observed, ['id', 'nameWithOwner'], 'ProviderProtocolViolation');
+        repositoryCheck = { id: observed.id, nameWithOwner: observed.nameWithOwner };
+        const candidates = parseJson(await invoke(
+          'pr', 'list', '--repo', repositoryName, '--state', 'all',
+          '--head', headRef, '--limit', '100', '--json',
+          'number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body',
+        ));
+        if (!Array.isArray(candidates)) fail('ProviderProtocolViolation');
+        return lookup(repositoryCheck, 'COMPLETE', candidates);
+      } catch (error) {
+        if (!(error instanceof GhDraftOperationProviderError)
+          || !['ProviderUnavailable', 'ProviderProtocolViolation'].includes(error.code)) throw error;
+        return lookup(repositoryCheck, 'ERRORED', []);
+      }
+    },
+  });
+}

@@ -164,6 +164,37 @@ test('a re-admission runs alone on a manual dispatch, a dry run unless applied, 
   assert.match(run, /-cnotin @\('ReadmissionPlanned', 'Readmitted', 'AlreadyReadmitted'\)/u,
     'a refused re-admission fails the run; its receipt is still uploaded');
 
-  assert.match(workflow, /^ {8}if: steps\.identity\.outputs\.readmit != 'true' && \(github\.event_name != 'workflow_dispatch' \|\| !inputs\.prepare_issue\)$/mu,
+  assert.match(workflow, /^ {8}if: steps\.identity\.outputs\.readmit != 'true' && steps\.identity\.outputs\.settle != 'true' && \(github\.event_name != 'workflow_dispatch' \|\| !inputs\.prepare_issue\)$/mu,
     'a re-admission run admits nothing');
+});
+
+test('a settlement runs alone on a manual dispatch, a dry run unless applied, its reason through env', () => {
+  const workflow = intake();
+  for (const input of ['settle_operation', 'settle_revision', 'settle_reason']) {
+    assert.match(workflow, new RegExp(`^ {6}${input}:\n(?: {8}.+\n)*? {8}type: string\n {8}default: ''$`, 'mu'));
+  }
+  assert.match(workflow, /^ {6}settle_apply:\n(?: {8}.+\n)*? {8}type: boolean\n {8}default: false$/mu);
+  assert.match(workflow, /-or \$target -or \$readmit\) \{\n {14}throw 'A settlement runs alone\.'/u,
+    'a settlement runs beside nothing, a re-admission included');
+  assert.match(workflow,
+    /^ {10}GAIA_SETTLE_APPLY: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.settle_apply \}\}$/mu,
+    'the identity gate sees the apply box, so ticking it alone is refused rather than run as intake');
+  assert.match(workflow, /-or \$env:GAIA_SETTLE_APPLY -eq 'true'\) \{/u);
+
+  const step = workflow.match(/^ {6}- name: Settle one ambiguous Draft operation\n([\s\S]*?)(?=^ {6}- )/mu)?.[1];
+  assert.ok(step, 'one settlement step');
+  assert.match(step, /^ {8}if: steps\.identity\.outputs\.settle == 'true'$/mu);
+  assert.match(step, /hosted-draft-pump\.mjs settle/u);
+  assert.match(step, /^ {10}GAIA_REPOSITORY_NODE_ID: \$\{\{ vars\.GAIA_REPOSITORY_NODE_ID \}\}$/mu,
+    'the marker search is checked against the configured repository identity');
+  const run = step.slice(step.indexOf('run: |'));
+  assert.doesNotMatch(run, /\$\{\{/u, 'dispatch inputs reach the CLI through env:, never the script');
+  assert.doesNotMatch(step,
+    /GAIA_OBSERVATION_PATH|GAIA_MANAGED_ROUND_JSON|GAIA_NORMAL_POLICY|GAIA_CANARY_POLICY|GAIA_READMIT/u);
+  assert.match(run, /-cnotin @\('AbandonmentPlanned', 'Abandoned', 'AlreadyAbandoned'\)/u,
+    'a settlement that was not made fails the run; its receipt is still uploaded');
+
+  // GitHub accepts at most 25 dispatch inputs; the operator paths must leave room below it.
+  const inputs = workflow.slice(workflow.indexOf('    inputs:\n'), workflow.indexOf('  issues:\n'));
+  assert.ok(inputs.match(/^ {6}[a-z_]+:$/gmu).length <= 25, 'within the workflow_dispatch input limit');
 });

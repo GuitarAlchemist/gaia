@@ -218,7 +218,9 @@ paths, and account data are forbidden. `ENQUEUED` alone carries the complete sea
 executors reload that copy and never accept an envelope from workflow inputs.
 
 The closed record kinds are infrastructure `WORK_ROOT`, then operation `ENQUEUED`, `CLAIMED`,
-`INTENT`, `EFFECT_STARTED`, `EFFECT_AMBIGUOUS`, `CREATED`, `REUSED`, `REFUSED`, and `CANCELLED`.
+`INTENT`, `EFFECT_STARTED`, `EFFECT_AMBIGUOUS`, `CREATED`, `REUSED`, `REFUSED`, `CANCELLED`, and
+`ABANDONED` (#161, which follows `EFFECT_AMBIGUOUS` only; see
+[Settling an ambiguous Draft — the operator write](hosted-draft-intake.md#settling-an-ambiguous-draft--the-operator-write-161)).
 The five operation kinds from `ENQUEUED` through `EFFECT_AMBIGUOUS` are nonterminal. `WORK_ROOT`
 is never projected as work. `EFFECT_AMBIGUOUS` means a create request may already have reached
 GitHub and only exact observation can settle it; it is never projected as refusal or completion.
@@ -385,7 +387,10 @@ ambiguity appends `EFFECT_AMBIGUOUS`, emits an alert, and performs no blind retr
 supervisor pass performs lookup only. The operation remains durably nonterminal until an exact
 Draft is observed; neither elapsed time nor repeated absence can turn it into `REFUSED`. This
 sacrifices automatic liveness in the irreducibly ambiguous window rather than publish a false
-terminal or duplicate a provider effect.
+terminal or duplicate a provider effect. The one other exit is an operator's (#161): a complete,
+untruncated search of the operation's head, in every state, that returns no pull request at all
+proves the Draft was never created, and a manual dispatch may record that proof as `ABANDONED`.
+Neither the pump nor elapsed time can take that exit.
 
 The original lease-expiry fault row is represented by executor epochs: A records intent and stalls,
 GitHub terminates A, B becomes the next serialized epoch, and any resumed A command is refused.
@@ -418,7 +423,11 @@ The terminal vocabulary is closed:
 - `CREATED`: effect `CREATE_DRAFT`, exact pull request, no refusal;
 - `REUSED`: effect `NONE`, exact pull request, no refusal; or
 - `REFUSED`: effect `NONE`, no pull request, one closed refusal category; or
-- `CANCELLED`: effect `NONE`, no pull request, cancellation committed before `EFFECT_STARTED`.
+- `CANCELLED`: effect `NONE`, no pull request, cancellation committed before `EFFECT_STARTED`; or
+- `ABANDONED`: effect `NONE`, no pull request, no refusal; committed only after `EFFECT_AMBIGUOUS`,
+  carrying the settlement evidence that proves the Draft absent and the operator dispatch that asked.
+  Every ledger read re-derives that evidence from the operation and refuses a record it does not
+  prove as `LedgerCorrupt`.
 
 `EFFECT_AMBIGUOUS` is explicitly nonterminal and projects effect `UNKNOWN`, no pull request, and
 `ProviderAmbiguous`. It is excluded from completion, throughput-success, and refusal counts. A

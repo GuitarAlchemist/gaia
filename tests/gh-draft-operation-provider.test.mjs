@@ -5,10 +5,12 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 
+import { decideAmbiguousSettlement } from '../src/draft-ambiguity-settlement.mjs';
 import {
   GhDraftOperationProviderError,
   createGhDraftOperationProvider,
   createGhManagedRoundApi,
+  createGhMarkerLookup,
 } from '../src/gh-draft-operation-provider.mjs';
 import {
   createInitialManagedRound,
@@ -709,4 +711,136 @@ test('MECHANISM REVERT: removing If-Match exposes an unconditional PATCH', async
   assert.ok(patch);
   assert.ok(!patch.some((argument) => String(argument).startsWith('If-Match:')),
     'the mutant demonstrates the unconditional provider write the public contract detects');
+});
+
+// The settlement fixture's own ambiguous operation, so a lookup can be decided end to end.
+const SETTLEMENT_OPERATION = JSON.parse(readFileSync(
+  new URL('./fixtures/draft-ambiguity-settlement/operation.json', import.meta.url), 'utf8',
+));
+const SETTLEMENT_REPOSITORY = SETTLEMENT_OPERATION.envelope.repository;
+const SETTLEMENT_HEAD = SETTLEMENT_OPERATION.envelope.generation.headRef;
+const settlementSearch = (overrides = {}) => ({
+  committedRevision: SETTLEMENT_OPERATION.committedRevision,
+  repository: { ...SETTLEMENT_REPOSITORY },
+  headRef: SETTLEMENT_HEAD,
+  marker: SETTLEMENT_OPERATION.operationId,
+  ...overrides,
+});
+const SETTLEMENT_VIEW = [
+  'repo', 'view', 'GuitarAlchemist/gaia', '--json', 'id,nameWithOwner',
+];
+const SETTLEMENT_LIST = [
+  'pr', 'list', '--repo', 'GuitarAlchemist/gaia', '--state', 'all',
+  '--head', SETTLEMENT_HEAD, '--limit', '100', '--json', PR_FIELDS,
+];
+const settlementIdentity = JSON.stringify({
+  id: SETTLEMENT_REPOSITORY.nodeId, nameWithOwner: 'GuitarAlchemist/gaia',
+});
+const decideSettlement = (lookup) => decideAmbiguousSettlement({
+  operation: structuredClone(SETTLEMENT_OPERATION), lookup: structuredClone(lookup),
+});
+
+test('the marker search runs the two provider reads and returns a lookup the decision accepts', async () => {
+  const { run, calls } = fakeRun([
+    { args: SETTLEMENT_VIEW, stdout: settlementIdentity },
+    { args: SETTLEMENT_LIST, stdout: '[]' },
+  ]);
+  const lookup = await createGhMarkerLookup({
+    expectedRepository: SETTLEMENT_REPOSITORY, run, now: () => '2026-09-30T12:34:56.789Z',
+  }).search(settlementSearch());
+  assert.equal(calls.length, 2, 'the identity check, then the search: nothing else');
+  assert.deepEqual(lookup, {
+    schema: 'GaiaDraftMarkerLookupV0',
+    committedRevision: SETTLEMENT_OPERATION.committedRevision,
+    repository: SETTLEMENT_REPOSITORY,
+    repositoryCheck: { id: SETTLEMENT_REPOSITORY.nodeId, nameWithOwner: 'GuitarAlchemist/gaia' },
+    headRef: SETTLEMENT_HEAD,
+    marker: SETTLEMENT_OPERATION.operationId,
+    search: { state: 'all', limit: 100 },
+    observedAt: '2026-09-30T12:34:56Z',
+    outcome: 'COMPLETE',
+    candidates: [],
+  });
+  assert.equal(decideSettlement(lookup).decision, 'SETTLE_ABANDONED');
+
+  // Rows are handed back as gh returned them; the decision, not the adapter, judges them.
+  const row = exactPullRequest({
+    headRefName: SETTLEMENT_HEAD, headRefOid: SETTLEMENT_OPERATION.envelope.generation.headRevision,
+    body: exactBody(SETTLEMENT_OPERATION.operationId),
+  });
+  const found = fakeRun([
+    { args: SETTLEMENT_VIEW, stdout: settlementIdentity },
+    { args: SETTLEMENT_LIST, stdout: JSON.stringify([row]) },
+  ]);
+  const foundLookup = await createGhMarkerLookup({
+    expectedRepository: SETTLEMENT_REPOSITORY, run: found.run, now: () => '2026-09-30T12:34:56Z',
+  }).search(settlementSearch());
+  assert.deepEqual(foundLookup.candidates, [row]);
+  assert.equal(decideSettlement(foundLookup).decision, 'SETTLE_REUSED');
+
+  // An identity that answers for another repository is recorded as observed, and refused later.
+  const foreign = fakeRun([
+    { args: SETTLEMENT_VIEW, stdout: JSON.stringify({ id: 'R_other', nameWithOwner: 'GuitarAlchemist/gaia' }) },
+    { args: SETTLEMENT_LIST, stdout: '[]' },
+  ]);
+  const foreignLookup = await createGhMarkerLookup({
+    expectedRepository: SETTLEMENT_REPOSITORY, run: foreign.run, now: () => '2026-09-30T12:34:56Z',
+  }).search(settlementSearch());
+  assert.equal(foreignLookup.repositoryCheck.id, 'R_other');
+  assert.throws(() => decideSettlement(foreignLookup), { code: 'LookupScopeMismatch' });
+});
+
+test('a marker search that cannot finish is ERRORED, never absent, and never searches elsewhere', async () => {
+  const lost = new Error('gh: HTTP 502');
+  const cases = {
+    'the identity read fails': [{ args: SETTLEMENT_VIEW, error: lost }],
+    'the identity answer is not JSON': [{ args: SETTLEMENT_VIEW, stdout: 'Bad gateway' }],
+    'the identity answer has other fields': [
+      { args: SETTLEMENT_VIEW, stdout: JSON.stringify({ id: 'x', nameWithOwner: 'y', extra: 1 }) },
+    ],
+    'the search fails': [
+      { args: SETTLEMENT_VIEW, stdout: settlementIdentity }, { args: SETTLEMENT_LIST, error: lost },
+    ],
+    'the search is not a list': [
+      { args: SETTLEMENT_VIEW, stdout: settlementIdentity }, { args: SETTLEMENT_LIST, stdout: '{}' },
+    ],
+  };
+  for (const [name, steps] of Object.entries(cases)) {
+    const identityRead = steps.length === 2;
+    const { run } = fakeRun(steps);
+    const lookup = await createGhMarkerLookup({
+      expectedRepository: SETTLEMENT_REPOSITORY, run, now: () => '2026-09-30T12:34:56Z',
+    }).search(settlementSearch());
+    assert.equal(lookup.outcome, 'ERRORED', name);
+    assert.deepEqual(lookup.candidates, [], name);
+    assert.equal(lookup.repositoryCheck === null, !identityRead, name);
+    assert.deepEqual([decideSettlement(lookup).decision, decideSettlement(lookup).reason],
+      ['STAY_UNSETTLED', 'LookupErrored'], name);
+  }
+
+  const idle = fakeRun([]);
+  const lookup = createGhMarkerLookup({
+    expectedRepository: SETTLEMENT_REPOSITORY, run: idle.run, now: () => '2026-09-30T12:34:56Z',
+  });
+  const refused = (code) => (error) => error instanceof GhDraftOperationProviderError
+    && error.code === code;
+  await assert.rejects(lookup.search(settlementSearch({
+    repository: { ...SETTLEMENT_REPOSITORY, nodeId: 'R_other' },
+  })), refused('RequestBindingMismatch'), 'an operation of another repository is not searched here');
+  for (const overrides of [
+    { committedRevision: 'NONE' }, { headRef: '../main' }, { marker: 'A'.repeat(64) },
+    { extra: true },
+  ]) {
+    await assert.rejects(lookup.search(settlementSearch(overrides)), refused('InvalidRequest'),
+      JSON.stringify(overrides));
+  }
+  assert.equal(idle.calls.length, 0, 'a refused request runs no gh command');
+  assert.throws(() => createGhMarkerLookup({ expectedRepository: SETTLEMENT_REPOSITORY }),
+    refused('InvalidAdapter'), 'the instant is injected, never read from a clock here');
+  const unclocked = fakeRun([
+    { args: SETTLEMENT_VIEW, stdout: settlementIdentity }, { args: SETTLEMENT_LIST, stdout: '[]' },
+  ]);
+  await assert.rejects(createGhMarkerLookup({
+    expectedRepository: SETTLEMENT_REPOSITORY, run: unclocked.run, now: () => 'never',
+  }).search(settlementSearch()), refused('InvalidClock'));
 });

@@ -17,7 +17,8 @@
  *
  * Prints the decision (SETTLE_REUSED, SETTLE_ABANDONED or STAY_UNSETTLED), its reason, and the
  * evidence record a settlement would carry. It reads the two files and nothing else: no network,
- * no ledger, no clock. There is no --apply; writing a settlement is #161's operator path.
+ * no ledger, no clock. There is no --apply: a settlement is written only by the intake workflow's
+ * operator dispatch (hosted-draft-pump.mjs settle, #161), which runs its own search.
  *
  * Exit codes: 0 a decision was made (whichever it is) · 1 refused (the files do not describe one
  * ambiguous operation and a lookup of its own marker, head and repository) · 2 usage error ·
@@ -47,7 +48,7 @@ function parse(argv) {
     const token = argv[index];
     if (!token.startsWith('--')) usageError(`unexpected argument: ${token}`);
     const name = token.slice(2);
-    if (name === 'apply') usageError('--apply is not in this slice; writing a settlement is #161');
+    if (name === 'apply') usageError('--apply is not here; a settlement is written by the settle dispatch (#161)');
     if (!FLAGS.has(name)) usageError(`unknown flag: ${token}`);
     if (flags[name] !== undefined) usageError(`${token} given more than once`);
     if (!VALUED.has(name)) { flags[name] = true; continue; }

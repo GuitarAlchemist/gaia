@@ -35,6 +35,22 @@ on:
         description: Write the successor admission; unchecked is a dry run that writes nothing
         type: boolean
         default: false
+      settle_operation:
+        description: Settle one EFFECT_AMBIGUOUS operation (its operation id) from a read-only marker search; no Draft, retry or cancellation
+        type: string
+        default: ''
+      settle_revision:
+        description: The ambiguous operation's current committed revision, as the operator read it
+        type: string
+        default: ''
+      settle_reason:
+        description: Why this ambiguous operation is being settled; recorded in the ledger with the evidence
+        type: string
+        default: ''
+      settle_apply:
+        description: Write ABANDONED when the search proves the Draft absent; unchecked is a dry run that writes nothing
+        type: boolean
+        default: false
   issues:
     types: [labeled]
   schedule:
@@ -72,6 +88,10 @@ jobs:
           GAIA_READMIT_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.readmit_revision || '' }}
           GAIA_READMIT_REASON: ${{ github.event_name == 'workflow_dispatch' && inputs.readmit_reason || '' }}
           GAIA_READMIT_APPLY: ${{ github.event_name == 'workflow_dispatch' && inputs.readmit_apply }}
+          GAIA_SETTLE_OPERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.settle_operation || '' }}
+          GAIA_SETTLE_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.settle_revision || '' }}
+          GAIA_SETTLE_REASON: ${{ github.event_name == 'workflow_dispatch' && inputs.settle_reason || '' }}
+          GAIA_SETTLE_APPLY: ${{ github.event_name == 'workflow_dispatch' && inputs.settle_apply }}
         run: |
           # Normal selection is computed once, here, and published as this step's only output so
           # every later step reads the same decision instead of re-deriving it from inputs/vars.
@@ -123,13 +143,29 @@ jobs:
               throw 'A re-admission runs alone.'
             }
           }
+          # A settlement is the same kind of operator decision, about one ambiguous operation, and
+          # runs alone in the same way, beside no re-admission either. Shapes are checked here; the
+          # CLI re-reads the operation at that revision, runs the marker search itself and writes
+          # only a proven absence. Ticking apply alone is a mistaken settlement, never an intake run.
+          $settle = [bool]$env:GAIA_SETTLE_OPERATION
+          if ($settle -or $env:GAIA_SETTLE_REVISION -or $env:GAIA_SETTLE_REASON -or $env:GAIA_SETTLE_APPLY -eq 'true') {
+            if (!$settle -or !$env:GAIA_SETTLE_REVISION -or [string]::IsNullOrWhiteSpace($env:GAIA_SETTLE_REASON)) {
+              throw 'A settlement names one operation, its revision and a written reason.'
+            }
+            if ($env:GAIA_SETTLE_OPERATION -cnotmatch '^[a-f0-9]{64}\z' -or $env:GAIA_SETTLE_REVISION -cnotmatch '^[a-f0-9]{64}\z') {
+              throw 'A settlement names an operation id and a committed revision.'
+            }
+            if ($env:GAIA_ONE_CANARY -eq 'true' -or $normalSelected -or $env:GAIA_PREPARE_ISSUE -or $target -or $readmit) {
+              throw 'A settlement runs alone.'
+            }
+          }
           $required = @(
             $env:GAIA_PUMP_APP_ID,
             $env:GAIA_PUMP_APP_PRIVATE_KEY,
             $env:GAIA_PUMP_ACTOR_ID,
             $env:GAIA_REPOSITORY_NODE_ID
           )
-          if ($env:GAIA_ONE_CANARY -ne 'true' -and !$normalSelected -and !$env:GAIA_PREPARE_ISSUE -and !$readmit) {
+          if ($env:GAIA_ONE_CANARY -ne 'true' -and !$normalSelected -and !$env:GAIA_PREPARE_ISSUE -and !$readmit -and !$settle) {
             $required += $env:GAIA_MANAGED_ROUND_JSON
           }
           if ($required.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
@@ -138,6 +174,7 @@ jobs:
           "normal_policy=$(if ($normalSelected) { 'true' } else { 'false' })" | Out-File $env:GITHUB_OUTPUT -Append
           "target_issue=$target" | Out-File $env:GITHUB_OUTPUT -Append
           "readmit=$(if ($readmit) { 'true' } else { 'false' })" | Out-File $env:GITHUB_OUTPUT -Append
+          "settle=$(if ($settle) { 'true' } else { 'false' })" | Out-File $env:GITHUB_OUTPUT -Append
 
       - name: Mint a bounded pump App token
         id: pump-token
@@ -247,8 +284,50 @@ jobs:
             throw "The re-admission was refused: $kind. The uploaded receipt names the refusal."
           }
 
+      - name: Settle one ambiguous Draft operation
+        # Operator authority only: a manual dispatch naming one EFFECT_AMBIGUOUS operation, and
+        # nothing else, reaches this step. It re-reads the operation at the named revision, searches
+        # its marker read-only, and writes ABANDONED only when that search proves the Draft absent
+        # and settle_apply is ticked. It never creates, retries or cancels an effect and publishes
+        # no observation. The reason reaches the CLI through env:, never interpolated into the script.
+        if: steps.identity.outputs.settle == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ steps.pump-token.outputs.token }}
+          GAIA_PUMP_ACTOR_ID: ${{ vars.GAIA_PUMP_ACTOR_ID }}
+          GAIA_REPOSITORY_NODE_ID: ${{ vars.GAIA_REPOSITORY_NODE_ID }}
+          GAIA_LEDGER_ROOT_OID: ${{ steps.policy.outputs.oid }}
+          GAIA_LEDGER_ROOT_REVISION: ${{ steps.policy.outputs.revision }}
+          GAIA_SETTLE_OPERATION: ${{ inputs.settle_operation }}
+          GAIA_SETTLE_REVISION: ${{ inputs.settle_revision }}
+          GAIA_SETTLE_REASON: ${{ inputs.settle_reason }}
+          GAIA_SETTLE_APPLY: ${{ inputs.settle_apply }}
+          GAIA_RECEIPT_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-receipt.json
+          GAIA_ERROR_PATH: ${{ runner.temp }}/gaia-hosted-draft-intake-error.json
+        run: |
+          & node scripts/hosted-draft-pump.mjs settle `
+            --repository $env:GITHUB_REPOSITORY `
+            --pump-actor-id $env:GAIA_PUMP_ACTOR_ID `
+            --repository-node-id $env:GAIA_REPOSITORY_NODE_ID `
+            --ledger-root-oid $env:GAIA_LEDGER_ROOT_OID `
+            --ledger-root-revision $env:GAIA_LEDGER_ROOT_REVISION `
+            1> $env:GAIA_RECEIPT_PATH 2> $env:GAIA_ERROR_PATH
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+            Move-Item -LiteralPath $env:GAIA_ERROR_PATH -Destination $env:GAIA_RECEIPT_PATH -Force
+            exit $exitCode
+          }
+          # Only a planned or written abandonment is what this dispatch asks for. Every other typed
+          # outcome (a Draft found for reconcile to adopt, a search that proves nothing, an operation
+          # that moved or is not ambiguous) exits 0 with its receipt kept for upload, and fails the
+          # run so the operator sees it on the run rather than only inside the artifact.
+          $kind = (Get-Content -Raw -LiteralPath $env:GAIA_RECEIPT_PATH | ConvertFrom-Json).result.kind
+          if ($kind -cnotin @('AbandonmentPlanned', 'Abandoned', 'AlreadyAbandoned')) {
+            throw "The settlement was not made: $kind. The uploaded receipt names why."
+          }
+
       - name: Resume or admit exactly one Draft operation
-        if: steps.identity.outputs.readmit != 'true' && (github.event_name != 'workflow_dispatch' || !inputs.prepare_issue)
+        if: steps.identity.outputs.readmit != 'true' && steps.identity.outputs.settle != 'true' && (github.event_name != 'workflow_dispatch' || !inputs.prepare_issue)
         shell: pwsh
         # GAIA_OBSERVATION_PATH below is empty for a labeled issue run, which the CLI reads as an
         # absent value. `sequence` on a published reading is the Actions run id, and run ids

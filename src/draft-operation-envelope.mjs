@@ -1,8 +1,14 @@
 import { createHash } from 'node:crypto';
 
+import {
+  AmbiguitySettlementError,
+  decideAmbiguousSettlement,
+  validateAbandonmentEvidence,
+} from './draft-ambiguity-settlement.mjs';
+
 const SHA256 = /^[a-f0-9]{64}$/u;
 const GIT_OID = /^[a-f0-9]{40}$/u;
-const TERMINAL = new Set(['CREATED', 'REUSED', 'REFUSED', 'CANCELLED']);
+const TERMINAL = new Set(['CREATED', 'REUSED', 'REFUSED', 'CANCELLED', 'ABANDONED']);
 const EPOCH_STATES = new Set(['CLAIMED', 'INTENT', 'EFFECT_STARTED']);
 // The create call is reachable only after EFFECT_STARTED, so a refusal from these states never ran it.
 const PRE_EFFECT_STATES = new Set(['ENQUEUED', 'CLAIMED', 'INTENT']);
@@ -284,8 +290,8 @@ function firstAdmission(workKey) {
   return closedObject([['key', workKey], ['spentGenerationKeys', Object.freeze([])]]);
 }
 
-function validateReadmissionProvenance(input) {
-  const code = 'InvalidReadmission';
+/** Who asked, and why: an operator's written reason and the dispatch that carried it. */
+function validateOperatorProvenance(input, code) {
   requireExactKeys(input, ['reason', 'runId', 'runAttempt', 'triggeringActor'], code);
   const reason = requireString(input.reason, code);
   if (reason.trim() !== reason || reason.length > READMISSION_REASON_LIMIT) {
@@ -365,11 +371,7 @@ function parseWorkRoot(body, admissionKey) {
     schema: 'GaiaDraftOperationIdV0', workKey: body.workKey,
     generationKey: body.spentGenerationKeys.at(-1),
   })) throw new DraftOperationError(code);
-  try {
-    validateReadmissionProvenance(body.readmission);
-  } catch {
-    throw new DraftOperationError(code);
-  }
+  validateOperatorProvenance(body.readmission, code);
   return {
     workKey: body.workKey,
     admission: closedObject([
@@ -670,7 +672,7 @@ function validateLedgerTransition(previous, next) {
     CLAIMED: new Set(['CLAIMED', 'INTENT', 'REUSED', 'REFUSED', 'CANCELLED']),
     INTENT: new Set(['CLAIMED', 'INTENT', 'EFFECT_STARTED', 'REUSED', 'REFUSED', 'CANCELLED']),
     EFFECT_STARTED: new Set(['EFFECT_AMBIGUOUS', 'CREATED', 'REUSED', 'REFUSED']),
-    EFFECT_AMBIGUOUS: new Set(['REUSED']),
+    EFFECT_AMBIGUOUS: new Set(['REUSED', 'ABANDONED']),
   };
   if (!allowed[previous]?.has(next)) throw new DraftOperationError('LedgerCorrupt');
 }
@@ -738,7 +740,37 @@ function validateOperationRecord(record, identity, envelope, previous) {
     requireExactKeys(body, common, 'LedgerCorrupt');
     return { outcome: 'CANCELLED', committedRevision: record.committedRevision };
   }
+  if (body.kind === 'ABANDONED') {
+    requireExactKeys(body, [...common, 'settlement', 'provenance'], 'LedgerCorrupt');
+    // The evidence must prove this operation's Draft absent at the ambiguous revision it follows.
+    let settlement;
+    try {
+      settlement = validateAbandonmentEvidence({
+        operation: ambiguousOperation(identity, envelope, body.priorCommittedRevision),
+        evidence: body.settlement,
+      });
+    } catch {
+      throw new DraftOperationError('LedgerCorrupt');
+    }
+    return {
+      outcome: 'ABANDONED', settlement,
+      provenance: validateOperatorProvenance(body.provenance, 'LedgerCorrupt'),
+      committedRevision: record.committedRevision,
+    };
+  }
   throw new DraftOperationError('LedgerCorrupt');
+}
+
+/** One ambiguous operation, in the shape the settlement decision reads. */
+function ambiguousOperation(identity, envelope, committedRevision) {
+  return {
+    operationId: identity.operationId,
+    workKey: identity.workKey,
+    generationKey: identity.generationKey,
+    committedRevision,
+    state: 'EFFECT_AMBIGUOUS',
+    envelope,
+  };
 }
 
 const UNSETTLED_INSPECTION_CONCURRENCY = 8;
@@ -1497,7 +1529,7 @@ export async function readmitDraft(operationId, expectedCommittedRevision, prove
   { apply = false } = {}) {
   requireRevision(operationId, 'InvalidOperationId');
   requireRevision(expectedCommittedRevision);
-  const readmission = validateReadmissionProvenance(provenance);
+  const readmission = validateOperatorProvenance(provenance, 'InvalidReadmission');
   if (typeof apply !== 'boolean') throw new DraftOperationError('InvalidReadmission');
   const capabilities = storeCapabilities(ports?.store);
   const snapshot = await capabilities.inspectByOperation(operationId);
@@ -1531,6 +1563,82 @@ export async function readmitDraft(operationId, expectedCommittedRevision, prove
   if (!opened.opened) return { kind: 'AlreadyReadmitted', ...planned };
   await emit(ports, { kind: 'READMITTED', operationId, admissionKey: root.admissionKey });
   return { kind: 'Readmitted', ...planned, successorRootRevision: opened.committedRevision };
+}
+
+/**
+ * Settle one EFFECT_AMBIGUOUS operation from a marker lookup. Dry run unless `apply` is true.
+ *
+ * The operation is read at the revision the operator names, and only then is its marker searched
+ * (`ports.searchMarker`), so the lookup is bound to that revision. decideAmbiguousSettlement makes
+ * the call. Only a Draft proven absent is written here: ABANDONED, carrying that decision's
+ * evidence and the dispatch that asked, by compare-and-swap at the same revision, so any move since
+ * the read loses. A Draft found is left to reconcileDraft, whose own exact lookup adopts it as
+ * REUSED; anything short of a proof leaves the operation as it is. Nothing here creates, retries or
+ * cancels an effect, and the only caller is an operator-dispatched run.
+ */
+export async function settleAmbiguousDraft(operationId, expectedCommittedRevision, provenance, ports,
+  { apply = false } = {}) {
+  requireRevision(operationId, 'InvalidOperationId');
+  requireRevision(expectedCommittedRevision);
+  const dispatch = validateOperatorProvenance(provenance, 'InvalidSettlement');
+  if (typeof apply !== 'boolean') throw new DraftOperationError('InvalidSettlement');
+  if (typeof ports?.searchMarker !== 'function') throw new DraftOperationError('InvalidPorts');
+  const capabilities = storeCapabilities(ports.store);
+  const snapshot = await capabilities.inspectByOperation(operationId);
+  if (!snapshot) throw new DraftOperationError('UnknownOperation');
+  const { identity, envelope } = snapshot;
+  if (snapshot.terminal?.outcome === 'ABANDONED'
+    && snapshot.terminal.settlement.committedRevision === expectedCommittedRevision) {
+    return {
+      kind: 'AlreadyAbandoned', operationId, workKey: identity.workKey,
+      committedRevision: expectedCommittedRevision, settledRevision: snapshot.committedRevision,
+    };
+  }
+  if (snapshot.committedRevision !== expectedCommittedRevision) return stale(snapshot);
+  if (snapshot.state !== 'EFFECT_AMBIGUOUS') {
+    return {
+      kind: 'NotAmbiguous', operationId, state: snapshot.state,
+      outcome: snapshot.terminal?.outcome ?? null, committedRevision: snapshot.committedRevision,
+    };
+  }
+  const lookup = await ports.searchMarker(closedObject([
+    ['committedRevision', snapshot.committedRevision],
+    ['repository', closedObject([
+      ['nodeId', envelope.repository.nodeId],
+      ['owner', envelope.repository.owner],
+      ['name', envelope.repository.name],
+    ])],
+    ['headRef', envelope.generation.headRef],
+    ['marker', identity.operationId],
+  ]));
+  let decided;
+  try {
+    decided = decideAmbiguousSettlement({
+      operation: ambiguousOperation(identity, envelope, snapshot.committedRevision), lookup,
+    });
+  } catch (error) {
+    if (!(error instanceof AmbiguitySettlementError)) throw error;
+    return {
+      kind: 'SettlementRefused', refusal: error.code, operationId, workKey: identity.workKey,
+      committedRevision: snapshot.committedRevision,
+    };
+  }
+  const planned = {
+    operationId, workKey: identity.workKey, committedRevision: snapshot.committedRevision,
+    decision: decided.decision, reason: decided.reason, evidence: decided.evidence,
+  };
+  if (decided.decision === 'STAY_UNSETTLED') return { kind: 'StaysUnsettled', ...planned };
+  if (decided.decision === 'SETTLE_REUSED') return { kind: 'ReconcileAdopts', ...planned };
+  if (!apply) return { kind: 'AbandonmentPlanned', ...planned };
+  const appended = await capabilities.append(
+    operationId, snapshot.committedRevision, 'ABANDONED',
+    { settlement: decided.evidence, provenance: dispatch },
+  );
+  if (appended.stale) return stale(appended.current);
+  // The read-back decides: the store returns the chain as re-read after the append (Git Data
+  // re-validates it whole), and nothing can follow the terminal record just written.
+  await emit(ports, { kind: 'ABANDONED', operationId });
+  return { kind: 'Abandoned', ...planned, settledRevision: appended.current.committedRevision };
 }
 
 function providerRequest(snapshot) {

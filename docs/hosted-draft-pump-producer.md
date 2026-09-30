@@ -152,6 +152,13 @@ because the read model's `deriveState` fallthrough would publish it as `REPLAYED
 producer closes A1's only reachable consequence **without touching the read model**, which the
 repair brief puts out of scope.
 
+**`Terminal` · `ABANDONED` refuses.** It is an operator's settlement of one ambiguous operation
+(`settleAmbiguousDraft`, #161), written by a manual dispatch and never by intake. A settled operation
+leaves the unsettled queue, so intake never reconciles it and no intake receipt should carry one.
+Should one arrive it is refused, not mapped: the sealed observation's outcome vocabulary
+(`HOSTED_DRAFT_PUMP_OUTCOMES`) has no `ABANDONED`, and the Control Room gets no new reading from this
+change.
+
 **`StaleRevision` refuses.** It is a compare-and-swap loser: this run performed no effect and does
 not know what the pump did. Publishing anything would be a guess, and the winner's own run publishes
 the truth. Refusing is `no effect + typed refusal`, which is the contract.

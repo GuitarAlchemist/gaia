@@ -460,8 +460,8 @@ The record adds when the search ran and whether it completed (`COMPLETE`, `PARTI
 followed reading it followed the create. A search from before it proves nothing.
 
 The module checks the record's shape and bindings, but not that the commands ran. The fields are the
-producer's claims: whoever assembles the record answers for it, and #161's write must read the
-operation again at that revision.
+producer's claims: whoever assembles the record answers for it. The #161 write below therefore never
+takes a lookup from outside: it reads the operation at that revision and runs the search itself.
 
 **Why an empty search proves absence.** The provider creates a Draft only with `--head` on the
 operation's own head branch. A pull request's head branch never changes, and a pull request is never
@@ -513,14 +513,124 @@ npm run draft:settle-ambiguous -- --operation operation.json --lookup lookup.jso
 
 - **Exit codes:** `0` a decision was made, whichever it is · `1` refused · `2` usage · `3`
   fail-closed, meaning a file could not be read.
-- **No `--apply`.** The operator write, a new `ABANDONED` transition in the envelope, and what
-  becomes of the evidence branch all stay on #161.
+- **No `--apply`.** This command decides from files and never writes. The write is the operator
+  dispatch in the next section, which runs its own search.
 - **The #127 operation.** Dry run at 2026-09-30T22:54:15Z, in the format above, with nothing written:
   - The operation (`e700fd9b…`) was read from the hosted ledger at its ambiguous revision
     (`02bd6009…`). Its identity recomputes from its envelope.
   - The repository identity check and the search above then ran with the user's own `gh`.
   - They found no pull request on `codex/issue127-normal-admission-live`.
   - The decision was `SETTLE_ABANDONED` (`MarkerProvablyAbsent`).
+
+## Settling an ambiguous Draft — the operator write (#161)
+
+The decision above writes nothing. `settleAmbiguousDraft` in `src/draft-operation-envelope.mjs` is
+the one path that writes a settlement, and only an operator-dispatched run of this workflow reaches
+it. It never creates, retries or cancels an effect. Intake has no path to it.
+
+**One new terminal, `ABANDONED`, after `EFFECT_AMBIGUOUS` only.** The ledger grammar now lets
+`EFFECT_AMBIGUOUS` end in `REUSED` or `ABANDONED`. The record is closed:
+
+```text
+{ schema: 'GaiaDraftOperationReceiptV0', priorCommittedRevision, kind: 'ABANDONED',
+  workKey, generationKey, operationId, settlement, provenance }
+```
+
+- `settlement` is the `GaiaDraftAmbiguitySettlementV0` evidence the decision returned for
+  `SETTLE_ABANDONED`.
+- `provenance` is `{ reason, runId, runAttempt, triggeringActor }`, the same shape a re-admission
+  records.
+
+**Every read re-proves it.** Whenever a store reads the chain, `validateAbandonmentEvidence` rebuilds
+the evidence from the operation itself:
+- its identity, repository and generation;
+- the ambiguous revision the record follows (its `priorCommittedRevision`);
+- what an abandonment requires of its search: complete, identity-checked, the provider's limit of
+  100, no pull request.
+
+It then re-hashes the evidence and compares it whole with what was stored. A record that disagrees
+anywhere, that was written for another operation or another revision, or whose provenance is
+malformed, is `LedgerCorrupt`. So is an `ABANDONED` after any state other than `EFFECT_AMBIGUOUS`. The
+check proves the record is a proof of absence for this operation. It cannot prove that the search
+ran; only the pump App writes the ledger, and it writes only what the steps below produced.
+
+**The write, in order.** `settleAmbiguousDraft(operationId, expectedRevision, provenance, { store,
+searchMarker }, { apply })`:
+
+1. **Read the operation.**
+   - An operation that already holds an abandonment of that revision answers `AlreadyAbandoned`, so
+     a re-run adopts its own write.
+   - One that moved answers `StaleRevision`.
+   - One that is not `EFFECT_AMBIGUOUS` answers `NotAmbiguous`.
+   - Nothing is searched in any of these cases.
+2. **Search the marker, after that read.** `createGhMarkerLookup` (`src/gh-draft-operation-provider.mjs`)
+   runs the provider's own two reads, in its order: `gh repo view --json id,nameWithOwner`, then the
+   `gh pr list … --state all --head HEAD_REF --limit 100` above.
+   - It records the revision it was handed, the identity it observed, and the instant the search
+     ended.
+   - A read that fails, or an answer that is not JSON of the expected shape, yields an `ERRORED`
+     lookup with no rows, which can only stay unsettled.
+   - The search is bound to this repository's configured identity. An operation of another
+     repository is refused before any `gh` call (`RequestBindingMismatch`).
+3. **Decide** with `decideAmbiguousSettlement`.
+   - `STAY_UNSETTLED` answers `StaysUnsettled`.
+   - `SETTLE_REUSED` answers `ReconcileAdopts`.
+   - A named refusal answers `SettlementRefused` with its code.
+   - None of these writes anything.
+4. **Write only a proven absence.**
+   - Without `apply`, `SETTLE_ABANDONED` answers `AbandonmentPlanned` and writes nothing.
+   - With `apply`, it appends `ABANDONED` by compare-and-swap at the revision read in step 1, so any
+     move since that read loses and answers `StaleRevision`.
+   - The read-back decides: `Abandoned` only when the ledger then holds this evidence.
+
+**Why a Draft found is not written here.** `REUSED` already has one writer: `reconcileDraft`, from
+the provider's own exact lookup, with its merge-evidence reads when the Draft was merged. Every
+scheduled intake reconciles each unsettled operation, so a Draft this search finds is adopted there.
+A second writer of `REUSED` would be a second implementation of adoption. `ReconcileAdopts` reports
+the Draft and leaves it to that path.
+
+**What an abandoned operation is.**
+- Its effect is `NONE`, with no pull request and no refusal.
+- It is terminal, so it leaves the unsettled queue and intake never reconciles it again.
+- It is not re-admissible: only an effect-free `REFUSED` is.
+- A later ready event of the same issue answers `StaleRevision`, as after any other terminal.
+- The observation producer refuses an `ABANDONED` result as unobservable
+  (`docs/hosted-draft-pump-producer.md`). Intake cannot produce one anyway, because it never
+  reconciles a settled operation.
+
+**The dispatch.** The inputs are:
+- `settle_operation`;
+- `settle_revision`, the ambiguous committed revision the operator read;
+- `settle_reason`, required and bounded like a re-admission's;
+- `settle_apply`, default `false`.
+
+The identity gate refuses a settlement that is incomplete or malformed, and one combined with
+anything else: a canary, normal admission, preparation, an issue selector or a re-admission. It also
+refuses `settle_apply` ticked with no operation, so a mistaken dispatch never falls through to an
+ordinary intake run. The settle step passes `GAIA_REPOSITORY_NODE_ID` to the search, and the intake
+step does not run.
+
+A green run means `AbandonmentPlanned`, `Abandoned` or `AlreadyAbandoned`. Every other result fails
+the run, and the receipt that names it is still uploaded.
+
+**Settling #127.** Dry run first, then apply only once the receipt says `AbandonmentPlanned`
+(`MarkerProvablyAbsent`):
+
+```bash
+gh workflow run hosted-draft-intake.yml --repo GuitarAlchemist/gaia \
+  -f settle_operation=e700fd9b5c20e1e3a252da8f0d14e1e2b0f6290911c34e03b3b3e00639003ffc \
+  -f settle_revision=02bd600943a37dca3fb71a69755a460446a0720fab701f3f181ede829f12a47f \
+  -f settle_reason='The create response for #127 was lost; no pull request exists on its head.'
+# then the same command with: -f settle_apply=true
+```
+
+After the apply, the next scheduled intake should report `unsettledCount: 0` and no
+`EFFECT_AMBIGUOUS` skip.
+
+**The evidence branch.** The proof is that `codex/issue127-normal-admission-live` carries no pull
+request, and the ledger record keeps that search: when it ran, what it checked, and that it found
+nothing. The branch itself holds nothing the settlement needs. Once the apply has run, the operator
+may delete it or keep it with a written reason. Neither choice changes the ledger.
 
 ## Re-admitting an effect-free refusal — decided (#167)
 
@@ -711,6 +821,11 @@ widening. No new repository variable or secret. No change to `src/draft-operatio
 `tests/hosted-draft-pump-workflow.test.mjs`, `.github/workflows/ci.yml`, or
 `.github/gaia/pump-policy.json`. A diff reaching any of those means the design drifted; treat it as a
 review stop.
+
+That list is the R0 intake's scope. Two operator paths designed later change
+`src/draft-operation-envelope.mjs` under their own decisions above: re-admission (#167) and
+settlement (#161). Settlement also adds a read-only marker search to
+`src/gh-draft-operation-provider.mjs`. Neither touches anything else in the list.
 
 ## Minimal implementation scope
 

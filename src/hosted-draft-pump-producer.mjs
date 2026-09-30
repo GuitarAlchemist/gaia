@@ -23,7 +23,9 @@
  * refuses the whole observation rather than degrading to blocker `NONE`, because a blocker read as
  * "no blocker" is the one direction this seam must never fail. A `CANCELLED` terminal refuses:
  * no shipped path calls `cancelDraft`, and the read model's fallthrough would publish it as a
- * healthy `REPLAYED`, which is not what a cancellation is.
+ * healthy `REPLAYED`, which is not what a cancellation is. An `ABANDONED` terminal refuses too: it is
+ * an operator's settlement of an ambiguous operation (#161), which leaves the unsettled queue and is
+ * never reconciled by intake, so no intake receipt should carry one.
  *
  * Skips are read only where they are the whole story. On `RESUME` and `ADMIT` the transition
  * describes the operation that actually moved and an incidental skip is not part of it. On
@@ -222,6 +224,9 @@ function actedTransition(receipt) {
   }
   if (result.outcome === 'CANCELLED') {
     unobservable('a cancelled operation is not a pump transition this producer may publish');
+  }
+  if (result.outcome === 'ABANDONED') {
+    unobservable('an abandoned operation is an operator settlement, not a pump transition');
   }
   if (typeof result.outcome !== 'string' || !Object.hasOwn(TERMINAL_EFFECTS, result.outcome)) {
     invalid(`the terminal outcome is not a recognised token: ${String(result.outcome)}`);
