@@ -1,0 +1,37 @@
+{
+  "schema": "GaiaDraftMarkerLookupV0",
+  "committedRevision": "d7a9b93b69478e99d73da566de4490fc8353485c3ff20de54d22ee8d23a49f8b",
+  "repository": {
+    "nodeId": "R_kgDOT3lpUg",
+    "owner": "GuitarAlchemist",
+    "name": "gaia"
+  },
+  "repositoryCheck": {
+    "id": "R_kgDOT3lpUg",
+    "nameWithOwner": "GuitarAlchemist/gaia"
+  },
+  "headRef": "gaia/issue-4242-ready-1",
+  "marker": "5303df23535b15e435f318b6cb9f01bc4f323d54e3589da0f55d736bf085865f",
+  "search": {
+    "state": "all",
+    "limit": 100
+  },
+  "observedAt": "2026-09-30T23:00:00Z",
+  "outcome": "COMPLETE",
+  "candidates": [
+    {
+      "number": 4301,
+      "url": "https://github.com/GuitarAlchemist/gaia/pull/4301",
+      "isDraft": true,
+      "state": "OPEN",
+      "baseRefName": "main",
+      "headRefName": "gaia/issue-4242-ready-1",
+      "headRefOid": "6df0ab90c4170de3c5fba7718ee96dcc1d211e0c",
+      "headRepositoryOwner": {
+        "id": "MDEyOk9yZ2FuaXphdGlvbjE=",
+        "login": "GuitarAlchemist"
+      },
+      "body": "<!-- gaia-operation:5303df23535b15e435f318b6cb9f01bc4f323d54e3589da0f55d736bf085865f -->\nIssue: https://github.com/GuitarAlchemist/gaia/issues/4242\nOwner: Gaia hosted Draft pump\nGate: DELIVERY\nETA: 60-120 minutes\n\nChecklist:\n- [ ] Create or reuse one exact Draft pull request\n- [ ] Persist one terminal receipt"
+    }
+  ]
+}

@@ -426,6 +426,102 @@ Mitigation: `hosted-draft-pump-effect.yml` becomes manual break-glass only, with
 the normal path. This is a documentation and operational change; the effect workflow file and its
 tests are not touched.
 
+## Settling an ambiguous Draft — the decision only (#176)
+
+Step 3 above leaves `EFFECT_AMBIGUOUS` one exit, `REUSED`, and `reconcileDraft` takes it only when its
+lookup finds the marked Draft. When the lookup finds nothing, the operation stays pending for ever:
+nothing tells "found nothing" apart from "searched badly". The #127 operation has sat there since at
+least 2026-09-15 (#161). `src/draft-ambiguity-settlement.mjs` makes that call from a saved lookup, and
+only that call. It reads no network, no clock and no ledger, and it never creates, retries or cancels
+an effect.
+
+**The operation** is the ledger's own record: `operationId`, `workKey`, `generationKey`,
+`committedRevision`, `state` and the envelope. The module recomputes the identity from the envelope
+exactly as `src/draft-operation-envelope.mjs` derives it. So an operation id cannot be paired with
+another generation's head, and a successor cannot borrow a predecessor's id
+(`OperationIdentityMismatch`). A test reproduces the fixture through `enqueueDraft` and a
+`reconcileDraft` whose create response is lost.
+
+**The lookup** is a `GaiaDraftMarkerLookupV0` record of the search the provider runs, in the
+provider's order:
+
+1. Read the operation at its ambiguous revision, and record that `committedRevision`.
+2. Check the repository identity (`gh repo view --json id,nameWithOwner`), and record the answer.
+3. List every pull request on the head branch, in every state, with the provider's limit of 100:
+
+```bash
+gh pr list --repo OWNER/NAME --state all --head HEAD_REF --limit 100 \
+  --json number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body
+```
+
+The record adds when the search ran and whether it completed (`COMPLETE`, `PARTIAL` or
+`ERRORED`). The lookup must name the revision the operation is decided at
+(`LookupRevisionMismatch`). That revision was committed after the create attempt, so a search that
+followed reading it followed the create. A search from before it proves nothing.
+
+The module checks the record's shape and bindings, but not that the commands ran. The fields are the
+producer's claims: whoever assembles the record answers for it, and #161's write must read the
+operation again at that revision.
+
+**Why an empty search proves absence.** The provider creates a Draft only with `--head` on the
+operation's own head branch. A pull request's head branch never changes, and a pull request is never
+deleted. So a complete search of that head, in every state, that returns no pull request at all
+proves the Draft was never created. The proof rests on those two GitHub properties, and on nothing
+the pump itself writes.
+
+**The decision**, `decideAmbiguousSettlement({ operation, lookup })`:
+
+| Lookup | Decision | Reason |
+| --- | --- | --- |
+| errored, partial, or 100 rows (a full page) | `STAY_UNSETTLED` | `LookupErrored`, `LookupPartial`, `LookupTruncated` |
+| complete, no pull request on the head | `SETTLE_ABANDONED` | `MarkerProvablyAbsent` |
+| more than one pull request on the head | `STAY_UNSETTLED` | `SeveralPullRequestsOnHead` |
+| one pull request, marker absent or repeated | `STAY_UNSETTLED` | `UnmarkedPullRequestOnHead` |
+| one marked pull request that is not an open Draft on the generation (merged, closed, ready, moved) | `STAY_UNSETTLED` | `MarkedPullRequestNotAdoptable` |
+| one marked open Draft on the generation | `SETTLE_REUSED` | `MarkedDraftFound` |
+
+**`SETTLE_REUSED` never goes beyond the existing adoption.**
+- A test runs the real provider over the same rows with no merge evidence available. It adopts
+  exactly the `SETTLE_REUSED` rows, and it finds nothing exactly where this module abandons.
+- A merged Draft is different. `reconcileDraft` can adopt it with its own merge reads, but this
+  module leaves it `STAY_UNSETTLED`.
+- `SETTLE_REUSED` is therefore a subset of what `reconcileDraft` adopts.
+
+**Refusals.** Each is named:
+- an operation that is not `EFFECT_AMBIGUOUS`: `OperationNotAmbiguous`;
+- an identity that does not follow from its envelope: `OperationIdentityMismatch`;
+- a lookup of another marker: `LookupMarkerMismatch`;
+- a lookup of another head or repository, or whose identity check saw another repository:
+  `LookupScopeMismatch`;
+- a lookup of another revision: `LookupRevisionMismatch`;
+- a malformed input: `InvalidOperation` or `InvalidLookup`.
+
+Inputs are read as plain data. Accessors, foreign prototypes, extra keys and array holes are refused,
+and what is hashed is the validated copy.
+
+**Evidence.** Every decision carries the record a settlement would write:
+- the operation, its generation, and the ambiguous revision it was decided at;
+- the lookup's own content revision, identity check and bounds;
+- the pull request found, if any;
+- its own content revision.
+
+**Dry run.**
+
+```bash
+npm run draft:settle-ambiguous -- --operation operation.json --lookup lookup.json [--json]
+```
+
+- **Exit codes:** `0` a decision was made, whichever it is · `1` refused · `2` usage · `3`
+  fail-closed, meaning a file could not be read.
+- **No `--apply`.** The operator write, a new `ABANDONED` transition in the envelope, and what
+  becomes of the evidence branch all stay on #161.
+- **The #127 operation.** Dry run at 2026-09-30T22:54:15Z, in the format above, with nothing written:
+  - The operation (`e700fd9b…`) was read from the hosted ledger at its ambiguous revision
+    (`02bd6009…`). Its identity recomputes from its envelope.
+  - The repository identity check and the search above then ran with the user's own `gh`.
+  - They found no pull request on `codex/issue127-normal-admission-live`.
+  - The decision was `SETTLE_ABANDONED` (`MarkerProvablyAbsent`).
+
 ## Re-admitting an effect-free refusal — decided (#167)
 
 A refusal is terminal, and the base work key is the issue. So a transient, host-side refusal that

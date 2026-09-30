@@ -1,0 +1,33 @@
+{
+  "operationId": "5303df23535b15e435f318b6cb9f01bc4f323d54e3589da0f55d736bf085865f",
+  "workKey": "5a13a62d988e163e67aa77777277295a5e423e39d68cda06333be12c542ad921",
+  "generationKey": "d50cd74a9cd44537111d98f2dee136eef562c0406b070dc75c0b18df56a2c40b",
+  "committedRevision": "d7a9b93b69478e99d73da566de4490fc8353485c3ff20de54d22ee8d23a49f8b",
+  "state": "EFFECT_AMBIGUOUS",
+  "envelope": {
+    "schema": "GaiaDraftOperationEnvelopeV0",
+    "repository": {
+      "nodeId": "R_kgDOT3lpUg",
+      "owner": "GuitarAlchemist",
+      "name": "gaia"
+    },
+    "workItem": {
+      "kind": "ISSUE",
+      "number": 4242
+    },
+    "readyItem": {
+      "schema": "GaiaReadyItemIdentityV0",
+      "queueReceiptRevision": "3294a7bdc52db0b1906713d74413f55f824db0fac70f4bdf6f514b7d221c040b",
+      "occurrence": 1,
+      "id": "5b3b98992d90500362e4a424c02c421880f14467903333693fcdcf1aadcf5825"
+    },
+    "observedSourceRevision": "8fcd965f33ed4c36689276b5b0bcd1d5b1041699aa184d4ec1b57f07e3bf815e",
+    "generation": {
+      "baseRef": "main",
+      "headRef": "gaia/issue-4242-ready-1",
+      "headRevision": "6df0ab90c4170de3c5fba7718ee96dcc1d211e0c",
+      "policyRevision": "739556f5d1ea8c347ef36abeb3c4e2dcc05d6740"
+    },
+    "requestedEffect": "CREATE_DRAFT"
+  }
+}

@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 2288 gates
+node --test                                   # 2296 gates
 ```
 
 Use the single Node.js version in `.node-version` (26.8.1, the latest Current release
@@ -700,7 +700,9 @@ authoritative for their named contracts.
 | `src/resume-manifest.mjs` | Pure resume-prompt check: compares a prompt's declared subject worktree, full commit, base pin and the upstream artifacts naming its entry with one observation, and refuses every disagreement by name. Repetition carries no weight; `authority: NONE`. |
 | `src/resume-manifest-git.mjs` | The check's observation adapter: worktree `HEAD` and cleanliness, the base resolved live on its remote, bounded upstream artifact text. Measures only; writes nothing, not even the index. |
 | `scripts/check-resume-prompt.mjs` | The single resume entrypoint: run before a lane is spawned or resumed from a prompt file. Exit `0` agreed / `1` refused / `2` usage / `3` fail-closed. See [`docs/resume-manifest.md`](docs/resume-manifest.md). |
-| `tests/` | 2288 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `src/draft-ambiguity-settlement.mjs` | Pure settlement decision for one `EFFECT_AMBIGUOUS` Draft operation, its identity recomputed from its envelope, from a saved marker lookup bound to its ambiguous revision: `SETTLE_REUSED`, `SETTLE_ABANDONED` only on a complete search that finds no pull request on the head, else `STAY_UNSETTLED`. No network, clock or ledger; `authority: NONE`. |
+| `scripts/draft-ambiguity-settlement.mjs` | Dry run of that decision over two files (`npm run draft:settle-ambiguous`). No `--apply`; the operator write is #161. Exit `0` decided / `1` refused / `2` usage / `3` fail-closed. |
+| `tests/` | 2296 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
