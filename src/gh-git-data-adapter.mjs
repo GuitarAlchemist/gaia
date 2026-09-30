@@ -90,6 +90,9 @@ const gitObjectId = (type, bytes) => createHash('sha1')
 // Git orders tree entries by name, comparing a directory as if its name ended in '/'.
 const treeOrder = (entry) => Buffer.from(entry.mode === 0o40000 ? `${entry.name}/` : entry.name, 'utf8');
 
+// An entry's type is not part of the tree's bytes, so it must follow from the mode, which is.
+const typeOfMode = (mode) => (mode === 0o40000 ? 'tree' : mode === 0o160000 ? 'commit' : 'blob');
+
 // The REST objects one GraphQL history node stands for, keyed by their REST path. A tree or blob
 // is returned only when its translated bytes hash back to the object id Git stored, so nothing the
 // transport altered is ever seeded: gh rewrites control characters in the JSON it prints, and a
@@ -106,7 +109,9 @@ function historyObjects(node) {
   const objects = [[`git/commits/${node.oid}`, {
     sha: node.oid, tree: { sha: tree.oid }, parents: parents.nodes.map(({ oid: sha }) => ({ sha })),
   }]];
-  for (const { oid: sha, object } of tree.entries) {
+  for (const entry of tree.entries) {
+    const sha = entry?.oid;
+    const object = entry?.object;
     if (object?.__typename !== 'Blob' || object.oid !== sha || !isOid(sha)
         || object.isBinary !== false || object.isTruncated !== false
         || typeof object.text !== 'string') continue;
@@ -116,7 +121,7 @@ function historyObjects(node) {
   }
   if (!tree.entries.every((entry) => typeof entry?.name === 'string'
       && Number.isSafeInteger(entry.mode) && entry.mode >= 0
-      && typeof entry.type === 'string' && isOid(entry.oid))) return objects;
+      && entry.type === typeOfMode(entry.mode) && isOid(entry.oid))) return objects;
   const entries = [...tree.entries].sort((a, b) => Buffer.compare(treeOrder(a), treeOrder(b)));
   const treeBytes = Buffer.concat(entries.flatMap((entry) => [
     Buffer.from(`${entry.mode.toString(8)} ${entry.name}\0`, 'utf8'), Buffer.from(entry.oid, 'hex'),

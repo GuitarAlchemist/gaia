@@ -707,5 +707,5 @@ a live proof that one labelled issue and one recovery replay create no duplicate
    - If GraphQL fails, or answers without the commit asked for, the adapter falls back to REST for the
      rest of the run, at the former cost. An object that does not verify costs its own REST read.
    - The prefetch runs before the head's receipt is checked. A ledger ref pointing at an ordinary
-     branch costs one large query (13.6 MB and 8.4 s, measured against `main`) before REST refuses it,
-     and the listing then fails closed as it did before.
+     branch costs one large query (13.6 MB and 8.4 s, measured against `main`) before its head receipt
+     is refused, and the listing then fails closed as it did before.

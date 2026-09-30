@@ -1140,6 +1140,10 @@ test('an object GraphQL does not give byte for byte is read over REST', async ()
       return node;
     }, { trees: 3 }],
     ['a malformed entry', undefined, entry((value) => { value.mode = null; }), { trees: 3 }],
+    // The type is outside the tree's bytes, so a type the mode does not imply is not believed.
+    ['a type the mode does not hold', undefined, entry((value) => { value.type = 'tree'; }), { trees: 3 }],
+    ['a missing entry', undefined, (node) => { node.tree.entries = [null]; return node; },
+      { trees: 3, blobs: 3 }],
   ];
   for (const [name, stored, view, expected] of cases) {
     const api = await chainApis(chainFixture(3, { stored, view }));
