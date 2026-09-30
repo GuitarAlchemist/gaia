@@ -435,15 +435,33 @@ least 2026-09-15 (#161). `src/draft-ambiguity-settlement.mjs` makes that call fr
 only that call. It reads no network, no clock and no ledger, and it never creates, retries or cancels
 an effect.
 
-**The lookup** is the provider's own search, saved as a `GaiaDraftMarkerLookupV0` record. It holds
-the repository, the head branch, the marker, the search bounds (`state: all` and a `limit`), when it
-ran, whether it completed (`COMPLETE`, `PARTIAL` or `ERRORED`), and the rows exactly as this command
-returns them:
+**The operation** is the ledger's own record: `operationId`, `workKey`, `generationKey`,
+`committedRevision`, `state` and the envelope. The module recomputes the identity from the envelope
+exactly as `src/draft-operation-envelope.mjs` derives it. So an operation id cannot be paired with
+another generation's head, and a successor cannot borrow a predecessor's id
+(`OperationIdentityMismatch`). A test reproduces the fixture through `enqueueDraft` and a
+`reconcileDraft` whose create response is lost.
+
+**The lookup** is a `GaiaDraftMarkerLookupV0` record of the search the provider runs, in the
+provider's order:
+
+1. Read the operation at its ambiguous revision, and record that `committedRevision`.
+2. Check the repository identity (`gh repo view --json id,nameWithOwner`), and record the answer.
+3. List every pull request on the head branch, in every state, with the provider's limit of 100:
 
 ```bash
 gh pr list --repo OWNER/NAME --state all --head HEAD_REF --limit 100 \
   --json number,url,isDraft,state,baseRefName,headRefName,headRefOid,headRepositoryOwner,body
 ```
+
+The record adds when the search ran and whether it completed (`COMPLETE`, `PARTIAL` or
+`ERRORED`). The lookup must name the revision the operation is decided at
+(`LookupRevisionMismatch`). That revision was committed after the create attempt, so a search that
+followed reading it followed the create. A search from before it proves nothing.
+
+The module checks the record's shape and bindings, but not that the commands ran. The fields are the
+producer's claims: whoever assembles the record answers for it, and #161's write must read the
+operation again at that revision.
 
 **Why an empty search proves absence.** The provider creates a Draft only with `--head` on the
 operation's own head branch. A pull request's head branch never changes, and a pull request is never
@@ -455,24 +473,37 @@ the pump itself writes.
 
 | Lookup | Decision | Reason |
 | --- | --- | --- |
-| errored, partial, or as many rows as its limit | `STAY_UNSETTLED` | `LookupErrored`, `LookupPartial`, `LookupTruncated` |
+| errored, partial, or 100 rows (a full page) | `STAY_UNSETTLED` | `LookupErrored`, `LookupPartial`, `LookupTruncated` |
 | complete, no pull request on the head | `SETTLE_ABANDONED` | `MarkerProvablyAbsent` |
 | more than one pull request on the head | `STAY_UNSETTLED` | `SeveralPullRequestsOnHead` |
 | one pull request, marker absent or repeated | `STAY_UNSETTLED` | `UnmarkedPullRequestOnHead` |
-| one marked pull request `reconcileDraft` would not adopt (merged, closed, ready, moved) | `STAY_UNSETTLED` | `MarkedPullRequestNotAdoptable` |
-| one marked open Draft on the request | `SETTLE_REUSED` | `MarkedDraftFound` |
+| one marked pull request that is not an open Draft on the generation (merged, closed, ready, moved) | `STAY_UNSETTLED` | `MarkedPullRequestNotAdoptable` |
+| one marked open Draft on the generation | `SETTLE_REUSED` | `MarkedDraftFound` |
 
-`SETTLE_REUSED` agrees with the existing adoption and does not replace it: a test runs the real
-provider over the same rows, and it adopts exactly what is called `SETTLE_REUSED`. A merged Draft
-is left to `reconcileDraft`, which proves the merge with its own reads.
+**`SETTLE_REUSED` never goes beyond the existing adoption.**
+- A test runs the real provider over the same rows with no merge evidence available. It adopts
+  exactly the `SETTLE_REUSED` rows, and it finds nothing exactly where this module abandons.
+- A merged Draft is different. `reconcileDraft` can adopt it with its own merge reads, but this
+  module leaves it `STAY_UNSETTLED`.
+- `SETTLE_REUSED` is therefore a subset of what `reconcileDraft` adopts.
 
-**Refusals.** An operation that is not `EFFECT_AMBIGUOUS` is refused as `OperationNotAmbiguous`. So
-is a lookup of another marker (`LookupMarkerMismatch`) or of another head or repository
-(`LookupScopeMismatch`). A malformed input is refused as `InvalidOperation` or `InvalidLookup`.
+**Refusals.** Each is named:
+- an operation that is not `EFFECT_AMBIGUOUS`: `OperationNotAmbiguous`;
+- an identity that does not follow from its envelope: `OperationIdentityMismatch`;
+- a lookup of another marker: `LookupMarkerMismatch`;
+- a lookup of another head or repository, or whose identity check saw another repository:
+  `LookupScopeMismatch`;
+- a lookup of another revision: `LookupRevisionMismatch`;
+- a malformed input: `InvalidOperation` or `InvalidLookup`.
 
-**Evidence.** Every decision carries the record a settlement would write. It names the operation and
-the ambiguous revision it was decided at, the lookup's own content revision and bounds, the pull
-request found if any, and its own content revision.
+Inputs are read as plain data. Accessors, foreign prototypes, extra keys and array holes are refused,
+and what is hashed is the validated copy.
+
+**Evidence.** Every decision carries the record a settlement would write:
+- the operation, its generation, and the ambiguous revision it was decided at;
+- the lookup's own content revision, identity check and bounds;
+- the pull request found, if any;
+- its own content revision.
 
 **Dry run.**
 

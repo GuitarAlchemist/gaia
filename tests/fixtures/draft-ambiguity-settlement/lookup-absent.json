@@ -1,12 +1,17 @@
 {
   "schema": "GaiaDraftMarkerLookupV0",
+  "committedRevision": "d7a9b93b69478e99d73da566de4490fc8353485c3ff20de54d22ee8d23a49f8b",
   "repository": {
     "nodeId": "R_kgDOT3lpUg",
     "owner": "GuitarAlchemist",
     "name": "gaia"
   },
+  "repositoryCheck": {
+    "id": "R_kgDOT3lpUg",
+    "nameWithOwner": "GuitarAlchemist/gaia"
+  },
   "headRef": "gaia/issue-4242-ready-1",
-  "marker": "6de23016fee768e524e62b1fe504b50a74caae8f2095ff186bb0e0f2c9cd6335",
+  "marker": "5303df23535b15e435f318b6cb9f01bc4f323d54e3589da0f55d736bf085865f",
   "search": {
     "state": "all",
     "limit": 100

@@ -6,12 +6,14 @@
  * Usage
  *   node scripts/draft-ambiguity-settlement.mjs --operation <file> --lookup <file> [--json]
  *
- *   --operation  the ambiguous operation: operationId, workKey, committedRevision, state and the
- *                provider request it was created with (repository, baseRef, headRef, headRevision,
- *                operationMarker, workItem);
- *   --lookup     a GaiaDraftMarkerLookupV0 record: every pull request on that head branch in every
- *                state, as `gh pr list --json` rows, with the search bounds, when it ran, and
- *                whether it completed (docs/hosted-draft-intake.md, "Settling an ambiguous Draft").
+ *   --operation  the ambiguous operation as the ledger holds it: operationId, workKey,
+ *                generationKey, committedRevision, state and its envelope. The identity is
+ *                recomputed from the envelope, so it cannot name another generation's head;
+ *   --lookup     a GaiaDraftMarkerLookupV0 record of the provider's search, run after reading the
+ *                operation at that revision: the repository identity check, then every pull request
+ *                on the head branch in every state, as `gh pr list --json` rows, with when it ran
+ *                and whether it completed (docs/hosted-draft-intake.md, "Settling an ambiguous
+ *                Draft").
  *
  * Prints the decision (SETTLE_REUSED, SETTLE_ABANDONED or STAY_UNSETTLED), its reason, and the
  * evidence record a settlement would carry. It reads the two files and nothing else: no network,
