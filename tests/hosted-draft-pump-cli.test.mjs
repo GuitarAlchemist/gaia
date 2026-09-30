@@ -438,6 +438,10 @@ test('the production runtime composition wires existing collector, Git Data, pro
   assert.equal(calls.find(([kind]) => kind === 'admission')[1].expectedWorkflowPath,
     '.github/workflows/hosted-draft-pump-effect.yml');
   assert.equal(calls.find(([kind]) => kind === 'reconcile-core')[3].executorEpoch.runId, 9001);
+  const portOptions = calls.filter(([kind]) => kind === 'ports').map(([, options]) => options);
+  assert.ok(portOptions.length > 0);
+  assert.ok(portOptions.every((options) => !Object.hasOwn(options, 'pause')),
+    'the pump keeps the real pause between contended admission attempts');
 });
 
 test('reconcile rejects a mismatched work key before provider, admission, or durable mutation', async () => {

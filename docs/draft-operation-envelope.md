@@ -299,8 +299,12 @@ revision to be either `NONE` for first use or the exact current 64-hex content r
 it runs the registry reservation/`WORK_ROOT`/confirmation protocol internally and then CAS-appends
 `ENQUEUED` from the returned bootstrap content revision. Every first admission appends to the one
 registry, so a lost registry CAS is usually another issue's admission: the caller re-reads its line
-and retries, three attempts in all. A caller whose own work key landed meanwhile returns
-`StaleRevision`. A caller still contended after the third attempt reads its line once more: it returns
+and retries, three attempts in all. Before each retry it pauses for `admissionRetryPauseMs(workKey,
+attempt)`: 2–4 s before the second attempt, 4–8 s before the third. The wait doubles per attempt and
+a fraction derived from the work key spreads contending issues across it, so they do not re-race in
+lockstep, and a replay waits exactly as the original run did. The pause is a port; ports built
+without one wait for real, and tests inject a recorder instead. A caller whose own work key landed
+meanwhile returns `StaleRevision`. A caller still contended after the third attempt reads its line once more: it returns
 `StaleRevision` if the work key landed, and otherwise `AdmissionContended`, having written nothing or
 a reservation the next caller resumes. No caller supplies or observes a Git OID. On a present work ref,
 `NONE` is stale and cannot rebootstrap. Only then does it CAS-append `ENQUEUED`.

@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import {
+  admissionRetryPauseMs,
   createDraftOperationPorts,
   createGitDataDraftOperationStore,
   enqueueDraft,
@@ -135,7 +136,7 @@ function sharedLedger() {
   };
 }
 
-function portsFor(store, envelope, provider) {
+function portsFor(store, envelope, provider, pause = async () => {}) {
   return createDraftOperationPorts({
     collector: { async collect() { return structuredClone(envelope); } },
     provider: provider ?? {
@@ -146,10 +147,13 @@ function portsFor(store, envelope, provider) {
     executorEpoch: { runId: 7201, runAttempt: 1 },
     telemetry: { async append() {} },
     store,
+    pause,
   });
 }
 
-const enqueue = (store) => enqueueDraft(SELECTOR, 'NONE', portsFor(store, readyEvent(1)));
+const enqueue = (store, pause) => enqueueDraft(
+  SELECTOR, 'NONE', portsFor(store, readyEvent(1), undefined, pause),
+);
 const outcome = (promise) => promise.then((result) => result.kind, (error) => error.code ?? error.message);
 
 test('a run resuming a bootstrap adopts the confirmation that lands meanwhile, never writes a second', async () => {
@@ -222,8 +226,11 @@ test('an admission that loses every attempt is contended, unless its own work ke
         ledger.rival();
       }
     };
-    const result = await enqueue(ledger.store('contended'));
+    const waited = [];
+    const result = await enqueue(ledger.store('contended'), async (ms) => { waited.push(ms); });
     assert.equal(reservations, 3, 'three attempts in all');
+    assert.deepEqual(waited, [admissionRetryPauseMs(WORK_KEY, 1), admissionRetryPauseMs(WORK_KEY, 2)],
+      'a pause before each retry, none once the last attempt is lost');
     if (lastRivalIsThisIssue) {
       assert.equal(result.kind, 'StaleRevision', 'an issue admitted meanwhile is settled');
       assert.deepEqual(ledger.kinds(WORK_REF), ['WORK_ROOT', 'ENQUEUED']);

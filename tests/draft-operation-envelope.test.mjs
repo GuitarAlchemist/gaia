@@ -158,6 +158,8 @@ async function harness(mod, options = {}) {
   const provider = options.provider ?? fakeProvider();
   const admission = options.admission ?? fakeAdmission();
   const observedTelemetry = options.telemetry ?? telemetry();
+  // Admission retries pause; the pause is recorded and never waited.
+  const waited = [];
   const ports = mod.createMemoryDraftOperationPorts({
     collector: collector.port,
     provider: provider.port,
@@ -165,8 +167,9 @@ async function harness(mod, options = {}) {
     executorEpoch: options.executorEpoch ?? EPOCH,
     telemetry: observedTelemetry.port,
     store,
+    async pause(milliseconds) { waited.push(milliseconds); },
   });
-  return { store, collector, provider, admission, telemetry: observedTelemetry, ports };
+  return { store, collector, provider, admission, telemetry: observedTelemetry, ports, waited };
 }
 
 async function enqueue(mod, fixture, selector = SELECTOR, expected = 'NONE') {
@@ -331,9 +334,12 @@ test('R02 NONE -> WORK_ROOT -> ENQUEUED first use has one winner and cannot rebo
   assert.equal(raced.filter(({ kind }) => kind === 'Enqueued').length, 1);
   assert.equal(raced.filter(({ kind }) => kind === 'StaleRevision').length, 1);
   const winner = assertEnqueued(raced.find(({ kind }) => kind === 'Enqueued'));
+  assert.deepEqual(fixture.waited, [mod.admissionRetryPauseMs(winner.workKey, 1)],
+    'the loser pauses once, then reads the winner');
   const replay = await enqueue(mod, fixture, SELECTOR, 'NONE');
   assert.equal(replay.kind, 'StaleRevision');
   assert.equal(replay.currentCommittedRevision, winner.committedRevision);
+  assert.equal(fixture.waited.length, 1, 'a replay that reads its answer never waits');
 });
 
 test('R03 identities and public revisions are deterministic adapter-neutral 64-hex content', async () => {
@@ -768,4 +774,50 @@ test('R15 authority decisions ignore monkeypatched public inspection snapshots',
 
   assert.equal(operationInspections, 0, 'reconcile/cancel must use private inspection authority');
   assert.equal(workInspections, 0, 'enqueue must use private inspection authority');
+});
+
+test('R16 a lost first admission pauses before retrying, for a wait derived from its work key', async (t) => {
+  const mod = await api('R16 admission retry pause');
+  const pauseMs = mod.admissionRetryPauseMs;
+  const keys = Array.from({ length: 64 }, (_, index) => sha256({ schema: 'R16', index }));
+  for (const [attempt, low] of [[1, 2000], [2, 4000]]) {
+    const waits = keys.map((key) => pauseMs(key, attempt));
+    assert.ok(waits.every((ms) => Number.isSafeInteger(ms) && ms >= low && ms < 2 * low),
+      `attempt ${attempt} waits within [${low}, ${2 * low})`);
+    assert.ok(new Set(waits).size >= 60, 'issues contending together wait different times');
+    assert.deepEqual(keys.map((key) => pauseMs(key, attempt)), waits, 'derived, never random');
+  }
+  // Each attempt draws its own fraction, so two issues that paused alike once need not again.
+  const redrawn = keys.filter((key) => Math.abs(pauseMs(key, 2) - 2 * pauseMs(key, 1)) > 1);
+  assert.ok(redrawn.length >= 60, `${redrawn.length} of 64 keys redraw their spread`);
+  for (const [key, attempt] of [
+    [SHA_A, 0], [SHA_A, 1.5], [SHA_A, '1'], [SHA_A.toUpperCase(), 1], [SHA_A.slice(1), 1], [null, 1],
+  ]) {
+    assert.throws(() => pauseMs(key, attempt), { code: 'InvalidRetryPause' }, `${key}, ${attempt}`);
+  }
+
+  const fixture = await harness(mod);
+  const required = {
+    collector: fixture.collector.port, provider: fixture.provider.port,
+    admission: fixture.admission.port, executorEpoch: EPOCH, telemetry: fixture.telemetry.port,
+  };
+  for (const invalid of [{ pause: null }, { pause: 2000 }, { pause: undefined }, { wait: async () => {} }]) {
+    assert.throws(() => mod.createMemoryDraftOperationPorts({ ...required, ...invalid }),
+      { code: 'InvalidPorts' }, Object.keys(invalid)[0]);
+  }
+  const { telemetry: _telemetry, ...incomplete } = required;
+  assert.throws(() => mod.createMemoryDraftOperationPorts({ ...incomplete, pause: async () => {} }),
+    { code: 'InvalidPorts' }, 'an optional pause does not stand in for a required port');
+
+  // Ports built without a pause wait for real: production cannot forget to pass one.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const ports = mod.createMemoryDraftOperationPorts(required);
+  let resumed = false;
+  const waiting = ports.pause(3000).then(() => { resumed = true; });
+  t.mock.timers.tick(2999);
+  await Promise.resolve();
+  assert.equal(resumed, false, 'still waiting one millisecond early');
+  t.mock.timers.tick(1);
+  await waiting;
+  assert.equal(resumed, true);
 });
