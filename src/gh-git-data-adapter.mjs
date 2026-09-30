@@ -9,6 +9,31 @@ const LEDGER_PREFIX = 'refs/heads/gaia-ledger/';
 const REGISTRY_REF = `${LEDGER_PREFIX}registry-v0`;
 const RECEIPT_PATH = 'receipt.json';
 
+// Up to this many ancestors of one ledger commit, each with its tree and receipt blob, arrive in
+// one GraphQL query instead of three REST reads per record. GraphQL has its own hourly quota.
+const HISTORY_PAGE = 100;
+const LEDGER_HISTORY_QUERY = `query($owner: String!, $name: String!, $oid: GitObjectID!) {
+  repository(owner: $owner, name: $name) {
+    object(oid: $oid) {
+      ... on Commit {
+        history(first: ${HISTORY_PAGE}) {
+          nodes {
+            oid
+            parents(first: 2) { totalCount nodes { oid } }
+            tree {
+              oid
+              entries {
+                name mode type oid
+                object { __typename ... on Blob { oid isBinary isTruncated text } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
 export class GhGitDataError extends Error {
   constructor(code, message = code) {
     super(message);
@@ -54,6 +79,62 @@ function segment(value, code = 'InvalidRepository') {
 function oid(value, code = 'GitDataProtocolViolation') {
   if (typeof value !== 'string' || !GIT_OID.test(value)) fail(code);
   return value;
+}
+
+const isOid = (value) => typeof value === 'string' && GIT_OID.test(value);
+
+// Git's object id for a body of this type: what a translated tree or blob must hash back to.
+const gitObjectId = (type, bytes) => createHash('sha1')
+  .update(`${type} ${bytes.length}\0`, 'utf8').update(bytes).digest('hex');
+
+// Git orders tree entries by name, comparing a directory as if its name ended in '/'.
+const treeOrder = (entry) => Buffer.from(entry.mode === 0o40000 ? `${entry.name}/` : entry.name, 'utf8');
+
+// An entry's type is not part of the tree's bytes, so it must follow from the mode, which is.
+const typeOfMode = (mode) => (mode === 0o40000 ? 'tree' : mode === 0o160000 ? 'commit' : 'blob');
+
+// The REST objects one GraphQL history node stands for, keyed by their REST path. A tree or blob
+// is returned only when its translated bytes hash back to the object id Git stored, so nothing the
+// transport altered is ever seeded: gh rewrites control characters in the JSON it prints, and a
+// GraphQL tree listing carries no truncation flag. Whatever does not verify is left for a REST
+// read. A commit cannot be rehashed without its raw header; its tree and parents are taken as
+// given, exactly as the REST path takes them. Nothing here validates a receipt: readRecord does.
+function historyObjects(node) {
+  const parents = node?.parents;
+  const tree = node?.tree;
+  if (!isOid(node?.oid) || !Array.isArray(parents?.nodes)
+      || parents.totalCount !== parents.nodes.length
+      || !parents.nodes.every((parent) => isOid(parent?.oid))
+      || !isOid(tree?.oid) || !Array.isArray(tree.entries)) return [];
+  const objects = [[`git/commits/${node.oid}`, {
+    sha: node.oid, tree: { sha: tree.oid }, parents: parents.nodes.map(({ oid: sha }) => ({ sha })),
+  }]];
+  for (const entry of tree.entries) {
+    const sha = entry?.oid;
+    const object = entry?.object;
+    if (object?.__typename !== 'Blob' || object.oid !== sha || !isOid(sha)
+        || object.isBinary !== false || object.isTruncated !== false
+        || typeof object.text !== 'string') continue;
+    const bytes = Buffer.from(object.text, 'utf8');
+    if (gitObjectId('blob', bytes) !== sha) continue;
+    objects.push([`git/blobs/${sha}`, { encoding: 'base64', content: bytes.toString('base64') }]);
+  }
+  if (!tree.entries.every((entry) => typeof entry?.name === 'string'
+      && Number.isSafeInteger(entry.mode) && entry.mode >= 0
+      && entry.type === typeOfMode(entry.mode) && isOid(entry.oid))) return objects;
+  const entries = [...tree.entries].sort((a, b) => Buffer.compare(treeOrder(a), treeOrder(b)));
+  const treeBytes = Buffer.concat(entries.flatMap((entry) => [
+    Buffer.from(`${entry.mode.toString(8)} ${entry.name}\0`, 'utf8'), Buffer.from(entry.oid, 'hex'),
+  ]));
+  if (gitObjectId('tree', treeBytes) !== tree.oid) return objects;
+  // A tree that hashes back is complete. REST gives each mode as a six-digit octal string.
+  objects.push([`git/trees/${tree.oid}`, {
+    truncated: false,
+    tree: entries.map((entry) => ({
+      path: entry.name, mode: entry.mode.toString(8).padStart(6, '0'), type: entry.type, sha: entry.oid,
+    })),
+  }]);
+  return objects;
 }
 
 function ledgerRef(value) {
@@ -177,7 +258,7 @@ function receiptTransportMetadata(body, value, registryRecord, code = 'InvalidTr
 
 export function createGhGitDataApi({
   repository, pumpActor: pumpActorInput, run = runGh, immutableObjectCacheLimit = 4096,
-  immutableReadAttempts = 3, immutableReadBackoffMs = 1000, sleep = delay,
+  immutableReadAttempts = 3, immutableReadBackoffMs = 1000, sleep = delay, historyPrefetch = false,
 }) {
   ownData(repository, 'InvalidRepository');
   const canonicalRepository = Object.freeze({
@@ -190,7 +271,8 @@ export function createGhGitDataApi({
   }
   if (!Number.isSafeInteger(immutableReadAttempts) || immutableReadAttempts < 1
       || immutableReadAttempts > 5 || !Number.isSafeInteger(immutableReadBackoffMs)
-      || immutableReadBackoffMs < 0 || typeof sleep !== 'function') {
+      || immutableReadBackoffMs < 0 || typeof sleep !== 'function'
+      || typeof historyPrefetch !== 'boolean') {
     fail('InvalidGitDataAdapter');
   }
   const repo = repositoryPath(canonicalRepository);
@@ -244,6 +326,51 @@ export function createGhGitDataApi({
       if (immutableObjectCache.get(path) === pending) immutableObjectCache.delete(path);
       throw error;
     }
+  };
+
+  // A REST walk costs three reads per record, and every intake walks every ledger ref, so the
+  // listing alone spent a tenth of the App's hourly REST quota. With the prefetch on, a walk that
+  // reaches a commit it has not seen first asks GraphQL for that commit's ancestors and seeds the
+  // object cache with them. Heads are still read over REST on every read, and every record still
+  // passes readRecord. Once GraphQL fails, or answers without the commit asked for, REST does
+  // every remaining read for this adapter instead of asking again at each step. Concurrent walks
+  // that reach the same commit share one query, as they share one REST read.
+  let prefetchAvailable = historyPrefetch;
+  const prefetches = new Map();
+  const seedImmutable = (path, value) => {
+    if (immutableObjectCache.has(path)) return;
+    if (immutableObjectCache.size >= IMMUTABLE_OBJECT_CACHE_LIMIT) {
+      immutableObjectCache.delete(immutableObjectCache.keys().next().value);
+    }
+    immutableObjectCache.set(path, Promise.resolve(value));
+  };
+  const fetchHistory = async (commitOid) => {
+    let response;
+    try {
+      response = await run(['api', 'graphql',
+        '-f', `owner=${canonicalRepository.owner}`, '-f', `name=${canonicalRepository.name}`,
+        '-f', `oid=${commitOid}`, '-f', `query=${LEDGER_HISTORY_QUERY}`]);
+    } catch {
+      prefetchAvailable = false;
+      return;
+    }
+    const nodes = response?.data?.repository?.object?.history?.nodes;
+    if (!Array.isArray(nodes)) {
+      prefetchAvailable = false;
+      return;
+    }
+    for (const node of nodes) {
+      for (const [path, value] of historyObjects(node)) seedImmutable(path, value);
+    }
+    if (!immutableObjectCache.has(`git/commits/${commitOid}`)) prefetchAvailable = false;
+  };
+  const prefetchHistory = (commitOid) => {
+    let pending = prefetches.get(commitOid);
+    if (pending === undefined) {
+      pending = fetchHistory(commitOid).finally(() => prefetches.delete(commitOid));
+      prefetches.set(commitOid, pending);
+    }
+    return pending;
   };
 
   async function currentHead(ref) {
@@ -357,6 +484,9 @@ export function createGhGitDataApi({
     while (cursor !== 'NONE') {
       if (visited.has(cursor)) fail('GitDataProtocolViolation');
       visited.add(cursor);
+      if (prefetchAvailable && !immutableObjectCache.has(`git/commits/${cursor}`)) {
+        await prefetchHistory(cursor);
+      }
       let read;
       try {
         read = await readRecord(cursor, ref);
