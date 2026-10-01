@@ -108,6 +108,14 @@ Predictive or advisory mechanisms require a declared baseline and evaluation on 
 
 Retain the question, alternatives, plan, immutable inputs, code and environment identity, raw observations, exclusions, analyses, failures, and verdict. Corrections supersede prior revisions; they do not silently rewrite them.
 
+### SCI-08 — Read absence as unknown, never as refutation
+
+A model's answer about evidence is a claim, not an observation. A model's `CONTRADICTED` or `INSUFFICIENT` answer about an artefact is admissible only behind a deterministic existence check on that artefact: the check decides whether the artefact, field, digest or check exists, and the model judges only what the check found. Absence of an artefact, field, digest or check maps to `UNKNOWN` or `INSUFFICIENT`, never to `CONTRADICTED`. A conflict between two strong records escalates to a human; it is never resolved by picking a side.
+
+Model judges do read absence as refutation. In [spareilleux/learn#18](https://github.com/spareilleux/learn/pull/18), 60 synthetic cases and 240 calls in both option orders, `jev-1.13.0` answered false or doubtful for 7 of 10 missing-evidence cases given Demerzel's definitions, and for 4–5 of 10 with an explicit "absence is Unknown" rule, which also pulled 6 of 10 probable cases into Unknown. It resolved 4 of 10 conflicts between two strong records to one side until told not to. The same error appeared live on 2026-09-22, when a missing digest was read as a contradiction.
+
+No model classifies evidence in Gaia yet. The only model verdicts that drive a route are binary review verdicts, `APPROVE` or `REQUEST_CHANGES`, where a misread absence costs a repair loop, not an approval. `tests/evidence-verdict-gate.test.mjs` keeps it that way. It fails when a source in `src/` or `scripts/` names a model evidence judge, gives a review verdict a third value, or uses contradiction vocabulary outside the deterministic sites it lists. The change that introduces a model evidence verdict must also add a test pinning this rule on the 10 U + 10 C cases of spareilleux/learn#18, adapted to Gaia's receipt format.
+
 ## Required workgraph artifacts
 
 The smallest applicable set is required; trivial work should not manufacture paperwork.
