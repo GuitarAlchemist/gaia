@@ -313,6 +313,7 @@ test('a receipt that is not a verified terminal or reconciled outcome performs n
       generationKey: GENERATION_KEY, committedRevision: COMMITTED,
     },
     terminal({ outcome: 'CANCELLED', effect: 'NONE', pullRequest: null }),
+    terminal({ outcome: 'ABANDONED', effect: 'NONE', pullRequest: null }),
   ];
   for (const result of unobservable) {
     const error = await refusalOf({ receipt: receipt({ result }) });

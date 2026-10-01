@@ -68,7 +68,8 @@ function runIdentityScript(scriptBody, env) {
         GAIA_REPOSITORY_NODE_ID: '', GAIA_MANAGED_ROUND_JSON: '', GAIA_ONE_CANARY: '',
         GAIA_PREPARE_ISSUE: '', GAIA_NORMAL_POLICY_DISPATCH: '', GAIA_NORMAL_POLICY_VAR: '',
         GAIA_TARGET_ISSUE: '', GAIA_READMIT_OPERATION: '', GAIA_READMIT_REVISION: '',
-        GAIA_READMIT_REASON: '', GAIA_READMIT_APPLY: '',
+        GAIA_READMIT_REASON: '', GAIA_READMIT_APPLY: '', GAIA_SETTLE_OPERATION: '',
+        GAIA_SETTLE_REVISION: '', GAIA_SETTLE_REASON: '', GAIA_SETTLE_APPLY: '',
         GITHUB_OUTPUT: outputPath, ...env },
     });
     let outputs = {};
@@ -497,13 +498,13 @@ test('a re-admission runs alone, names all three fields, and apply alone is refu
   }
 });
 
-/** Runs the re-admission step's body with `node` standing in for the CLI, printing `receipt`. */
-function runReadmitStep(receipt) {
-  const scratch = mkdtempSync(join(tmpdir(), 'gaia-readmit-step-'));
+/** Runs an operator step's body with `node` standing in for the CLI, printing `receipt`. */
+function runOperatorStep(stepName, receipt) {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-operator-step-'));
   try {
-    const scriptPath = join(scratch, 'readmit.ps1');
+    const scriptPath = join(scratch, 'operator.ps1');
     const receiptPath = join(scratch, 'receipt.json');
-    const body = runBody(stepBlock(workflowText(), 'Re-admit one effect-free refusal'));
+    const body = runBody(stepBlock(workflowText(), stepName));
     writeFileSync(scriptPath, [
       `function node { $global:LASTEXITCODE = 0; '${JSON.stringify(receipt)}' }`, body,
     ].join('\n'), 'utf8');
@@ -524,6 +525,8 @@ function runReadmitStep(receipt) {
   }
 }
 
+const runReadmitStep = (receipt) => runOperatorStep('Re-admit one effect-free refusal', receipt);
+
 test('a refused re-admission fails its run and still leaves the receipt for upload', PWSH, () => {
   for (const kind of ['ReadmissionPlanned', 'Readmitted', 'AlreadyReadmitted']) {
     const { status, stderr, receipt } = runReadmitStep({ command: 'readmit', result: { kind } });
@@ -534,6 +537,74 @@ test('a refused re-admission fails its run and still leaves the receipt for uplo
     const { status, stderr, receipt } = runReadmitStep({ command: 'readmit', result: { kind } });
     assert.notEqual(status, 0, `${kind} fails the run`);
     assert.ok(stderr.includes(`The re-admission was refused: ${kind}.`), stderr);
+    assert.equal(receipt.result.kind, kind, `${kind}: the receipt is what gets uploaded`);
+  }
+});
+
+const SETTLEMENT = Object.freeze({
+  ...REQUIRED_IDENTITY,
+  GAIA_SETTLE_OPERATION: 'a'.repeat(64),
+  GAIA_SETTLE_REVISION: 'b'.repeat(64),
+  GAIA_SETTLE_REASON: 'The create response for #127 was lost; nothing is on its head.',
+  GAIA_SETTLE_APPLY: 'false',
+});
+
+test('a settlement runs alone, names all three fields, and apply alone is refused', PWSH, () => {
+  const alone = runIdentityScript(identityScript(), SETTLEMENT);
+  assert.equal(alone.status, 0, alone.stderr);
+  assert.deepEqual([alone.outputs.settle, alone.outputs.readmit], ['true', 'false'],
+    'a settlement needs no managed-round data and is no re-admission');
+
+  const control = runIdentityScript(identityScript(), {
+    ...REQUIRED_IDENTITY, GAIA_MANAGED_ROUND_JSON: '{"fixture":true}', GAIA_SETTLE_APPLY: 'false',
+  });
+  assert.equal(control.status, 0, control.stderr);
+  assert.equal(control.outputs.settle, 'false', 'the unticked apply box selects nothing');
+
+  const refusals = {
+    'apply ticked with no operation': {
+      ...REQUIRED_IDENTITY, GAIA_MANAGED_ROUND_JSON: '{"fixture":true}', GAIA_SETTLE_APPLY: 'true',
+    },
+    'a reason with no operation': {
+      ...REQUIRED_IDENTITY, GAIA_MANAGED_ROUND_JSON: '{"fixture":true}',
+      GAIA_SETTLE_REASON: SETTLEMENT.GAIA_SETTLE_REASON,
+    },
+    'no reason': { ...SETTLEMENT, GAIA_SETTLE_REASON: '  ' },
+    'no revision': { ...SETTLEMENT, GAIA_SETTLE_REVISION: '' },
+    'a short revision': { ...SETTLEMENT, GAIA_SETTLE_REVISION: 'b'.repeat(63) },
+    'a malformed operation id': { ...SETTLEMENT, GAIA_SETTLE_OPERATION: 'A'.repeat(64) },
+    'an operation id with a second line': {
+      ...SETTLEMENT, GAIA_SETTLE_OPERATION: `${'a'.repeat(64)}\nsettle=true`,
+    },
+    'beside the canary': { ...SETTLEMENT, GAIA_ONE_CANARY: 'true' },
+    'beside normal admission': { ...SETTLEMENT, GAIA_NORMAL_POLICY_DISPATCH: 'true' },
+    'beside preparation': { ...SETTLEMENT, GAIA_PREPARE_ISSUE: '127' },
+    'beside a re-admission': {
+      ...SETTLEMENT, GAIA_READMIT_OPERATION: 'c'.repeat(64), GAIA_READMIT_REVISION: 'd'.repeat(64),
+      GAIA_READMIT_REASON: 'Admission window expired; NOT_INVOKED.',
+    },
+    'without the repository identity': { ...SETTLEMENT, GAIA_REPOSITORY_NODE_ID: '' },
+  };
+  for (const [name, env] of Object.entries(refusals)) {
+    const { status, outputs } = runIdentityScript(identityScript(), env);
+    assert.notEqual(status, 0, `${name} is refused`);
+    assert.equal(outputs.settle, undefined, `${name} publishes no selection`);
+  }
+});
+
+test('a settlement that was not made fails its run and still leaves the receipt for upload', PWSH, () => {
+  const run = (kind) => runOperatorStep('Settle one ambiguous Draft operation',
+    { command: 'settle', result: { kind } });
+  for (const kind of ['AbandonmentPlanned', 'Abandoned', 'AlreadyAbandoned']) {
+    const { status, stderr, receipt } = run(kind);
+    assert.equal(status, 0, `${kind}: ${stderr}`);
+    assert.equal(receipt.result.kind, kind);
+  }
+  for (const kind of ['ReconcileAdopts', 'StaysUnsettled', 'SettlementRefused', 'NotAmbiguous',
+    'ExecutorUnfinished', 'StaleRevision', 'Readmitted']) {
+    const { status, stderr, receipt } = run(kind);
+    assert.notEqual(status, 0, `${kind} fails the run`);
+    assert.ok(stderr.includes(`The settlement was not made: ${kind}.`), stderr);
     assert.equal(receipt.result.kind, kind, `${kind}: the receipt is what gets uploaded`);
   }
 });

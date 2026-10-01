@@ -6,6 +6,8 @@ import {
   createHostedDraftPumpRuntime,
   main,
 } from '../scripts/hosted-draft-pump.mjs';
+import { DraftOperationError } from '../src/draft-operation-envelope.mjs';
+import { GhDraftOperationProviderError } from '../src/gh-draft-operation-provider.mjs';
 import { GhGitDataError } from '../src/gh-git-data-adapter.mjs';
 
 const OPERATION_ID = 'a'.repeat(64);
@@ -639,6 +641,146 @@ test('readmit names its dispatcher from the Actions environment and is a dry run
       apply: expected, result: { kind: expected ? 'Readmitted' : 'ReadmissionPlanned' },
       telemetry: [],
     });
+  }
+});
+
+const SETTLE_ACTIONS = Object.freeze({
+  GITHUB_RUN_ID: '9201', GITHUB_RUN_ATTEMPT: '1', GITHUB_TRIGGERING_ACTOR: 'spareilleux',
+  GAIA_REPOSITORY_NODE_ID: 'R_node',
+  GAIA_SETTLE_OPERATION: OPERATION_ID, GAIA_SETTLE_REVISION: REVISION,
+  GAIA_SETTLE_REASON: 'The create response for #127 was lost; nothing is on its head.',
+});
+
+test('settle names its dispatcher from the Actions environment, is a dry run unless applied, and searches only this repository', async () => {
+  for (const [apply, expected] of [[undefined, false], ['false', false], ['true', true]]) {
+    const output = sink();
+    const calls = [];
+    const exitCode = await main({
+      argv: commonArgs('settle'),
+      env: apply === undefined ? SETTLE_ACTIONS : { ...SETTLE_ACTIONS, GAIA_SETTLE_APPLY: apply },
+      stdout: output.stream, stderr: sink().stream,
+      runtimeFactory(configuration) {
+        assert.equal(configuration.command, 'settle');
+        assert.equal(configuration.repositoryNodeId, 'R_node');
+        return {
+          async settle(request) {
+            calls.push(request);
+            return { kind: expected ? 'Abandoned' : 'AbandonmentPlanned' };
+          },
+          async readmit() { assert.fail('a settlement re-admits nothing'); },
+        };
+      },
+    });
+    assert.equal(exitCode, 0);
+    assert.deepEqual(calls, [{
+      operationId: OPERATION_ID, expectedRevision: REVISION, apply: expected,
+      provenance: {
+        reason: SETTLE_ACTIONS.GAIA_SETTLE_REASON,
+        runId: 9201, runAttempt: 1, triggeringActor: 'spareilleux',
+      },
+    }]);
+    assert.deepEqual(output.json(), {
+      schema: 'GaiaHostedDraftPumpCliReceiptV0', command: 'settle', operationId: OPERATION_ID,
+      apply: expected, result: { kind: expected ? 'Abandoned' : 'AbandonmentPlanned' },
+      telemetry: [],
+    });
+  }
+
+  // The runtime hands the envelope the ledger store and a search bound to this repository only.
+  const calls = [];
+  const store = Object.freeze({ ledger: true });
+  const now = () => '2026-09-30T12:00:00.000Z';
+  const runtime = createHostedDraftPumpRuntime({
+    command: 'settle', repository: { owner: 'GuitarAlchemist', name: 'gaia' },
+    repositoryNodeId: 'R_node', pumpActorId: 1234, ledgerRootOid: ROOT_OID,
+    ledgerRootRevision: ROOT_REVISION, environment: {},
+  }, { async append() {} }, {
+    createGhGitDataApi() { return {}; },
+    createGitDataDraftOperationStore() { return store; },
+    createGhDraftCollectorApi() { return {}; },
+    createHostedDraftCollector() { return {}; },
+    createDraftOperationPorts() { return {}; },
+    createGhDraftOperationProvider() { calls.push('provider'); return {}; },
+    createGitHubActionsDraftAdmission() { calls.push('admission'); return {}; },
+    async reconcileDraft() { calls.push('reconcile'); },
+    now,
+    createGhMarkerLookup(options) {
+      calls.push(['lookup', options]);
+      return { async search(request) { calls.push(['search', request]); return 'observed'; } };
+    },
+    createGhExecutorRunReader(options) {
+      calls.push(['executor', options]);
+      return { async read(request) { calls.push(['run', request]); return 'completed'; } };
+    },
+    async settleAmbiguousDraft(operationId, expectedRevision, provenance, ports, options) {
+      calls.push(['settle', operationId, expectedRevision, provenance, options]);
+      assert.equal(ports.store, store);
+      assert.equal(typeof ports.telemetry.append, 'function');
+      assert.equal(await ports.readExecutorRun('epoch'), 'completed');
+      assert.equal(await ports.searchMarker('request'), 'observed');
+      return { kind: 'AbandonmentPlanned' };
+    },
+  });
+  const result = await runtime.settle({
+    operationId: OPERATION_ID, expectedRevision: REVISION, provenance: { reason: 'r' }, apply: false,
+  });
+  assert.deepEqual(result, { kind: 'AbandonmentPlanned' });
+  assert.deepEqual(calls, [
+    ['lookup', {
+      expectedRepository: { nodeId: 'R_node', owner: 'GuitarAlchemist', name: 'gaia' }, now,
+    }],
+    ['executor', {
+      expectedRepository: { nodeId: 'R_node', owner: 'GuitarAlchemist', name: 'gaia' },
+    }],
+    ['settle', OPERATION_ID, REVISION, { reason: 'r' }, { apply: false }],
+    ['run', 'epoch'],
+    ['search', 'request'],
+  ], 'no provider, admission or reconcile: two read-only reads and the ledger');
+});
+
+test('settle refuses an absent dispatcher, repository identity, malformed apply or a foreign flag before the runtime starts', async () => {
+  const without = (name) => Object.fromEntries(
+    Object.entries(SETTLE_ACTIONS).filter(([key]) => key !== name),
+  );
+  for (const [name, argv, env] of [
+    ['no run id', commonArgs('settle'), without('GITHUB_RUN_ID')],
+    ['no triggering actor', commonArgs('settle'), without('GITHUB_TRIGGERING_ACTOR')],
+    ['no repository identity', commonArgs('settle'), without('GAIA_REPOSITORY_NODE_ID')],
+    ['no reason', commonArgs('settle'), without('GAIA_SETTLE_REASON')],
+    ['no revision', commonArgs('settle'), without('GAIA_SETTLE_REVISION')],
+    ['a re-admission reason instead', commonArgs('settle'),
+      { ...without('GAIA_SETTLE_REASON'), GAIA_READMIT_REASON: 'reason' }],
+    ['padded reason', commonArgs('settle'), { ...SETTLE_ACTIONS, GAIA_SETTLE_REASON: ' reason' }],
+    ['long reason', commonArgs('settle'), { ...SETTLE_ACTIONS, GAIA_SETTLE_REASON: 'x'.repeat(501) }],
+    ['apply yes', commonArgs('settle'), { ...SETTLE_ACTIONS, GAIA_SETTLE_APPLY: 'yes' }],
+    ['short operation', commonArgs('settle'), { ...SETTLE_ACTIONS, GAIA_SETTLE_OPERATION: 'abc' }],
+    ['actor flag', [...commonArgs('settle'), '--triggering-actor', 'someone'], SETTLE_ACTIONS],
+    ['issue flag', [...commonArgs('settle'), '--issue', '127'], SETTLE_ACTIONS],
+    ['managed round flag', [...commonArgs('settle'), '--managed-round', '{}'], SETTLE_ACTIONS],
+  ]) {
+    const errors = sink();
+    const exitCode = await main({
+      argv, env, stdout: sink().stream, stderr: errors.stream,
+      runtimeFactory() { assert.fail(`${name}: the runtime must not start`); },
+    });
+    assert.equal(exitCode, 2, name);
+    assert.deepEqual(errors.json(), { schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'InvalidArguments' }, name);
+  }
+
+  // A settlement the runtime refuses names its closed cause, and nothing else crosses the boundary.
+  for (const [error, cause] of [
+    [new DraftOperationError('InvalidSettlement'), { cause: 'InvalidSettlement' }],
+    [new GhDraftOperationProviderError('RequestBindingMismatch'), { cause: 'RequestBindingMismatch' }],
+    [new GhDraftOperationProviderError('ProviderUnavailable'), {}],
+  ]) {
+    const errors = sink();
+    const exitCode = await main({
+      argv: commonArgs('settle'), env: SETTLE_ACTIONS, stdout: sink().stream, stderr: errors.stream,
+      runtimeFactory() { return { async settle() { throw error; } }; },
+    });
+    assert.equal(exitCode, 1, error.code);
+    assert.deepEqual(errors.json(),
+      { schema: 'GaiaHostedDraftPumpCliErrorV0', error: 'OperationFailed', ...cause }, error.code);
   }
 });
 

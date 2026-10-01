@@ -13,10 +13,14 @@ import {
   listUnsettledDrafts,
   readmitDraft,
   reconcileDraft,
+  settleAmbiguousDraft,
 } from '../src/draft-operation-envelope.mjs';
 import {
   createGhDraftOperationProvider,
+  createGhExecutorRunReader,
   createGhManagedRoundApi,
+  createGhMarkerLookup,
+  GhDraftOperationProviderError,
 } from '../src/gh-draft-operation-provider.mjs';
 import { createGhGitDataApi, GhGitDataError } from '../src/gh-git-data-adapter.mjs';
 import {
@@ -55,7 +59,7 @@ function readNormalPolicy(path) {
 }
 const GIT_OID = /^[a-f0-9]{40}$/u;
 const REPOSITORY = /^([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)$/u;
-const COMMANDS = new Set(['enqueue', 'reconcile', 'list-unsettled', 'intake', 'readmit']);
+const COMMANDS = new Set(['enqueue', 'reconcile', 'list-unsettled', 'intake', 'readmit', 'settle']);
 const READMISSION_REASON_LIMIT = 500;
 // Sealed per command. Never a flag and never environment-derived: a caller that could name its
 // own workflow here would mint effect authority for a run it controls.
@@ -90,6 +94,10 @@ const COMMAND_FLAGS = Object.freeze({
   // The dispatch identity (run id, attempt, triggering actor) is read from the Actions
   // environment only: it is who re-admitted, and a flag would let a caller name someone else.
   readmit: new Set([...COMMON_FLAGS, 'operation-id', 'expected-revision', 'reason', 'apply']),
+  // The same operator dispatch, plus the repository identity the marker search is checked against.
+  settle: new Set([
+    ...COMMON_FLAGS, 'operation-id', 'expected-revision', 'reason', 'apply', 'repository-node-id',
+  ]),
 });
 
 export class HostedDraftPumpCliError extends Error {
@@ -227,6 +235,29 @@ function managedRound(value) {
   return Object.freeze(parsed);
 }
 
+/**
+ * An operator dispatch about one named operation: its id, the revision the operator read, a dry run
+ * unless apply is exactly `true`, and the provenance the ledger records. The written reason
+ * comes from a flag or the prefixed environment; who dispatched comes from the Actions environment.
+ */
+function operatorDispatch(flags, env, prefix) {
+  const operationId = sha256(flagOrEnv(flags, 'operation-id', env, `${prefix}_OPERATION`));
+  const expectedRevision = sha256(flagOrEnv(flags, 'expected-revision', env, `${prefix}_REVISION`));
+  const apply = optionalFlagOrEnv(flags, 'apply', env, `${prefix}_APPLY`) ?? 'false';
+  if (apply !== 'true' && apply !== 'false') fail();
+  return {
+    operationId,
+    expectedRevision,
+    apply: apply === 'true',
+    provenance: Object.freeze({
+      reason: flagOrEnv(flags, 'reason', env, `${prefix}_REASON`, READMISSION_REASON_LIMIT),
+      runId: positiveInteger(envValue(env, 'GITHUB_RUN_ID')),
+      runAttempt: positiveInteger(envValue(env, 'GITHUB_RUN_ATTEMPT')),
+      triggeringActor: configuredText(envValue(env, 'GITHUB_TRIGGERING_ACTOR'), 64),
+    }),
+  };
+}
+
 function parseConfiguration(argv, env) {
   const { command, flags } = parseFlags(argv);
   const repository = parseRepository(flagOrEnv(flags, 'repository', env, 'GAIA_REPOSITORY'));
@@ -266,22 +297,12 @@ function parseConfiguration(argv, env) {
       flags, 'managed-round', env, 'GAIA_MANAGED_ROUND_JSON', 64 * 1024,
     ));
   }
-  if (command === 'readmit') {
-    configuration.operationId = sha256(flagOrEnv(
-      flags, 'operation-id', env, 'GAIA_READMIT_OPERATION',
+  if (command === 'readmit') Object.assign(configuration, operatorDispatch(flags, env, 'GAIA_READMIT'));
+  if (command === 'settle') {
+    Object.assign(configuration, operatorDispatch(flags, env, 'GAIA_SETTLE'));
+    configuration.repositoryNodeId = configuredText(flagOrEnv(
+      flags, 'repository-node-id', env, 'GAIA_REPOSITORY_NODE_ID',
     ));
-    configuration.expectedRevision = sha256(flagOrEnv(
-      flags, 'expected-revision', env, 'GAIA_READMIT_REVISION',
-    ));
-    const apply = optionalFlagOrEnv(flags, 'apply', env, 'GAIA_READMIT_APPLY') ?? 'false';
-    if (apply !== 'true' && apply !== 'false') fail();
-    configuration.apply = apply === 'true';
-    configuration.provenance = Object.freeze({
-      reason: flagOrEnv(flags, 'reason', env, 'GAIA_READMIT_REASON', READMISSION_REASON_LIMIT),
-      runId: positiveInteger(envValue(env, 'GITHUB_RUN_ID')),
-      runAttempt: positiveInteger(envValue(env, 'GITHUB_RUN_ATTEMPT')),
-      triggeringActor: configuredText(envValue(env, 'GITHUB_TRIGGERING_ACTOR'), 64),
-    });
   }
   if (command === 'intake') {
     const issue = optionalFlagOrEnv(flags, 'issue', env, 'GAIA_ISSUE_NUMBER');
@@ -391,6 +412,9 @@ const DEFAULT_DEPENDENCIES = Object.freeze({
   executeManagedRoundUpdate,
   listUnsettledDrafts,
   readmitDraft,
+  settleAmbiguousDraft,
+  createGhMarkerLookup,
+  createGhExecutorRunReader,
   readWorkflowAdmission,
   now: () => new Date().toISOString(),
 });
@@ -525,6 +549,27 @@ export function createHostedDraftPumpRuntime(
         operationId, expectedRevision, provenance, { store, telemetry }, { apply },
       );
     },
+    async settle({ operationId, expectedRevision, provenance, apply }) {
+      // The ledger store and two read-only reads, the executor's run attempt and the marker
+      // search: no collector, provider effect or admission. Both are bound to this repository's
+      // identity, not the operation's word.
+      const expectedRepository = {
+        nodeId: configuration.repositoryNodeId,
+        owner: configuration.repository.owner,
+        name: configuration.repository.name,
+      };
+      const lookup = dependencies.createGhMarkerLookup({ expectedRepository, now: dependencies.now });
+      const executor = dependencies.createGhExecutorRunReader({ expectedRepository });
+      return dependencies.settleAmbiguousDraft(
+        operationId, expectedRevision, provenance,
+        {
+          store, telemetry,
+          readExecutorRun: (request) => executor.read(request),
+          searchMarker: (request) => lookup.search(request),
+        },
+        { apply },
+      );
+    },
     async listUnsettled() {
       // Intake selects the policy's issue; retain the complete list for its global count.
       // The policy binding in reconcile rejects any other operation before mutation.
@@ -562,7 +607,8 @@ const RUNTIME_FAILURE_CAUSES = Object.freeze([
     'GitDataProtocolViolation', 'LedgerProtectionUnavailable'])],
   [DraftOperationError, new Set(['LedgerCorrupt', 'LedgerRegistryMissing',
     'LedgerRegistryMismatch', 'LedgerWorkMissing', 'LedgerProtectionMissing', 'UnknownOperation',
-    'InvalidReadmission'])],
+    'InvalidReadmission', 'InvalidSettlement'])],
+  [GhDraftOperationProviderError, new Set(['RequestBindingMismatch'])],
   [HostedDraftCollectorError, new Set(['GitHubObservationUnavailable', 'GitHubRateLimited',
     'HeadIdentityAmbiguous', 'HeadObservationInvalid', 'CommitObservationInvalid',
     'IssueObservationInvalid'])],
@@ -704,15 +750,17 @@ export async function main({
           };
         }
       }
-    } else if (configuration.command === 'readmit') {
-      const result = cloneJson(await runtime.readmit({
+    } else if (configuration.command === 'readmit' || configuration.command === 'settle') {
+      const request = {
         operationId: configuration.operationId,
         expectedRevision: configuration.expectedRevision,
         provenance: configuration.provenance,
         apply: configuration.apply,
-      }));
+      };
+      const result = cloneJson(configuration.command === 'readmit'
+        ? await runtime.readmit(request) : await runtime.settle(request));
       receipt = {
-        schema: 'GaiaHostedDraftPumpCliReceiptV0', command: 'readmit',
+        schema: 'GaiaHostedDraftPumpCliReceiptV0', command: configuration.command,
         operationId: configuration.operationId, apply: configuration.apply,
         result,
         telemetry: cloneJson(telemetry.events),

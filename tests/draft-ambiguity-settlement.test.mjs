@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   AmbiguitySettlementError, SETTLEMENT_DECISIONS, decideAmbiguousSettlement,
+  validateAbandonmentEvidence,
 } from '../src/draft-ambiguity-settlement.mjs';
 import {
   createMemoryDraftOperationPorts, createMemoryDraftOperationStore, enqueueDraft, reconcileDraft,
@@ -324,6 +325,78 @@ test('hand-built inputs cannot hide rows or change what is hashed', () => {
     ? (Array.isArray(value) ? value.map(bare) : value)
     : Object.assign(Object.create(null), Object.fromEntries(Object.entries(value).map(([k, v]) => [k, bare(v)]))));
   assert.deepEqual(direct(bare(found()), bare(structuredClone(OPERATION))), decide(FOUND));
+});
+
+test('an abandonment is read back only as the evidence its operation fixes', () => {
+  const read = (evidence, operation = OPERATION) => validateAbandonmentEvidence({
+    operation: structuredClone(operation), evidence,
+  });
+  const { evidence } = decide(ABSENT);
+  assert.deepEqual(read(structuredClone(evidence)), evidence);
+  assert.ok(Object.isFrozen(read(structuredClone(evidence)).lookup.repositoryCheck));
+  const bare = (value) => (value === null || typeof value !== 'object' ? value
+    : Object.assign(Object.create(null), Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [key, bare(child)]))));
+  assert.deepEqual(read(bare(structuredClone(evidence))), evidence, 'as the ledger stores it');
+
+  // Each change is re-hashed, so what refuses it is the rule and not the digest.
+  const changed = (change) => {
+    const copy = structuredClone(evidence);
+    change(copy);
+    const { revision, ...record } = copy;
+    return { ...copy, revision: revision === evidence.revision ? sha256(record) : revision };
+  };
+  const refusals = {
+    'the found decision': structuredClone(decide(FOUND).evidence),
+    'an ambiguous decision': structuredClone(decide(AMBIGUOUS).evidence),
+    'a pull request': changed((copy) => { copy.pullRequest = { number: 1 }; }),
+    'a row counted': changed((copy) => { copy.lookup.candidateCount = 1; }),
+    'an incomplete search': changed((copy) => { copy.lookup.outcome = 'PARTIAL'; }),
+    'no identity check': changed((copy) => { copy.lookup.repositoryCheck = null; }),
+    'a wider search': changed((copy) => { copy.lookup.search.limit = 1000; }),
+    'another head': changed((copy) => { copy.lookup.headRef = 'elsewhere'; }),
+    'another revision': changed((copy) => { copy.committedRevision = 'f'.repeat(64); }),
+    'another generation': changed((copy) => { copy.generation.headRevision = '9'.repeat(40); }),
+    'another repository': changed((copy) => { copy.repository.nodeId = 'R_elsewhere'; }),
+    'an effect': changed((copy) => { copy.effect = 'CREATE_DRAFT'; }),
+    'authority': changed((copy) => { copy.authority = 'MERGE'; }),
+    'an extra field': changed((copy) => { copy.note = 'trust me'; }),
+    'a malformed instant': changed((copy) => { copy.lookup.observedAt = '2026-09-30'; }),
+    'another search\'s digest': changed((copy) => { copy.lookup.revision = 'f'.repeat(64); }),
+    'a stale digest': { ...structuredClone(evidence), reason: 'MarkerProvablyAbsent ' },
+    'a wrong digest': { ...structuredClone(evidence), revision: 'f'.repeat(64) },
+    'an accessor': Object.defineProperty(structuredClone(evidence), 'effect', {
+      enumerable: true, get: () => 'NONE',
+    }),
+    'an array': [structuredClone(evidence)],
+    'nothing': null,
+  };
+  for (const [name, stored] of Object.entries(refusals)) {
+    assert.throws(() => read(stored), refusedAs('InvalidSettlementEvidence'), name);
+  }
+  // Written for this operation at another revision, it is not this operation's abandonment.
+  assert.throws(() => read(structuredClone(evidence),
+    { ...OPERATION, committedRevision: 'f'.repeat(64) }), refusedAs('InvalidSettlementEvidence'));
+  assert.throws(() => read(structuredClone(evidence), { ...OPERATION, state: 'EFFECT_STARTED' }),
+    refusedAs('OperationNotAmbiguous'));
+  assert.throws(() => validateAbandonmentEvidence({ evidence }), refusedAs('InvalidSettlementInput'));
+});
+
+test('a V0 abandonment stored today reads back under every later version', () => {
+  // The bytes a ledger holds are fixed once written. If the provider's bound, the envelope
+  // reading or the identity derivation ever changes, this record must still read, or every
+  // intake would stop at LedgerCorrupt on a settled operation.
+  const stored = fixture('abandonment-v0.json');
+  assert.equal(stored.revision, '067790b90f744af3ce11bafe02893757da6d3437529e2182867dbb213c72ee93');
+  assert.equal(stored.lookup.revision,
+    '1376152bb7e7f3f63bfdd0666324a2501729386e6d342f0da4920bb57104361c');
+  assert.deepEqual(validateAbandonmentEvidence({
+    operation: structuredClone(OPERATION), evidence: structuredClone(stored),
+  }), stored);
+  assert.deepEqual(structuredClone(decide(ABSENT).evidence), stored,
+    'and it is what the decision writes today');
+  assert.equal(stored.lookup.revision, sha256(ABSENT),
+    'its lookup digest is the saved search, recomputed rather than trusted');
 });
 
 test('the settlement module reads no network, no clock and no process', () => {

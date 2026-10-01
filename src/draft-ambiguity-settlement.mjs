@@ -5,7 +5,8 @@
  * marker lookup finds the Draft. When the lookup finds nothing, the operation stays pending for
  * ever, because nothing tells "found nothing" apart from "searched badly". This module makes that
  * call from a saved lookup, and only that call: it reads no network, no clock and no ledger, and
- * it never creates, retries or cancels an effect. Writing a settlement is #161's operator path.
+ * it never creates, retries or cancels an effect. Writing a settlement is the envelope module's
+ * `settleAmbiguousDraft` (#161), which re-reads its evidence here whenever the ledger is read.
  *
  * The operation is the ledger's own record: its envelope, identity, state and committed revision.
  * Its identity is recomputed here from the envelope, exactly as the envelope module derives it, so
@@ -14,8 +15,9 @@
  * every pull request on the operation's head branch in every state, as `gh pr list --json` rows,
  * after reading the operation at the ambiguous revision it names. The provider creates a Draft only
  * on that head, a pull request's head branch never changes, and a pull request is never deleted.
- * So a complete, untruncated search that returns no pull request proves the Draft absent.
- * Anything short of that stays unsettled.
+ * So a complete, untruncated search that returns no pull request finds the Draft absent at the
+ * moment it ran; that it stays absent needs the create call to be over, which is the envelope's
+ * check on the executor run, not this module's. Anything short of that stays unsettled.
  */
 
 import { createHash } from 'node:crypto';
@@ -361,4 +363,92 @@ export function decideAmbiguousSettlement(input) {
   };
   const evidence = { ...record, revision: contentRevision(record) };
   return deepFreeze({ decision, reason, evidence: structuredClone(evidence) });
+}
+
+/** A deep copy of plain JSON data, refusing anything else: what is compared is what was stored. */
+function plainData(value, code, depth = 0) {
+  if (depth > 8) fail(code);
+  if (value === null || typeof value === 'string' || typeof value === 'boolean'
+    || (typeof value === 'number' && Number.isFinite(value))) return value;
+  if (Array.isArray(value)) {
+    return items(value, PROVIDER_SEARCH_LIMIT, code).map((item) => plainData(item, code, depth + 1));
+  }
+  if (typeof value !== 'object') fail(code);
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key !== 'string')) fail(code);
+  const copy = fields(value, keys, code);
+  return Object.fromEntries(keys.map((key) => [key, plainData(copy[key], code, depth + 1)]));
+}
+
+// The V0 abandonment's search, pinned: a stored record is re-read by every later version of this
+// module, so a change to the provider's bound must not turn old records into corruption.
+const ABANDONMENT_V0_SEARCH = Object.freeze({ state: 'all', limit: 100 });
+
+/**
+ * An abandonment read back from the ledger, checked against the operation it settles.
+ *
+ * The ledger stores the evidence decideAmbiguousSettlement returned for SETTLE_ABANDONED. Every
+ * field of it but the lookup's instant is fixed by the operation (identity, scope, generation, the
+ * ambiguous revision it settles) or by what an abandonment requires of its lookup (complete,
+ * identity-checked, no pull request, the V0 bound). Even the lookup is: an empty search of this
+ * operation differs from any other only by when it ran. So the lookup and the record are rebuilt
+ * from those, both re-hashed, and the record compared whole with what was stored: a record that
+ * disagrees anywhere, or that was written for another operation or another revision, is refused.
+ *
+ * This is a consistency check of what the ledger holds, not a proof that a search ran: whoever can
+ * write the ledger can write a consistent record. The ledger's one writer is the pump App.
+ *
+ * Takes `{ operation, evidence }`, the operation in decideAmbiguousSettlement's shape. Returns the
+ * evidence, deep-frozen, or throws AmbiguitySettlementError.
+ */
+export function validateAbandonmentEvidence(input) {
+  const given = fields(input, ['operation', 'evidence'], 'InvalidSettlementInput');
+  const operation = validateOperation(given.operation);
+  const code = 'InvalidSettlementEvidence';
+  const stored = plainData(given.evidence, code);
+  if (stored === null || typeof stored !== 'object' || Array.isArray(stored)) fail(code);
+  const lookup = stored.lookup;
+  if (lookup === null || typeof lookup !== 'object' || Array.isArray(lookup)) fail(code);
+  const { repository: expected, generation, workItem } = operation.envelope;
+  const observedAt = instant(lookup.observedAt, code);
+  const repositoryCheck = { id: expected.nodeId, nameWithOwner: `${expected.owner}/${expected.name}` };
+  const searched = {
+    schema: 'GaiaDraftMarkerLookupV0',
+    committedRevision: operation.committedRevision,
+    repository: expected,
+    repositoryCheck,
+    headRef: generation.headRef,
+    marker: operation.operationId,
+    search: ABANDONMENT_V0_SEARCH,
+    observedAt,
+    outcome: 'COMPLETE',
+    candidates: [],
+  };
+  const record = {
+    schema: 'GaiaDraftAmbiguitySettlementV0',
+    decision: 'SETTLE_ABANDONED',
+    reason: 'MarkerProvablyAbsent',
+    operationId: operation.operationId,
+    workKey: operation.workKey,
+    generationKey: operation.generationKey,
+    committedRevision: operation.committedRevision,
+    repository: expected,
+    workItem,
+    generation,
+    lookup: {
+      revision: contentRevision(searched),
+      repositoryCheck,
+      headRef: generation.headRef,
+      search: ABANDONMENT_V0_SEARCH,
+      observedAt,
+      outcome: 'COMPLETE',
+      candidateCount: 0,
+    },
+    pullRequest: null,
+    effect: 'NONE',
+    authority: 'NONE',
+  };
+  const evidence = { ...record, revision: contentRevision(record) };
+  if (canonical(stored) !== canonical(evidence)) fail(code);
+  return deepFreeze(structuredClone(evidence));
 }
