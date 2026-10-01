@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 2319 gates
+node --test                                   # 2328 gates
 ```
 
 Use the single Node.js version in `.node-version` (26.8.1, the latest Current release
@@ -663,6 +663,7 @@ authoritative for their named contracts.
 | `src/portfolio-drain-ledger.mjs` | Append-only, CAS-protected receipt ledger and read-only idempotent drain `tick`; binds an exact machine/rules version and performs no worker or GitHub effect. |
 | `src/drain-petri-net.mjs` | Pure bounded Petri-net interpreter for PR drain and lane lifecycles: validates nets, fires deterministic steps, replays evidence, and checks token-conserving reachability without I/O or authority. |
 | `src/drain-petri-net-facts.mjs` | Pure collector from an exact caller-authorized observation source plus content-addressed review artifacts into closed Petri receptivity facts; actor kind and prose grant nothing. |
+| `src/repair-round-breaker.mjs` | Repair-round circuit breaker on the delivery-round `BUDGET_EXHAUSTED` boundary: one compare-and-set record per work identity scope, tripped before the effect runs and armed again only by an operator reset receipt given as data. A memory store; not wired into the live pump yet. See [`docs/repair-round-breaker.md`](docs/repair-round-breaker.md). |
 | `src/duckdb-drain-petri-net.mjs` | Optional, rebuildable DuckDB analytical projection of Petri markings and firings; named client-absence refusal, no transition or authority surface. |
 | `src/bootstrap-deadlock.mjs` | Pure issue #80 tracer nets (hosted Draft pump observation as shipped and as #80 specifies, with the receipt seed, staleness, steady state and seed retirement; a gated cyclic control, a seeded control and an acyclic control), content-addressed and handed to IX by revision, plus a fail-closed reading of an IX Petri analysis into `BOOTSTRAP_DEADLOCK` (a dead marking whose transitions are blocked only by facts other blocked transitions would produce), `MISSING_PREREQUISITE`, `REACHABLE_DEADLOCK`, `NO_DEADLOCK` or `UNDECIDED`; enumerates nothing itself. |
 | `src/duckdb-ix-petri.mjs` | Optional DuckDB extension port to IX's `ix_petri_analyze`: loads a named `ix.duckdb_extension` into a throwaway in-memory store; named refusals for an absent client, an unloadable extension, or an extension without the function. |
@@ -702,7 +703,7 @@ authoritative for their named contracts.
 | `scripts/check-resume-prompt.mjs` | The single resume entrypoint: run before a lane is spawned or resumed from a prompt file. Exit `0` agreed / `1` refused / `2` usage / `3` fail-closed. See [`docs/resume-manifest.md`](docs/resume-manifest.md). |
 | `src/draft-ambiguity-settlement.mjs` | Pure settlement decision for one `EFFECT_AMBIGUOUS` Draft operation, its identity recomputed from its envelope, from a saved marker lookup bound to its ambiguous revision: `SETTLE_REUSED`, `SETTLE_ABANDONED` only on a complete search that finds no pull request on the head, else `STAY_UNSETTLED`. No network, clock or ledger; `authority: NONE`. Every ledger read of an `ABANDONED` record re-checks its evidence here (`validateAbandonmentEvidence`). |
 | `scripts/draft-ambiguity-settlement.mjs` | Dry run of that decision over two files (`npm run draft:settle-ambiguous`). No `--apply`: the write is `hosted-draft-pump.mjs settle`, an operator dispatch of the intake workflow that runs its own marker search and writes `ABANDONED` only when that search is empty and began at least 65 minutes after the run that started the effect completed, once that run's token has expired (#161). Exit `0` decided / `1` refused / `2` usage / `3` fail-closed. |
-| `tests/` | 2319 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 2328 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
