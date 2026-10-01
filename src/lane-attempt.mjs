@@ -1,43 +1,53 @@
 /**
  * Lane-attempt decisions (#180): a per-attempt deadline, a heartbeat timeout and a compensation
  * record, decided over the lane lifecycle net that already ships (`LANE_NET_TEMPLATE` in
- * `src/drain-petri-net.mjs`).
+ * `src/drain-petri-net.mjs`). docs/lane-attempt-decisions.md is the decision table.
  *
- * `decideLaneAttempt({ attempt, observation, now })` reads one running attempt and what has been
- * observed of it, and returns one of five decisions:
+ * Two calls decide one running attempt. Each returns one of five decisions:
  *   - `CONTINUE`: nothing is due yet;
  *   - `COMPLETE`: the completion marker arrived first;
  *   - `DEADLINE_EXCEEDED`: the attempt's deadline came first;
  *   - `HEARTBEAT_TIMEOUT`: the heartbeat went quiet for the timeout first;
  *   - `ABORTED`: an abort order came first.
  *
+ * `decideLaneAttempt({ attempt, observation, now })` reads a snapshot: the last heartbeat, and when
+ * a marker and an abort order were first seen. `replayLaneAttempt({ attempt, events, now })` reads
+ * the attempt's event log and decides at every event before folding it in, so a timeout that
+ * expired between two heartbeats is not erased by the later one.
+ *
  * WHICH EVENT DECIDES
  * -------------------
  * Each terminal decision has an instant: the marker's, the abort order's, the deadline, and the
  * last heartbeat (or the start, before any heartbeat) plus the timeout. Among the instants at or
- * before `now`, the earliest decides. So the answer depends on when things happened, not on when
- * the caller asked: once every instant is past, asking later gives the same decision. Equal
- * instants resolve in `LANE_ATTEMPT_PRECEDENCE` order, failures before completion, so a marker
- * written at the deadline instant does not complete the attempt. Only the last heartbeat is
- * observed, so a silent gap between two earlier heartbeats is invisible: a caller that decides at
- * every heartbeat it reads sees every gap.
+ * before `now`, the earliest decides; boundaries are inclusive. Equal instants resolve in
+ * `LANE_ATTEMPT_PRECEDENCE` order, failures before completion, so a marker written at the deadline
+ * instant does not complete the attempt. For one snapshot, asking later gives the same decision
+ * once every instant is past. For one event log, replay gives the same terminal decision at every
+ * `now` from the instant it fell due, however rarely the caller asks.
+ *
+ * An observed instant before the attempt's start counts at the start, so clock skew between the
+ * lane and the coordinator never blocks the deadline. An instant after `now` is refused: read the
+ * observation first, then take `now`.
  *
  * WHAT THE NET CAN CARRY
  * ----------------------
  * In the shipped net an attempt leaves `L_ATTEMPT_RUNNING` only through an observed exit
  * (`T_EXIT_ERROR`, `T_EXIT_CLEAN`), and a running attempt cannot be aborted. `COMPLETE` maps to
- * `T_EXIT_CLEAN`. `DEADLINE_EXCEEDED`, `HEARTBEAT_TIMEOUT` and `ABORTED` have no transition yet;
- * they are listed in `UNMAPPED`, and this slice does not change the net (#103 owns that).
+ * `T_EXIT_CLEAN`, which still fires only on its own receptivity, an `exit=0` heartbeat: after
+ * `COMPLETE` the caller keeps watching for the exit. `DEADLINE_EXCEEDED`, `HEARTBEAT_TIMEOUT` and
+ * `ABORTED` have no transition yet; they are listed in `UNMAPPED`, and this slice does not change
+ * the net (#103 owns that).
  *
  * Every terminal decision other than `COMPLETE` carries a compensation record naming what the
  * caller has to undo or report. The record describes work; nothing here performs it.
  *
- * Pure: no clock, no process, no filesystem, no environment, no imports. The caller supplies
- * `now`. A decision grants no authority.
+ * Pure: no clock, no process, no filesystem, no environment, no imports. Every input field is read
+ * once, so what is validated is what is decided. A decision grants no authority.
  */
 
 export const LANE_ATTEMPT_DECISION_SCHEMA = 'gaia-lane-attempt-decision/1';
 export const LANE_ATTEMPT_COMPENSATION_SCHEMA = 'gaia-lane-attempt-compensation/1';
+export const MAX_LANE_ATTEMPT_EVENTS = 65_536;
 
 export const LANE_ATTEMPT_DECISIONS = Object.freeze([
   'CONTINUE', 'COMPLETE', 'DEADLINE_EXCEEDED', 'HEARTBEAT_TIMEOUT', 'ABORTED',
@@ -54,14 +64,19 @@ export const LANE_ATTEMPT_TRANSITIONS = Object.freeze({ COMPLETE: 'T_EXIT_CLEAN'
 /** Terminal decisions the shipped lane net has no transition for. */
 export const UNMAPPED = Object.freeze(['DEADLINE_EXCEEDED', 'HEARTBEAT_TIMEOUT', 'ABORTED']);
 
+/** The exits that return a running attempt's `LANE_SLOTS` token in the shipped net. */
+export const LANE_SLOT_RETURNING_EXITS = Object.freeze(['T_EXIT_CLEAN', 'T_EXIT_ERROR']);
+
 /** What a compensation record may ask the caller to undo, in the order it is listed. */
 export const COMPENSATION_ACTIONS = Object.freeze([
   // The provider process may still be running after the decision.
   'STOP_ATTEMPT_PROCESS',
-  // No shipped transition returns the attempt's `LANE_SLOTS` token for an unmapped decision.
+  // An unmapped decision returns no token; release it unless an exit in `releaseSlotUnless` fires.
   'RELEASE_LANE_SLOT',
   // Whatever the attempt wrote is not this attempt's verified result.
   'DISCARD_UNVERIFIED_OUTPUT',
+  // A marker came too late to count: keep the output aside for a person, never as the result.
+  'QUARANTINE_LATE_OUTPUT',
 ]);
 
 /** What a compensation record asks the caller to report. */
@@ -74,6 +89,7 @@ const REPORTS = Object.freeze({
 
 /** The closed refusal vocabulary for input this module cannot judge. */
 export const LANE_ATTEMPT_REFUSAL_CODES = Object.freeze([
+  'InvalidCall',
   'InvalidAttempt',
   'InvalidLaneId',
   'InvalidAttemptNumber',
@@ -82,6 +98,8 @@ export const LANE_ATTEMPT_REFUSAL_CODES = Object.freeze([
   'InvalidHeartbeatTimeout',
   'InvalidObservation',
   'InvalidHeartbeatStep',
+  'InvalidEvents',
+  'InvalidEvent',
   'NowBeforeStart',
   'ObservationOutOfRange',
 ]);
@@ -100,12 +118,21 @@ const refuse = (code, detail = null) => { throw new LaneAttemptError(code, detai
 const LANE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const STEP = /^L[0-9]{1,4}$/u;
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
+const EVENT_KEYS = Object.freeze({
+  HEARTBEAT: ['at', 'kind', 'step'],
+  MARKER: ['at', 'kind'],
+  ABORT: ['at', 'kind'],
+});
 
-function requireExactKeys(value, keys, code) {
+/** A plain object with exactly `keys`, each read once into a fresh record. */
+function readFields(value, keys, code) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)
       || Object.keys(value).sort().join('\0') !== [...keys].sort().join('\0')) {
     refuse(code);
   }
+  const fields = {};
+  for (const key of keys) fields[key] = value[key];
+  return fields;
 }
 
 /** An ISO-8601 UTC instant, to the second or the millisecond, that names a real calendar time. */
@@ -121,9 +148,9 @@ function instantMs(value, detail) {
 
 const iso = (ms) => new Date(ms).toISOString();
 
-function readAttempt(attempt) {
-  requireExactKeys(attempt, ['laneId', 'attemptNumber', 'startedAt', 'deadline', 'heartbeatTimeoutMs'],
-    'InvalidAttempt');
+function readAttempt(value) {
+  const attempt = readFields(value,
+    ['laneId', 'attemptNumber', 'startedAt', 'deadline', 'heartbeatTimeoutMs'], 'InvalidAttempt');
   if (typeof attempt.laneId !== 'string' || !LANE_ID.test(attempt.laneId)) refuse('InvalidLaneId');
   if (!Number.isSafeInteger(attempt.attemptNumber) || attempt.attemptNumber < 1) {
     refuse('InvalidAttemptNumber');
@@ -140,29 +167,66 @@ function readAttempt(attempt) {
   };
 }
 
-function readObservation(observation, startedAt, now) {
-  requireExactKeys(observation, ['heartbeat', 'markerSeenAt', 'abortOrderedAt'], 'InvalidObservation');
-  const within = (ms, detail) => {
-    if (ms < startedAt || ms > now) refuse('ObservationOutOfRange', detail);
-    return ms;
-  };
+/** An observed instant: refused after `now`, counted at the start when it is earlier. */
+function observedMs(value, run, nowMs, detail) {
+  const ms = instantMs(value, detail);
+  if (ms > nowMs) refuse('ObservationOutOfRange', detail);
+  return Math.max(ms, run.startedAt);
+}
+
+function readStep(value) {
+  if (typeof value !== 'string' || !STEP.test(value)) refuse('InvalidHeartbeatStep');
+  return value;
+}
+
+function readObservation(value, run, nowMs) {
+  const observation = readFields(value, ['heartbeat', 'markerSeenAt', 'abortOrderedAt'], 'InvalidObservation');
   let heartbeat = null;
   if (observation.heartbeat !== null) {
-    requireExactKeys(observation.heartbeat, ['at', 'step'], 'InvalidObservation');
-    if (typeof observation.heartbeat.step !== 'string' || !STEP.test(observation.heartbeat.step)) {
-      refuse('InvalidHeartbeatStep');
-    }
-    heartbeat = {
-      at: within(instantMs(observation.heartbeat.at, 'heartbeat.at'), 'heartbeat.at'),
-      step: observation.heartbeat.step,
-    };
+    const fields = readFields(observation.heartbeat, ['at', 'step'], 'InvalidObservation');
+    const step = readStep(fields.step);
+    heartbeat = { at: observedMs(fields.at, run, nowMs, 'heartbeat.at'), step };
   }
-  const optional = (value, detail) => (value === null ? null : within(instantMs(value, detail), detail));
+  const optional = (field, detail) => (field === null ? null : observedMs(field, run, nowMs, detail));
   return {
     heartbeat,
     markerSeenAt: optional(observation.markerSeenAt, 'markerSeenAt'),
     abortOrderedAt: optional(observation.abortOrderedAt, 'abortOrderedAt'),
   };
+}
+
+function readEvents(value, run, nowMs) {
+  if (!Array.isArray(value) || value.length > MAX_LANE_ATTEMPT_EVENTS) refuse('InvalidEvents');
+  const events = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const entry = value[index];
+    const kind = entry !== null && typeof entry === 'object' ? entry.kind : undefined;
+    if (typeof kind !== 'string' || !Object.hasOwn(EVENT_KEYS, kind)) refuse('InvalidEvent', `events[${index}]`);
+    const fields = readFields(entry, EVENT_KEYS[kind], 'InvalidEvent');
+    if (fields.kind !== kind) refuse('InvalidEvent', `events[${index}]`);
+    events.push({
+      kind,
+      at: observedMs(fields.at, run, nowMs, `events[${index}].at`),
+      step: kind === 'HEARTBEAT' ? readStep(fields.step) : null,
+    });
+  }
+  // A stable sort keeps the log's own order among events of the same instant.
+  return events.sort((left, right) => left.at - right.at);
+}
+
+/** The earliest terminal decision due at `atMs` for one observation, or null when none is. */
+function firstDue(run, seen, atMs) {
+  const instants = {
+    ABORTED: seen.abortOrderedAt,
+    DEADLINE_EXCEEDED: run.deadline,
+    HEARTBEAT_TIMEOUT: (seen.heartbeat?.at ?? run.startedAt) + run.heartbeatTimeoutMs,
+    COMPLETE: seen.markerSeenAt,
+  };
+  const due = LANE_ATTEMPT_PRECEDENCE.map((decision) => [decision, instants[decision]])
+    .filter(([, at]) => at !== null && at <= atMs);
+  // Stable sort: candidates start in precedence order, so equal instants keep it.
+  due.sort((left, right) => left[1] - right[1]);
+  return due.length === 0 ? null : { decision: due[0][0], at: due[0][1] };
 }
 
 const deepFreeze = (value) => {
@@ -173,7 +237,8 @@ const deepFreeze = (value) => {
   return value;
 };
 
-function compensationFor(decision, decisiveAt, run, seen) {
+function compensationFor(decision, decisiveAt, run, seen, lateMarkerAt) {
+  const unmapped = UNMAPPED.includes(decision);
   return {
     schema: LANE_ATTEMPT_COMPENSATION_SCHEMA,
     laneId: run.laneId,
@@ -182,58 +247,87 @@ function compensationFor(decision, decisiveAt, run, seen) {
     decisiveAt: iso(decisiveAt),
     lastStep: seen.heartbeat?.step ?? null,
     lastHeartbeatAt: seen.heartbeat === null ? null : iso(seen.heartbeat.at),
-    // A marker that arrived after the decisive instant: the work may exist, but not as this
-    // attempt's result. Reported so a person can look at it; never read as completion.
-    lateMarkerAt: seen.markerSeenAt === null ? null : iso(seen.markerSeenAt),
-    undo: COMPENSATION_ACTIONS.filter((action) => action !== 'RELEASE_LANE_SLOT'
-      || UNMAPPED.includes(decision)),
+    lateMarkerAt: lateMarkerAt === null ? null : iso(lateMarkerAt),
+    undo: [
+      'STOP_ATTEMPT_PROCESS',
+      ...(unmapped ? ['RELEASE_LANE_SLOT'] : []),
+      lateMarkerAt === null ? 'DISCARD_UNVERIFIED_OUTPUT' : 'QUARANTINE_LATE_OUTPUT',
+    ],
+    // The slot goes back once: by one of these exits if it fires for this attempt, else by the caller.
+    releaseSlotUnless: unmapped ? [...LANE_SLOT_RETURNING_EXITS] : [],
     report: REPORTS[decision],
   };
 }
 
-/**
- * Decide one running lane attempt at the caller's `now`. Throws `LaneAttemptError` with a code
- * from `LANE_ATTEMPT_REFUSAL_CODES` for input it cannot judge.
- */
-export function decideLaneAttempt({ attempt, observation, now } = {}) {
-  const run = readAttempt(attempt);
-  const nowMs = instantMs(now, 'now');
-  if (nowMs < run.startedAt) refuse('NowBeforeStart');
-  const seen = readObservation(observation, run.startedAt, nowMs);
-
-  const heartbeatExpiry = (seen.heartbeat?.at ?? run.startedAt) + run.heartbeatTimeoutMs;
-  const instants = {
-    ABORTED: seen.abortOrderedAt,
-    DEADLINE_EXCEEDED: run.deadline,
-    HEARTBEAT_TIMEOUT: heartbeatExpiry,
-    COMPLETE: seen.markerSeenAt,
-  };
-  const candidates = LANE_ATTEMPT_PRECEDENCE.map((decision) => [decision, instants[decision]])
-    .filter(([, at]) => at !== null && at <= nowMs);
-  // Stable sort: candidates start in precedence order, so equal instants keep it.
-  candidates.sort((left, right) => left[1] - right[1]);
-
+function decisionAt(run, seen, nowMs, lateMarkerAt) {
   const base = {
     schema: LANE_ATTEMPT_DECISION_SCHEMA,
     laneId: run.laneId,
     attemptNumber: run.attemptNumber,
     decidedAt: iso(nowMs),
   };
-  if (candidates.length === 0) {
+  const due = firstDue(run, seen, nowMs);
+  if (due === null) {
+    const heartbeatExpiry = (seen.heartbeat?.at ?? run.startedAt) + run.heartbeatTimeoutMs;
     return deepFreeze({
       ...base, decision: 'CONTINUE', decisiveAt: null, transition: null,
       nextDueAt: iso(Math.min(run.deadline, heartbeatExpiry)), compensation: null,
     });
   }
-  const [decision, decisiveAt] = candidates[0];
-  if (decision === 'COMPLETE') {
+  if (due.decision === 'COMPLETE') {
     return deepFreeze({
-      ...base, decision, decisiveAt: iso(decisiveAt), transition: LANE_ATTEMPT_TRANSITIONS.COMPLETE,
-      nextDueAt: null, compensation: null,
+      ...base, decision: 'COMPLETE', decisiveAt: iso(due.at),
+      transition: LANE_ATTEMPT_TRANSITIONS.COMPLETE, nextDueAt: null, compensation: null,
     });
   }
   return deepFreeze({
-    ...base, decision, decisiveAt: iso(decisiveAt), transition: null, nextDueAt: null,
-    compensation: compensationFor(decision, decisiveAt, run, seen),
+    ...base, decision: due.decision, decisiveAt: iso(due.at), transition: null, nextDueAt: null,
+    compensation: compensationFor(due.decision, due.at, run, seen, lateMarkerAt),
   });
+}
+
+/**
+ * Decide one running lane attempt from a snapshot at the caller's `now`. Throws
+ * `LaneAttemptError` with a code from `LANE_ATTEMPT_REFUSAL_CODES` for input it cannot judge.
+ */
+export function decideLaneAttempt(input) {
+  const call = readFields(input, ['attempt', 'observation', 'now'], 'InvalidCall');
+  const run = readAttempt(call.attempt);
+  const nowMs = instantMs(call.now, 'now');
+  if (nowMs < run.startedAt) refuse('NowBeforeStart');
+  const seen = readObservation(call.observation, run, nowMs);
+  return decisionAt(run, seen, nowMs, seen.markerSeenAt);
+}
+
+/**
+ * Decide one running lane attempt from its event log at the caller's `now`. Events are
+ * `{ kind: 'HEARTBEAT', at, step }`, `{ kind: 'MARKER', at }` or `{ kind: 'ABORT', at }`, in any
+ * order. At each observed instant, its markers and aborts are folded in and the instant is judged
+ * against the heartbeat before it; only then does a heartbeat of that instant replace it. The first
+ * terminal decision stands.
+ */
+export function replayLaneAttempt(input) {
+  const call = readFields(input, ['attempt', 'events', 'now'], 'InvalidCall');
+  const run = readAttempt(call.attempt);
+  const nowMs = instantMs(call.now, 'now');
+  if (nowMs < run.startedAt) refuse('NowBeforeStart');
+  const events = readEvents(call.events, run, nowMs);
+
+  let seen = { heartbeat: null, markerSeenAt: null, abortOrderedAt: null };
+  for (let index = 0; index < events.length;) {
+    // Everything observed at one instant is judged together, so ties keep their precedence.
+    const instant = events[index].at;
+    let heartbeat = null;
+    for (; index < events.length && events[index].at === instant; index += 1) {
+      const event = events[index];
+      if (event.kind === 'MARKER') seen = { ...seen, markerSeenAt: instant };
+      else if (event.kind === 'ABORT') seen = { ...seen, abortOrderedAt: instant };
+      else heartbeat = { at: instant, step: event.step };
+    }
+    // Judge the instant against the heartbeat before it, then let its own heartbeat replace it.
+    if (firstDue(run, seen, instant) !== null) break;
+    if (heartbeat !== null) seen = { ...seen, heartbeat };
+  }
+  const firstMarker = events.find((event) => event.kind === 'MARKER')?.at ?? null;
+  return decisionAt(run, seen, nowMs, firstMarker);
 }
