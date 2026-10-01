@@ -854,13 +854,17 @@ test('the search instant is read before the list is requested, never after it re
     { args: SETTLEMENT_LIST, stdout: '[]' },
   ];
   const { run } = fakeRun(steps);
+  // Recorded rather than asserted here: the adapter turns anything its runner throws into ERRORED.
+  let readWhenListed = null;
   const timed = async (command, args, options) => {
-    if (args[0] === 'pr') assert.equal(read, 1, 'the instant is read before the list is requested');
+    if (args[0] === 'pr') readWhenListed = read;
     return run(command, args, options);
   };
   const lookup = await createGhMarkerLookup({
     expectedRepository: SETTLEMENT_REPOSITORY, run: timed, now,
   }).search(settlementSearch());
+  assert.equal(lookup.outcome, 'COMPLETE');
+  assert.equal(readWhenListed, 1, 'the instant is read before the list is requested');
   assert.equal(lookup.observedAt, '2026-09-30T12:00:00Z');
   assert.equal(read, 1, 'one instant per search');
 });
