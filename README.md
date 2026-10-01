@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 2329 gates
+node --test                                   # 2333 gates
 ```
 
 Use the single Node.js version in `.node-version` (26.8.1, the latest Current release
@@ -703,7 +703,7 @@ authoritative for their named contracts.
 | `src/lane-attempt.mjs` | Pure lane-attempt decisions over a caller-supplied clock, from a snapshot or by replaying the attempt's event log: continue, complete, deadline exceeded, heartbeat timeout or aborted, by the earliest due instant. Every non-completing end carries a compensation record that performs nothing; decisions the lane net cannot carry yet are listed as `UNMAPPED`. See [`docs/lane-attempt-decisions.md`](docs/lane-attempt-decisions.md). |
 | `src/draft-ambiguity-settlement.mjs` | Pure settlement decision for one `EFFECT_AMBIGUOUS` Draft operation, its identity recomputed from its envelope, from a saved marker lookup bound to its ambiguous revision: `SETTLE_REUSED`, `SETTLE_ABANDONED` only on a complete search that finds no pull request on the head, else `STAY_UNSETTLED`. No network, clock or ledger; `authority: NONE`. Every ledger read of an `ABANDONED` record re-checks its evidence here (`validateAbandonmentEvidence`). |
 | `scripts/draft-ambiguity-settlement.mjs` | Dry run of that decision over two files (`npm run draft:settle-ambiguous`). No `--apply`: the write is `hosted-draft-pump.mjs settle`, an operator dispatch of the intake workflow that runs its own marker search and writes `ABANDONED` only when that search is empty and began at least 65 minutes after the run that started the effect completed, once that run's token has expired (#161). Exit `0` decided / `1` refused / `2` usage / `3` fail-closed. |
-| `tests/` | 2329 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 2333 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
