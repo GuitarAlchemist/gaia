@@ -601,7 +601,7 @@ test('a settlement that was not made fails its run and still leaves the receipt 
     assert.equal(receipt.result.kind, kind);
   }
   for (const kind of ['ReconcileAdopts', 'StaysUnsettled', 'SettlementRefused', 'NotAmbiguous',
-    'StaleRevision', 'Readmitted']) {
+    'ExecutorUnfinished', 'StaleRevision', 'Readmitted']) {
     const { status, stderr, receipt } = run(kind);
     assert.notEqual(status, 0, `${kind} fails the run`);
     assert.ok(stderr.includes(`The settlement was not made: ${kind}.`), stderr);

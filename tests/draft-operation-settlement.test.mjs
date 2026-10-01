@@ -1,7 +1,7 @@
 /**
  * Operator settlement of one EFFECT_AMBIGUOUS Draft operation (Gaia issue #161,
- * docs/hosted-draft-intake.md): the ABANDONED transition, its compare-and-swap write, and the ledger
- * read-back that re-proves it.
+ * docs/hosted-draft-intake.md): the ABANDONED transition, the executor run it waits for, its
+ * compare-and-swap write, and the ledger read-back that re-checks it.
  *
  * Every scenario runs against the memory store and against a fake Git Data API implementing the
  * real ref/commit protocol, because ABANDONED is a ledger record both stores must hold and replay.
@@ -38,6 +38,11 @@ const PROVENANCE = Object.freeze({
   runId: 16101, runAttempt: 1, triggeringActor: 'spareilleux',
 });
 const OBSERVED_AT = '2026-09-30T12:00:00Z';
+const EXECUTOR = Object.freeze({ runId: 16100, runAttempt: 1 });
+// The attempt that wrote EFFECT_STARTED, completed an hour before the search.
+const COMPLETED_RUN = Object.freeze({ ...EXECUTOR, status: 'completed', updatedAt: '2026-09-30T11:00:00Z' });
+const secondsBeforeSearch = (seconds) => new Date(Date.parse(OBSERVED_AT) - seconds * 1000)
+  .toISOString().replace('.000Z', 'Z');
 
 function canonical(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -167,7 +172,7 @@ function portsFor(store, occurrence, provider, telemetry = { async append() {} }
     collector: { async collect() { return structuredClone(readyEvent(occurrence)); } },
     provider,
     admission: { async reserveEffect() { return 'AVAILABLE'; } },
-    executorEpoch: { runId: 16100, runAttempt: 1 },
+    executorEpoch: { ...EXECUTOR },
     telemetry,
     store,
     async pause() {},
@@ -212,11 +217,20 @@ function lookupFor(request, candidates = [], overrides = {}) {
   };
 }
 
-/** A marker search that records every request and answers with `answer(request)`. */
-function searcher(answer = (request) => lookupFor(request)) {
+/**
+ * A marker search and an executor-run read that record every request: the search answers with
+ * `answer(request)`, the run read with `runAnswer(request)`, by default a run long completed.
+ */
+function searcher(answer = (request) => lookupFor(request), runAnswer = () => ({ ...COMPLETED_RUN })) {
   const requests = [];
+  const runRequests = [];
   return {
     requests,
+    runRequests,
+    async readExecutorRun(request) {
+      runRequests.push({ ...request });
+      return runAnswer(request);
+    },
     async searchMarker(request) {
       requests.push(structuredClone({ ...request, repository: { ...request.repository } }));
       return answer(request);
@@ -232,7 +246,11 @@ function telemetry() {
 const settle = (store, pending, search, options, provenance = PROVENANCE, events = telemetry()) =>
   settleAmbiguousDraft(
     pending.operationId, pending.committedRevision, provenance,
-    { store, telemetry: events, searchMarker: search.searchMarker }, options,
+    {
+      store, telemetry: events,
+      searchMarker: search.searchMarker, readExecutorRun: search.readExecutorRun,
+    },
+    options,
   );
 
 test('a provably absent Draft is abandoned only by an explicit apply, at the ambiguous revision', async () => {
@@ -251,6 +269,9 @@ test('a provably absent Draft is abandoned only by an explicit apply, at the amb
       committedRevision: pending.committedRevision, repository: REPOSITORY,
       headRef: readyEvent(1).generation.headRef, marker: pending.operationId,
     }], `${name}: the search is bound to the revision read, the head and the marker`);
+    assert.deepEqual(search.runRequests, [EXECUTOR],
+      `${name}: the run read is the attempt that wrote EFFECT_STARTED`);
+    assert.deepEqual({ ...planned.executorRun }, COMPLETED_RUN, name);
     assert.equal(git?.writes(), writesBefore, `${name}: a dry run writes nothing`);
     assert.equal((await listUnsettledDrafts({ store })).length, 1, name);
 
@@ -279,6 +300,7 @@ test('a provably absent Draft is abandoned only by an explicit apply, at the amb
     assert.equal(again.kind, 'AlreadyAbandoned', `${name}: a re-run adopts its own write`);
     assert.equal(again.settledRevision, applied.settledRevision, name);
     assert.equal(search.requests.length, 2, `${name}: and searches nothing`);
+    assert.equal(search.runRequests.length, 2, `${name}: nor reads the executor again`);
     if (git) assert.equal(git.writes(), writesBefore + 1, name);
 
     // An abandoned line is settled: a new generation is not admitted and it is not re-admissible.
@@ -298,18 +320,40 @@ test('the stored abandonment carries the decision evidence and the dispatch that
     const read = await (open ? open() : store).inspectByOperation(pending.operationId);
     assert.equal(read.state, 'ABANDONED', name);
     assert.deepEqual({ ...read.terminal.provenance }, PROVENANCE, name);
+    assert.deepEqual({ ...read.terminal.executorRun }, COMPLETED_RUN, name);
     assert.deepEqual(structuredClone(read.terminal.settlement), structuredClone(applied.evidence), name);
     assert.deepEqual([read.terminal.outcome, read.terminal.committedRevision],
       ['ABANDONED', applied.settledRevision], name);
     if (git) {
       const body = git.records(`${WORK_PREFIX}${WORK_KEY}`).at(-1).body;
       assert.deepEqual(Object.keys(body).sort(), [
-        'generationKey', 'kind', 'operationId', 'priorCommittedRevision', 'provenance', 'schema',
-        'settlement', 'workKey',
+        'executorRun', 'generationKey', 'kind', 'operationId', 'priorCommittedRevision',
+        'provenance', 'schema', 'settlement', 'workKey',
       ], `${name}: a closed record`);
       assert.equal(body.priorCommittedRevision, pending.committedRevision, name);
     }
   }
+
+  // What is read back after the write is compared with what was written. A ledger that took the
+  // write but then holds another, equally valid abandonment is not this settlement's.
+  const git = fakeGitData();
+  const rewriting = Object.freeze({
+    ...git.port,
+    async compareAndAppend(ref, expectedHeadOid, body, transportMetadata) {
+      const appended = await git.port.compareAndAppend(ref, expectedHeadOid, body, transportMetadata);
+      if (body.kind === 'ABANDONED' && appended.kind === 'APPENDED') {
+        git.rewriteLast(ref, (stored) => { stored.provenance.reason = 'Rewritten after the write.'; });
+      }
+      return appended;
+    },
+  });
+  const store = createGitDataDraftOperationStore({
+    gitData: rewriting,
+    config: { ledgerRegistryRootOid: OID_A, ledgerRegistryRootRevision: git.registryRootRevision },
+  });
+  const { result: pending } = await operation(store);
+  await assert.rejects(settle(store, pending, searcher(), { apply: true }),
+    (error) => error.code === 'LedgerCorrupt');
 });
 
 test('a marked Draft found is left for reconcile to adopt, and a search that proves nothing writes nothing', async () => {
@@ -377,6 +421,7 @@ test('settlement refuses what it cannot bind: another revision, another state, a
     assert.deepEqual([settled.kind, settled.state, settled.outcome],
       ['NotAmbiguous', 'CREATED', 'CREATED'], `${name}: a created Draft is never abandoned`);
     assert.equal(search.requests.length, 0, `${name}: nothing is searched for an unbound operation`);
+    assert.equal(search.runRequests.length, 0, `${name}: nor any executor read`);
 
     const refusals = {
       LookupScopeMismatch: (request) => lookupFor(request, [], {
@@ -393,8 +438,9 @@ test('settlement refuses what it cannot bind: another revision, another state, a
     assert.equal(git?.writes(), writesBefore, `${name}: a refused settlement writes nothing`);
 
     const code = (expected) => (error) => error.code === expected;
-    await assert.rejects(settleAmbiguousDraft(SHA_A, SHA_B, PROVENANCE,
-      { store, searchMarker: search.searchMarker }), code('UnknownOperation'), name);
+    await assert.rejects(settleAmbiguousDraft(SHA_A, SHA_B, PROVENANCE, {
+      store, searchMarker: search.searchMarker, readExecutorRun: search.readExecutorRun,
+    }), code('UnknownOperation'), name);
     await assert.rejects(settle(store, pending, search, { apply: 'yes' }),
       code('InvalidSettlement'), name);
     for (const provenance of [
@@ -406,9 +452,118 @@ test('settlement refuses what it cannot bind: another revision, another state, a
         code('InvalidSettlement'), name);
     }
     await assert.rejects(settleAmbiguousDraft(pending.operationId, pending.committedRevision,
-      PROVENANCE, { store }), code('InvalidPorts'), `${name}: no search, no settlement`);
+      PROVENANCE, { store, readExecutorRun: search.readExecutorRun }), code('InvalidPorts'),
+    `${name}: no search, no settlement`);
+    await assert.rejects(settleAmbiguousDraft(pending.operationId, pending.committedRevision,
+      PROVENANCE, { store, searchMarker: search.searchMarker }), code('InvalidPorts'),
+    `${name}: no executor read, no settlement`);
     assert.equal(search.requests.length, 0, name);
   }
+});
+
+test('nothing is searched or abandoned until the run that started the effect has completed and gone quiet', async () => {
+  for (const [name, make] of STORES) {
+    const { store, git, open } = make();
+    const { result: pending } = await operation(store);
+    const writesBefore = git?.writes();
+    const unfinished = {
+      ExecutorRunUnreadable: [
+        () => { throw new Error('gh api failed'); },
+        () => ({ ...COMPLETED_RUN, runAttempt: 2 }),
+        () => ({ ...COMPLETED_RUN, runId: 16099 }),
+        () => ({ ...COMPLETED_RUN, conclusion: 'success' }),
+        () => ({ ...COMPLETED_RUN, updatedAt: '2026-09-30 11:00:00' }),
+        () => ({ ...COMPLETED_RUN, status: '' }),
+        () => null,
+      ],
+      ExecutorRunNotCompleted: [
+        () => ({ ...COMPLETED_RUN, status: 'in_progress' }),
+        () => ({ ...COMPLETED_RUN, status: 'queued' }),
+      ],
+    };
+    for (const [reason, answers] of Object.entries(unfinished)) {
+      for (const runAnswer of answers) {
+        const search = searcher(undefined, runAnswer);
+        const result = await settle(store, pending, search, { apply: true });
+        assert.deepEqual([result.kind, result.reason], ['ExecutorUnfinished', reason],
+          `${name}: ${reason}`);
+        assert.equal(search.requests.length, 0,
+          `${name}: nothing is searched while the executor may still create`);
+      }
+    }
+
+    // Completed, but searched within ten minutes of its last update: a create it sent could
+    // still land, so even an empty search abandons nothing.
+    const recent = searcher(undefined, () => ({ ...COMPLETED_RUN, updatedAt: secondsBeforeSearch(599) }));
+    const tooSoon = await settle(store, pending, recent, { apply: true });
+    assert.deepEqual([tooSoon.kind, tooSoon.reason, tooSoon.decision],
+      ['ExecutorUnfinished', 'ExecutorRunRecentlyActive', 'SETTLE_ABANDONED'], name);
+    assert.equal(git?.writes(), writesBefore, `${name}: an unfinished executor writes nothing`);
+    // Only abandonment waits: a Draft found is reported at once.
+    const found = await settle(store, pending, searcher(
+      (request) => lookupFor(request, [ghRow(request)]),
+      () => ({ ...COMPLETED_RUN, updatedAt: secondsBeforeSearch(1) }),
+    ), { apply: true });
+    assert.equal(found.kind, 'ReconcileAdopts', name);
+
+    // Ten minutes exactly is quiet enough, and the ledger reads that record back.
+    const quietRun = { ...COMPLETED_RUN, updatedAt: secondsBeforeSearch(600) };
+    const applied = await settle(store, pending, searcher(undefined, () => ({ ...quietRun })),
+      { apply: true });
+    assert.equal(applied.kind, 'Abandoned', name);
+    const read = await (open ? open() : store).inspectByOperation(pending.operationId);
+    assert.deepEqual({ ...read.terminal.executorRun }, quietRun, name);
+  }
+});
+
+test('an executor still inside the create call keeps the operation open for its Draft', async () => {
+  // Two runs share only the ledger. Lane A is inside createDraft when run B, finding nothing,
+  // marks the operation ambiguous. Abandoning it now would orphan the Draft A is about to make.
+  const { git, open } = STORES[1][1]();
+  const laneStore = open();
+  let entered;
+  const inCreate = new Promise((resolve) => { entered = resolve; });
+  let release;
+  let created = null;
+  const hanging = {
+    async lookupExact() { return created; },
+    createDraft(request) {
+      entered();
+      return new Promise((resolve) => {
+        release = () => { created = exactDraft(request); resolve(created); };
+      });
+    },
+  };
+  const accepted = await enqueueDraft(SELECTOR, 'NONE', portsFor(laneStore, 1, hanging));
+  const lane = reconcileDraft(
+    accepted.operationId, accepted.committedRevision, portsFor(laneStore, 1, hanging),
+  );
+  await inCreate;
+  const started = await open().inspectByOperation(accepted.operationId);
+  assert.equal(started.state, 'EFFECT_STARTED');
+  const pending = await reconcileDraft(
+    accepted.operationId, started.committedRevision, portsFor(open(), 1, PROVIDERS.ambiguous()),
+  );
+  assert.equal(pending.kind, 'Pending');
+  assert.equal((await open().inspectByOperation(accepted.operationId)).state, 'EFFECT_AMBIGUOUS');
+
+  const writes = git.writes();
+  const running = searcher(undefined, () => ({ ...COMPLETED_RUN, status: 'in_progress' }));
+  const held = await settle(open(), pending, running, { apply: true });
+  assert.deepEqual([held.kind, held.reason], ['ExecutorUnfinished', 'ExecutorRunNotCompleted']);
+  assert.deepEqual(running.runRequests, [EXECUTOR], 'the attempt read is the one inside create');
+  assert.equal(running.requests.length, 0);
+  assert.equal(git.writes(), writes, 'nothing is written while it may still create');
+
+  release();
+  await lane;
+  const after = await open().inspectByOperation(accepted.operationId);
+  assert.equal(after.state, 'EFFECT_AMBIGUOUS', 'the late Draft is still recoverable');
+  const adopted = await reconcileDraft(
+    accepted.operationId, after.committedRevision, portsFor(open(), 1, hanging),
+  );
+  assert.deepEqual([adopted.kind, adopted.outcome, adopted.pullRequest.number],
+    ['Terminal', 'REUSED', 1270], 'and reconcile adopts it');
 });
 
 test('an operation that moves between the read and the write is never abandoned', async () => {
@@ -432,15 +587,29 @@ test('an operation that moves between the read and the write is never abandoned'
   }
 });
 
-test('the ledger reads an abandonment back only with evidence that proves it', async () => {
+test('the ledger reads an abandonment back only with evidence its operation and executor fix', async () => {
   const [, makeGit] = STORES[1];
-  const rehash = (settlement) => {
+  // Each change is re-hashed throughout, the lookup digest included, as a writer forging a
+  // consistent record would: what refuses it is then the rule under test, not a stale digest.
+  const rehash = (settlement, { lookup = true } = {}) => {
+    if (lookup) {
+      settlement.lookup.revision = sha256({
+        schema: 'GaiaDraftMarkerLookupV0', committedRevision: settlement.committedRevision,
+        repository: settlement.repository, repositoryCheck: settlement.lookup.repositoryCheck,
+        headRef: settlement.lookup.headRef, marker: settlement.operationId,
+        search: settlement.lookup.search, observedAt: settlement.lookup.observedAt,
+        outcome: settlement.lookup.outcome, candidates: [],
+      });
+    }
     const { revision, ...record } = settlement;
     settlement.revision = sha256(record);
-    return revision;
   };
   const tampers = {
     'an untouched record (control)': null,
+    'an untouched record re-hashed throughout (control)': (body) => { rehash(body.settlement); },
+    'a later search, re-hashed throughout (control)': (body) => {
+      body.settlement.lookup.observedAt = '2026-09-30T12:30:00Z'; rehash(body.settlement);
+    },
     'a lookup that found a pull request': (body) => {
       body.settlement.lookup.candidateCount = 1; rehash(body.settlement);
     },
@@ -468,6 +637,15 @@ test('the ledger reads an abandonment back only with evidence that proves it', a
     'evidence that does not name its content': (body) => {
       body.settlement.lookup.observedAt = '2026-10-01T00:00:00Z';
     },
+    'another search\'s digest': (body) => {
+      body.settlement.lookup.revision = SHA_A; rehash(body.settlement, { lookup: false });
+    },
+    'an executor run of another attempt': (body) => { body.executorRun.runAttempt = 2; },
+    'an executor still running': (body) => { body.executorRun.status = 'in_progress'; },
+    'a search within ten minutes of the executor': (body) => {
+      body.executorRun.updatedAt = secondsBeforeSearch(599);
+    },
+    'no executor run': (body) => { delete body.executorRun; },
     'a dispatcher that is no GitHub login': (body) => {
       body.provenance.triggeringActor = 'not an actor';
     },
@@ -480,7 +658,7 @@ test('the ledger reads an abandonment back only with evidence that proves it', a
     assert.equal((await settle(store, pending, searcher(), { apply: true })).kind, 'Abandoned');
     if (tamper) git.rewriteLast(`${WORK_PREFIX}${WORK_KEY}`, tamper);
     const read = open().inspectByOperation(pending.operationId);
-    if (tamper === null) {
+    if (name.endsWith('(control)')) {
       assert.equal((await read).state, 'ABANDONED', name);
     } else {
       await assert.rejects(read, (error) => error.code === 'LedgerCorrupt', name);

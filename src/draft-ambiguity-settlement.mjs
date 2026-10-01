@@ -15,8 +15,9 @@
  * every pull request on the operation's head branch in every state, as `gh pr list --json` rows,
  * after reading the operation at the ambiguous revision it names. The provider creates a Draft only
  * on that head, a pull request's head branch never changes, and a pull request is never deleted.
- * So a complete, untruncated search that returns no pull request proves the Draft absent.
- * Anything short of that stays unsettled.
+ * So a complete, untruncated search that returns no pull request finds the Draft absent at the
+ * moment it ran; that it stays absent needs the create call to be over, which is the envelope's
+ * check on the executor run, not this module's. Anything short of that stays unsettled.
  */
 
 import { createHash } from 'node:crypto';
@@ -379,16 +380,23 @@ function plainData(value, code, depth = 0) {
   return Object.fromEntries(keys.map((key) => [key, plainData(copy[key], code, depth + 1)]));
 }
 
+// The V0 abandonment's search, pinned: a stored record is re-read by every later version of this
+// module, so a change to the provider's bound must not turn old records into corruption.
+const ABANDONMENT_V0_SEARCH = Object.freeze({ state: 'all', limit: 100 });
+
 /**
  * An abandonment read back from the ledger, checked against the operation it settles.
  *
  * The ledger stores the evidence decideAmbiguousSettlement returned for SETTLE_ABANDONED. Every
- * field of it except the lookup's own revision and instant is fixed by the operation (identity,
- * scope, generation, the ambiguous revision it settles) or by what an abandonment requires of its
- * lookup (complete, identity-checked, no pull request, the provider's bound). So the record is
- * rebuilt from those, re-hashed, and compared whole with what was stored: a record that disagrees
- * anywhere, or that was written for another operation or another revision, is refused. The lookup
- * itself is not stored, so its revision is checked for shape only.
+ * field of it but the lookup's instant is fixed by the operation (identity, scope, generation, the
+ * ambiguous revision it settles) or by what an abandonment requires of its lookup (complete,
+ * identity-checked, no pull request, the V0 bound). Even the lookup is: an empty search of this
+ * operation differs from any other only by when it ran. So the lookup and the record are rebuilt
+ * from those, both re-hashed, and the record compared whole with what was stored: a record that
+ * disagrees anywhere, or that was written for another operation or another revision, is refused.
+ *
+ * This is a consistency check of what the ledger holds, not a proof that a search ran: whoever can
+ * write the ledger can write a consistent record. The ledger's one writer is the pump App.
  *
  * Takes `{ operation, evidence }`, the operation in decideAmbiguousSettlement's shape. Returns the
  * evidence, deep-frozen, or throws AmbiguitySettlementError.
@@ -402,6 +410,20 @@ export function validateAbandonmentEvidence(input) {
   const lookup = stored.lookup;
   if (lookup === null || typeof lookup !== 'object' || Array.isArray(lookup)) fail(code);
   const { repository: expected, generation, workItem } = operation.envelope;
+  const observedAt = instant(lookup.observedAt, code);
+  const repositoryCheck = { id: expected.nodeId, nameWithOwner: `${expected.owner}/${expected.name}` };
+  const searched = {
+    schema: 'GaiaDraftMarkerLookupV0',
+    committedRevision: operation.committedRevision,
+    repository: expected,
+    repositoryCheck,
+    headRef: generation.headRef,
+    marker: operation.operationId,
+    search: ABANDONMENT_V0_SEARCH,
+    observedAt,
+    outcome: 'COMPLETE',
+    candidates: [],
+  };
   const record = {
     schema: 'GaiaDraftAmbiguitySettlementV0',
     decision: 'SETTLE_ABANDONED',
@@ -414,11 +436,11 @@ export function validateAbandonmentEvidence(input) {
     workItem,
     generation,
     lookup: {
-      revision: pattern(lookup.revision, SHA256, code),
-      repositoryCheck: { id: expected.nodeId, nameWithOwner: `${expected.owner}/${expected.name}` },
+      revision: contentRevision(searched),
+      repositoryCheck,
       headRef: generation.headRef,
-      search: { state: 'all', limit: PROVIDER_SEARCH_LIMIT },
-      observedAt: instant(lookup.observedAt, code),
+      search: ABANDONMENT_V0_SEARCH,
+      observedAt,
       outcome: 'COMPLETE',
       candidateCount: 0,
     },

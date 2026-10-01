@@ -17,6 +17,7 @@ import {
 } from '../src/draft-operation-envelope.mjs';
 import {
   createGhDraftOperationProvider,
+  createGhExecutorRunReader,
   createGhManagedRoundApi,
   createGhMarkerLookup,
   GhDraftOperationProviderError,
@@ -413,6 +414,7 @@ const DEFAULT_DEPENDENCIES = Object.freeze({
   readmitDraft,
   settleAmbiguousDraft,
   createGhMarkerLookup,
+  createGhExecutorRunReader,
   readWorkflowAdmission,
   now: () => new Date().toISOString(),
 });
@@ -548,19 +550,24 @@ export function createHostedDraftPumpRuntime(
       );
     },
     async settle({ operationId, expectedRevision, provenance, apply }) {
-      // The ledger store and one read-only marker search: no collector, provider effect or
-      // admission. The search is bound to this repository's identity, not the operation's word.
-      const lookup = dependencies.createGhMarkerLookup({
-        expectedRepository: {
-          nodeId: configuration.repositoryNodeId,
-          owner: configuration.repository.owner,
-          name: configuration.repository.name,
-        },
-        now: dependencies.now,
-      });
+      // The ledger store and two read-only reads, the executor's run attempt and the marker
+      // search: no collector, provider effect or admission. Both are bound to this repository's
+      // identity, not the operation's word.
+      const expectedRepository = {
+        nodeId: configuration.repositoryNodeId,
+        owner: configuration.repository.owner,
+        name: configuration.repository.name,
+      };
+      const lookup = dependencies.createGhMarkerLookup({ expectedRepository, now: dependencies.now });
+      const executor = dependencies.createGhExecutorRunReader({ expectedRepository });
       return dependencies.settleAmbiguousDraft(
         operationId, expectedRevision, provenance,
-        { store, telemetry, searchMarker: (request) => lookup.search(request) }, { apply },
+        {
+          store, telemetry,
+          readExecutorRun: (request) => executor.read(request),
+          searchMarker: (request) => lookup.search(request),
+        },
+        { apply },
       );
     },
     async listUnsettled() {

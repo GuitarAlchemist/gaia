@@ -708,10 +708,15 @@ test('settle names its dispatcher from the Actions environment, is a dry run unl
       calls.push(['lookup', options]);
       return { async search(request) { calls.push(['search', request]); return 'observed'; } };
     },
+    createGhExecutorRunReader(options) {
+      calls.push(['executor', options]);
+      return { async read(request) { calls.push(['run', request]); return 'completed'; } };
+    },
     async settleAmbiguousDraft(operationId, expectedRevision, provenance, ports, options) {
       calls.push(['settle', operationId, expectedRevision, provenance, options]);
       assert.equal(ports.store, store);
       assert.equal(typeof ports.telemetry.append, 'function');
+      assert.equal(await ports.readExecutorRun('epoch'), 'completed');
       assert.equal(await ports.searchMarker('request'), 'observed');
       return { kind: 'AbandonmentPlanned' };
     },
@@ -724,9 +729,13 @@ test('settle names its dispatcher from the Actions environment, is a dry run unl
     ['lookup', {
       expectedRepository: { nodeId: 'R_node', owner: 'GuitarAlchemist', name: 'gaia' }, now,
     }],
+    ['executor', {
+      expectedRepository: { nodeId: 'R_node', owner: 'GuitarAlchemist', name: 'gaia' },
+    }],
     ['settle', OPERATION_ID, REVISION, { reason: 'r' }, { apply: false }],
+    ['run', 'epoch'],
     ['search', 'request'],
-  ], 'no provider, admission or reconcile: one read-only search and the ledger');
+  ], 'no provider, admission or reconcile: two read-only reads and the ledger');
 });
 
 test('settle refuses an absent dispatcher, repository identity, malformed apply or a foreign flag before the runtime starts', async () => {

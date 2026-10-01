@@ -165,13 +165,16 @@ derive exactly as before, and a spent generation can never enqueue again. Only a
 operator-dispatched run of the sealed intake workflow reaches this path; intake only follows a
 successor that already exists.
 An operator may also settle one `EFFECT_AMBIGUOUS` operation. That run reads it at a named revision,
-then searches its marker the way the provider does: repository identity first, then every pull
-request on its head. It writes `ABANDONED` only when that search is complete and finds no pull
-request, which proves the Draft was never created. The write is a compare-and-swap at the revision it
-read. The record carries that evidence and the dispatch, and every ledger read re-derives the
-evidence from the operation. A Draft the search finds is left to reconciliation, the only writer of
-`REUSED`. `ABANDONED` has no effect and is not re-admissible. Only an operator-dispatched run of the
-sealed intake workflow reaches this path.
+then reads the Actions run attempt that wrote its `EFFECT_STARTED`, the only caller that can still be
+inside the create call, and goes on only once that attempt has completed. It then searches the
+marker the way the provider does: repository identity first, then every pull request on its head.
+It writes `ABANDONED` only when that search is complete, finds no pull request, and ended at least
+ten minutes after the executor's last update: no Draft exists, and no create call of its can still
+land. The write is a compare-and-swap at the revision it read. The record carries the evidence, the
+executor run and the dispatch, and every ledger read re-checks them against the operation and its
+executor epoch. A Draft the search finds is left to reconciliation, the only writer of `REUSED`.
+`ABANDONED` has no effect and is not re-admissible. Only an operator-dispatched run of the sealed
+intake workflow reaches this path.
 The Hosted Draft intake is one concrete pump. An issue-triggered run remains bound to its issue and
 fails closed on its unsettled operation. A scheduled run probes a bounded, deterministic prefix of
 the unsettled queue before it may admit one eligible issue. When reconciliation returns the same

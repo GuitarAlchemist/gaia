@@ -48,7 +48,7 @@ on:
         type: string
         default: ''
       settle_apply:
-        description: Write ABANDONED when the search proves the Draft absent; unchecked is a dry run that writes nothing
+        description: Write ABANDONED when the executor run has completed and the search then finds no pull request; unchecked is a dry run that writes nothing
         type: boolean
         default: false
   issues:
@@ -145,8 +145,9 @@ jobs:
           }
           # A settlement is the same kind of operator decision, about one ambiguous operation, and
           # runs alone in the same way, beside no re-admission either. Shapes are checked here; the
-          # CLI re-reads the operation at that revision, runs the marker search itself and writes
-          # only a proven absence. Ticking apply alone is a mistaken settlement, never an intake run.
+          # CLI re-reads the operation at that revision, reads its executor's run attempt and runs
+          # the marker search itself, and writes only an absence found after that attempt ended.
+          # Ticking apply alone is a mistaken settlement, never an intake run.
           $settle = [bool]$env:GAIA_SETTLE_OPERATION
           if ($settle -or $env:GAIA_SETTLE_REVISION -or $env:GAIA_SETTLE_REASON -or $env:GAIA_SETTLE_APPLY -eq 'true') {
             if (!$settle -or !$env:GAIA_SETTLE_REVISION -or [string]::IsNullOrWhiteSpace($env:GAIA_SETTLE_REASON)) {
@@ -286,10 +287,12 @@ jobs:
 
       - name: Settle one ambiguous Draft operation
         # Operator authority only: a manual dispatch naming one EFFECT_AMBIGUOUS operation, and
-        # nothing else, reaches this step. It re-reads the operation at the named revision, searches
-        # its marker read-only, and writes ABANDONED only when that search proves the Draft absent
-        # and settle_apply is ticked. It never creates, retries or cancels an effect and publishes
-        # no observation. The reason reaches the CLI through env:, never interpolated into the script.
+        # nothing else, reaches this step. It re-reads the operation at the named revision, reads
+        # the run attempt that wrote its EFFECT_STARTED and searches its marker, both read-only, and
+        # writes ABANDONED only when that attempt has completed, the search ten minutes or more
+        # later finds no pull request, and settle_apply is ticked. It never creates, retries or
+        # cancels an effect and publishes no observation. The reason reaches the CLI through env:,
+        # never interpolated into the script.
         if: steps.identity.outputs.settle == 'true'
         shell: pwsh
         env:
@@ -318,9 +321,10 @@ jobs:
             exit $exitCode
           }
           # Only a planned or written abandonment is what this dispatch asks for. Every other typed
-          # outcome (a Draft found for reconcile to adopt, a search that proves nothing, an operation
-          # that moved or is not ambiguous) exits 0 with its receipt kept for upload, and fails the
-          # run so the operator sees it on the run rather than only inside the artifact.
+          # outcome (a Draft found for reconcile to adopt, a search that proves nothing, an executor
+          # not yet finished, an operation that moved or is not ambiguous) exits 0 with its receipt
+          # kept for upload, and fails the run so the operator sees it on the run rather than only
+          # inside the artifact.
           $kind = (Get-Content -Raw -LiteralPath $env:GAIA_RECEIPT_PATH | ConvertFrom-Json).result.kind
           if ($kind -cnotin @('AbandonmentPlanned', 'Abandoned', 'AlreadyAbandoned')) {
             throw "The settlement was not made: $kind. The uploaded receipt names why."

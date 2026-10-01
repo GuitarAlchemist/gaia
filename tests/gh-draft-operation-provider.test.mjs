@@ -9,6 +9,7 @@ import { decideAmbiguousSettlement } from '../src/draft-ambiguity-settlement.mjs
 import {
   GhDraftOperationProviderError,
   createGhDraftOperationProvider,
+  createGhExecutorRunReader,
   createGhManagedRoundApi,
   createGhMarkerLookup,
 } from '../src/gh-draft-operation-provider.mjs';
@@ -778,16 +779,70 @@ test('the marker search runs the two provider reads and returns a lookup the dec
   assert.deepEqual(foundLookup.candidates, [row]);
   assert.equal(decideSettlement(foundLookup).decision, 'SETTLE_REUSED');
 
-  // An identity that answers for another repository is recorded as observed, and refused later.
-  const foreign = fakeRun([
-    { args: SETTLEMENT_VIEW, stdout: JSON.stringify({ id: 'R_other', nameWithOwner: 'GuitarAlchemist/gaia' }) },
-    { args: SETTLEMENT_LIST, stdout: '[]' },
-  ]);
-  const foreignLookup = await createGhMarkerLookup({
-    expectedRepository: SETTLEMENT_REPOSITORY, run: foreign.run, now: () => '2026-09-30T12:34:56Z',
-  }).search(settlementSearch());
-  assert.equal(foreignLookup.repositoryCheck.id, 'R_other');
-  assert.throws(() => decideSettlement(foreignLookup), { code: 'LookupScopeMismatch' });
+  // An identity that answers for another repository stops the search, as it stops the provider:
+  // nothing is listed, the identity seen is recorded, and the decision refuses it.
+  for (const identity of [
+    { id: 'R_other', nameWithOwner: 'GuitarAlchemist/gaia' },
+    { id: SETTLEMENT_REPOSITORY.nodeId, nameWithOwner: 'GuitarAlchemist/elsewhere' },
+  ]) {
+    const foreign = fakeRun([{ args: SETTLEMENT_VIEW, stdout: JSON.stringify(identity) }]);
+    const foreignLookup = await createGhMarkerLookup({
+      expectedRepository: SETTLEMENT_REPOSITORY, run: foreign.run, now: () => '2026-09-30T12:34:56Z',
+    }).search(settlementSearch());
+    assert.equal(foreign.calls.length, 1, 'no pull request is listed in an unverified repository');
+    assert.deepEqual([foreignLookup.outcome, foreignLookup.candidates, foreignLookup.repositoryCheck],
+      ['ERRORED', [], identity]);
+    assert.throws(() => decideSettlement(foreignLookup), { code: 'LookupScopeMismatch' });
+  }
+});
+
+test('the executor read returns one run attempt of this repository, or fails by name', async () => {
+  const RUN_ARGS = ['api', 'repos/GuitarAlchemist/gaia/actions/runs/34145776069/attempts/1'];
+  const attempt = (overrides = {}) => JSON.stringify({
+    id: 34145776069, run_attempt: 1, status: 'completed', conclusion: 'success',
+    updated_at: '2026-09-07T17:17:10Z', path: '.github/workflows/hosted-draft-intake.yml',
+    repository: { node_id: SETTLEMENT_REPOSITORY.nodeId, full_name: 'GuitarAlchemist/gaia' },
+    ...overrides,
+  });
+  const request = { runId: 34145776069, runAttempt: 1 };
+  const reader = (steps) => {
+    const fake = fakeRun(steps);
+    return { ...fake, read: createGhExecutorRunReader({
+      expectedRepository: SETTLEMENT_REPOSITORY, run: fake.run,
+    }).read };
+  };
+  const ok = reader([{ args: RUN_ARGS, stdout: attempt() }]);
+  assert.deepEqual(await ok.read(request), {
+    runId: 34145776069, runAttempt: 1, status: 'completed', updatedAt: '2026-09-07T17:17:10Z',
+  });
+  assert.equal(ok.calls.length, 1, 'one read, nothing else');
+  assert.deepEqual((await reader([{ args: RUN_ARGS, stdout: attempt({ status: 'in_progress' }) }])
+    .read(request)).status, 'in_progress', 'a running attempt is reported as it is');
+
+  const refused = (code) => (error) => error instanceof GhDraftOperationProviderError
+    && error.code === code;
+  await assert.rejects(reader([{ args: RUN_ARGS, error: new Error('HTTP 404') }]).read(request),
+    refused('ProviderUnavailable'));
+  for (const stdout of [
+    'Not Found', '[]', 'null', attempt({ id: 34145776070 }), attempt({ run_attempt: 2 }),
+    attempt({ repository: { node_id: 'R_other', full_name: 'GuitarAlchemist/gaia' } }),
+    attempt({ repository: { node_id: SETTLEMENT_REPOSITORY.nodeId, full_name: 'Other/gaia' } }),
+    attempt({ repository: null }), attempt({ status: '' }), attempt({ status: 7 }),
+    attempt({ updated_at: '2026-09-07T17:17:10.123Z' }), attempt({ updated_at: null }),
+  ]) {
+    await assert.rejects(reader([{ args: RUN_ARGS, stdout }]).read(request),
+      refused('ProviderProtocolViolation'), stdout);
+  }
+  const idle = reader([]);
+  for (const bad of [
+    { runId: 0, runAttempt: 1 }, { runId: 1, runAttempt: 0 }, { runId: '1', runAttempt: 1 },
+    { runId: 1 }, { runId: 1, runAttempt: 1, extra: true },
+  ]) {
+    await assert.rejects(idle.read(bad), refused('InvalidRequest'), JSON.stringify(bad));
+  }
+  assert.equal(idle.calls.length, 0, 'a refused request runs no gh command');
+  assert.throws(() => createGhExecutorRunReader({ expectedRepository: { owner: 'x' } }),
+    refused('InvalidConfiguration'));
 });
 
 test('a marker search that cannot finish is ERRORED, never absent, and never searches elsewhere', async () => {

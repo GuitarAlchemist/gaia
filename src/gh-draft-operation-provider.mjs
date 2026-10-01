@@ -503,6 +503,11 @@ export function createGhMarkerLookup({ expectedRepository, now, run = defaultRun
         ));
         exactKeys(observed, ['id', 'nameWithOwner'], 'ProviderProtocolViolation');
         repositoryCheck = { id: observed.id, nameWithOwner: observed.nameWithOwner };
+        // As the provider does, nothing is listed in a repository that is not the configured one;
+        // the identity it did see is recorded, and the decision refuses it as out of scope.
+        if (observed.id !== expected.nodeId || observed.nameWithOwner !== repositoryName) {
+          return lookup(repositoryCheck, 'ERRORED', []);
+        }
         const candidates = parseJson(await invoke(
           'pr', 'list', '--repo', repositoryName, '--state', 'all',
           '--head', headRef, '--limit', '100', '--json',
@@ -515,6 +520,53 @@ export function createGhMarkerLookup({ expectedRepository, now, run = defaultRun
           || !['ProviderUnavailable', 'ProviderProtocolViolation'].includes(error.code)) throw error;
         return lookup(repositoryCheck, 'ERRORED', []);
       }
+    },
+  });
+}
+
+const RUN_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u;
+
+/**
+ * Read one Actions run attempt of the configured repository (Gaia issue #161): the executor that
+ * wrote an operation's EFFECT_STARTED, whose completion an abandonment waits for.
+ *
+ * `read({ runId, runAttempt })` runs `gh api repos/OWNER/NAME/actions/runs/RUN/attempts/N` and
+ * returns `{ runId, runAttempt, status, updatedAt }`. The answer must name that run, that attempt
+ * and this repository by node id, or it is ProviderProtocolViolation; a failed read is
+ * ProviderUnavailable. Read-only.
+ */
+export function createGhExecutorRunReader({ expectedRepository, run = defaultRun } = {}) {
+  const expected = repository(expectedRepository, 'InvalidConfiguration');
+  if (typeof run !== 'function') fail('InvalidAdapter');
+  const repositoryName = `${expected.owner}/${expected.name}`;
+  return Object.freeze({
+    async read(requestInput) {
+      exactKeys(requestInput, ['runId', 'runAttempt'], 'InvalidRequest');
+      const { runId, runAttempt } = requestInput;
+      if (!Number.isSafeInteger(runId) || runId <= 0
+        || !Number.isSafeInteger(runAttempt) || runAttempt <= 0) fail('InvalidRequest');
+      let stdout;
+      try {
+        const result = await run('gh', [
+          'api', `repos/${repositoryName}/actions/runs/${runId}/attempts/${runAttempt}`,
+        ], { encoding: 'utf8', maxBuffer: 1024 * 1024, windowsHide: true });
+        stdout = String(result?.stdout ?? '');
+      } catch {
+        fail('ProviderUnavailable');
+      }
+      const observed = parseJson(stdout);
+      const owner = observed?.repository;
+      if (observed === null || typeof observed !== 'object' || Array.isArray(observed)
+        || owner === null || typeof owner !== 'object'
+        || observed.id !== runId || observed.run_attempt !== runAttempt
+        || owner.node_id !== expected.nodeId || owner.full_name !== repositoryName
+        || typeof observed.status !== 'string' || observed.status.length === 0
+        || typeof observed.updated_at !== 'string' || !RUN_INSTANT.test(observed.updated_at)) {
+        fail('ProviderProtocolViolation');
+      }
+      return Object.freeze({
+        runId, runAttempt, status: observed.status, updatedAt: observed.updated_at,
+      });
     },
   });
 }

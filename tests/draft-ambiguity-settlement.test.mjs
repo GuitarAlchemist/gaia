@@ -362,6 +362,7 @@ test('an abandonment is read back only as the evidence its operation fixes', () 
     'authority': changed((copy) => { copy.authority = 'MERGE'; }),
     'an extra field': changed((copy) => { copy.note = 'trust me'; }),
     'a malformed instant': changed((copy) => { copy.lookup.observedAt = '2026-09-30'; }),
+    'another search\'s digest': changed((copy) => { copy.lookup.revision = 'f'.repeat(64); }),
     'a stale digest': { ...structuredClone(evidence), reason: 'MarkerProvablyAbsent ' },
     'a wrong digest': { ...structuredClone(evidence), revision: 'f'.repeat(64) },
     'an accessor': Object.defineProperty(structuredClone(evidence), 'effect', {
@@ -379,6 +380,23 @@ test('an abandonment is read back only as the evidence its operation fixes', () 
   assert.throws(() => read(structuredClone(evidence), { ...OPERATION, state: 'EFFECT_STARTED' }),
     refusedAs('OperationNotAmbiguous'));
   assert.throws(() => validateAbandonmentEvidence({ evidence }), refusedAs('InvalidSettlementInput'));
+});
+
+test('a V0 abandonment stored today reads back under every later version', () => {
+  // The bytes a ledger holds are fixed once written. If the provider's bound, the envelope
+  // reading or the identity derivation ever changes, this record must still read, or every
+  // intake would stop at LedgerCorrupt on a settled operation.
+  const stored = fixture('abandonment-v0.json');
+  assert.equal(stored.revision, '067790b90f744af3ce11bafe02893757da6d3437529e2182867dbb213c72ee93');
+  assert.equal(stored.lookup.revision,
+    '1376152bb7e7f3f63bfdd0666324a2501729386e6d342f0da4920bb57104361c');
+  assert.deepEqual(validateAbandonmentEvidence({
+    operation: structuredClone(OPERATION), evidence: structuredClone(stored),
+  }), stored);
+  assert.deepEqual(structuredClone(decide(ABSENT).evidence), stored,
+    'and it is what the decision writes today');
+  assert.equal(stored.lookup.revision, sha256(ABSENT),
+    'its lookup digest is the saved search, recomputed rather than trusted');
 });
 
 test('the settlement module reads no network, no clock and no process', () => {
