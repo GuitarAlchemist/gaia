@@ -13,12 +13,14 @@ included, for two kinds of identity literal:
 - **the owning organization's name**, in any case and anywhere, even inside a longer identifier
   such as an environment-style constant;
 - **a literal GitHub owner**: `github.com/<owner>`, `github.com:<owner>` (SSH),
-  `api.github.com/repos/<owner>` or `githubusercontent.com/<owner>`, whatever the owner.
+  `api.github.com/repos/<owner>`, `api.github.com/orgs/<owner>`, `api.github.com/users/<owner>`
+  or `githubusercontent.com/<owner>`, whatever the owner.
 
 An owner built from inputs, such as `` `https://github.com/${owner}/${repo}` ``, is not a literal
 and is not reported. A literal owner is reported even when the repository after it comes from an
-input. A GitHub product path such as `github.com/login` reads as an owner too; build it from an
-input or keep it out of the core.
+input. A GitHub path that is not an owner reads as one too: `github.com/login`, `github.com:443`
+or `uploads.github.com/repos/…`, for example. Build such a path from an input or keep it out of
+the core.
 
 Tests and scripts are not scanned. A test may name the organization it runs against, and a
 composition root under `scripts/` is where an organization's values are supplied.
@@ -27,8 +29,8 @@ When a hit appears, there are two ways out:
 
 1. **Move the literal out of the core.** Accept the value as an input and let the caller supply
    it. A default belongs in the composition root under `scripts/`, never in `src/`.
-2. **Allowlist it**, only when the literal is a contract identifier that has to stay verbatim.
-   The entry names:
+2. **Allowlist it**, only when the literal is a published contract identifier that has to stay
+   verbatim. Today's one entry is still pending publication, and says so. The entry names:
    - the file;
    - the exact literal;
    - a written reason.

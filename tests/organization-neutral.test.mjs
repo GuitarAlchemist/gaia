@@ -5,7 +5,7 @@
  * comments included, for two kinds of identity literal:
  *   - the owning organization's name, in any case and anywhere, even inside a longer identifier;
  *   - a literal GitHub owner: `github.com/<owner>`, `github.com:<owner>` (SSH),
- *     `api.github.com/repos/<owner>` or `githubusercontent.com/<owner>`.
+ *     `api.github.com/{repos,orgs,users}/<owner>` or `githubusercontent.com/<owner>`.
  * A URL whose owner is built from inputs (`github.com/${owner}/…`) is not a literal and is not
  * reported. A hit fails the gate unless the allowlist below names its file and the exact string
  * literal around it, with a written reason. docs/organization-neutral-core.md is the rule.
@@ -27,7 +27,7 @@ const OWNING_ORGANIZATION = 'GuitarAlchemist';
 const identityPatterns = () => [
   ['ORGANIZATION_NAME', new RegExp(OWNING_ORGANIZATION, 'giu')],
   // An owner segment starts with a letter or a digit, so `github.com/${owner}` never matches.
-  ['GITHUB_OWNER', /\bapi\.github\.com\/repos\/[A-Za-z0-9][A-Za-z0-9-]*/giu],
+  ['GITHUB_OWNER', /\bapi\.github\.com\/(?:repos|orgs|users)\/[A-Za-z0-9][A-Za-z0-9-]*/giu],
   ['GITHUB_OWNER', /(?<!\bapi\.)\bgithub\.com[/:][A-Za-z0-9][A-Za-z0-9-]*/giu],
   ['GITHUB_OWNER', /\bgithubusercontent\.com\/[A-Za-z0-9][A-Za-z0-9-]*/giu],
 ];
@@ -40,7 +40,7 @@ const ALLOWLIST = Object.freeze([
     literal: `https://github.com/${OWNING_ORGANIZATION}/Demerzel/schemas/contracts/epistemic-research-proposal-v0.1`,
     reason: 'A cross-repository contract identifier, not configuration. Demerzel\'s '
       + 'epistemic-research-proposal schema pins this exact URI as its `$id` and as the `const` of '
-      + 'its `schema` property (GuitarAlchemist/Demerzel#994, still unmerged on 2026-10-01), so a '
+      + `its \`schema\` property (${OWNING_ORGANIZATION}/Demerzel#994, still unmerged on 2026-10-01), so a `
       + 'caller-supplied value would only be rejected by the receiver. Changing it is a contract '
       + 'version change. Re-check this exception when that schema lands.',
   }),
@@ -112,7 +112,8 @@ test('the scanner reports the organization name and a literal GitHub owner in a 
     `const ENCODED = 'github.com%2F${name}%2Fgaia';`,
     "const HOME = 'https://github.com/acme/widgets';",
     "const SSH = 'git@github.com:acme/widgets.git'; const ONE = `https://github.com/acme/${repo}`;",
-    "const RAW = 'https://raw.githubusercontent.com/acme/widgets/main/x'; const API = 'https://api.github.com/repos/acme/widgets';",
+    "const RAW = 'https://raw.githubusercontent.com/acme/widgets/main/x';",
+    "const API = 'https://api.github.com/repos/acme/widgets'; const ORG = 'https://api.github.com/orgs/acme';",
     'const issue = `https://github.com/${owner}/${repo}/issues/${number}`;',
     "if (url.startsWith('https://github.com/')) return;",
     'const api = `https://api.github.com/repos/${repository}`;',
@@ -128,8 +129,9 @@ test('the scanner reports the organization name and a literal GitHub owner in a 
     [5, 'GITHUB_OWNER', 'github.com:acme'],
     [5, 'GITHUB_OWNER', 'github.com/acme'],
     [6, 'GITHUB_OWNER', 'githubusercontent.com/acme'],
-    [6, 'GITHUB_OWNER', 'api.github.com/repos/acme'],
-  ],'any case of the name anywhere, and any literal owner, are reported; templated owners are not');
+    [7, 'GITHUB_OWNER', 'api.github.com/repos/acme'],
+    [7, 'GITHUB_OWNER', 'api.github.com/orgs/acme'],
+  ], 'any case of the name anywhere, and any literal owner, are reported; templated owners are not');
   assert.ok(allowlistViolations(hits, ALLOWLIST).includes(
     `UNEXPLAINED synthetic.mjs:1 ${name.toLowerCase()}`), 'the gate fails on the synthetic module');
 
@@ -155,7 +157,8 @@ test('every src file is organization-neutral, with at most one reasoned exceptio
 
   // The scan reaches real modules: a literal planted in a copy of one is reported.
   const planted = scanIdentityLiterals(files[0], `${read(files[0])}\nconst X = 'https://github.com/acme/widgets';\n`);
-  assert.ok(allowlistViolations(planted, []).some((violation) => violation.endsWith('github.com/acme')));
+  assert.ok(allowlistViolations(planted, []).some((violation) => violation.endsWith('github.com/acme')),
+    'a literal planted in a copy of a real module is reported');
 });
 
 test('the allowlist refuses an unexplained hit, a second exception, a missing reason and a stale entry', () => {
