@@ -398,7 +398,7 @@ export async function applyRepairRoundReset(input) {
 
 /**
  * A compare-and-set store held in memory, keyed by scope. Each call is one atomic step, and it
- * shares no object with its callers. It keeps nothing across a restart: it is for tests and for
+ * shares no record with its callers. It keeps nothing across a restart: it is for tests and for
  * callers whose breaker lives no longer than one run.
  */
 export function createMemoryRepairRoundStore() {

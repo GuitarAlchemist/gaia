@@ -132,11 +132,7 @@ test('the delivery-round BUDGET_EXHAUSTED refusal trips the scope, and the next 
   assert.equal((await stored(store)).status, 'TRIPPED', 'what the refusal said is now on record');
 
   // A round the delivery history would admit is now refused on this scope, before its effect.
-  const next = await runRepairRound({
-    store, scope: WORK_KEY, policy: POLICY, effect,
-    attempt: { attemptKey: admitted.plan.advanceKey, fingerprint, boundary: deliveryBoundary(admitted.plan) },
-  });
-  assert.equal(next.kind, 'TRIPPED');
+  assert.equal((await runPlan(admitted)).kind, 'TRIPPED');
   assert.equal(calls.length, 1, 'no effect ran on the tripped scope');
 
   // Only those two plans are modelled.
@@ -209,6 +205,12 @@ test('a concurrent or duplicate reset has one outcome, and the reset scope runs 
   // Another receipt for the trip already lifted finds no trip, rather than claiming the reset.
   await rejected('NotTripped', reset(store, { ...receipt, operator: 'github:user:someone-else' }));
 
+  // A reset keeps the last admitted key: that round asked again is still a duplicate, so the reset
+  // cannot run its effect a second time.
+  const before = await run(store, effect, 2);
+  assert.equal(`${before.kind}:${before.record.rounds}:${before.write}`, 'DUPLICATE:0:false');
+  assert.equal(calls.length, 2);
+
   // Armed again, the scope admits rounds up to its budget, then trips anew.
   for (const number of [4, 5]) assert.equal((await run(store, effect, number)).kind, 'ALLOW');
   assert.equal((await run(store, effect, 6)).kind, 'TRIPPED');
@@ -243,6 +245,13 @@ test('a reset without a receipt, for another scope or for another trip is refuse
   await rejected('ResetScopeMismatch', reset(store, receiptFor(record), SIBLING));
   await rejected('InvalidResetReceipt', reset(store, receiptFor(record, { basis: 'TIME_PASSED' })));
   await rejected('NotTripped', reset(store, receiptFor(record)));
+  const { effect } = spy();
+  await run(store, effect, 1, { attempt: attempt(1, 'BUDGET_EXHAUSTED') });
+  const unchanged = receiptFor(await stored(store), {
+    basis: 'CHANGED_POLICY', evidenceRevision: POLICY.revision,
+  });
+  await rejected('ResetEvidenceUnchanged', reset(store, unchanged));
+  assert.equal((await stored(store)).status, 'TRIPPED');
 });
 
 test('a sibling scope keeps returning ALLOW after a trip', async () => {
@@ -304,7 +313,7 @@ test('malformed input is refused with named codes', async () => {
   assert.ok(REPAIR_ROUND_REFUSAL_CODES.every((code) => /^[A-Z][A-Za-z]+$/u.test(code)));
 });
 
-test('input is copied from data fields once, and the store shares no object with its callers', async () => {
+test('input is copied from data fields once, and the store shares no record with its callers', async () => {
   const getter = (object, key, get) => Object.defineProperty({ ...object }, key, { enumerable: true, get });
   const call = (patch) => () => decideRepairRound({
     state: null, scope: SCOPE, attempt: attempt(1), policy: POLICY, ...patch,
@@ -318,6 +327,10 @@ test('input is copied from data fields once, and the store shares no object with
   assert.equal(reads, 0);
   const hidden = Object.defineProperty({ ...attempt(1) }, 'boundary', { value: 'ROUND_PROPOSED', enumerable: false });
   refused('InvalidAttempt', call({ attempt: hidden }));
+  // Inherited fields are not the object's own: a prototype other than Object's is refused.
+  refused('InvalidAttempt', call({ attempt: Object.assign(Object.create({}), attempt(1)) }));
+  refused('InvalidPolicy', call({ policy: Object.assign(Object.create({ roundBudget: 2 }), POLICY) }));
+  assert.equal(call({ attempt: Object.assign(Object.create(null), attempt(1)) })().kind, 'ALLOW');
 
   // The store's methods and each field of its answers are read once.
   const memory = createMemoryRepairRoundStore();
@@ -342,6 +355,27 @@ test('input is copied from data fields once, and the store shares no object with
   assert.equal((await run(tricky, effect, 2)).kind, 'ALLOW');
   assert.equal(methodReads, 1);
   assert.equal(typeof versions[0], 'string', 'the version sent back is the version checked');
+
+  // A store that keeps its records in private fields is called as itself.
+  class PrivateStore {
+    #inner = createMemoryRepairRoundStore();
+    read(scope) { return this.#inner.read(scope); }
+    compareAndSet(...args) { return this.#inner.compareAndSet(...args); }
+  }
+  assert.equal((await run(new PrivateStore(), effect, 1)).kind, 'ALLOW');
+
+  // The kind a compare-and-set answers is read once: the write it reports is the one decided on.
+  const flipping = createMemoryRepairRoundStore();
+  const once = {
+    read: (scope) => flipping.read(scope),
+    compareAndSet: async (...args) => {
+      const answer = await flipping.compareAndSet(...args);
+      let kinds = 0;
+      return { ...answer, get kind() { kinds += 1; return kinds === 1 ? answer.kind : 'STALE'; } };
+    },
+  };
+  assert.equal((await run(once, effect, 1)).kind, 'ALLOW');
+  assert.equal((await stored(flipping)).rounds, 1);
 
   // Neither what a caller reads nor what it wrote can change what the store holds.
   const read = await memory.read(SCOPE);

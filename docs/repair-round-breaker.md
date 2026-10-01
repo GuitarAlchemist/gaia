@@ -15,7 +15,8 @@ Two stops on repeated repair ship already, and neither is a breaker:
   advance, records nothing, and needs no reset.
 
 `src/repair-round-breaker.mjs` gives the second one a record. It keeps one record per work identity
-scope, trips before the effect, and only a reset receipt bound to the trip clears it.
+scope and trips before the effect. While the store keeps the record, only a reset receipt bound to
+the trip clears it.
 
 ## The calls
 
@@ -75,6 +76,9 @@ The rows are checked in order:
   still used its round. Only the last admitted `attemptKey` is recognised as a `DUPLICATE`, which
   runs no effect. An earlier key asked again is a new round and uses another unit of the budget.
   Recovering an effect is the job of its own idempotency key.
+- **A reset keeps the last admitted key.** After a reset, the round admitted last before the trip
+  is still a `DUPLICATE`, so a reset never runs that round's effect twice. Re-running the same
+  advance needs a new advance receipt, and so a new key.
 
 ## The record
 
@@ -145,10 +149,10 @@ compareAndSet(scope, expectedVersion, record)
 // { kind: 'SET', version } or { kind: 'STALE', currentVersion }
 ```
 
-`expectedVersion` is `NONE` for a scope with no record. Each method is read once, and each answer's
-fields are read once. `createMemoryRepairRoundStore()` is the one adapter in this slice. Its version
-is a SHA-256 of the record, which the rising `generation` keeps unique, and it shares no object
-with its callers.
+`expectedVersion` is `NONE` for a scope with no record. Each method is read once and called on the
+store itself, and each answer's fields are read once. `createMemoryRepairRoundStore()` is the one
+adapter in this slice. Its version is a SHA-256 of the record, which the rising `generation` keeps
+unique, and it shares no record with its callers.
 
 ## How it relates to ENG-09
 
