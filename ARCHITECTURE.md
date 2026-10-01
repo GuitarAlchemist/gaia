@@ -84,7 +84,7 @@ only in the final column and must not escape in a result or refusal.
 | Hybrid search | `index(corpus)`; `query(request) -> matches or refusal` | Advisory retrieval with provenance | local JavaScript engine; optional IX embedding input |
 | Architecture drift | `checkArchitectureDrift(inventory) -> report or refusal` | Normalized repository inventory | filesystem inventory; deterministic in-memory inventory |
 | Managed PR delivery rounds | `createInitialManagedRound(input) -> round or refusal`; `executeManagedRoundUpdate(input) -> receipt or blocker` | One evidence-bound managed-section transition with read-after-write proof | GitHub pull-request body CAS and conditional-write adapter; memory evidence and effect adapters |
-| Repair-round breaker | `decideRepairRound({ state, scope, attempt, policy }) -> decision or refusal`; `resetRepairRound({ state, receipt }) -> decision or refusal`; `runRepairRound({ store, scope, attempt, policy, effect }) -> decision or conflict` | One durable record per work identity scope: the delivery-round `BUDGET_EXHAUSTED` refusal or a spent round budget trips it before the effect; a compare-and-set gives concurrent trips and resets one outcome; only an operator reset receipt, never minted here, arms it again | in-memory compare-and-set store; the delivery-round advance as the boundary; deterministic spy-effect fixtures |
+| Repair-round breaker | `decideRepairRound({ state, scope, attempt, policy }) -> decision or refusal`; `resetRepairRound({ state, receipt }) -> decision or refusal`; `runRepairRound({ store, scope, attempt, policy, effect }) -> decision, conflict or refusal`; `applyRepairRoundReset({ store, scope, receipt }) -> decision, conflict or refusal` | One record per work identity scope: the delivery-round `BUDGET_EXHAUSTED` refusal or a spent round budget trips it before the effect; a compare-and-set gives concurrent trips and resets one outcome; only a reset receipt bound to the trip, never minted here, arms it again. Receipts are checked for binding, not authenticity, and the record lasts only as long as the store keeps it | in-memory compare-and-set store; the delivery-round advance as the boundary; deterministic spy-effect fixtures |
 | Artifact chain | `buildArtifactChain(input) -> manifest or refusal`; `evaluateArtifactChain(input) -> report or refusal` | The caller supplies the subject and the currently expected root revisions, so a self-consistent old chain cannot declare itself current. A changed required predecessor invalidates dependents transitively; advisory and reference predecessors are reported and never affect required freshness. Absent stages stay absent, and a recorded claim stays asserted rather than verified: a fresh chain is a statement about digests and edges, never about tests, approval, or publication. Historical acceptance and effect authority are untouched | pure deterministic descriptor preflight before any artifact measurement; bounded local measurement and immutable create-if-absent sidecar adapter; read-only CLI; deterministic in-memory fixtures |
 | Test observation intake | `normalizeTestObservation(reading) -> observation`; `admitTestObservation(ledger, observation) -> admission`; `admitTestObservationBatch(ledger, readings) -> batch or refusal`; `projectTestObservations(ledger) -> read model` | Untrusted comments become digest-verified, append-only observation entries and an authority-free read model; admission owns predecessor linkage and immutable content snapshots. A bounded batch sequences existing admission rules atomically: structural errors or capacity exhaustion return no partial ledger. Absence from a page is not deletion. Current-state deduplication preserves recovery after unavailability without weakening the monotonic source-time frontier. Every claim remains source-asserted, not authenticated or verified | injected read-only comment source; captured-replay and synthetic fixtures |
 
@@ -393,9 +393,11 @@ compare-and-set performs no effect and is reported as a typed stale-revision ref
 Retries repeat a bounded request under the same identity and idempotency boundary; they do not
 skip revision checks. Repeated independently reproduced failures at one seam trip the
 Boundary redesign circuit breaker and preserve immutable Failure Evidence. Repair rounds have
-their own breaker (`src/repair-round-breaker.mjs`): per work identity, it records the delivery-round
-round budget running out, refuses every later round before its effect, and is armed again only by
-an operator reset receipt bound to that exact trip.
+their own breaker (`src/repair-round-breaker.mjs`). Per work identity, it trips when the
+delivery-round advance refuses a round as `BUDGET_EXHAUSTED` or its own round budget is spent,
+refuses every later round before its effect, and is armed again only by a reset receipt bound to
+that exact trip. It checks a receipt's binding, not its authenticity, and its store is in memory,
+so it stays unwired until #54 adds an authenticated reset channel and a durable store.
 
 Alerts are evidence-backed projections: blockers, expired telemetry, corrupt evidence, stale
 reviews, and authority-needed states. A missing sensor yields unknown or paused state, never a
@@ -594,7 +596,8 @@ are linked here.
 - [Managed PR delivery rounds](docs/pr-delivery-round-history.md) — bounded R0/R1 history,
   single-owner conditional effect, durable intent, and read-after-write reconciliation.
 - [Repair-round breaker](docs/repair-round-breaker.md) — trip before effect on the round budget,
-  one outcome per compare-and-set, operator reset receipts, and how it relates to ENG-09.
+  one outcome per compare-and-set, reset receipts bound to one trip (not yet authenticated), and
+  how it relates to ENG-09.
 - [Test observation intake R0](docs/test-observation-intake-r0.md) — comment identity, raw-source
   digest, append-only revisions, and the fact/interpretation/recommendation distinction.
 - [Artifact chain](docs/artifact-chain.md) — the five stages, digest-pinned required/advisory/

@@ -6,23 +6,28 @@
  * That refusal is stateless: it stops one advance and records nothing. This breaker keeps one
  * record per work identity scope: how many repair rounds it admitted, the failure fingerprint of
  * the last one, and whether it tripped. It trips when either of these comes first:
- *   - the delivery-round advance reports `BUDGET_EXHAUSTED` (`BUDGET_EXHAUSTED`);
+ *   - the delivery-round advance reports `BUDGET_EXHAUSTED` (`BUDGET_EXHAUSTED`), whatever the
+ *     attempt's key;
  *   - an attempt would go past the policy's round budget (`ROUND_BUDGET`).
- * A tripped scope refuses every later attempt as `TRIPPED`. Only an operator reset receipt, given
- * as data, arms it again; a restart or the passage of time never does.
+ * A tripped scope refuses every later attempt as `TRIPPED` until a reset receipt bound to that
+ * trip arms it again. No call reads a clock, so the record outlives a restart exactly as long as
+ * the store keeps it: the memory store of this slice keeps nothing across a restart (#54).
  *
  * TRIP BEFORE EFFECT
  * ------------------
  * `decideRepairRound` and `resetRepairRound` are pure. `runRepairRound` reads the scope's record,
  * decides, and compare-and-sets the next record before it calls the effect. Only an `ALLOW` that
  * won its compare-and-set runs the effect. A loser gets `REVISION_CONFLICT` and runs nothing, so
- * concurrent attempts, trips or resets on one revision have one outcome.
+ * concurrent attempts, trips or resets on one revision have one outcome; the loser asks again to
+ * have its own decided.
  *
- * NO SELF-AUTHORIZATION
- * ---------------------
+ * NO SELF-AUTHORIZATION, AND NO AUTHENTICATION EITHER
+ * ---------------------------------------------------
  * Nothing here mints a reset receipt. `resetRepairRound` checks that a receipt is bound to the
- * scope and to the exact trip it lifts; whether the receipt is authentic is for the operator surface
- * that issued it to prove. The live pump path is not wired to this breaker yet (#54).
+ * scope and to the exact trip it lifts. It does not check that the receipt is authentic: every
+ * field is either free text or already in the caller's hands, so any caller can build one. Until
+ * #54 supplies an authenticated reset channel, no untrusted caller may reach the reset. The live
+ * pump path is not wired to this breaker yet.
  */
 
 import { createHash } from 'node:crypto';
@@ -53,6 +58,7 @@ export const REPAIR_ROUND_REFUSAL_CODES = Object.freeze([
   'InvalidResetReceipt',
   'ResetScopeMismatch',
   'ResetTripMismatch',
+  'ResetEvidenceUnchanged',
   'NotTripped',
   'InvalidStore',
   'InvalidEffect',
@@ -95,18 +101,25 @@ const deepFreeze = (value) => {
   return value;
 };
 
-/** A plain object with exactly `keys`, each read once into a fresh record. */
+/**
+ * The exact own data fields of a plain object, copied. Everything after this reads the copy, so
+ * what is validated is what is decided and stored: no accessor, prototype or extra key.
+ */
 function readFields(value, keys, code) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) refuse(code);
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) refuse(code);
   const own = Reflect.ownKeys(value);
-  if (own.some((key) => typeof key !== 'string')
-      || own.toSorted().join('\0') !== [...keys].toSorted().join('\0')) {
+  if (own.length !== keys.length
+      || own.some((key) => typeof key !== 'string' || !keys.includes(key))) {
     refuse(code);
   }
   const fields = {};
-  for (const key of keys) fields[key] = value[key];
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) refuse(code);
+    fields[key] = descriptor.value;
+  }
   return fields;
 }
 
@@ -230,17 +243,16 @@ function decide(record, scope, attempt, policy) {
   if (record !== null && record.scope !== scope) refuse('ScopeMismatch');
   // A tripped scope stays tripped whatever is asked of it, until a reset.
   if (record?.status === 'TRIPPED') return outcome('TRIPPED', record, false);
-  // The same attempt asked again was already admitted: it is not counted or run twice.
-  if (record !== null && record.lastAttemptKey === attempt.attemptKey) {
-    return outcome('ALREADY_ALLOWED', record, false);
-  }
   const prior = record ?? {
     schema: REPAIR_ROUND_RECORD_SCHEMA, scope, generation: 0, status: 'ARMED', rounds: 0,
     lastAttemptKey: null, fingerprint: null, trip: null, lastReset: null,
   };
+  // The advance said the budget is spent: that trips the scope, whatever key the attempt carries.
   if (attempt.boundary === 'BUDGET_EXHAUSTED') {
     return outcome('TRIPPED', tripped(prior, 'BUDGET_EXHAUSTED', attempt, policy), true);
   }
+  // The last admitted round asked again is not counted or run twice.
+  if (prior.lastAttemptKey === attempt.attemptKey) return outcome('DUPLICATE', prior, false);
   if (prior.rounds >= policy.roundBudget) {
     return outcome('TRIPPED', tripped(prior, 'ROUND_BUDGET', attempt, policy), true);
   }
@@ -256,29 +268,33 @@ function decide(record, scope, attempt, policy) {
 function reset(record, receipt) {
   if (record === null) refuse('NotTripped');
   if (record.scope !== receipt.scope) refuse('ResetScopeMismatch');
+  const lastReset = {
+    tripKey: receipt.tripKey, operator: receipt.operator, basis: receipt.basis,
+    evidenceRevision: receipt.evidenceRevision,
+  };
   if (record.status === 'ARMED') {
-    // The same receipt applied again finds the scope it already armed.
-    if (record.lastReset?.tripKey === receipt.tripKey) return outcome('ALREADY_RESET', record, false);
+    // The same receipt applied again finds the scope it already armed; any other finds no trip.
+    if (record.lastReset !== null && canonical(record.lastReset) === canonical(lastReset)) {
+      return outcome('ALREADY_RESET', record, false);
+    }
     refuse('NotTripped');
   }
   if (record.trip.tripKey !== receipt.tripKey) refuse('ResetTripMismatch');
+  // A changed policy has to name a policy other than the one the scope tripped under.
+  if (receipt.basis === 'CHANGED_POLICY'
+      && receipt.evidenceRevision === record.trip.policyRevision) {
+    refuse('ResetEvidenceUnchanged');
+  }
   return outcome('RESET', {
-    ...record,
-    generation: record.generation + 1,
-    status: 'ARMED',
-    rounds: 0,
-    trip: null,
-    lastReset: {
-      tripKey: receipt.tripKey, operator: receipt.operator, basis: receipt.basis,
-      evidenceRevision: receipt.evidenceRevision,
-    },
+    ...record, generation: record.generation + 1, status: 'ARMED', rounds: 0, trip: null, lastReset,
   }, true);
 }
 
 /**
  * Decide one repair-round attempt for a scope. `state` is the scope's record, or null before its
- * first attempt. Returns a frozen `{ kind, record, write }`: `ALLOW`, `TRIPPED` or
- * `ALREADY_ALLOWED`, with the record to compare-and-set when `write` is true.
+ * first attempt. Returns a frozen `{ kind, record, write }`: `ALLOW`, `TRIPPED` or `DUPLICATE`
+ * (the last admitted round asked again, which grants nothing new), with the record to
+ * compare-and-set when `write` is true.
  */
 export function decideRepairRound(input) {
   const call = readFields(input, ['state', 'scope', 'attempt', 'policy'], 'InvalidCall');
@@ -289,8 +305,9 @@ export function decideRepairRound(input) {
 }
 
 /**
- * Lift a trip with an operator reset receipt. Returns a frozen `{ kind, record, write }`: `RESET`,
- * or `ALREADY_RESET` when the same receipt already armed the scope.
+ * Lift a trip with a reset receipt bound to it. Returns a frozen `{ kind, record, write }`:
+ * `RESET`, or `ALREADY_RESET` when the same receipt already armed the scope. The receipt's
+ * authenticity is not checked here (see the header).
  */
 export function resetRepairRound(input) {
   const call = readFields(input, ['state', 'receipt'], 'InvalidCall');
@@ -306,30 +323,36 @@ export function deliveryBoundary(plan) {
   return refuse('UnmodelledBoundary');
 }
 
+/** The store's two methods, each read once and bound to the store. */
 function readStore(value) {
-  if (value === null || typeof value !== 'object'
-      || typeof value.read !== 'function' || typeof value.compareAndSet !== 'function') {
-    refuse('InvalidStore');
-  }
-  return value;
+  if (value === null || typeof value !== 'object') refuse('InvalidStore');
+  const { read, compareAndSet } = value;
+  if (typeof read !== 'function' || typeof compareAndSet !== 'function') refuse('InvalidStore');
+  return {
+    read: (scope) => read.call(value, scope),
+    compareAndSet: (scope, expectedVersion, record) => compareAndSet.call(
+      value, scope, expectedVersion, record,
+    ),
+  };
 }
 
 /** What the store holds for a scope: no record yet (`NONE`), or one record at a version. */
 async function observe(store, scope) {
-  const observed = await store.read(scope);
-  if (observed?.state === 'UNSEEN') return { version: 'NONE', record: null };
-  if (observed?.state !== 'PRESENT' || typeof observed.version !== 'string') refuse('InvalidStore');
-  const record = readRecord(observed.record);
+  // Each field of the answer is read once, so the version checked is the version sent back.
+  const { state, version, record: stored } = (await store.read(scope)) ?? {};
+  if (state === 'UNSEEN') return { version: 'NONE', record: null };
+  if (state !== 'PRESENT' || typeof version !== 'string') refuse('InvalidStore');
+  const record = readRecord(stored);
   if (record.scope !== scope) refuse('ScopeMismatch');
-  return { version: observed.version, record };
+  return { version, record };
 }
 
 /** Compare-and-set a decided record; a loser on the version is told so and nothing else happens. */
 async function commit(store, scope, observed, decision) {
   if (!decision.write) return true;
-  const written = await store.compareAndSet(scope, observed.version, decision.record);
-  if (written?.kind === 'STALE') return false;
-  if (written?.kind !== 'SET') refuse('InvalidStore');
+  const { kind } = (await store.compareAndSet(scope, observed.version, decision.record)) ?? {};
+  if (kind === 'STALE') return false;
+  if (kind !== 'SET') refuse('InvalidStore');
   return true;
 }
 
@@ -337,8 +360,11 @@ const conflict = (scope) => Object.freeze({ kind: 'REVISION_CONFLICT', scope });
 
 /**
  * Run one repair-round attempt behind the breaker. The decided record is compare-and-set before
- * the effect is called, and only an `ALLOW` that won it calls `effect({ scope, attemptKey, round })`.
- * Returns the decision (with `effectResult` after an `ALLOW`) or `REVISION_CONFLICT`.
+ * the effect is called, and only an `ALLOW` that won it calls
+ * `effect({ scope, attemptKey, round })`. Returns the decision (with `effectResult` after an
+ * `ALLOW`) or `REVISION_CONFLICT`. A caller told `REVISION_CONFLICT` asks again: its attempt is
+ * then decided on the record that won, so a trip that lost the race to an `ALLOW` is still
+ * recorded.
  */
 export async function runRepairRound(input) {
   const call = readFields(input, ['store', 'scope', 'attempt', 'policy', 'effect'], 'InvalidCall');
@@ -357,7 +383,7 @@ export async function runRepairRound(input) {
   return Object.freeze({ ...decision, effectResult });
 }
 
-/** Apply an operator reset receipt to a scope's stored record. */
+/** Apply a reset receipt to a scope's stored record. */
 export async function applyRepairRoundReset(input) {
   const call = readFields(input, ['store', 'scope', 'receipt'], 'InvalidCall');
   const store = readStore(call.store);
@@ -370,7 +396,11 @@ export async function applyRepairRoundReset(input) {
   return decision;
 }
 
-/** A compare-and-set store held in memory, keyed by scope. Each call is one atomic step. */
+/**
+ * A compare-and-set store held in memory, keyed by scope. Each call is one atomic step, and it
+ * shares no object with its callers. It keeps nothing across a restart: it is for tests and for
+ * callers whose breaker lives no longer than one run.
+ */
 export function createMemoryRepairRoundStore() {
   const records = new Map();
   const calls = [];

@@ -1,8 +1,8 @@
 # Repair-round circuit breaker
 
 Status: one breaker family of #54, with a memory store (#184). It trips and records; it stops,
-sends and retries nothing, and it grants no authority. The file-backed store, the wiring into the
-live pump path and the other breaker classes stay on #54.
+sends and retries nothing, and it grants no authority. A durable store, an authenticated reset
+channel, the wiring into the live pump path and the other breaker classes stay on #54.
 
 Two stops on repeated repair ship already, and neither is a breaker:
 
@@ -14,8 +14,8 @@ Two stops on repeated repair ship already, and neither is a breaker:
   to propose a round past the R0 receipt's round budget. That refusal is stateless: it stops one
   advance, records nothing, and needs no reset.
 
-`src/repair-round-breaker.mjs` makes the second one durable. It keeps one record per work
-identity scope, trips before the effect, and only an operator reset receipt clears it.
+`src/repair-round-breaker.mjs` gives the second one a record. It keeps one record per work identity
+scope, trips before the effect, and only a reset receipt bound to the trip clears it.
 
 ## The calls
 
@@ -38,30 +38,43 @@ deliveryBoundary(plan)                                    // a delivery-round pl
 `deliveryBoundary(plan)` reads it from a `planManagedRoundUpdate` result. Any other plan, such as
 `ALREADY_APPLIED` or another refusal, is refused as `UnmodelledBoundary`: the breaker is not asked.
 
+For `attemptKey`, use the revision of the advance receipt the plan was made from. A `PROPOSED`
+plan also carries an `advanceKey`, but a `BUDGET_EXHAUSTED` refusal carries no key of its own.
+
 ## Deciding
+
+The rows are checked in order:
 
 | Record | Attempt | Decision | Written |
 | --- | --- | --- | --- |
 | `TRIPPED` | any | `TRIPPED` | nothing |
-| `ARMED`, same `attemptKey` as the last admitted round | any | `ALREADY_ALLOWED` | nothing |
-| none or `ARMED` | `BUDGET_EXHAUSTED` | `TRIPPED`, reason `BUDGET_EXHAUSTED` | the trip |
+| none or `ARMED` | `BUDGET_EXHAUSTED`, whatever its key | `TRIPPED`, reason `BUDGET_EXHAUSTED` | the trip |
+| `ARMED`, `lastAttemptKey` equal to the attempt's key | `ROUND_PROPOSED` | `DUPLICATE` | nothing |
 | none or `ARMED`, `rounds` at `roundBudget` | `ROUND_PROPOSED` | `TRIPPED`, reason `ROUND_BUDGET` | the trip |
 | none or `ARMED`, `rounds` below `roundBudget` | `ROUND_PROPOSED` | `ALLOW` | `rounds + 1` |
 
 - **Trip before effect.** `runRepairRound` compare-and-sets the decided record before it calls
-  `effect`. Only an `ALLOW` that won its compare-and-set calls `effect({ scope, attemptKey, round })`,
-  so the attempt past the budget is refused with its effect never run.
+  `effect`. Only an `ALLOW` that won its compare-and-set calls
+  `effect({ scope, attemptKey, round })`, so the attempt past the budget never runs its effect.
 - **One outcome.** Two calls that read the same version race on one compare-and-set. The loser gets
   `REVISION_CONFLICT` and runs nothing: two attempts for the last round run one effect, and two
   concurrent trips write one trip. Asked again, a tripped scope answers with the same trip and
   writes nothing.
+- **A loser asks again.** `REVISION_CONFLICT` says nothing about the loser's own attempt. Asked
+  again, it is decided on the record that won, so a `BUDGET_EXHAUSTED` attempt that lost to an
+  `ALLOW` still trips the scope.
 - **Scopes are separate.** A trip in one scope leaves sibling scopes armed.
-- **Nothing but a reset lifts a trip.** The record is the whole state and no call reads a clock,
-  so a restart or the passage of time changes nothing. A larger `roundBudget` or a new policy
-  revision does not lift a trip either: a changed policy is a reset basis.
+- **Only a reset lifts a trip.** No call reads a clock, and a larger `roundBudget` or a new policy
+  revision does not lift a trip: a changed policy is a reset basis.
+- **The record lasts as long as the store keeps it.** The memory store keeps nothing across a
+  restart, and a scope without a record is a fresh, armed one. So a restart, or deleting the record,
+  arms the scope again. Making a trip survive both needs a durable, append-only store (#54).
+- **The policy is the caller's.** An armed record does not pin the policy: the caller passes the
+  policy it runs under on every call, and a larger budget admits more rounds.
 - **An admitted round is consumed.** The count rises before the effect runs, so an effect that fails
-  still used its round. The same `attemptKey` asked again is `ALREADY_ALLOWED` and runs no effect;
-  recovering that effect is the job of its own idempotency key.
+  still used its round. Only the last admitted `attemptKey` is recognised as a `DUPLICATE`, which
+  runs no effect. An earlier key asked again is a new round and uses another unit of the budget.
+  Recovering an effect is the job of its own idempotency key.
 
 ## The record
 
@@ -81,24 +94,29 @@ trip has its own key.
 
 ## Resetting
 
-A reset receipt is data the operator surface issues; this module never builds one.
-
 | Field | Meaning |
 | --- | --- |
 | `schema` | `gaia-repair-round-reset/1` |
 | `scope`, `tripKey` | the scope and the exact trip the receipt lifts |
-| `operator` | `github:user:<login>` |
+| `operator` | `github:user:<login>`, as the receipt states it |
 | `basis` | `NEW_DESIGN`, `FIXED_POINT` or `CHANGED_POLICY` (#54: a new design or fixed point, or a changed policy) |
-| `evidenceRevision` | 64 hex naming the design, fix or policy the reset rests on |
+| `evidenceRevision` | 64 hex naming the design, fix or policy the reset rests on; for `CHANGED_POLICY`, not the policy revision the scope tripped under |
 
-A reset arms the scope again with `rounds` at 0. Applied twice, the same receipt answers
-`ALREADY_RESET` and writes nothing. Two concurrent resets have one outcome, as trips do. A receipt
-names one trip, so it cannot lift a later one. The module checks that a receipt is bound to the
-scope and the trip; proving that the receipt is authentic is the operator surface's job.
+A reset arms the scope again with `rounds` at 0. A receipt names one trip, so it cannot lift a
+later one. Applied again, the same receipt answers `ALREADY_RESET` and writes nothing; any other
+receipt finds no trip. Two concurrent resets have one outcome, as trips do.
+
+**A receipt is checked for binding, not for authenticity.** The module never builds a receipt, but
+it cannot tell who built one. Every field is either free to choose or already in the caller's
+hands: the `tripKey` comes back in every `TRIPPED` decision. So any caller can lift a trip it can
+see. Until #54 supplies an authenticated reset channel, the reset must not be reachable by a
+caller the operator does not control, and the breaker is not wired into the live pump.
 
 ## Refusals
 
-Input the breaker cannot judge throws `RepairRoundError`:
+Input the breaker cannot judge throws `RepairRoundError`. A call, policy, attempt, record or
+receipt must be a plain object whose fields are exactly its own enumerable data properties: no
+accessor, prototype or extra key.
 
 | Code | When |
 | --- | --- |
@@ -113,6 +131,7 @@ Input the breaker cannot judge throws `RepairRoundError`:
 | `InvalidResetReceipt` | the receipt is malformed |
 | `ResetScopeMismatch` | the receipt names another scope |
 | `ResetTripMismatch` | the receipt names another trip |
+| `ResetEvidenceUnchanged` | a `CHANGED_POLICY` receipt names the policy the scope tripped under |
 | `NotTripped` | there is no trip to lift |
 | `InvalidStore` | the store is not a compare-and-set port, or answered outside its protocol |
 | `InvalidEffect` | the effect is not a function |
@@ -120,18 +139,22 @@ Input the breaker cannot judge throws `RepairRoundError`:
 ## The store port
 
 ```js
-read(scope)                                  // { state: 'UNSEEN' } or { state: 'PRESENT', version, record }
-compareAndSet(scope, expectedVersion, record) // { kind: 'SET', version } or { kind: 'STALE', currentVersion }
+read(scope)
+// { state: 'UNSEEN' } or { state: 'PRESENT', version, record }
+compareAndSet(scope, expectedVersion, record)
+// { kind: 'SET', version } or { kind: 'STALE', currentVersion }
 ```
 
-`expectedVersion` is `NONE` for a scope with no record. `createMemoryRepairRoundStore()` is the one
-adapter in this slice; its version is a SHA-256 of the record, which the rising `generation` keeps
-unique.
+`expectedVersion` is `NONE` for a scope with no record. Each method is read once, and each answer's
+fields are read once. `createMemoryRepairRoundStore()` is the one adapter in this slice. Its version
+is a SHA-256 of the record, which the rising `generation` keeps unique, and it shares no object
+with its callers.
 
 ## How it relates to ENG-09
 
 The two breakers watch different signals. ENG-09 trips on the same failure family repeated
 across reviews of one pull request. This breaker trips on the number of repair rounds for one
-work identity, whichever failure each round repaired. Both are lifted only by an operator. The
+work identity, whichever failure each round repaired. ENG-09's lift has no channel in R0, so only
+an operator can lift it; this breaker's reset is data, and authenticating it is still to come. The
 record already keeps the failure fingerprint of the last admitted round and of the trip, so a
 recurrence rule over fingerprints (#54's "repeated same-family blocker") can compare against them.
