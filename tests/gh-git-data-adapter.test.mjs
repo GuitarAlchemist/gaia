@@ -13,7 +13,8 @@ function ledgerRuleset(overrides = {}) {
     conditions: { ref_name: {
       include: ['refs/heads/gaia-ledger/**'], exclude: [],
     } },
-    rules: [{ type: 'deletion' }, { type: 'non_fast_forward' }, { type: 'update' }],
+    rules: [{ type: 'deletion' }, { type: 'non_fast_forward' }, { type: 'update' },
+      { type: 'creation' }],
     bypass_actors: [{ actor_id: PUMP_ACTOR.actorId, actor_type: PUMP_ACTOR.actorType,
       bypass_mode: 'always' }],
     ...overrides,
@@ -444,7 +445,11 @@ test('R3 protection is restricted to exactly the configured Gaia pump App actor'
       } },
     }),
     'missing update restriction': ledgerRuleset({
-      rules: [{ type: 'deletion' }, { type: 'non_fast_forward' }],
+      rules: [{ type: 'deletion' }, { type: 'non_fast_forward' }, { type: 'creation' }],
+    }),
+    // #200: without it, any writer can create a ref the pump then reads as its own ledger.
+    'missing creation restriction': ledgerRuleset({
+      rules: [{ type: 'deletion' }, { type: 'non_fast_forward' }, { type: 'update' }],
     }),
     'missing pump actor': ledgerRuleset({ bypass_actors: [] }),
     'wrong App actor': ledgerRuleset({

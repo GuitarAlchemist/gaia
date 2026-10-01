@@ -193,12 +193,13 @@ Provisioning and policy mutation are outside pump authority.
 The registry records each work branch's reservation and adapter-neutral bootstrap content identity;
 a missing work ref that is
 already registered is corruption, never a new bootstrap. A required GitHub ruleset forbids deletion
-and non-fast-forward updates for `gaia-ledger/**` and restricts updates to the Gaia pump GitHub App.
+and non-fast-forward updates for `gaia-ledger/**` and restricts updates and ref creation to the Gaia
+pump GitHub App, so no other writer can add a ref the pump would read as its own ledger (#200).
 Provisioning verifies through an administrator credential that the App is the ruleset's sole
 `always` bypass actor. The runtime App deliberately has no Administration-write permission. GitHub
 therefore redacts `bypass_actors` from its ruleset response; the adapter instead requires GitHub's
 server-derived `current_user_can_bypass: 'always'` plus the exact active target, include/exclude,
-deletion, non-fast-forward, and update restrictions before every write. It fails closed when any
+deletion, non-fast-forward, update, and creation restrictions before every write. It fails closed when any
 runtime-visible protection or the App's own bypass changes. An administrator adding another bypass
 actor is not observable to this least-privilege token and remains a provisioning/audit residual,
 not authority granted to the pump. The pump cannot create or loosen the ruleset.
