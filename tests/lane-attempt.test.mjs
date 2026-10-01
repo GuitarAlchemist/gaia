@@ -122,6 +122,7 @@ test('an abort during a live heartbeat aborts the attempt and asks for lane-abor
   assert.equal(decision.decision, 'ABORTED');
   assert.equal(decision.decisiveAt, at(13 * MINUTE));
   assert.equal(decision.transition, null, 'the shipped net cannot abort a running attempt');
+  assert.equal(decision.staleMarkerAt, null);
   assert.deepEqual(decision.compensation, {
     schema: 'gaia-lane-attempt-compensation/1',
     laneId: 'lane-180',
@@ -244,6 +245,7 @@ test('a replayed decision, once terminal, stands at every later now', () => {
     [MARKER(4 * MINUTE), ABORT(5 * MINUTE)],
     [ABORT(-MINUTE)],
     [HB(-1)],
+    [MARKER(-MINUTE)],
     [],
   ];
   for (const [index, log] of logs.entries()) {
@@ -270,17 +272,54 @@ test('a replayed decision, once terminal, stands at every later now', () => {
   assert.equal(tied([MARKER(expiry), ABORT(expiry)]), 'ABORTED', 'an abort beats a marker of the same instant');
   assert.equal(tied([MARKER(expiry)]), 'HEARTBEAT_TIMEOUT', 'an expiry beats a marker of the same instant');
   assert.equal(tied([ABORT(expiry)]), 'ABORTED', 'an abort beats an expiry of the same instant');
+
+  // Heartbeats of one instant report the highest step, whatever their order in the log.
+  for (const steps of [['L3', 'L4'], ['L4', 'L3'], ['L9', 'L10'], ['L10', 'L9']]) {
+    const answer = replay([...steps.map((step) => HB(4 * MINUTE, step)), ABORT(5 * MINUTE)], at(6 * MINUTE));
+    assert.equal(answer.compensation.lastStep, steps.includes('L10') ? 'L10' : 'L4', steps.join(','));
+  }
+
+  // The promise holds while events land in the order of their instants. One stamped earlier that
+  // lands later reopens what an earlier replay decided, so the caller keeps the first decision.
+  const before = replay([HB(3 * MINUTE)], at(8 * MINUTE));
+  assert.equal(`${before.decision}@${before.decisiveAt}`, `HEARTBEAT_TIMEOUT@${at(8 * MINUTE)}`);
+  assert.equal(replay([HB(3 * MINUTE), HB(8 * MINUTE - 1)], at(11 * MINUTE)).decision, 'CONTINUE');
 });
 
-test('an instant before the start counts at the start, so skew never blocks the deadline', () => {
+test('a heartbeat or an abort before the start counts at the start, so skew never blocks the deadline', () => {
   const preStartAbort = decide({ observation: { ...QUIET, abortOrderedAt: at(-1) }, now: at(31 * MINUTE) });
   assert.equal(preStartAbort.decision, 'ABORTED');
   assert.equal(preStartAbort.decisiveAt, at(0), 'a pending abort aborts the attempt as it starts');
+  assert.equal(replay([ABORT(-MINUTE)], at(31 * MINUTE)).decisiveAt, at(0));
 
   const skewedBeat = decide({ observation: { ...QUIET, heartbeat: beat(-1) }, now: at(31 * MINUTE) });
   assert.equal(skewedBeat.decision, 'HEARTBEAT_TIMEOUT', 'a hung lane is still timed out');
   assert.equal(skewedBeat.decisiveAt, at(ATTEMPT.heartbeatTimeoutMs));
   assert.equal(replay([HB(-1)], at(31 * MINUTE)).decision, 'HEARTBEAT_TIMEOUT');
+});
+
+test('a marker from before the start never completes the attempt and is reported as stale', () => {
+  // An earlier attempt wrote it: it says nothing about this one.
+  const leftover = { ...QUIET, markerSeenAt: at(-10 * MINUTE) };
+  const early = decide({ observation: leftover, now: at(MINUTE) });
+  assert.equal(`${early.decision}@${early.staleMarkerAt}`, `CONTINUE@${at(-10 * MINUTE)}`);
+  const hung = decide({ observation: leftover, now: at(6 * MINUTE) });
+  assert.equal(`${hung.decision}@${hung.decisiveAt}`, `HEARTBEAT_TIMEOUT@${at(5 * MINUTE)}`);
+  assert.equal(hung.staleMarkerAt, at(-10 * MINUTE));
+  assert.equal(hung.compensation.lateMarkerAt, null, 'a stale marker is not a late one');
+  assert.deepEqual(hung.compensation.undo, ['STOP_ATTEMPT_PROCESS', 'RELEASE_LANE_SLOT', 'DISCARD_UNVERIFIED_OUTPUT']);
+
+  const replayed = replay([MARKER(-MINUTE), MARKER(-10 * MINUTE)], at(MINUTE));
+  assert.equal(`${replayed.decision}@${replayed.staleMarkerAt}`, `CONTINUE@${at(-10 * MINUTE)}`,
+    'replay reports the first stale marker');
+  const fresh = replay([MARKER(-10 * MINUTE), HB(MINUTE), MARKER(2 * MINUTE)], at(3 * MINUTE));
+  assert.equal(`${fresh.decision}@${fresh.decisiveAt}`, `COMPLETE@${at(2 * MINUTE)}`,
+    'the attempt\'s own marker still counts');
+  assert.equal(fresh.staleMarkerAt, at(-10 * MINUTE));
+
+  // A marker exactly at the start is this attempt's.
+  assert.equal(decide({ observation: { ...QUIET, markerSeenAt: at(0) }, now: at(MINUTE) }).decision, 'COMPLETE');
+  assert.equal(replay([MARKER(0)], at(MINUTE)).staleMarkerAt, null);
 });
 
 test('malformed calls, attempts, observations and events are refused with named codes', () => {
@@ -333,15 +372,29 @@ test('every input field is read once, so what is validated is what is decided', 
   assert.equal(reads, 1);
   assert.equal(decision.laneId, 'lane-180');
   assert.equal(decision.compensation.laneId, 'lane-180');
+
+  // The log's length is read once: entries a getter appends while it is read are not decided.
+  const log = [HB(MINUTE)];
+  Object.defineProperty(log, 0, {
+    enumerable: true,
+    get() { log.push(ABORT(MINUTE)); return HB(MINUTE); },
+  });
+  assert.equal(replay(log, at(2 * MINUTE)).decision, 'CONTINUE');
 });
+
+const FORBIDDEN = [
+  /\bimport\b/u, /\brequire\b/u, /\bglobalThis\b/u, /\bprocess\b/u, /\bfetch\b/u, /Math\.random/u,
+  /\bcrypto\b/u, /\bperformance\b/u, /\bIntl\b/u, /\bset(?:Timeout|Interval|Immediate)\b/u, /\beval\b/u,
+  /\bFunction\s*\(/u,
+];
 
 /** Code that reaches a clock, a process, the network, randomness or another module. */
 function breaksPurity(source) {
-  const code = source.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/^\s*\/\/.*$/gmu, '');
-  const forbidden = /\bimport\b|\brequire\b|\bglobalThis\b|\bprocess\b|\bfetch\b|Math\.random|\bcrypto\b|\bperformance\b|\bIntl\b|\bset(?:Timeout|Interval|Immediate)\b|\beval\b|\bFunction\s*\(/u;
+  // Only comments that open a line are dropped: a '/*' inside a string or a regex stays code.
+  const code = source.replace(/^\s*\/\*[\s\S]*?\*\//gmu, '').replace(/^\s*\/\/.*$/gmu, '');
   // The only clock-shaped uses allowed parse or format a caller-supplied instant.
   const dateUses = code.replaceAll('Date.parse(value)', '').replaceAll('new Date(ms)', '');
-  return forbidden.test(code) || /\bDate\b/u.test(dateUses);
+  return FORBIDDEN.some((pattern) => pattern.test(code)) || /\bDate\b/u.test(dateUses);
 }
 
 test('NEGATIVE CONTROL: the module reads no clock, spawns nothing and imports nothing', () => {
@@ -355,5 +408,12 @@ test('NEGATIVE CONTROL: the module reads no clock, spawns nothing and imports no
     "fetch('https://example.invalid');", 'setImmediate(() => {});', 'performance.now();',
   ]) {
     assert.equal(breaksPurity(`${source}\n${leak}\n`), true, `the control rejects ${leak}`);
+  }
+  // A '/*' in a string or a regex must not hide the code after it up to the next comment's end.
+  for (const leak of [
+    "const GLOB = 'lanes/*.jsonl'; Date.now();", "const SEP = '/*'; globalThis.process.hrtime();",
+    '/a\\/*b/u; Date.now();',
+  ]) {
+    assert.equal(breaksPurity(`${leak}\n${source}`), true, `the control sees ${leak} before a comment`);
   }
 });

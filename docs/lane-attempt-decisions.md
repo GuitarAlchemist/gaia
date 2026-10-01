@@ -28,9 +28,15 @@ replayLaneAttempt({ attempt, events, now })        // from the attempt's event l
 
 Instants are ISO-8601 UTC, to the second or the millisecond.
 
-- **Before the start.** An observed instant before the attempt's start counts at the start. Clock
-  skew between the lane and the coordinator therefore never stops the deadline or the timeout
-  from deciding, and an abort ordered before the attempt started aborts it as it starts.
+- **Before the start.** A heartbeat or an abort order observed before the attempt's start counts
+  at the start. Clock skew between the lane and the coordinator therefore never stops the deadline
+  or the timeout from deciding, and an abort ordered before the attempt started aborts it as it
+  starts.
+- **A marker before the start** was left by an earlier attempt, for instance one that wrote its
+  marker and then exited non-zero. It never completes this attempt. The decision reports it as
+  `staleMarkerAt` (in a log, the first such marker), whatever it decides. The module cannot tell a
+  leftover marker first seen after the start from a new one, so the caller scopes markers to the
+  attempt or removes them before starting the next.
 - **After `now`.** An observed instant after `now` is refused. Read the observation or the log
   first, then take `now`.
 - **Read once.** Every input field is read once, so what is validated is what is decided.
@@ -59,9 +65,17 @@ Among the instants at or before `now`, **the earliest decides**. If none has com
   a timeout that had already fallen due.
 - **The log keeps it.** `replayLaneAttempt` judges each observed instant before folding in its
   heartbeat. Events of one instant are judged together, so ties keep their precedence, whatever
-  their order in the log. The first terminal decision stands. So for one log, every `now` from the
-  instant a decision fell due gives that same decision, however rarely the caller asks or however
-  often it restarts and replays.
+  their order in the log; heartbeats of one instant report the highest step among them. The first
+  terminal decision stands. So for one log, every `now` from the instant a decision fell due gives
+  that same decision, however rarely the caller asks.
+- **Persist the first terminal decision.** That promise holds only while events land in the order
+  of their instants. The bus stamps an event before it takes the log lock
+  (`src/mcp-server.mjs`), so a slow writer can land a heartbeat stamped 7:59 after a replay at 8:00
+  has already timed the attempt out, and a later replay then continues it. The caller persists the
+  first terminal decision it acts on and never derives it again, after a restart included.
+- **The log is bounded.** A log of more than 65,536 events is refused whole, the deadline
+  included. Size the heartbeat interval to the attempt: a heartbeat every second fills the bound in
+  about 18 hours, one every five seconds in about 91.
 - **Late markers.** A marker that arrives after the attempt has already ended is reported as
   `lateMarkerAt`, never read as completion.
 
@@ -85,6 +99,19 @@ wrote its marker and then exits non-zero leaves through `T_EXIT_ERROR`.
 A test compares this map with `LANE_NET_TEMPLATE`, reading each arc by its place whether it is
 written as a name or as `{ place, weight }`. If a transition out of `L_ATTEMPT_RUNNING` is added
 later, the test fails until the transition is mapped and `UNMAPPED` shrinks.
+
+## The decision
+
+Each call returns a frozen `gaia-lane-attempt-decision/1` record:
+
+| Field | Meaning |
+| --- | --- |
+| `laneId`, `attemptNumber`, `decidedAt` | the attempt, and the caller's `now` |
+| `decision`, `decisiveAt` | one of the five decisions, and the instant that decided it (`null` for `CONTINUE`) |
+| `transition` | `T_EXIT_CLEAN` for `COMPLETE`, otherwise `null` |
+| `nextDueAt` | for `CONTINUE`, the earlier of the deadline and the heartbeat expiry |
+| `staleMarkerAt` | a marker observed before the start, which never decides |
+| `compensation` | the record below, for every terminal decision other than `COMPLETE` |
 
 ## The compensation record
 

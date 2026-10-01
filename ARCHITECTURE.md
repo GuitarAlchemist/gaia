@@ -79,7 +79,7 @@ only in the final column and must not escape in a result or refusal.
 | Continuity successor tracer | `accept(input) -> receipt or refusal`; `replace(input) -> receipt or refusal`; `deliverWake(input) -> receipt or refusal`; `consume(input) -> portable receipt or refusal`; `inspect(input) -> projection or refusal` | One Work Identity owns one successor slot; only generation 0 may be replaced by generation 1. Revisioned transitions replay exact response bytes, evidence age never moves backward, and no decision is admitted before one exact bus wake is durably reconciled. The post-consumption receipt is authority-empty and cannot grant implementation or merge authority | Node SQLite WAL store with serialized transitions; bus evidence cursor/checkpoint/idempotent-send adapter over the existing event log; ecosystem-neutral JSON Schema and bounded fixtures; Demerzel read-only validator |
 | Lane generation bootstrap | `bootstrapLaneGeneration(manifest, ports) -> receipt or refusal`; `verifyLaneLaunchReceipt(receipt) -> receipt or refusal` | Work-scoped execution exclusion, topology before spawn, verified launch receipt, and recoverable CAS cleanup intent | deterministic shared-instance in-memory generation store; deterministic lane-adapter fixture; production exclusion not shipped |
 | Resume-prompt check | `checkResumePrompt(prompt, manifest, observation) -> verdict or refusal`; `observeResumeWorld(manifest) -> observation or refusal` | A lane prompt's declared subject worktree, generation, base pin and the upstream artifacts naming its entry are compared with one fresh observation before any spawn or resume. The text must carry each declared binding, repeated text carries no weight, every disagreement is a named refusal, and agreement grants no authority | read-only Git worktree, live remote and artifact-file observation adapter; read-only CLI; deterministic in-memory fixtures |
-| Lane-attempt decisions | `decideLaneAttempt({ attempt, observation, now }) -> decision or refusal`; `replayLaneAttempt({ attempt, events, now }) -> decision or refusal` | One running attempt's deadline, heartbeat timeout, abort and completion, decided by the earliest due instant over a caller-supplied clock; a replayed event log keeps its first terminal decision at every later `now`; every non-completing end carries a compensation record that describes work and performs none; decisions the shipped lane net cannot carry are listed as `UNMAPPED` | none yet: the lane runner of issue #103 is the caller; deterministic fake-clock fixtures |
+| Lane-attempt decisions | `decideLaneAttempt({ attempt, observation, now }) -> decision or refusal`; `replayLaneAttempt({ attempt, events, now }) -> decision or refusal` | One running attempt's deadline, heartbeat timeout, abort and completion, decided by the earliest due instant over a caller-supplied clock; a replayed event log keeps its first terminal decision at every later `now` while events land in the order of their instants, and the caller persists that decision; every non-completing end carries a compensation record that describes work and performs none; decisions the shipped lane net cannot carry are listed as `UNMAPPED` | none yet: the lane runner of issue #103 is the caller; deterministic fake-clock fixtures |
 | Control room | `render(snapshot, observed instant) -> read model` | Authority-free operator projection | static HTML/dashboard; in-memory snapshots |
 | Hybrid search | `index(corpus)`; `query(request) -> matches or refusal` | Advisory retrieval with provenance | local JavaScript engine; optional IX embedding input |
 | Architecture drift | `checkArchitectureDrift(inventory) -> report or refusal` | Normalized repository inventory | filesystem inventory; deterministic in-memory inventory |
@@ -148,12 +148,15 @@ Once an attempt runs, `src/lane-attempt.mjs` decides whether it continues, compl
 its deadline, went quiet past its heartbeat timeout, or was aborted. The earliest due instant
 decides. Replayed from the attempt's event log, each instant is judged before its heartbeat is
 folded in, so the first terminal decision stands at every later `now`, however rarely the caller
-asks or often it restarts; a snapshot of the last heartbeat alone cannot promise that. Every
-non-completing end carries a compensation record naming what to stop, release once, discard or
-quarantine, and report; the module performs none of it. Only completion maps to a lane-net
-transition (`T_EXIT_CLEAN`, which still fires only on an observed `exit=0`): the shipped net cannot
-carry a deadline, a heartbeat timeout or an abort out of a running attempt, and those decisions
-are listed as `UNMAPPED` until issue #103 adds the transitions. See
+asks; a snapshot of the last heartbeat alone cannot promise that. The bus stamps an event before it
+takes the log lock, so an event can land after a later one, and the caller therefore persists the
+first terminal decision it acts on. A marker observed before the start belongs to an earlier
+attempt: it never completes this one and is reported as stale. Every non-completing end carries a
+compensation record naming what to stop, release once, discard or quarantine, and report; the
+module performs none of it. Only completion maps to a lane-net transition (`T_EXIT_CLEAN`, which
+still fires only on an observed `exit=0`): the shipped net cannot carry a deadline, a heartbeat
+timeout or an abort out of a running attempt, and those decisions are listed as `UNMAPPED` until
+issue #103 adds the transitions. See
 [`docs/lane-attempt-decisions.md`](docs/lane-attempt-decisions.md).
 
 The principal operation lifecycle is observation -> eligible claim -> intent -> effect started ->

@@ -23,11 +23,15 @@
  * `LANE_ATTEMPT_PRECEDENCE` order, failures before completion, so a marker written at the deadline
  * instant does not complete the attempt. For one snapshot, asking later gives the same decision
  * once every instant is past. For one event log, replay gives the same terminal decision at every
- * `now` from the instant it fell due, however rarely the caller asks.
+ * `now` from the instant it fell due, however rarely the caller asks, as long as no event lands
+ * later with an earlier instant. The bus stamps an event before it takes the log lock, so one can:
+ * the caller persists the first terminal decision it acts on and never derives it again.
  *
- * An observed instant before the attempt's start counts at the start, so clock skew between the
- * lane and the coordinator never blocks the deadline. An instant after `now` is refused: read the
- * observation first, then take `now`.
+ * A heartbeat or an abort order observed before the attempt's start counts at the start, so clock
+ * skew between the lane and the coordinator never blocks the deadline. A marker observed before
+ * the start was left by an earlier attempt: it never completes this one, and the decision reports
+ * it as `staleMarkerAt`. An instant after `now` is refused: read the observation first, then take
+ * `now`.
  *
  * WHAT THE NET CAN CARRY
  * ----------------------
@@ -167,38 +171,55 @@ function readAttempt(value) {
   };
 }
 
-/** An observed instant: refused after `now`, counted at the start when it is earlier. */
-function observedMs(value, run, nowMs, detail) {
+/** An observed instant, refused after `now`. */
+function observedMs(value, nowMs, detail) {
   const ms = instantMs(value, detail);
   if (ms > nowMs) refuse('ObservationOutOfRange', detail);
-  return Math.max(ms, run.startedAt);
+  return ms;
 }
+
+/** A heartbeat or an abort order observed before the start counts at the start. */
+const fromStart = (ms, run) => Math.max(ms, run.startedAt);
+
+/** The step a heartbeat reported, as a number: `L12` is 12. */
+const stepNumber = (step) => Number(step.slice(1));
 
 function readStep(value) {
   if (typeof value !== 'string' || !STEP.test(value)) refuse('InvalidHeartbeatStep');
   return value;
 }
 
+/** A snapshot, and a marker it holds from before the start, which belongs to no running attempt. */
 function readObservation(value, run, nowMs) {
   const observation = readFields(value, ['heartbeat', 'markerSeenAt', 'abortOrderedAt'], 'InvalidObservation');
   let heartbeat = null;
   if (observation.heartbeat !== null) {
     const fields = readFields(observation.heartbeat, ['at', 'step'], 'InvalidObservation');
     const step = readStep(fields.step);
-    heartbeat = { at: observedMs(fields.at, run, nowMs, 'heartbeat.at'), step };
+    heartbeat = { at: fromStart(observedMs(fields.at, nowMs, 'heartbeat.at'), run), step };
   }
-  const optional = (field, detail) => (field === null ? null : observedMs(field, run, nowMs, detail));
+  const optional = (field, detail) => (field === null ? null : observedMs(field, nowMs, detail));
+  const marker = optional(observation.markerSeenAt, 'markerSeenAt');
+  const abort = optional(observation.abortOrderedAt, 'abortOrderedAt');
+  const stale = marker !== null && marker < run.startedAt;
   return {
-    heartbeat,
-    markerSeenAt: optional(observation.markerSeenAt, 'markerSeenAt'),
-    abortOrderedAt: optional(observation.abortOrderedAt, 'abortOrderedAt'),
+    seen: {
+      heartbeat,
+      markerSeenAt: stale ? null : marker,
+      abortOrderedAt: abort === null ? null : fromStart(abort, run),
+    },
+    staleMarkerAt: stale ? marker : null,
   };
 }
 
-function readEvents(value, run, nowMs) {
-  if (!Array.isArray(value) || value.length > MAX_LANE_ATTEMPT_EVENTS) refuse('InvalidEvents');
+/** The log sorted by instant, each instant as observed: nothing is moved to the start here. */
+function readEvents(value, nowMs) {
+  if (!Array.isArray(value)) refuse('InvalidEvents');
+  // Read once: a log that grows while it is read is decided as it stood at the bound check.
+  const length = value.length;
+  if (length > MAX_LANE_ATTEMPT_EVENTS) refuse('InvalidEvents');
   const events = [];
-  for (let index = 0; index < value.length; index += 1) {
+  for (let index = 0; index < length; index += 1) {
     const entry = value[index];
     const kind = entry !== null && typeof entry === 'object' ? entry.kind : undefined;
     if (typeof kind !== 'string' || !Object.hasOwn(EVENT_KEYS, kind)) refuse('InvalidEvent', `events[${index}]`);
@@ -206,7 +227,7 @@ function readEvents(value, run, nowMs) {
     if (fields.kind !== kind) refuse('InvalidEvent', `events[${index}]`);
     events.push({
       kind,
-      at: observedMs(fields.at, run, nowMs, `events[${index}].at`),
+      at: observedMs(fields.at, nowMs, `events[${index}].at`),
       step: kind === 'HEARTBEAT' ? readStep(fields.step) : null,
     });
   }
@@ -259,12 +280,14 @@ function compensationFor(decision, decisiveAt, run, seen, lateMarkerAt) {
   };
 }
 
-function decisionAt(run, seen, nowMs, lateMarkerAt) {
+function decisionAt(run, seen, nowMs, { lateMarkerAt, staleMarkerAt }) {
   const base = {
     schema: LANE_ATTEMPT_DECISION_SCHEMA,
     laneId: run.laneId,
     attemptNumber: run.attemptNumber,
     decidedAt: iso(nowMs),
+    // A marker from before the start never decides; it is reported whatever the decision.
+    staleMarkerAt: staleMarkerAt === null ? null : iso(staleMarkerAt),
   };
   const due = firstDue(run, seen, nowMs);
   if (due === null) {
@@ -295,23 +318,28 @@ export function decideLaneAttempt(input) {
   const run = readAttempt(call.attempt);
   const nowMs = instantMs(call.now, 'now');
   if (nowMs < run.startedAt) refuse('NowBeforeStart');
-  const seen = readObservation(call.observation, run, nowMs);
-  return decisionAt(run, seen, nowMs, seen.markerSeenAt);
+  const { seen, staleMarkerAt } = readObservation(call.observation, run, nowMs);
+  return decisionAt(run, seen, nowMs, { lateMarkerAt: seen.markerSeenAt, staleMarkerAt });
 }
 
 /**
  * Decide one running lane attempt from its event log at the caller's `now`. Events are
  * `{ kind: 'HEARTBEAT', at, step }`, `{ kind: 'MARKER', at }` or `{ kind: 'ABORT', at }`, in any
  * order. At each observed instant, its markers and aborts are folded in and the instant is judged
- * against the heartbeat before it; only then does a heartbeat of that instant replace it. The first
- * terminal decision stands.
+ * against the heartbeat before it; only then does a heartbeat of that instant replace it, the
+ * highest step if several share the instant. The first terminal decision stands.
  */
 export function replayLaneAttempt(input) {
   const call = readFields(input, ['attempt', 'events', 'now'], 'InvalidCall');
   const run = readAttempt(call.attempt);
   const nowMs = instantMs(call.now, 'now');
   if (nowMs < run.startedAt) refuse('NowBeforeStart');
-  const events = readEvents(call.events, run, nowMs);
+  const observed = readEvents(call.events, nowMs);
+  const isStale = (event) => event.kind === 'MARKER' && event.at < run.startedAt;
+  const staleMarkerAt = observed.find(isStale)?.at ?? null;
+  // Moving an instant up to the start keeps the log sorted.
+  const events = observed.filter((event) => !isStale(event))
+    .map((event) => ({ ...event, at: fromStart(event.at, run) }));
 
   let seen = { heartbeat: null, markerSeenAt: null, abortOrderedAt: null };
   for (let index = 0; index < events.length;) {
@@ -322,12 +350,14 @@ export function replayLaneAttempt(input) {
       const event = events[index];
       if (event.kind === 'MARKER') seen = { ...seen, markerSeenAt: instant };
       else if (event.kind === 'ABORT') seen = { ...seen, abortOrderedAt: instant };
-      else heartbeat = { at: instant, step: event.step };
+      else if (heartbeat === null || stepNumber(event.step) > stepNumber(heartbeat.step)) {
+        heartbeat = { at: instant, step: event.step };
+      }
     }
     // Judge the instant against the heartbeat before it, then let its own heartbeat replace it.
     if (firstDue(run, seen, instant) !== null) break;
     if (heartbeat !== null) seen = { ...seen, heartbeat };
   }
-  const firstMarker = events.find((event) => event.kind === 'MARKER')?.at ?? null;
-  return decisionAt(run, seen, nowMs, firstMarker);
+  const lateMarkerAt = events.find((event) => event.kind === 'MARKER')?.at ?? null;
+  return decisionAt(run, seen, nowMs, { lateMarkerAt, staleMarkerAt });
 }
