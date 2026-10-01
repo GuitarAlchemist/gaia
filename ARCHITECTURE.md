@@ -79,6 +79,7 @@ only in the final column and must not escape in a result or refusal.
 | Continuity successor tracer | `accept(input) -> receipt or refusal`; `replace(input) -> receipt or refusal`; `deliverWake(input) -> receipt or refusal`; `consume(input) -> portable receipt or refusal`; `inspect(input) -> projection or refusal` | One Work Identity owns one successor slot; only generation 0 may be replaced by generation 1. Revisioned transitions replay exact response bytes, evidence age never moves backward, and no decision is admitted before one exact bus wake is durably reconciled. The post-consumption receipt is authority-empty and cannot grant implementation or merge authority | Node SQLite WAL store with serialized transitions; bus evidence cursor/checkpoint/idempotent-send adapter over the existing event log; ecosystem-neutral JSON Schema and bounded fixtures; Demerzel read-only validator |
 | Lane generation bootstrap | `bootstrapLaneGeneration(manifest, ports) -> receipt or refusal`; `verifyLaneLaunchReceipt(receipt) -> receipt or refusal` | Work-scoped execution exclusion, topology before spawn, verified launch receipt, and recoverable CAS cleanup intent | deterministic shared-instance in-memory generation store; deterministic lane-adapter fixture; production exclusion not shipped |
 | Resume-prompt check | `checkResumePrompt(prompt, manifest, observation) -> verdict or refusal`; `observeResumeWorld(manifest) -> observation or refusal` | A lane prompt's declared subject worktree, generation, base pin and the upstream artifacts naming its entry are compared with one fresh observation before any spawn or resume. The text must carry each declared binding, repeated text carries no weight, every disagreement is a named refusal, and agreement grants no authority | read-only Git worktree, live remote and artifact-file observation adapter; read-only CLI; deterministic in-memory fixtures |
+| Lane-attempt decisions | `decideLaneAttempt({ attempt, observation, now }) -> decision or refusal` | One running attempt's deadline, heartbeat timeout, abort and completion, decided by the earliest due instant over a caller-supplied clock; every non-completing end carries a compensation record that describes work and performs none; decisions the shipped lane net cannot carry are listed as `UNMAPPED` | none yet: the lane runner of issue #103 is the caller; deterministic fake-clock fixtures |
 | Control room | `render(snapshot, observed instant) -> read model` | Authority-free operator projection | static HTML/dashboard; in-memory snapshots |
 | Hybrid search | `index(corpus)`; `query(request) -> matches or refusal` | Advisory retrieval with provenance | local JavaScript engine; optional IX embedding input |
 | Architecture drift | `checkArchitectureDrift(inventory) -> report or refusal` | Normalized repository inventory | filesystem inventory; deterministic in-memory inventory |
@@ -142,6 +143,14 @@ reports every disagreement as a named refusal, writes nothing and grants nothing
 single entrypoint for the lane runner that issue #103 brings into the repository; until then an
 operator runs it before the out-of-tree launcher, and no runtime here spawns a lane from a prompt
 file.
+
+Once an attempt runs, `src/lane-attempt.mjs` decides whether it continues, completed, ran past
+its deadline, went quiet past its heartbeat timeout, or was aborted. The earliest due instant
+decides, so the answer does not depend on when the caller asks. Every non-completing end carries
+a compensation record naming what to stop, release, discard and report; the module performs none
+of it. Only completion maps to a lane-net transition (`T_EXIT_CLEAN`): the shipped net cannot
+carry a deadline, a heartbeat timeout or an abort out of a running attempt, and those decisions
+are listed as `UNMAPPED` until issue #103 adds the transitions.
 
 The principal operation lifecycle is observation -> eligible claim -> intent -> effect started ->
 reconciliation -> terminal receipt. Draft operations preserve `ENQUEUED`, `CLAIMED`, `INTENT`,
