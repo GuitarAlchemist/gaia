@@ -120,7 +120,8 @@ export class LaneAttemptError extends Error {
 const refuse = (code, detail = null) => { throw new LaneAttemptError(code, detail); };
 
 const LANE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-const STEP = /^L[0-9]{1,4}$/u;
+// No leading zeros, so one step has one spelling.
+const STEP = /^L(?:0|[1-9][0-9]{0,3})$/u;
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
 const EVENT_KEYS = Object.freeze({
   HEARTBEAT: ['at', 'kind', 'step'],
@@ -326,8 +327,9 @@ export function decideLaneAttempt(input) {
  * Decide one running lane attempt from its event log at the caller's `now`. Events are
  * `{ kind: 'HEARTBEAT', at, step }`, `{ kind: 'MARKER', at }` or `{ kind: 'ABORT', at }`, in any
  * order. At each observed instant, its markers and aborts are folded in and the instant is judged
- * against the heartbeat before it; only then does a heartbeat of that instant replace it, the
- * highest step if several share the instant. The first terminal decision stands.
+ * against the heartbeat before it; only then does a heartbeat of that instant replace it. If
+ * several share the instant, the one seen last stands, and among those seen at once the highest
+ * step. The first terminal decision stands.
  */
 export function replayLaneAttempt(input) {
   const call = readFields(input, ['attempt', 'events', 'now'], 'InvalidCall');
@@ -337,9 +339,9 @@ export function replayLaneAttempt(input) {
   const observed = readEvents(call.events, nowMs);
   const isStale = (event) => event.kind === 'MARKER' && event.at < run.startedAt;
   const staleMarkerAt = observed.find(isStale)?.at ?? null;
-  // Moving an instant up to the start keeps the log sorted.
+  // Moving an instant up to the start keeps the log sorted; `observedAt` keeps the instant as seen.
   const events = observed.filter((event) => !isStale(event))
-    .map((event) => ({ ...event, at: fromStart(event.at, run) }));
+    .map((event) => ({ ...event, observedAt: event.at, at: fromStart(event.at, run) }));
 
   let seen = { heartbeat: null, markerSeenAt: null, abortOrderedAt: null };
   for (let index = 0; index < events.length;) {
@@ -350,13 +352,16 @@ export function replayLaneAttempt(input) {
       const event = events[index];
       if (event.kind === 'MARKER') seen = { ...seen, markerSeenAt: instant };
       else if (event.kind === 'ABORT') seen = { ...seen, abortOrderedAt: instant };
-      else if (heartbeat === null || stepNumber(event.step) > stepNumber(heartbeat.step)) {
-        heartbeat = { at: instant, step: event.step };
+      // The log is sorted, so a heartbeat seen later replaces one seen earlier; among those seen
+      // at the same instant, the highest step stands.
+      else if (heartbeat === null || event.observedAt > heartbeat.observedAt
+          || stepNumber(event.step) > stepNumber(heartbeat.step)) {
+        heartbeat = { observedAt: event.observedAt, step: event.step };
       }
     }
     // Judge the instant against the heartbeat before it, then let its own heartbeat replace it.
     if (firstDue(run, seen, instant) !== null) break;
-    if (heartbeat !== null) seen = { ...seen, heartbeat };
+    if (heartbeat !== null) seen = { ...seen, heartbeat: { at: instant, step: heartbeat.step } };
   }
   const lateMarkerAt = events.find((event) => event.kind === 'MARKER')?.at ?? null;
   return decisionAt(run, seen, nowMs, { lateMarkerAt, staleMarkerAt });

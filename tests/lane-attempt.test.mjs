@@ -278,6 +278,12 @@ test('a replayed decision, once terminal, stands at every later now', () => {
     const answer = replay([...steps.map((step) => HB(4 * MINUTE, step)), ABORT(5 * MINUTE)], at(6 * MINUTE));
     assert.equal(answer.compensation.lastStep, steps.includes('L10') ? 'L10' : 'L4', steps.join(','));
   }
+  // Heartbeats moved up to the start report the one seen last, as a snapshot of them would.
+  for (const log of [[HB(-10 * MINUTE, 'L9'), HB(-1, 'L1')], [HB(-1, 'L1'), HB(-10 * MINUTE, 'L9')]]) {
+    assert.equal(replay(log, at(31 * MINUTE)).compensation.lastStep, 'L1');
+  }
+  assert.equal(decide({ observation: { ...QUIET, heartbeat: beat(-1, 'L1') }, now: at(31 * MINUTE) })
+    .compensation.lastStep, 'L1');
 
   // The promise holds while events land in the order of their instants. One stamped earlier that
   // lands later reopens what an earlier replay decided, so the caller keeps the first decision.
@@ -356,6 +362,7 @@ test('malformed calls, attempts, observations and events are refused with named 
   refused('InvalidEvent', log([{ kind: 'EXIT', at: at(0) }]), replayLaneAttempt);
   refused('InvalidEvent', log([{ kind: 'MARKER', at: at(0), step: 'L1' }]), replayLaneAttempt);
   refused('InvalidHeartbeatStep', log([{ kind: 'HEARTBEAT', at: at(0), step: 'L' }]), replayLaneAttempt);
+  refused('InvalidHeartbeatStep', log([HB(0, 'L010')]), replayLaneAttempt);
   refused('ObservationOutOfRange', log([HB(MINUTE + 1)]), replayLaneAttempt);
 
   assert.ok(LANE_ATTEMPT_REFUSAL_CODES.every((code) => /^[A-Z][A-Za-z]+$/u.test(code)));
@@ -390,6 +397,9 @@ const FORBIDDEN = [
 
 /** Code that reaches a clock, a process, the network, randomness or another module. */
 function breaksPurity(source) {
+  // A template literal spanning lines could start a line with '/*' or '//' and hide what follows,
+  // so the control reads only sources whose every line pairs its backticks.
+  if (source.split('\n').some((line) => line.split('`').length % 2 === 0)) return true;
   // Only comments that open a line are dropped: a '/*' inside a string or a regex stays code.
   const code = source.replace(/^\s*\/\*[\s\S]*?\*\//gmu, '').replace(/^\s*\/\/.*$/gmu, '');
   // The only clock-shaped uses allowed parse or format a caller-supplied instant.
@@ -415,5 +425,9 @@ test('NEGATIVE CONTROL: the module reads no clock, spawns nothing and imports no
     '/a\\/*b/u; Date.now();',
   ]) {
     assert.equal(breaksPurity(`${leak}\n${source}`), true, `the control sees ${leak} before a comment`);
+  }
+  for (const opener of ['/*', '//']) {
+    const leak = `const T = \`\n${opener} not a comment\`; const clock = () => Date.now();`;
+    assert.equal(breaksPurity(`${leak}\n${source}`), true, `the control sees past a template line ${opener}`);
   }
 });

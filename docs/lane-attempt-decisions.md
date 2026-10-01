@@ -65,9 +65,10 @@ Among the instants at or before `now`, **the earliest decides**. If none has com
   a timeout that had already fallen due.
 - **The log keeps it.** `replayLaneAttempt` judges each observed instant before folding in its
   heartbeat. Events of one instant are judged together, so ties keep their precedence, whatever
-  their order in the log; heartbeats of one instant report the highest step among them. The first
-  terminal decision stands. So for one log, every `now` from the instant a decision fell due gives
-  that same decision, however rarely the caller asks.
+  their order in the log. Of several heartbeats that count at one instant, the one seen last
+  stands (heartbeats moved up to the start keep their order), and of those seen at once, the
+  highest step. The first terminal decision stands. So for one log, every `now` from the instant a
+  decision fell due gives that same decision, however rarely the caller asks.
 - **Persist the first terminal decision.** That promise holds only while events land in the order
   of their instants. The bus stamps an event before it takes the log lock
   (`src/mcp-server.mjs`), so a slow writer can land a heartbeat stamped 7:59 after a replay at 8:00
@@ -141,7 +142,7 @@ Input the module cannot judge throws `LaneAttemptError`. Its code is one of the 
 | `DeadlineNotAfterStart` | the deadline is not after the start |
 | `InvalidHeartbeatTimeout` | the heartbeat timeout is not a positive whole number of milliseconds |
 | `InvalidObservation` | the observation, or its heartbeat, does not have exactly its keys |
-| `InvalidHeartbeatStep` | a heartbeat step is not `L<n>` |
+| `InvalidHeartbeatStep` | a heartbeat step is not `L<n>`, with `n` written without leading zeros |
 | `InvalidEvents` | the log is not an array, or holds more than 65,536 events |
 | `InvalidEvent` | an event has an unknown kind or not exactly its keys |
 | `NowBeforeStart` | `now` is before the start |
