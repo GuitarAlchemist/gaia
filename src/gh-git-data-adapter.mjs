@@ -241,6 +241,7 @@ function protectedLedgerRuleset(ruleset, pumpActor) {
     && types.has('deletion')
     && types.has('non_fast_forward')
     && types.has('update')
+    && types.has('creation')
     && (exactConfiguredActor || currentAppBypassWhenRedacted);
 }
 
