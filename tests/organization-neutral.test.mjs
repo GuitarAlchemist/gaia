@@ -1,64 +1,80 @@
 /**
  * organization-neutral.test.mjs — no core module names the organization it runs for (#183).
  *
- * Gaia has to stay usable by another organization (#49). These gates scan every `src/*.mjs` for
- * two kinds of identity literal: the owning organization's name, in any case, and a literal
- * `github.com/<owner>/<repo>` URL. A URL built from variables (`github.com/${owner}/…`) is not a
- * literal and is not reported. A hit fails the gate unless the allowlist below names its file and
- * the exact literal around it, with a written reason. docs/organization-neutral-core.md is the rule.
+ * Gaia has to stay usable by another organization (#49). These gates scan every file under `src/`,
+ * comments included, for two kinds of identity literal:
+ *   - the owning organization's name, in any case and anywhere, even inside a longer identifier;
+ *   - a literal GitHub owner: `github.com/<owner>`, `github.com:<owner>` (SSH),
+ *     `api.github.com/repos/<owner>` or `githubusercontent.com/<owner>`.
+ * A URL whose owner is built from inputs (`github.com/${owner}/…`) is not a literal and is not
+ * reported. A hit fails the gate unless the allowlist below names its file and the exact string
+ * literal around it, with a written reason. docs/organization-neutral-core.md is the rule.
  */
 
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const SRC = fileURLToPath(new URL('../src', import.meta.url));
 
-// The organization this repository is published under. Tests are not scanned, so this is the one
-// place the name is spelled out.
+// The organization this repository is published under. Tests are not scanned; everything below
+// that needs the name builds it from this constant.
 const OWNING_ORGANIZATION = 'GuitarAlchemist';
 
-const IDENTITY_PATTERNS = Object.freeze([
-  ['ORGANIZATION_NAME', new RegExp(`\\b${OWNING_ORGANIZATION}\\b`, 'giu')],
+/** Fresh patterns per scan, so no caller can leave a shared `lastIndex` behind. */
+const identityPatterns = () => [
+  ['ORGANIZATION_NAME', new RegExp(OWNING_ORGANIZATION, 'giu')],
   // An owner segment starts with a letter or a digit, so `github.com/${owner}` never matches.
-  ['REPOSITORY_URL', /\bgithub\.com\/[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+/giu],
-]);
+  ['GITHUB_OWNER', /\bapi\.github\.com\/repos\/[A-Za-z0-9][A-Za-z0-9-]*/giu],
+  ['GITHUB_OWNER', /(?<!\bapi\.)\bgithub\.com[/:][A-Za-z0-9][A-Za-z0-9-]*/giu],
+  ['GITHUB_OWNER', /\bgithubusercontent\.com\/[A-Za-z0-9][A-Za-z0-9-]*/giu],
+];
 
 // At most one entry, each with the reason it must stay verbatim. An entry no hit uses fails the
 // gate, so a literal that moves out of the core takes its exception with it.
 const ALLOWLIST = Object.freeze([
   Object.freeze({
     file: 'epistemic-research.mjs',
-    literal: 'https://github.com/GuitarAlchemist/Demerzel/schemas/contracts/epistemic-research-proposal-v0.1',
-    reason: 'A published contract identifier, not configuration. Demerzel owns the '
-      + 'epistemic-research-proposal schema and the receiver matches this URI verbatim; '
-      + 'another organization changing it would emit a different contract, not the same one '
-      + 'under its own name. Changing it is a contract version change.',
+    literal: `https://github.com/${OWNING_ORGANIZATION}/Demerzel/schemas/contracts/epistemic-research-proposal-v0.1`,
+    reason: 'A cross-repository contract identifier, not configuration. Demerzel\'s '
+      + 'epistemic-research-proposal schema pins this exact URI as its `$id` and as the `const` of '
+      + 'its `schema` property (GuitarAlchemist/Demerzel#994, still unmerged on 2026-10-01), so a '
+      + 'caller-supplied value would only be rejected by the receiver. Changing it is a contract '
+      + 'version change. Re-check this exception when that schema lands.',
   }),
 ]);
 
-/** Every identity literal in one module's text: one entry per match, with its 1-based line. */
+/** Every identity literal in one file's text, in reading order, with its 1-based line. */
 function scanIdentityLiterals(file, text) {
   const hits = [];
+  const patterns = identityPatterns();
   text.split(/\r?\n/u).forEach((source, index) => {
-    for (const [kind, pattern] of IDENTITY_PATTERNS) {
+    for (const [kind, pattern] of patterns) {
       for (const match of source.matchAll(pattern)) {
         hits.push({ file, line: index + 1, kind, text: match[0], column: match.index, source });
       }
     }
   });
-  return hits;
+  return hits.sort((left, right) => left.line - right.line || left.column - right.column);
 }
 
-/** The allowlist entry whose literal, in the same file, contains the whole hit; otherwise null. */
-function allowedBy(hit, allowlist = ALLOWLIST) {
+const QUOTES = new Set(["'", '"', '`']);
+
+/**
+ * The entry that excuses a hit: same file, and the hit lies wholly inside the entry's literal
+ * written as a complete string literal (`'…'`, `"…"` or `` `…` ``), not inside a longer string.
+ */
+function allowedBy(hit, allowlist) {
   return allowlist.find((entry) => {
     if (entry.file !== hit.file) return false;
+    const end = (at) => at + entry.literal.length;
     for (let at = hit.source.indexOf(entry.literal); at !== -1;
       at = hit.source.indexOf(entry.literal, at + 1)) {
-      if (at <= hit.column && hit.column + hit.text.length <= at + entry.literal.length) return true;
+      const quote = hit.source[at - 1];
+      if (QUOTES.has(quote) && hit.source[end(at)] === quote
+          && at <= hit.column && hit.column + hit.text.length <= end(at)) return true;
     }
     return false;
   }) ?? null;
@@ -78,54 +94,80 @@ function allowlistViolations(hits, allowlist) {
   return violations;
 }
 
+/** Every file under `src/`, at any depth, as a forward-slash path relative to it. */
+function sourceFiles() {
+  return readdirSync(SRC, { recursive: true })
+    .map((name) => String(name).replaceAll('\\', '/'))
+    .filter((name) => statSync(join(SRC, name)).isFile())
+    .sort();
+}
+
 const summary = (hits) => hits.map(({ line, kind, text }) => [line, kind, text]);
 
-test('the scanner reports an organization literal and a literal repository URL in a synthetic module', () => {
+test('the scanner reports the organization name and a literal GitHub owner in a synthetic module', () => {
+  const name = OWNING_ORGANIZATION;
   const fixture = [
-    "export const OWNER = 'guitaralchemist';",
+    `export const OWNER = '${name.toLowerCase()}';`,
+    `const ${name.toUpperCase()}_APP_ID = 1; const is${name}Repo = true;`,
+    `const ENCODED = 'github.com%2F${name}%2Fgaia';`,
     "const HOME = 'https://github.com/acme/widgets';",
+    "const SSH = 'git@github.com:acme/widgets.git'; const ONE = `https://github.com/acme/${repo}`;",
+    "const RAW = 'https://raw.githubusercontent.com/acme/widgets/main/x'; const API = 'https://api.github.com/repos/acme/widgets';",
     'const issue = `https://github.com/${owner}/${repo}/issues/${number}`;',
     "if (url.startsWith('https://github.com/')) return;",
     'const api = `https://api.github.com/repos/${repository}`;',
   ].join('\n');
 
-  assert.deepEqual(summary(scanIdentityLiterals('synthetic.mjs', fixture)), [
-    [1, 'ORGANIZATION_NAME', 'guitaralchemist'],
-    [2, 'REPOSITORY_URL', 'github.com/acme/widgets'],
-  ], 'any case of the name and any literal owner/repo URL are reported; templates are not');
+  const hits = scanIdentityLiterals('synthetic.mjs', fixture);
+  assert.deepEqual(summary(hits), [
+    [1, 'ORGANIZATION_NAME', name.toLowerCase()],
+    [2, 'ORGANIZATION_NAME', name.toUpperCase()],
+    [2, 'ORGANIZATION_NAME', name],
+    [3, 'ORGANIZATION_NAME', name],
+    [4, 'GITHUB_OWNER', 'github.com/acme'],
+    [5, 'GITHUB_OWNER', 'github.com:acme'],
+    [5, 'GITHUB_OWNER', 'github.com/acme'],
+    [6, 'GITHUB_OWNER', 'githubusercontent.com/acme'],
+    [6, 'GITHUB_OWNER', 'api.github.com/repos/acme'],
+  ],'any case of the name anywhere, and any literal owner, are reported; templated owners are not');
+  assert.ok(allowlistViolations(hits, ALLOWLIST).includes(
+    `UNEXPLAINED synthetic.mjs:1 ${name.toLowerCase()}`), 'the gate fails on the synthetic module');
 
-  const [entry] = ALLOWLIST;
-  const elsewhere = scanIdentityLiterals('another-module.mjs', `const SCHEMA = '${entry.literal}';`);
-  assert.equal(elsewhere.length, 2, 'the excused literal is still found in another file');
-  assert.deepEqual(elsewhere.map((hit) => allowedBy(hit)), [null, null],
+  const entry = { file: 'core.mjs', literal: 'https://github.com/acme/widgets', reason: 'a reason' };
+  const excused = (file, text) => scanIdentityLiterals(file, text).map((hit) => allowedBy(hit, [entry]) !== null);
+  assert.deepEqual(excused('core.mjs', `const A = '${entry.literal}';`), [true]);
+  assert.deepEqual(excused('other.mjs', `const A = '${entry.literal}';`), [false],
     'an exception covers its own file only');
-
-  const beside = scanIdentityLiterals(entry.file,
-    `const A = '${entry.literal}'; const B = 'GuitarAlchemist';`);
-  assert.deepEqual(beside.filter((hit) => allowedBy(hit) === null).map((hit) => hit.text),
-    ['GuitarAlchemist'], 'a second literal on the excused line is not excused');
+  assert.deepEqual(excused('core.mjs', `const A = '${entry.literal}'; const B = '${name}';`), [true, false],
+    'a second literal on the excused line is not excused');
+  assert.deepEqual(excused('core.mjs', `const A = '${entry.literal}-v2';`), [false],
+    'a longer string that merely contains the literal is not excused');
 });
 
-test('every src module is organization-neutral, with at most one reasoned exception', () => {
-  const modules = readdirSync(SRC).filter((name) => name.endsWith('.mjs')).sort();
-  assert.ok(modules.length > 0, 'src/ holds modules to scan');
-  const hits = modules.flatMap((name) => scanIdentityLiterals(name, readFileSync(join(SRC, name), 'utf8')));
+test('every src file is organization-neutral, with at most one reasoned exception', () => {
+  const files = sourceFiles();
+  assert.ok(files.length > 0, 'src/ holds files to scan');
+  const read = (file) => readFileSync(join(SRC, file), 'utf8');
+  const hits = files.flatMap((file) => scanIdentityLiterals(file, read(file)));
 
   assert.deepEqual(allowlistViolations(hits, ALLOWLIST), [],
     'an identity literal in src/ must become an input or carry the one allowlisted reason');
-  assert.ok(hits.length > 0 && hits.every((hit) => allowedBy(hit) === ALLOWLIST[0]),
-    'the scan does reach the excused literal, so the exception is in use');
+
+  // The scan reaches real modules: a literal planted in a copy of one is reported.
+  const planted = scanIdentityLiterals(files[0], `${read(files[0])}\nconst X = 'https://github.com/acme/widgets';\n`);
+  assert.ok(allowlistViolations(planted, []).some((violation) => violation.endsWith('github.com/acme')));
 });
 
 test('the allowlist refuses an unexplained hit, a second exception, a missing reason and a stale entry', () => {
   const hits = scanIdentityLiterals('core.mjs', "const HOME = 'https://github.com/acme/widgets';");
   const used = { file: 'core.mjs', literal: 'https://github.com/acme/widgets', reason: 'a reason' };
 
-  assert.deepEqual(allowlistViolations(hits, []), ['UNEXPLAINED core.mjs:1 github.com/acme/widgets']);
+  assert.deepEqual(allowlistViolations(hits, []), ['UNEXPLAINED core.mjs:1 github.com/acme']);
   assert.deepEqual(allowlistViolations(hits, [used]), [], 'one used, reasoned exception is sound');
   assert.deepEqual(allowlistViolations(hits, [{ ...used, reason: '  ' }]), ['NO_REASON core.mjs']);
   assert.deepEqual(allowlistViolations(hits, [used, { ...used, file: 'gone.mjs' }]),
     ['TOO_MANY_EXCEPTIONS 2', 'STALE gone.mjs']);
   assert.deepEqual(allowlistViolations([], [used]), ['STALE core.mjs'],
     'an exception whose literal left the core goes with it');
+  assert.deepEqual(allowlistViolations([], []), [], 'a core with no literal and no exception is sound');
 });
