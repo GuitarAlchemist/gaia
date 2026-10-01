@@ -14,9 +14,14 @@ const EPOCH_STATES = new Set(['CLAIMED', 'INTENT', 'EFFECT_STARTED']);
 const PRE_EFFECT_STATES = new Set(['ENQUEUED', 'CLAIMED', 'INTENT']);
 const READMISSION_REASON_LIMIT = 500;
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u;
-// An abandonment searches only once the run that started the effect has completed, and records a
-// search at least this long after that run's last update, so no create call of its can still land.
-const EXECUTOR_QUIET_SECONDS = 600;
+// An abandonment needs a search at least this long after the last update of the completed run
+// attempt that started the effect. `completed` alone does not stop that attempt's process: a
+// force-cancelled run, or one whose runner lost contact, reads completed while its process may
+// still call. Its credential does stop it: the create call needs the pump App installation token
+// the attempt minted, GitHub expires that token an hour after minting, and minting precedes the
+// attempt's last update. Five more minutes cover clock skew and a request in flight. Pinned for V0
+// records: every later version reads them against this bound, and may only wait longer to write.
+const ABANDONMENT_V0_QUIET_SECONDS = 3900;
 const REGISTRY_WRITE_ATTEMPTS = 3;
 const ADMISSION_RETRY_PAUSE_MS = 2000;
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u;
@@ -314,7 +319,7 @@ function validateOperatorProvenance(input, code) {
 }
 
 function requireInstant(value, code) {
-  if (typeof value !== 'string' || !INSTANT.test(value)
+  if (typeof value !== 'string' || !INSTANT.test(value) || !Number.isFinite(Date.parse(value))
     || new Date(value).toISOString().replace('.000Z', 'Z') !== value) {
     throw new DraftOperationError(code);
   }
@@ -337,9 +342,33 @@ function executorRunOf(value, executorEpoch, code) {
   ]);
 }
 
-/** A search observed long enough after the executor's last update that its create cannot follow. */
+/** A search observed long enough after the executor's last update that its token has expired. */
 function quietSince(updatedAt, observedAt) {
-  return Date.parse(observedAt) - Date.parse(updatedAt) >= EXECUTOR_QUIET_SECONDS * 1000;
+  return Date.parse(observedAt) - Date.parse(updatedAt) >= ABANDONMENT_V0_QUIET_SECONDS * 1000;
+}
+
+/**
+ * An ABANDONED body as the ledger reads it: the evidence of this operation's empty search at the
+ * ambiguous revision it follows, the executor run that had completed and gone quiet before that
+ * search, and the dispatch that asked. The Git Data store runs this on every read, and a settlement
+ * runs it on the body before writing, so nothing is written that a later read would refuse.
+ */
+function readAbandonment({ identity, envelope, priorCommittedRevision, executorEpoch, body }, code) {
+  let settlement;
+  try {
+    settlement = validateAbandonmentEvidence({
+      operation: ambiguousOperation(identity, envelope, priorCommittedRevision),
+      evidence: body.settlement,
+    });
+  } catch {
+    throw new DraftOperationError(code);
+  }
+  const executorRun = executorRunOf(body.executorRun, executorEpoch, code);
+  if (executorRun.status !== 'completed'
+    || !quietSince(executorRun.updatedAt, settlement.lookup.observedAt)) {
+    throw new DraftOperationError(code);
+  }
+  return { settlement, executorRun, provenance: validateOperatorProvenance(body.provenance, code) };
 }
 
 /** The root of a successor chain, built from the refused snapshot it follows. */
@@ -775,25 +804,11 @@ function validateOperationRecord(record, identity, envelope, previous, executorE
   }
   if (body.kind === 'ABANDONED') {
     requireExactKeys(body, [...common, 'settlement', 'executorRun', 'provenance'], 'LedgerCorrupt');
-    // The evidence must be this operation's empty search at the ambiguous revision it follows, run
-    // after the attempt that started the effect had completed and gone quiet.
-    let settlement;
-    try {
-      settlement = validateAbandonmentEvidence({
-        operation: ambiguousOperation(identity, envelope, body.priorCommittedRevision),
-        evidence: body.settlement,
-      });
-    } catch {
-      throw new DraftOperationError('LedgerCorrupt');
-    }
-    const executorRun = executorRunOf(body.executorRun, executorEpoch, 'LedgerCorrupt');
-    if (executorRun.status !== 'completed'
-      || !quietSince(executorRun.updatedAt, settlement.lookup.observedAt)) {
-      throw new DraftOperationError('LedgerCorrupt');
-    }
     return {
-      outcome: 'ABANDONED', settlement, executorRun,
-      provenance: validateOperatorProvenance(body.provenance, 'LedgerCorrupt'),
+      outcome: 'ABANDONED',
+      ...readAbandonment({
+        identity, envelope, priorCommittedRevision: body.priorCommittedRevision, executorEpoch, body,
+      }, 'LedgerCorrupt'),
       committedRevision: record.committedRevision,
     };
   }
@@ -1612,9 +1627,10 @@ export async function readmitDraft(operationId, expectedCommittedRevision, prove
  * be inside the create call, so nothing is searched until Actions reports it completed. Only then
  * is the marker searched (`ports.searchMarker`), bound to the revision read, and
  * decideAmbiguousSettlement makes the call. Only a Draft found absent is written here, and only by
- * a search at least EXECUTOR_QUIET_SECONDS after that attempt's last update: ABANDONED, carrying
- * the decision's evidence, the executor run and the dispatch that asked, by compare-and-swap at the
- * same revision, so any move since the read loses. A Draft found is left to reconcileDraft, whose
+ * a search at least ABANDONMENT_V0_QUIET_SECONDS after that attempt's last update: ABANDONED,
+ * carrying the decision's evidence, the executor run and the dispatch that asked, checked first by
+ * the ledger's own reader, then appended by compare-and-swap at the same revision, so any move since
+ * the read loses. A Draft found is left to reconcileDraft, whose
  * own exact lookup adopts it as REUSED; anything short of that leaves the operation as it is.
  * Nothing here creates, retries or cancels an effect, and the only caller is an operator-dispatched
  * run.
@@ -1691,6 +1707,13 @@ export async function settleAmbiguousDraft(operationId, expectedCommittedRevisio
   if (!quietSince(executorRun.updatedAt, decided.evidence.lookup.observedAt)) {
     return { kind: 'ExecutorUnfinished', ...planned, reason: 'ExecutorRunRecentlyActive' };
   }
+  // The ledger's reader checks the body before it exists, so a drift between the decision and the
+  // reader stops here rather than as a corrupt record that halts every intake.
+  readAbandonment({
+    identity, envelope, priorCommittedRevision: snapshot.committedRevision,
+    executorEpoch: snapshot.executorEpoch,
+    body: { settlement: decided.evidence, executorRun, provenance: dispatch },
+  }, 'InvalidSettlement');
   if (!apply) return { kind: 'AbandonmentPlanned', ...planned };
   const appended = await capabilities.append(
     operationId, snapshot.committedRevision, 'ABANDONED',

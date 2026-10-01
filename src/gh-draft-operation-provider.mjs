@@ -484,6 +484,9 @@ export function createGhMarkerLookup({ expectedRepository, now, run = defaultRun
       }
       const headRef = branch(requestInput.headRef, code);
       const marker = operationMarker(requestInput.marker, code);
+      // The instant is read just before the list is requested: whatever rows come back, GitHub
+      // answered no earlier than this, however long the call then takes.
+      let listedAt = null;
       const lookup = (repositoryCheck, outcome, candidates) => Object.freeze({
         schema: 'GaiaDraftMarkerLookupV0',
         committedRevision: requestInput.committedRevision,
@@ -492,7 +495,7 @@ export function createGhMarkerLookup({ expectedRepository, now, run = defaultRun
         headRef,
         marker,
         search: { state: 'all', limit: 100 },
-        observedAt: observedAt(),
+        observedAt: listedAt ?? observedAt(),
         outcome,
         candidates,
       });
@@ -508,6 +511,7 @@ export function createGhMarkerLookup({ expectedRepository, now, run = defaultRun
         if (observed.id !== expected.nodeId || observed.nameWithOwner !== repositoryName) {
           return lookup(repositoryCheck, 'ERRORED', []);
         }
+        listedAt = observedAt();
         const candidates = parseJson(await invoke(
           'pr', 'list', '--repo', repositoryName, '--state', 'all',
           '--head', headRef, '--limit', '100', '--json',

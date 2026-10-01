@@ -39,8 +39,10 @@ const PROVENANCE = Object.freeze({
 });
 const OBSERVED_AT = '2026-09-30T12:00:00Z';
 const EXECUTOR = Object.freeze({ runId: 16100, runAttempt: 1 });
-// The attempt that wrote EFFECT_STARTED, completed an hour before the search.
-const COMPLETED_RUN = Object.freeze({ ...EXECUTOR, status: 'completed', updatedAt: '2026-09-30T11:00:00Z' });
+// The attempt that wrote EFFECT_STARTED, completed two hours before the search.
+const COMPLETED_RUN = Object.freeze({ ...EXECUTOR, status: 'completed', updatedAt: '2026-09-30T10:00:00Z' });
+// An hour of installation-token life after the attempt's last update, and five minutes more.
+const QUIET_SECONDS = 3900;
 const secondsBeforeSearch = (seconds) => new Date(Date.parse(OBSERVED_AT) - seconds * 1000)
   .toISOString().replace('.000Z', 'Z');
 
@@ -492,9 +494,10 @@ test('nothing is searched or abandoned until the run that started the effect has
       }
     }
 
-    // Completed, but searched within ten minutes of its last update: a create it sent could
-    // still land, so even an empty search abandons nothing.
-    const recent = searcher(undefined, () => ({ ...COMPLETED_RUN, updatedAt: secondsBeforeSearch(599) }));
+    // Completed, but searched while a token the attempt minted could still be live: a process of
+    // its that GitHub stopped tracking could still create, so even an empty search abandons nothing.
+    const recent = searcher(undefined,
+      () => ({ ...COMPLETED_RUN, updatedAt: secondsBeforeSearch(QUIET_SECONDS - 1) }));
     const tooSoon = await settle(store, pending, recent, { apply: true });
     assert.deepEqual([tooSoon.kind, tooSoon.reason, tooSoon.decision],
       ['ExecutorUnfinished', 'ExecutorRunRecentlyActive', 'SETTLE_ABANDONED'], name);
@@ -506,8 +509,8 @@ test('nothing is searched or abandoned until the run that started the effect has
     ), { apply: true });
     assert.equal(found.kind, 'ReconcileAdopts', name);
 
-    // Ten minutes exactly is quiet enough, and the ledger reads that record back.
-    const quietRun = { ...COMPLETED_RUN, updatedAt: secondsBeforeSearch(600) };
+    // The bound exactly is quiet enough, and the ledger reads that record back.
+    const quietRun = { ...COMPLETED_RUN, updatedAt: secondsBeforeSearch(QUIET_SECONDS) };
     const applied = await settle(store, pending, searcher(undefined, () => ({ ...quietRun })),
       { apply: true });
     assert.equal(applied.kind, 'Abandoned', name);
@@ -642,8 +645,11 @@ test('the ledger reads an abandonment back only with evidence its operation and 
     },
     'an executor run of another attempt': (body) => { body.executorRun.runAttempt = 2; },
     'an executor still running': (body) => { body.executorRun.status = 'in_progress'; },
-    'a search within ten minutes of the executor': (body) => {
-      body.executorRun.updatedAt = secondsBeforeSearch(599);
+    'a search while the executor\'s token could be live': (body) => {
+      body.executorRun.updatedAt = secondsBeforeSearch(QUIET_SECONDS - 1);
+    },
+    'an executor update on no calendar day': (body) => {
+      body.executorRun.updatedAt = '2026-13-01T00:00:00Z';
     },
     'no executor run': (body) => { delete body.executorRun; },
     'a dispatcher that is no GitHub login': (body) => {

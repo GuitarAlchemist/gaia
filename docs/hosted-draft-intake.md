@@ -552,13 +552,21 @@ that was harmless: once A's Draft appeared, reconciliation adopted it as `REUSED
 terminal, so an empty search inside that window would orphan A's Draft for good. The attempt that
 wrote `EFFECT_STARTED` is the only caller that can still be inside the create call: any other run
 finds the operation started or ambiguous and never reaches it, and a re-run is a new attempt. So the
-settlement reads that attempt before searching, and abandons only on a search that ended at least
-ten minutes after the attempt's last update. GitHub answers or drops a REST call within seconds;
-ten minutes is a wide margin, not a measured bound. A test runs exactly that interleaving over one
-shared ledger.
+settlement reads that attempt before searching, and searches only once Actions reports it
+`completed`. A test runs exactly that interleaving over one shared ledger.
 
-**Every read re-checks it.** Whenever a store reads the chain, `validateAbandonmentEvidence` rebuilds
-the evidence from the operation itself:
+`completed` is not enough on its own. A run that is force-cancelled, or whose runner lost contact,
+reads `completed` while its process may still be alive, and the step that would revoke its token may
+never run. What bounds that process is its credential. The step that calls `gh pr create` holds one
+thing that can create a pull request: the pump App installation token minted earlier in the same
+attempt. The workflow's own `GITHUB_TOKEN` reads only `contents` and `actions`, and no step that runs
+the CLI sees the App key (a workflow test pins both). GitHub expires an installation token one hour
+after minting, and minting precedes the attempt's last update. So the settlement abandons only on a
+search that began at least 65 minutes after that last update: the hour, and five minutes for clock
+skew and a request in flight.
+
+**Every read re-checks it.** Whenever the Git Data store reads the chain, as on the hosted ledger,
+`validateAbandonmentEvidence` rebuilds the evidence from the operation itself:
 - its identity, repository and generation;
 - the ambiguous revision the record follows (its `priorCommittedRevision`);
 - what an abandonment requires of its search: complete, identity-checked, a limit of 100, no pull
@@ -568,15 +576,17 @@ the evidence from the operation itself:
 
 It then re-hashes the evidence and compares it whole with what was stored. The executor run must
 name the epoch the chain's `EFFECT_STARTED` holds, be `completed`, and have been last updated at
-least ten minutes before the search ended. A record that disagrees anywhere, that was written for
+least 65 minutes before the search began. A record that disagrees anywhere, that was written for
 another operation or another revision, or whose provenance is malformed, is `LedgerCorrupt`. So is
-an `ABANDONED` after any state other than `EFFECT_AMBIGUOUS`.
+an `ABANDONED` after any state other than `EFFECT_AMBIGUOUS`. The memory store used in tests keeps
+what it is handed and checks none of this.
 
 This is a consistency check, not a proof that the reads ran: whoever can write the ledger can write
 a consistent record. Only the pump App writes it, and it writes only what the steps below produced.
-The V0 bounds (the limit of 100, the ten minutes) are literals in the reader, and a frozen V0 record
-is in the tests, so a later change to the provider's bound cannot turn a stored abandonment into
-corruption that stops every intake.
+The V0 bounds (the limit of 100, the 65 minutes) are literals in the reader, and a frozen V0 record
+is in the tests. Before writing, the settlement runs the same reader over the record it is about to
+append, so a drift between the decision and the reader refuses the write (`InvalidSettlement`)
+instead of storing a record that every later read, and so every intake, would stop at.
 
 **The write, in order.** `settleAmbiguousDraft(operationId, expectedRevision, provenance, { store,
 readExecutorRun, searchMarker }, { apply })`:
@@ -598,8 +608,8 @@ readExecutorRun, searchMarker }, { apply })`:
 3. **Search the marker, after those reads.** `createGhMarkerLookup` runs the provider's two reads in
    its order, and stops where it stops: `gh repo view --json id,nameWithOwner`, then, only if that
    names this repository, the `gh pr list … --state all --head HEAD_REF --limit 100` above.
-   - It records the revision it was handed, the identity it observed, and the instant the search
-     ended.
+   - It records the revision it was handed, the identity it observed, and the instant read just
+     before the list was requested: whatever comes back, GitHub answered no earlier than that.
    - A read that fails, or an answer that is not JSON of the expected shape, yields an `ERRORED`
      lookup with no rows, which can only stay unsettled.
    - An identity of another repository yields an `ERRORED` lookup that records it, and the decision
@@ -610,16 +620,18 @@ readExecutorRun, searchMarker }, { apply })`:
    - `STAY_UNSETTLED` answers `StaysUnsettled`.
    - `SETTLE_REUSED` answers `ReconcileAdopts`.
    - A named refusal answers `SettlementRefused` with its code.
-   - `SETTLE_ABANDONED` from a search that ended less than ten minutes after the executor's last
+   - `SETTLE_ABANDONED` from a search that began less than 65 minutes after the executor's last
      update answers `ExecutorUnfinished` (`ExecutorRunRecentlyActive`).
    - None of these writes anything.
 5. **Write only an absence found after the executor finished.**
    - Without `apply`, `SETTLE_ABANDONED` answers `AbandonmentPlanned` and writes nothing.
    - With `apply`, it appends `ABANDONED` by compare-and-swap at the revision read in step 1, so any
      move since that read loses and answers `StaleRevision`.
+   - Before either, the record is run through the ledger's own reader, as above.
    - The store hands back the chain as re-read after the append, and the settlement compares the
      terminal it holds with what it wrote, field by field. `Abandoned` means the ledger holds this
-     record; anything else is `LedgerCorrupt`.
+     record; anything else is `LedgerCorrupt`. This last comparison catches a store that misbehaves;
+     the write is already made by then.
 
 **Why a Draft found is not written here.** `REUSED` already has one writer: `reconcileDraft`, from
 the provider's own exact lookup, with its merge-evidence reads when the Draft was merged. Scheduled
@@ -652,7 +664,12 @@ search, and the intake step does not run.
 
 A green run means `AbandonmentPlanned`, `Abandoned` or `AlreadyAbandoned`. Every other result fails
 the run, and the receipt that names it is still uploaded. After `ExecutorUnfinished`, dispatch again
-once the executor's attempt has completed and ten minutes have passed.
+once the executor's attempt has completed and 65 minutes have passed.
+
+**The executor's run must still exist.** The check reads that run attempt from Actions. If its run
+is ever deleted, by hand or by GitHub's own cleanup of old runs, the settlement answers
+`ExecutorUnfinished` (`ExecutorRunUnreadable`) for good, and the operation keeps only its `REUSED`
+exit. Settle an ambiguous operation while its executor's run is still listed.
 
 **Settling #127.** Dry run first, then apply only once the receipt says `AbandonmentPlanned`
 (`MarkerProvablyAbsent`):

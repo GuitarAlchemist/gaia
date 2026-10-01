@@ -289,8 +289,8 @@ jobs:
         # Operator authority only: a manual dispatch naming one EFFECT_AMBIGUOUS operation, and
         # nothing else, reaches this step. It re-reads the operation at the named revision, reads
         # the run attempt that wrote its EFFECT_STARTED and searches its marker, both read-only, and
-        # writes ABANDONED only when that attempt has completed, the search ten minutes or more
-        # later finds no pull request, and settle_apply is ticked. It never creates, retries or
+        # writes ABANDONED only when that attempt has completed, a search begun 65 minutes or more
+        # after its last update finds no pull request, and settle_apply is ticked. It never creates, retries or
         # cancels an effect and publishes no observation. The reason reaches the CLI through env:,
         # never interpolated into the script.
         if: steps.identity.outputs.settle == 'true'

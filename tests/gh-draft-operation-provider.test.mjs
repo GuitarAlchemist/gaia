@@ -845,6 +845,26 @@ test('the executor read returns one run attempt of this repository, or fails by 
     refused('InvalidConfiguration'));
 });
 
+test('the search instant is read before the list is requested, never after it returns', async () => {
+  const instants = ['2026-09-30T12:00:00.250Z', '2026-09-30T13:00:00Z'];
+  let read = 0;
+  const now = () => { read += 1; return instants.shift(); };
+  const steps = [
+    { args: SETTLEMENT_VIEW, stdout: settlementIdentity },
+    { args: SETTLEMENT_LIST, stdout: '[]' },
+  ];
+  const { run } = fakeRun(steps);
+  const timed = async (command, args, options) => {
+    if (args[0] === 'pr') assert.equal(read, 1, 'the instant is read before the list is requested');
+    return run(command, args, options);
+  };
+  const lookup = await createGhMarkerLookup({
+    expectedRepository: SETTLEMENT_REPOSITORY, run: timed, now,
+  }).search(settlementSearch());
+  assert.equal(lookup.observedAt, '2026-09-30T12:00:00Z');
+  assert.equal(read, 1, 'one instant per search');
+});
+
 test('a marker search that cannot finish is ERRORED, never absent, and never searches elsewhere', async () => {
   const lost = new Error('gh: HTTP 502');
   const cases = {

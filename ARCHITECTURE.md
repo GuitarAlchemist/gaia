@@ -168,11 +168,12 @@ An operator may also settle one `EFFECT_AMBIGUOUS` operation. That run reads it 
 then reads the Actions run attempt that wrote its `EFFECT_STARTED`, the only caller that can still be
 inside the create call, and goes on only once that attempt has completed. It then searches the
 marker the way the provider does: repository identity first, then every pull request on its head.
-It writes `ABANDONED` only when that search is complete, finds no pull request, and ended at least
-ten minutes after the executor's last update: no Draft exists, and no create call of its can still
-land. The write is a compare-and-swap at the revision it read. The record carries the evidence, the
-executor run and the dispatch, and every ledger read re-checks them against the operation and its
-executor epoch. A Draft the search finds is left to reconciliation, the only writer of `REUSED`.
+It writes `ABANDONED` only when that search is complete, finds no pull request, and began at least
+65 minutes after the executor's last update. By then no Draft exists, and the installation token the
+executor minted, the one credential its create call could use, has expired. The record is run
+through the ledger's own reader before it is appended by compare-and-swap at the revision read. It
+carries the evidence, the executor run and the dispatch, and every ledger read re-checks them against
+the operation and its executor epoch. A Draft the search finds is left to reconciliation, the only writer of `REUSED`.
 `ABANDONED` has no effect and is not re-admissible. Only an operator-dispatched run of the sealed
 intake workflow reaches this path.
 The Hosted Draft intake is one concrete pump. An issue-triggered run remains bound to its issue and

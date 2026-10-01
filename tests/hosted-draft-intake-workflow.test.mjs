@@ -194,6 +194,19 @@ test('a settlement runs alone on a manual dispatch, a dry run unless applied, it
   assert.match(run, /-cnotin @\('AbandonmentPlanned', 'Abandoned', 'AlreadyAbandoned'\)/u,
     'a settlement that was not made fails the run; its receipt is still uploaded');
 
+  // A settlement waits out the executor's credential, not its process: the step that runs the CLI,
+  // in either workflow, holds the installation token its attempt minted and never the App key that
+  // could mint another.
+  for (const [name, text] of [['intake', workflow], ['effect', readOrNull(EFFECT_URL)]]) {
+    const cliSteps = text.split(/^ {6}- (?=name:|uses:)/mu).slice(1)
+      .filter((each) => each.includes('scripts/hosted-draft-pump.mjs'));
+    assert.ok(cliSteps.length > 0, `${name}: the CLI runs in a step`);
+    for (const each of cliSteps) {
+      assert.doesNotMatch(each, /PRIVATE_KEY|private-key/u, `${name}: no App key beside the CLI`);
+      assert.match(each, /GH_TOKEN: \$\{\{ steps\.pump-token\.outputs\.token \}\}/u, name);
+    }
+  }
+
   // GitHub accepts at most 25 dispatch inputs; the operator paths must leave room below it.
   const inputs = workflow.slice(workflow.indexOf('    inputs:\n'), workflow.indexOf('  issues:\n'));
   assert.ok(inputs.match(/^ {6}[a-z_]+:$/gmu).length <= 25, 'within the workflow_dispatch input limit');

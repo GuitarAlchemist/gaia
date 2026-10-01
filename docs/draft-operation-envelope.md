@@ -389,9 +389,10 @@ Draft is observed; neither elapsed time nor repeated absence can turn it into `R
 sacrifices automatic liveness in the irreducibly ambiguous window rather than publish a false
 terminal or duplicate a provider effect. The one other exit is an operator's (#161). The run attempt
 that wrote `EFFECT_STARTED` must have completed, and a complete, untruncated search of the
-operation's head, in every state, run at least ten minutes after that attempt's last update, must
-return no pull request at all. Then no Draft exists and none can still be created, and a manual
-dispatch may record that as `ABANDONED`. Neither the pump nor elapsed time alone can take that exit.
+operation's head, in every state, begun at least 65 minutes after that attempt's last update, must
+return no pull request at all. Then no Draft exists, and the installation token that attempt minted,
+the one credential its create call could use, has expired. A manual dispatch may record that as
+`ABANDONED`. Neither the pump nor elapsed time alone can take that exit.
 
 The original lease-expiry fault row is represented by executor epochs: A records intent and stalls,
 GitHub terminates A, B becomes the next serialized epoch, and any resumed A command is refused.
