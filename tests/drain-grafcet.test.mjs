@@ -458,7 +458,9 @@ function breakerProblems({ coordinator, doc }) {
   if (!lead.includes('`BLOCKED_REDESIGN`') || !allClasses(lead)) {
     problems.push('coordinator: the breaker does not come before the classes');
   }
-  if (firstBullet < 0) problems.push('coordinator: step 5 has no class bullet');
+  // The bullets must name the six classes, so a bullet written another way is not read as lead.
+  const bulleted = [...step.matchAll(/\n {3}- `([a-z-]+)`/gu)].map(([, name]) => name);
+  if (bulleted.join() !== CLASSES.join()) problems.push('coordinator: step 5 does not bullet the six classes');
   else if (BREAKER_WORDS.test(step.slice(firstBullet))) problems.push('coordinator: a class bullet applies the breaker');
   if (BREAKER_WORDS.test(between('4. **Classify**', '5. **Decide the next lane**'))) {
     problems.push('coordinator: a class definition names the breaker');
@@ -526,7 +528,8 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
 
   // Negative control: each hardening alone, so dropping one lets its plant pass. An exemption in
   // any case, as a sentence of its own or wrapped across lines; a listed word in any case, in a
-  // class row's Predicate cell, after an escaped pipe, or in a row with no closing pipe.
+  // class row's Predicate cell, after an escaped pipe, or in a row with no closing pipe; a class
+  // bullet the finder cannot read.
   for (const [where, from, to, problem] of [
     ['coordinator', '`merge-ready` included. A new head',
       '`merge-ready` included. Except `merge-ready`, which goes to `publish`. A new head',
@@ -537,6 +540,9 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
     ['coordinator', '`merge-ready` included. A new head',
       '`merge-ready` included. Every class waits, but\n   not `merge-ready`. A new head',
       'coordinator: the breaker does not come before the classes'],
+    ['coordinator', '\n   - `conflicting` -> `reconcile`',
+      '\n    - `conflicting` -> `wait` with `BLOCKED_REDESIGN`, else `reconcile`',
+      'coordinator: step 5 does not bullet the six classes'],
     ['doc', 'one `REQUEST_CHANGES` | `bounded repair` |',
       'one `REQUEST_CHANGES` | `bounded repair`, or `wait` on the Breaker |',
       'doc: class changes-requested applies the breaker'],
@@ -561,7 +567,27 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
   const step = coordinator.slice(coordinator.indexOf('5. **Decide the next lane**'), coordinator.indexOf('\n6. **'));
   const starred = coordinator.replace(step, () => step.replaceAll('\n   - `', '\n   * `'));
   assert.notEqual(starred, coordinator);
-  assert.deepEqual(breakerProblems({ coordinator: starred, doc }), ['coordinator: step 5 has no class bullet']);
+  assert.deepEqual(breakerProblems({ coordinator: starred, doc }), ['coordinator: step 5 does not bullet the six classes']);
+  // Every exemption word the Test gates line lists, planted alone after the lead.
+  for (const word of ['except', 'excepting', 'unless', 'other than', 'but not', 'save', 'excluded', 'excludes', 'however']) {
+    const planted = plant(coordinator, '`merge-ready` included. A new head',
+      `\`merge-ready\` included. Every class waits, ${word} \`merge-ready\`. A new head`);
+    assert.deepEqual(breakerProblems({ coordinator: planted, doc }), ['coordinator: the breaker does not come before the classes'], word);
+  }
+  // Every breaker word, planted alone in a class row.
+  for (const word of ['BLOCKED_REDESIGN', 'breaker', 'ENG-09', 'family']) {
+    const planted = plant(doc, 'and neither `conflicting` nor `merge-ready` |',
+      `and neither \`conflicting\` nor \`merge-ready\`, ${word} aside |`);
+    assert.deepEqual(breakerProblems({ coordinator, doc: planted }), ['doc: class dual-approved applies the breaker'], word);
+  }
+  // The blocker left unnamed in the lead; the approved classes left unnamed in the lead, then in
+  // the paragraph.
+  assert.deepEqual(breakerProblems({ coordinator: plant(coordinator, '`wait` with\n   `BLOCKED_REDESIGN` (named blockers, below),',
+    '`wait` with\n   the named blocker below,'), doc }), ['coordinator: the breaker does not come before the classes']);
+  assert.deepEqual(breakerProblems({ coordinator: plant(coordinator, ',\n   `dual-approved` and `merge-ready` included. A new head', '. A new head'), doc }),
+    ['coordinator: the breaker does not come before the classes']);
+  assert.deepEqual(breakerProblems({ coordinator, doc: plant(doc, ', `dual-approved` and `merge-ready` included. A new head\nis not', '. A new head\nis not') }),
+    ['doc: the breaker paragraph is not class-free']);
 });
 
 test('NEGATIVE CONTROL: each binding gate fires on a planted mismatch', () => {

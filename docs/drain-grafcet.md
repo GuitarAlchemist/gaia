@@ -414,8 +414,8 @@ family, and would trip the breaker on the next repair.
   `merge-ready` included", and with none of the exemption words the gate lists, in any case
   (`except`, `excepting`, `unless`, `other than`, `but not`, `save`, `excluded`, `excludes`,
   `however`). No class definition, class bullet, or class row, read whole after its name, names
-  `BLOCKED_REDESIGN`, `breaker`, `ENG-09` or `family`, in any case, and a step 5 with no class
-  bullet the gate can find fails it. The `BLOCKED_REDESIGN` row and the breaker paragraph above
+  `BLOCKED_REDESIGN`, `breaker`, `ENG-09` or `family`, in any case, and a step 5 whose bullets do
+  not name the six classes fails it. The `BLOCKED_REDESIGN` row and the breaker paragraph above
   say "whatever the class". The gate reads those words, so a wording outside its lists passes it;
 - a negative control plants each mismatch and asserts the exact problem lists.
 
