@@ -131,6 +131,8 @@ test('the delivery-round BUDGET_EXHAUSTED refusal trips the scope, and the next 
   assert.equal(tripped.record.trip.fingerprint, fingerprint, 'the trip keeps the failure fingerprint');
   assert.equal((await stored(store)).status, 'TRIPPED', 'what the refusal said is now on record');
 
+  // The admitted advance asked again is refused as a trip, not answered as a duplicate.
+  assert.equal((await runPlan(admitted)).kind, 'TRIPPED');
   // Another advance the delivery history would admit, under its own key, is now refused on this
   // scope, before its effect.
   const later = plan(2, hex(0xc2));
