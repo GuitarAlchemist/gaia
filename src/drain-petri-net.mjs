@@ -673,6 +673,7 @@ export const DRAIN_NET_TEMPLATE = deepFreeze({
     STEP('P_MERGED', { label: 'merge confirmed' }),
     STEP('P_ISSUE_RECONCILED', { terminal: true, label: 'linked issue reconciled' }),
     STEP('P_BLOCKED_REDESIGN', { label: 'ENG-09 breaker tripped' }),
+    STEP('P_BLOCKED_PUBLICATION', { label: 'ENG-09 breaker tripped, publication token held' }),
   ],
   receptivities: {
     D_HEAD_PUBLISHED: { kind: 'LEVEL', fact: 'the latest recorded observation of the pull request names a full head SHA', channel: 'bus message.sent kind pr-observation (head=)' },
@@ -696,6 +697,20 @@ export const DRAIN_NET_TEMPLATE = deepFreeze({
     { id: 'T_SPEC_VERDICT', receptivity: 'D_SPEC_VERDICT_BOUND', refusal: 'SPEC_VERDICT_NOT_BOUND', inputs: ['P_REVIEW_SPEC'], outputs: ['P_SPEC_VERDICT', 'PROVIDER_CAPACITY'] },
     { id: 'T_STANDARDS_VERDICT', receptivity: 'D_STANDARDS_VERDICT_BOUND', refusal: 'STANDARDS_VERDICT_NOT_BOUND', inputs: ['P_REVIEW_STANDARDS'], outputs: ['P_STANDARDS_VERDICT', 'PROVIDER_CAPACITY'] },
     { id: 'T_BREAKER_TRIP', receptivity: 'D_FAILURE_FAMILY_REPEATED', refusal: 'FAMILY_NOT_REPEATED', priority: 1, inputs: ['P_SPEC_VERDICT', 'P_STANDARDS_VERDICT'], outputs: ['P_BLOCKED_REDESIGN'] },
+    // The breaker also trips from P_DRAFT_HEAD, P_DUAL_APPROVED, P_MERGEABLE and P_READY,
+    // outranking each step's other exits, the head-advanced ones (priority 2) included. No trip
+    // returns a resource. The publisher's ordered command may still run in P_MERGEABLE or P_READY,
+    // so their trips keep MERGE_LOCK in P_BLOCKED_PUBLICATION until the merge is confirmed or a new
+    // head rules it out. The review steps, P_REPAIR and P_RECONCILE hold a running lane and trip at
+    // the step it exits to.
+    { id: 'T_DRAFT_HEAD_BREAKER_TRIP', receptivity: 'D_FAILURE_FAMILY_REPEATED', refusal: 'FAMILY_NOT_REPEATED', priority: 3, inputs: ['P_DRAFT_HEAD'], outputs: ['P_BLOCKED_REDESIGN'] },
+    { id: 'T_DUAL_APPROVED_BREAKER_TRIP', receptivity: 'D_FAILURE_FAMILY_REPEATED', refusal: 'FAMILY_NOT_REPEATED', priority: 3, inputs: ['P_DUAL_APPROVED'], outputs: ['P_BLOCKED_REDESIGN'] },
+    { id: 'T_MERGEABLE_BREAKER_TRIP', receptivity: 'D_FAILURE_FAMILY_REPEATED', refusal: 'FAMILY_NOT_REPEATED', priority: 3, inputs: ['P_MERGEABLE'], outputs: ['P_BLOCKED_PUBLICATION'] },
+    { id: 'T_READY_BREAKER_TRIP', receptivity: 'D_FAILURE_FAMILY_REPEATED', refusal: 'FAMILY_NOT_REPEATED', priority: 3, inputs: ['P_READY'], outputs: ['P_BLOCKED_PUBLICATION'] },
+    // A merge ordered before the trip is still recorded, and a new head returns the lock.
+    { id: 'T_BLOCKED_PUBLICATION_HEAD_ADVANCED', receptivity: 'D_HEAD_ADVANCED', refusal: 'HEAD_UNCHANGED', inputs: ['P_BLOCKED_PUBLICATION'], outputs: ['P_BLOCKED_REDESIGN', 'MERGE_LOCK'] },
+    { id: 'T_BLOCKED_PUBLICATION_MERGE', receptivity: 'D_MERGE_CONFIRMED', refusal: 'MERGE_UNCONFIRMED', inputs: ['P_BLOCKED_PUBLICATION'], outputs: ['P_MERGED', 'MERGE_LOCK'] },
+    { id: 'T_BLOCKED_REDESIGN_MERGE', receptivity: 'D_MERGE_CONFIRMED', refusal: 'MERGE_UNCONFIRMED', inputs: ['P_BLOCKED_REDESIGN'], outputs: ['P_MERGED'] },
     { id: 'T_JOIN_APPROVE', receptivity: 'D_BOTH_APPROVE_AT_HEAD', refusal: 'DUAL_APPROVAL_MISSING', inputs: ['P_SPEC_VERDICT', 'P_STANDARDS_VERDICT'], outputs: ['P_DUAL_APPROVED'] },
     { id: 'T_JOIN_REPAIR', receptivity: 'D_ANY_REQUEST_CHANGES_AT_HEAD', refusal: 'NO_REQUEST_CHANGES', inputs: ['P_SPEC_VERDICT', 'P_STANDARDS_VERDICT', 'PROVIDER_CAPACITY'], outputs: ['P_REPAIR'] },
     { id: 'T_REPAIR_PUBLISHED', receptivity: 'D_HEAD_ADVANCED', refusal: 'REPAIR_UNPUBLISHED', inputs: ['P_REPAIR'], outputs: ['P_DRAFT_HEAD', 'PROVIDER_CAPACITY'], inhibitors: ['P_BLOCKED_REDESIGN'] },
