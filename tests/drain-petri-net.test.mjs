@@ -541,6 +541,74 @@ test('an unobserved fact is UNKNOWN and holds the chart; an observed false fact 
   assert.deepEqual(drain.facts['pr#92/D_FAILURE_FAMILY_REPEATED'], { value: true, evidence: { families: ['receipt-boundary'] } });
 });
 
+test('the breaker acts at a verdict join: it trips at a head pushed before the repeating round joined, and misses a repetition that lands after a later join (ENG-09)', () => {
+  let clock = 0;
+  const t = () => { clock += 1; return `2026-09-04T06:00:${String(clock).padStart(2, '0')}.000Z`; };
+  const observe = (head) => ({ type: 'message.sent', at: t(), message: { from: 'act-0001', kind: 'pr-observation', text: `pr=7;head=${head}` } });
+  const review = (round, axis, head, verdict, family = null) => ({
+    name: `pr7-${round.toLowerCase()}-${axis.toLowerCase()}-review.md`,
+    bytes: bytes([
+      `# PR #7 - ${round} independent ${axis} review`, '', `**Verdict: ${verdict}**`, '',
+      `Subject: clone, detached at ${head}`, ...(family === null ? [] : [`Family: ${family}`]), '',
+      `PR7_${round}_${axis.toUpperCase()}_COMPLETE`, '',
+    ].join('\n')),
+  });
+  // A script of observed heads and reviews; each review becomes visible at its lane-complete send.
+  const drive = (script) => {
+    clock = 0;
+    const records = [registerCoordinator(t()), { type: 'actor.registered', at: t(), ref: 'act-0002', kind: 'lane' }];
+    const artifacts = [];
+    for (const entry of script) {
+      if (typeof entry === 'string') { records.push(observe(entry)); continue; }
+      const { sha256, marker } = parseArtifact(entry);
+      artifacts.push(entry);
+      records.push({ type: 'message.sent', at: t(), message: { from: 'act-0002', kind: 'lane-complete', text: `${entry.name};sha256=${sha256};marker=${marker}` } });
+    }
+    const facts = collectDrainFacts({ records, artifacts });
+    assert.deepEqual(facts.refused, []);
+    const run = replay(drainFor(['7']), facts.drainEvents);
+    return { fired: run.history.flatMap(({ fired }) => fired), marking: run.marking, family: run.facts['pr#7/D_FAILURE_FAMILY_REPEATED'] };
+  };
+  // R1 rejects H1 in family X and is repaired. R2's Spec rejects H2 in X too, but H3 is pushed
+  // before R2's Standards verdict lands, so the R2 verdicts never join at H2.
+  const prefix = (spec2) => [
+    H1, review('R1', 'Spec', H1, 'REQUEST_CHANGES', 'X'), review('R1', 'Standards', H1, 'APPROVE'),
+    H2, review('R2', 'Spec', H2, 'REQUEST_CHANGES', spec2), H3, review('R2', 'Standards', H2, 'APPROVE'),
+  ];
+
+  // Both axes approve H3: a new head is not a new design, so the breaker outranks the approval.
+  const approved = drive([...prefix('X'), review('R3', 'Spec', H3, 'APPROVE'), review('R3', 'Standards', H3, 'APPROVE')]);
+  assert.equal(approved.fired.at(-1), 'pr#7/T_BREAKER_TRIP');
+  assert.deepEqual(active(approved.marking).filter((id) => id.startsWith('pr#7/')), ['pr#7/P_BLOCKED_REDESIGN']);
+  assert.deepEqual(approved.family, { value: true, evidence: { families: ['X'] } });
+
+  // H3 rejected in a new family Y: the breaker, not another repair.
+  const rejected = drive([...prefix('X'), review('R3', 'Spec', H3, 'REQUEST_CHANGES', 'Y'), review('R3', 'Standards', H3, 'APPROVE')]);
+  assert.equal(rejected.fired.at(-1), 'pr#7/T_BREAKER_TRIP');
+  assert.equal(rejected.marking['pr#7/P_REPAIR'], 0);
+
+  // Control: R2 rejects in family Y, so nothing repeats and the approved H3 joins.
+  const fresh = drive([...prefix('Y'), review('R3', 'Spec', H3, 'APPROVE'), review('R3', 'Standards', H3, 'APPROVE')]);
+  assert.equal(fresh.fired.at(-1), 'pr#7/T_JOIN_APPROVE');
+  assert.deepEqual(active(fresh.marking).filter((id) => id.startsWith('pr#7/')), ['pr#7/P_DUAL_APPROVED']);
+  assert.deepEqual(fresh.family, { value: false, evidence: { families: [] } });
+
+  // Declared divergence 5 (docs/drain-grafcet.md): T_BREAKER_TRIP consumes only the verdict steps.
+  // When R2's rejection of H2 lands after both axes approved H3 and the chart joined, the family
+  // has repeated, yet the chart goes on to merge. The coordinator waits with BLOCKED_REDESIGN.
+  const ready = `${H3};mergeable=MERGEABLE;draft=false;checks=ALL_PASS`;
+  const late = drive([
+    H1, review('R1', 'Spec', H1, 'REQUEST_CHANGES', 'X'), review('R1', 'Standards', H1, 'APPROVE'), H2, H3,
+    review('R3', 'Spec', H3, 'APPROVE'), review('R3', 'Standards', H3, 'APPROVE'),
+    review('R2', 'Spec', H2, 'REQUEST_CHANGES', 'X'), review('R2', 'Standards', H2, 'APPROVE'),
+    ready, `${ready};state=MERGED;mergeCommit=${'4'.repeat(40)};issue=none`,
+  ]);
+  assert.deepEqual(late.fired.filter((id) => /T_(JOIN_APPROVE|BREAKER_TRIP|MERGEABLE|READY|MERGE)$/u.test(id)),
+    ['pr#7/T_JOIN_APPROVE', 'pr#7/T_MERGEABLE', 'pr#7/T_READY', 'pr#7/T_MERGE']);
+  assert.deepEqual(active(late.marking).filter((id) => id.startsWith('pr#7/')), ['pr#7/P_ISSUE_RECONCILED']);
+  assert.deepEqual(late.family, { value: true, evidence: { families: ['X'] } });
+});
+
 // ---------------------------------------------------------------------------
 // adversarial: forged and stale pr-observations must not move durable work
 // ---------------------------------------------------------------------------

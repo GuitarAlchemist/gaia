@@ -232,8 +232,10 @@ after merge; a failure records completed effects and stops the remaining actions
    full SHA, concurrently.
 3. Once both axes carry a verdict on the head, a `REQUEST_CHANGES` on either sends the PR to a
    bounded repair whose specification is the blocking findings of both reviews; the new head gets
-   both axes again. A second `REQUEST_CHANGES` at a new head in the same `Family:` stops repairs
-   until an operator orders a redesign (`BLOCKED_REDESIGN`).
+   both axes again. A second `REQUEST_CHANGES` at a new head in the same `Family:` stops the PR
+   until an operator orders a redesign (`BLOCKED_REDESIGN`): no review, repair, reconciliation or
+   publication of any later head, whatever its verdicts, because a new head is not a new design
+   (ENG-09).
 4. Dual `APPROVE` on the exact published head, `MERGEABLE`, `CLEAN`, checks green: the
    coordinator proposes; the operator orders; the publisher marks ready and squash-merges with
    `--match-head-commit`.
@@ -314,7 +316,7 @@ coordinator record is prepend-only, so its line numbers are valid at the named r
 | An issue close without a merge first reads the merge it names | order `mergeCommit`; publisher `PR_NOT_MERGED` | `gaia-architect-r2-grafcet-drain-design.md:570-571` |
 | A repair counts once its exit head is the published head | coordinator `REPAIR_UNPUBLISHED` | `gaia-architect-r2-grafcet-drain-design.md:96` |
 | One publication token covers every proposal and every reconciliation | coordinator `PUBLICATION_BUSY` | `gaia-architect-r2-grafcet-drain-design.md:99`, `gaia-drain-coordinator-status.md:362-372` |
-| Two `REQUEST_CHANGES` in one failure family at distinct heads stop repairs (ENG-09) | reviewer `Family:` line; coordinator `BLOCKED_REDESIGN` | `gaia-architect-r2-grafcet-drain-design.md:105` |
+| Two `REQUEST_CHANGES` in one failure family at distinct heads stop the PR at every later head, whatever its verdicts, until an operator orders a redesign (ENG-09) | reviewer `Family:` line; coordinator `BLOCKED_REDESIGN`, before any class | `gaia-architect-r2-grafcet-drain-design.md:105`, `docs/engineering-and-research-principles.md:77` |
 | The merge is a human boundary in R0 | publisher `issuedBy: operator`; design C cost | `gaia-drain-coordinator-status.md:73-77`, `gaia-drain-coordinator-status.md:11`, `ARCHITECTURE.md:233-236` |
 
 Two fleet rules are operator notes rather than agent rules, because Claude Code spawns subagents
