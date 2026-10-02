@@ -205,7 +205,7 @@ test('LICENSE, NOTICE, and the engineering doctrine ship', () => {
   const doctrine = readFileSync(doctrinePath, 'utf8');
   const requiredPrinciples = [
     'ENG-01', 'ENG-02', 'ENG-03', 'ENG-04', 'ENG-05', 'ENG-06', 'ENG-07', 'ENG-08', 'ENG-09',
-    'SCI-01', 'SCI-02', 'SCI-03', 'SCI-04', 'SCI-05', 'SCI-06', 'SCI-07',
+    'SCI-01', 'SCI-02', 'SCI-03', 'SCI-04', 'SCI-05', 'SCI-06', 'SCI-07', 'SCI-08',
   ];
   for (const id of requiredPrinciples) {
     assert.equal(doctrine.match(new RegExp(`^### ${id} —`, 'gm'))?.length ?? 0, 1,
