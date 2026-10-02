@@ -459,10 +459,11 @@ function breakerProblems({ coordinator, doc }) {
   if (!lead.includes('`BLOCKED_REDESIGN`') || !allClasses(lead)) {
     problems.push('coordinator: the breaker does not come before the classes');
   }
-  // The dashed bullets name the six classes and the lead holds no list item, so a bullet written
-  // another way, in place of a class bullet or beside it, is never read as lead.
+  // The dashed bullets name the six classes. Every lead line after the first opens, after its
+  // indent, with a letter, a backtick or a parenthesis, and the lead holds no `<li>` tag, so no
+  // list item can open in it: a bullet written another way is never read as lead.
   const bulleted = [...step.matchAll(/\n {3}- `([a-z-]+)`/gu)].map(([, name]) => name);
-  if (bulleted.join() !== CLASSES.join() || /\n\s*(?:[-*+]|\d+\.)\s/u.test(leadText)) {
+  if (bulleted.join() !== CLASSES.join() || /\n(?![ \t]*[A-Za-z`(])|<li\b/iu.test(leadText)) {
     problems.push('coordinator: step 5 does not bullet exactly the six classes');
   } else if (BREAKER_WORDS.test(step.slice(firstBullet))) {
     problems.push('coordinator: a class bullet applies the breaker');
@@ -578,6 +579,14 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
   const starred = coordinator.replace(step, () => step.replaceAll('\n   - `', '\n   * `'));
   assert.notEqual(starred, coordinator);
   assert.deepEqual(breakerProblems({ coordinator: starred, doc }), ['coordinator: step 5 does not bullet exactly the six classes']);
+  // A line added before the six: one opening with a list marker, at other indents, in a block
+  // quote or after a blank line; a blank line; and one opening with a letter that holds an HTML
+  // list item.
+  for (const marker of ['   -', '   +', '   *', '   1.', '   1)', '   > *', '*', '     1)', '\n   2)', '\n   then', '   then <LI>']) {
+    const planted = plant(coordinator, 'Otherwise, by class:\n',
+      `Otherwise, by class:\n${marker} **\`merge-ready\`** -> \`publish\`, even when the family repeats;\n`);
+    assert.deepEqual(breakerProblems({ coordinator: planted, doc }), ['coordinator: step 5 does not bullet exactly the six classes'], marker);
+  }
   // Every exemption word the Test gates line lists, planted alone after the lead.
   for (const word of ['except', 'excepting', 'unless', 'other than', 'but not', 'save', 'excluded', 'excludes', 'however']) {
     const planted = plant(coordinator, '`merge-ready` included. A new head',

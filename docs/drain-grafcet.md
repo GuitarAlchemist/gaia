@@ -415,9 +415,10 @@ family, and would trip the breaker on the next repair.
   (`except`, `excepting`, `unless`, `other than`, `but not`, `save`, `excluded`, `excludes`,
   `however`). No class definition, class bullet, or class row, read whole after its name, names
   `BLOCKED_REDESIGN`, `breaker`, `ENG-09` or `family`, in any case, and a step 5 that does not
-  bullet exactly the six classes, with no list item before them, fails it. The
-  `BLOCKED_REDESIGN` row and the breaker paragraph above say "whatever the class". The gate reads
-  those words, so a wording outside its lists passes it;
+  bullet exactly the six classes fails it. So does a lead line, after the first, that does not
+  open with a letter, a backtick or a parenthesis after its indent, and a `<li>` tag in the lead:
+  no list item can open there. The `BLOCKED_REDESIGN` row and the breaker paragraph above say
+  "whatever the class". The gate reads those words, so a wording outside its lists passes it;
 - a negative control plants each mismatch and asserts the exact problem lists.
 
 ## What this slice does not do
