@@ -284,9 +284,9 @@ class, so a reconciled head is never also `unreviewed` or `single-axis`.
 
 The breaker is not a class. Once two `REQUEST_CHANGES` artifacts of a pull request at distinct
 heads carry the same `Family:` token, the coordinator's step 5 waits with `BLOCKED_REDESIGN`
-whatever the class of the published head, `dual-approved` and `merge-ready` included, because
-`T_BREAKER_TRIP` outranks both joins at the next verdict join. A new head is not a new design
-(ENG-09).
+whatever the class of the published head, `dual-approved` and `merge-ready` included. A new head
+is not a new design (ENG-09). The chart agrees at every verdict join, where `T_BREAKER_TRIP`
+outranks both joins; divergence 5 lists where the chart does not stop the pull request.
 
 ## Receptivities no agent reads
 
@@ -317,18 +317,27 @@ prompt exactly would still disagree with the chart.
    `RECONCILIATION_UNCLASSIFIED`.
 5. **The breaker.** `D_FAILURE_FAMILY_REPEATED` is a level fact over every artifact of the pull
    request, and `T_BREAKER_TRIP` (priority 1) outranks `T_JOIN_APPROVE` as well as
-   `T_JOIN_REPAIR`. Once a family has repeated, the chart trips at the next verdict join, whatever
-   the verdicts there, at a head pushed before the repeating round's verdicts joined as well. The
-   coordinator waits with `BLOCKED_REDESIGN` as soon as the family has repeated, even while a
-   verdict step is still open; the chart trips only at the join, so it still binds a review to
-   the open step. Both stop the pull request; the agents are stricter. After a redesign
-   order the two part: the coordinator waits only until an operator orders a redesign, while the
-   chart cannot see the order, so `T_REDESIGN_RESUMED` returns the pull request to review and the
-   same fact trips the breaker again at the next join. That part is unreachable in R0, where no
-   class-D order reaches the bus and `T_REDESIGN_RESUMED` never fires; scoping the fact to the
-   rejections after the order needs the order's channel. Binding the fact to the observed head
-   instead would drop a repetition whenever the head moves before the repeating round's verdicts
-   join, which R0 can reach (`tests/drain-petri-net.test.mjs`).
+   `T_JOIN_REPAIR`, but it consumes only the two verdict steps: the chart's breaker acts at a
+   verdict join. A repetition visible at a join trips it, whatever the verdicts there, at a head
+   pushed before the repeating round's verdicts joined as well. The coordinator waits with
+   `BLOCKED_REDESIGN` as soon as the family has repeated, wherever the pull request is, so the
+   agents are stricter in three cases R0 reaches:
+   - while a verdict step is still open, the chart binds a review to it and trips at the join;
+   - when the repeating rejection, at a superseded head, lands while the chart is in `P_REPAIR`,
+     the chart publishes the repair and trips only at the next join;
+   - when it lands after an approving join, from a late review of a superseded head or a second
+     review of the joined head, the chart goes on from `P_DUAL_APPROVED` through `T_MERGEABLE`,
+     `T_READY` and `T_MERGE`, and never trips (`tests/drain-petri-net.test.mjs`).
+
+   Tripping the chart from those steps needs new transitions, outside this slice. After a
+   redesign order the two part the other way. The coordinator waits only until an operator
+   orders a redesign, but the family fact is not scoped by the order: once `T_REDESIGN_RESUMED`
+   returns the pull request to review, the same fact trips the breaker again at the next join.
+   That part is unreachable in R0, where no class-D order reaches the bus and
+   `T_REDESIGN_RESUMED` never fires; scoping the fact to the rejections after the order needs the
+   order's channel. Binding the fact to the observed head instead would drop a repetition
+   whenever the head moves before the repeating round's verdicts join, which R0 can reach
+   (`tests/drain-petri-net.test.mjs`).
 6. **`REPAIR_UNPUBLISHED`.** The coordinator requires the published head to be the handoff's exit
    head; `D_HEAD_ADVANCED` holds on any head change. The agents are stricter.
 7. **Readiness.** The collector holds `D_NOT_DRAFT` only at the approved head with checks
@@ -399,8 +408,10 @@ family, and would trip the breaker on the next repair.
 - the reviewer's artifact shape, filled in, is an artifact `parseArtifact` binds, with its
   `Family:` line read and an omitted line read as no family;
 - `T_BREAKER_TRIP` outranks both joins on their verdict steps, and the coordinator's step 5
-  applies `BLOCKED_REDESIGN` before the classes, whatever the class, while no class bullet or
-  class row applies it;
+  applies `BLOCKED_REDESIGN` before the classes, whatever the class, `dual-approved` and
+  `merge-ready` included and none exempted. No class definition, class bullet, or class row
+  names the breaker, and the `BLOCKED_REDESIGN` row and the breaker paragraph above apply to
+  every class;
 - a negative control plants each mismatch and asserts the exact problem lists.
 
 ## What this slice does not do

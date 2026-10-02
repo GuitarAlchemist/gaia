@@ -437,23 +437,39 @@ test('the reviewer writes a Family line the breaker reads, and never a placehold
   assert.doesNotMatch(reviewer, /Family: `?(?:none|n\/a|-)`?\s*$/mu, 'the reviewer never writes a placeholder family');
 });
 
+const BREAKER_WORDS = /BLOCKED_REDESIGN|breaker|ENG-09|Family|repeated family/u;
+const EXEMPTION_WORDS = /\b(?:except|unless|other than|but not|excluded|excludes)\b/u;
+/** A sentence that applies the breaker to every class, approved heads named as included. */
+const classFree = (text) => text.includes('whatever the class') && !EXEMPTION_WORDS.test(text);
+const allClasses = (text) => classFree(text) && text.includes('`dual-approved` and `merge-ready` included');
+
 /** Where the coordinator and the doc apply the breaker: before every class, never inside one. */
 function breakerProblems({ coordinator, doc }) {
   const problems = [];
-  const start = coordinator.indexOf('5. **Decide the next lane**');
-  const end = coordinator.indexOf('\n6. **', start);
-  const step = start >= 0 && end > start ? coordinator.slice(start, end) : '';
+  const between = (from, to) => {
+    const start = coordinator.indexOf(from);
+    const end = coordinator.indexOf(to, start);
+    return start >= 0 && end > start ? coordinator.slice(start, end) : '';
+  };
+  const step = between('5. **Decide the next lane**', '\n6. **');
   const firstBullet = step.indexOf('\n   - `');
   const lead = firstBullet >= 0 ? step.slice(0, firstBullet) : step;
-  if (!lead.includes('`BLOCKED_REDESIGN`') || !lead.includes('whatever the class')) {
+  if (!lead.includes('`BLOCKED_REDESIGN`') || !allClasses(lead)) {
     problems.push('coordinator: the breaker does not come before the classes');
   }
-  if (firstBullet >= 0 && step.slice(firstBullet).includes('BLOCKED_REDESIGN')) {
+  if (firstBullet >= 0 && BREAKER_WORDS.test(step.slice(firstBullet))) {
     problems.push('coordinator: a class bullet applies the breaker');
   }
-  for (const [, name, lane] of section(doc, 'Coordinator classes').matchAll(/^\| `([a-z-]+)` \| [^|]+ \| ([^|]+) \|/gmu)) {
-    if (lane.includes('BLOCKED_REDESIGN')) problems.push(`doc: class ${name} applies the breaker`);
+  if (BREAKER_WORDS.test(between('4. **Classify**', '5. **Decide the next lane**'))) {
+    problems.push('coordinator: a class definition names the breaker');
   }
+  const row = coordinator.split('\n').find((line) => line.startsWith('| `BLOCKED_REDESIGN` |')) ?? '';
+  if (!classFree(row)) problems.push('coordinator: the BLOCKED_REDESIGN row is not class-free');
+  for (const [, name, lane] of section(doc, 'Coordinator classes').matchAll(/^\| `([a-z-]+)` \| [^|]+ \| ([^|]+) \|/gmu)) {
+    if (BREAKER_WORDS.test(lane)) problems.push(`doc: class ${name} applies the breaker`);
+  }
+  const paragraph = section(doc, 'Coordinator classes').split('\n\n').find((text) => text.startsWith('The breaker is not a class.')) ?? '';
+  if (!allClasses(paragraph.replaceAll('\n', ' '))) problems.push('doc: the breaker paragraph is not class-free');
   return problems;
 }
 
@@ -482,6 +498,29 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
     'coordinator: the breaker does not come before the classes',
     'coordinator: a class bullet applies the breaker',
     'doc: class changes-requested applies the breaker',
+  ]);
+
+  // Negative control: wordings that keep the phrases and still exempt approved heads, or move the
+  // breaker into a class definition, a class row, the blocker row or the doc's paragraph.
+  const plant = (text, from, to) => {
+    assert.ok(text.includes(from), `the plant anchor "${from}" exists`);
+    return text.replace(from, to);
+  };
+  let exempting = plant(coordinator, '`dual-approved` and `merge-ready` included.',
+    'except `dual-approved` and `merge-ready`, which go to `publish`.');
+  exempting = plant(exempting, 'not `conflicting`, and\n     not `merge-ready`',
+    'not `conflicting` (a repeated family does not hold it), and\n     not `merge-ready`');
+  exempting = plant(exempting, '(ENG-09), whatever the class of the published head:', '(ENG-09):');
+  let exemptingDoc = plant(doc, 'one `REQUEST_CHANGES` | `bounded repair` |',
+    'one `REQUEST_CHANGES` | `bounded repair`, or `wait` on the ENG-09 breaker when the family repeats |');
+  exemptingDoc = plant(exemptingDoc, 'waits with `BLOCKED_REDESIGN`\nwhatever the class of the published head, `dual-approved` and `merge-ready` included.',
+    'waits with `BLOCKED_REDESIGN`\nonly within `changes-requested`, `dual-approved` and `merge-ready` excluded.');
+  assert.deepEqual(breakerProblems({ coordinator: exempting, doc: exemptingDoc }), [
+    'coordinator: the breaker does not come before the classes',
+    'coordinator: a class definition names the breaker',
+    'coordinator: the BLOCKED_REDESIGN row is not class-free',
+    'doc: class changes-requested applies the breaker',
+    'doc: the breaker paragraph is not class-free',
   ]);
 });
 

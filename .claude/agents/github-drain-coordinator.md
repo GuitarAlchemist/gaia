@@ -110,9 +110,10 @@ the publisher.
 5. **Decide the next lane** per PR. The breaker comes first: when two `REQUEST_CHANGES`
    artifacts of this PR at distinct heads carry the same `Family:` token, the lane is `wait` with
    `BLOCKED_REDESIGN` (named blockers, below), whatever the class of the published head,
-   `dual-approved` and `merge-ready` included. A new head is not a new design (ENG-09): the
-   breaker holds at every later head, one pushed before the repeating round's verdicts joined
-   included. Otherwise, by class:
+   `dual-approved` and `merge-ready` included. A new head is not a new design (ENG-09): until an
+   operator orders a redesign, the breaker holds at every later head, one pushed before the
+   repeating round's verdicts joined included, and it holds when the repeating rejection lands
+   after a later head was approved. Otherwise, by class:
    - `conflicting` -> `reconcile` (one PR at a time; the PR nearest to merge first; the reconciler
      derives the README gate counter from the tests directory and never hand-edits it; the
      reconciled head is proposed under the reconciliation class when step 3 classifies every

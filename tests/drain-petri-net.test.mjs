@@ -541,7 +541,7 @@ test('an unobserved fact is UNKNOWN and holds the chart; an observed false fact 
   assert.deepEqual(drain.facts['pr#92/D_FAILURE_FAMILY_REPEATED'], { value: true, evidence: { families: ['receipt-boundary'] } });
 });
 
-test('a repeated failure family trips the breaker at a head pushed before the repeating round joined (ENG-09)', () => {
+test('the breaker acts at a verdict join: it trips at a head pushed before the repeating round joined, and misses a repetition that lands after a later join (ENG-09)', () => {
   let clock = 0;
   const t = () => { clock += 1; return `2026-09-04T06:00:${String(clock).padStart(2, '0')}.000Z`; };
   const observe = (head) => ({ type: 'message.sent', at: t(), message: { from: 'act-0001', kind: 'pr-observation', text: `pr=7;head=${head}` } });
@@ -592,6 +592,21 @@ test('a repeated failure family trips the breaker at a head pushed before the re
   assert.equal(fresh.fired.at(-1), 'pr#7/T_JOIN_APPROVE');
   assert.deepEqual(active(fresh.marking).filter((id) => id.startsWith('pr#7/')), ['pr#7/P_DUAL_APPROVED']);
   assert.deepEqual(fresh.family, { value: false, evidence: { families: [] } });
+
+  // Declared divergence 5 (docs/drain-grafcet.md): T_BREAKER_TRIP consumes only the verdict steps.
+  // When R2's rejection of H2 lands after both axes approved H3 and the chart joined, the family
+  // has repeated, yet the chart goes on to merge. The coordinator waits with BLOCKED_REDESIGN.
+  const ready = `${H3};mergeable=MERGEABLE;draft=false;checks=ALL_PASS`;
+  const late = drive([
+    H1, review('R1', 'Spec', H1, 'REQUEST_CHANGES', 'X'), review('R1', 'Standards', H1, 'APPROVE'), H2, H3,
+    review('R3', 'Spec', H3, 'APPROVE'), review('R3', 'Standards', H3, 'APPROVE'),
+    review('R2', 'Spec', H2, 'REQUEST_CHANGES', 'X'), review('R2', 'Standards', H2, 'APPROVE'),
+    ready, `${ready};state=MERGED;mergeCommit=${'4'.repeat(40)};issue=none`,
+  ]);
+  assert.deepEqual(late.fired.filter((id) => /T_(JOIN_APPROVE|BREAKER_TRIP|MERGEABLE|READY|MERGE)$/u.test(id)),
+    ['pr#7/T_JOIN_APPROVE', 'pr#7/T_MERGEABLE', 'pr#7/T_READY', 'pr#7/T_MERGE']);
+  assert.deepEqual(active(late.marking).filter((id) => id.startsWith('pr#7/')), ['pr#7/P_ISSUE_RECONCILED']);
+  assert.deepEqual(late.family, { value: true, evidence: { families: ['X'] } });
 });
 
 // ---------------------------------------------------------------------------
