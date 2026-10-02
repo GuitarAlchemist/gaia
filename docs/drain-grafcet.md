@@ -409,16 +409,26 @@ family, and would trip the breaker on the next repair.
   `CLOSING_EFFECT_UNNAMED` before `HEAD_MISMATCH`, and `mergeCommit` is an order field;
 - the reviewer's artifact shape, filled in, is an artifact `parseArtifact` binds, with its
   `Family:` line read and an omitted line read as no family;
-- `T_BREAKER_TRIP` outranks both joins on their verdict steps. The coordinator's step 5 names
-  `BLOCKED_REDESIGN` before its class bullets, with "whatever the class" and "`dual-approved` and
-  `merge-ready` included", and with none of the exemption words the gate lists, in any case
+- `T_BREAKER_TRIP` outranks both joins on their verdict steps. The breaker gate reads source
+  text, split at line feeds, and renders no Markdown. It takes step 5 as the text from the
+  coordinator's first `5. **Decide the next lane**` to the next line opening `6. **`, step 4 as
+  the text from the first `4. **Classify**` to the next `5. **Decide the next lane**`, and the
+  lead as the text before step 5's first line opening with three spaces, a dash, a space and a
+  backtick. The lead names `BLOCKED_REDESIGN`, says "whatever the class" and "`dual-approved` and
+  `merge-ready` included", and holds none of the exemption words the gate lists, in any case
   (`except`, `excepting`, `unless`, `other than`, `but not`, `save`, `excluded`, `excludes`,
-  `however`). No class definition, class bullet, or class row, read whole after its name, names
-  `BLOCKED_REDESIGN`, `breaker`, `ENG-09` or `family`, in any case, and a step 5 that does not
-  bullet exactly the six classes fails it. So does a lead line, after the first, that does not
-  open with a letter, a backtick or a parenthesis after its indent, and a `<li>` tag in the lead:
-  no list item can open there. The `BLOCKED_REDESIGN` row and the breaker paragraph above say
-  "whatever the class". The gate reads those words, so a wording outside its lists passes it;
+  `however`). Each lead line after the first opens, after its indent, with an ASCII letter, a
+  backtick or a parenthesis, and the lead holds no `<li>` tag, in any case. The names, of lowercase
+  letters and dashes in backticks, that open step 5's lines after three spaces, a dash and a space
+  are exactly the six classes, in order. Step 4, step 5 after its lead, and each line of the
+  Coordinator classes section that opens with a cell holding such a name, read whole after that
+  cell, name none of `BLOCKED_REDESIGN`, `breaker`, `ENG-09` and `family`, in any case. The
+  `BLOCKED_REDESIGN` row says "whatever the class", and the breaker paragraph above says it with
+  "`dual-approved` and `merge-ready` included"; neither holds a listed exemption word. The lead
+  and the paragraph are read with whitespace normalized. The gate reads those words and forms, so
+  a wording or a Markdown structure outside them passes it: a code fence, a list item written
+  another way, a second step-5 heading, or a line ended by a lone carriage return, which the
+  LF-only gate refuses;
 - a negative control plants each mismatch and asserts the exact problem lists.
 
 ## What this slice does not do

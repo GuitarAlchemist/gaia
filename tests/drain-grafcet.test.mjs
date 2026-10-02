@@ -459,9 +459,10 @@ function breakerProblems({ coordinator, doc }) {
   if (!lead.includes('`BLOCKED_REDESIGN`') || !allClasses(lead)) {
     problems.push('coordinator: the breaker does not come before the classes');
   }
-  // The dashed bullets name the six classes. Every lead line after the first opens, after its
-  // indent, with a letter, a backtick or a parenthesis, and the lead holds no `<li>` tag, so no
-  // list item can open in it: a bullet written another way is never read as lead.
+  // Read on the source text, split at line feeds, as the doc's Test gates line states: the dashed
+  // bullets whose backticked name is lowercase list the six classes, in order, and every lead line
+  // after the first opens, after its indent, with an ASCII letter, a backtick or a parenthesis,
+  // with no `<li>` tag. No Markdown is rendered.
   const bulleted = [...step.matchAll(/\n {3}- `([a-z-]+)`/gu)].map(([, name]) => name);
   if (bulleted.join() !== CLASSES.join() || /\n(?![ \t]*[A-Za-z`(])|<li\b/iu.test(leadText)) {
     problems.push('coordinator: step 5 does not bullet exactly the six classes');
