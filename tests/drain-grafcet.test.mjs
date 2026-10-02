@@ -458,16 +458,16 @@ function breakerProblems({ coordinator, doc }) {
   if (!lead.includes('`BLOCKED_REDESIGN`') || !allClasses(lead)) {
     problems.push('coordinator: the breaker does not come before the classes');
   }
-  if (firstBullet >= 0 && BREAKER_WORDS.test(step.slice(firstBullet))) {
-    problems.push('coordinator: a class bullet applies the breaker');
-  }
+  if (firstBullet < 0) problems.push('coordinator: step 5 has no class bullet');
+  else if (BREAKER_WORDS.test(step.slice(firstBullet))) problems.push('coordinator: a class bullet applies the breaker');
   if (BREAKER_WORDS.test(between('4. **Classify**', '5. **Decide the next lane**'))) {
     problems.push('coordinator: a class definition names the breaker');
   }
   const row = coordinator.split('\n').find((line) => line.startsWith('| `BLOCKED_REDESIGN` |')) ?? '';
   if (!classFree(row)) problems.push('coordinator: the BLOCKED_REDESIGN row is not class-free');
-  for (const [, name, predicate, lane] of section(doc, 'Coordinator classes').matchAll(/^\| `([a-z-]+)` \| ([^|]+) \| ([^|]+) \|/gmu)) {
-    if (BREAKER_WORDS.test(`${predicate} ${lane}`)) problems.push(`doc: class ${name} applies the breaker`);
+  // A class row is read whole after its name cell, so a missing or escaped pipe hides no cell.
+  for (const [, name, cells] of section(doc, 'Coordinator classes').matchAll(/^\| `([a-z-]+)` \|(.*)$/gmu)) {
+    if (BREAKER_WORDS.test(cells)) problems.push(`doc: class ${name} applies the breaker`);
   }
   const paragraph = section(doc, 'Coordinator classes').split('\n\n').find((text) => text.startsWith('The breaker is not a class.')) ?? '';
   if (!allClasses(paragraph.replace(/\s+/gu, ' '))) problems.push('doc: the breaker paragraph is not class-free');
@@ -523,6 +523,45 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
     'doc: class changes-requested applies the breaker',
     'doc: the breaker paragraph is not class-free',
   ]);
+
+  // Negative control: each hardening alone, so dropping one lets its plant pass. An exemption in
+  // any case, as a sentence of its own or wrapped across lines; a listed word in any case, in a
+  // class row's Predicate cell, after an escaped pipe, or in a row with no closing pipe.
+  for (const [where, from, to, problem] of [
+    ['coordinator', '`merge-ready` included. A new head',
+      '`merge-ready` included. Except `merge-ready`, which goes to `publish`. A new head',
+      'coordinator: the breaker does not come before the classes'],
+    ['coordinator', '`merge-ready` included. A new head',
+      '`merge-ready` included. However, a `merge-ready` head goes to `publish`. A new head',
+      'coordinator: the breaker does not come before the classes'],
+    ['coordinator', '`merge-ready` included. A new head',
+      '`merge-ready` included. Every class waits, but\n   not `merge-ready`. A new head',
+      'coordinator: the breaker does not come before the classes'],
+    ['doc', 'one `REQUEST_CHANGES` | `bounded repair` |',
+      'one `REQUEST_CHANGES` | `bounded repair`, or `wait` on the Breaker |',
+      'doc: class changes-requested applies the breaker'],
+    ['doc', 'and neither `conflicting` nor `merge-ready` |',
+      'and neither `conflicting` nor `merge-ready`, the failure family not repeated |',
+      'doc: class dual-approved applies the breaker'],
+    ['doc', 'and every check green | `publish` |',
+      'and every check green | `publish` \\| `wait` while the failure family repeats |',
+      'doc: class merge-ready applies the breaker'],
+    ['doc', 'and every check green | `publish` |',
+      'and every check green, `BLOCKED_REDESIGN` not holding | `publish`',
+      'doc: class merge-ready applies the breaker'],
+    ['doc', 'included. A new head\nis not',
+      'included. Every class waits, but\n  not `merge-ready`. A new head\nis not',
+      'doc: the breaker paragraph is not class-free'],
+  ]) {
+    const files = { coordinator, doc };
+    files[where] = plant(files[where], from, to);
+    assert.deepEqual(breakerProblems(files), [problem], `${where}: ${to}`);
+  }
+  // A step 5 whose class bullets the gate cannot find fails closed.
+  const step = coordinator.slice(coordinator.indexOf('5. **Decide the next lane**'), coordinator.indexOf('\n6. **'));
+  const starred = coordinator.replace(step, () => step.replaceAll('\n   - `', '\n   * `'));
+  assert.notEqual(starred, coordinator);
+  assert.deepEqual(breakerProblems({ coordinator: starred, doc }), ['coordinator: step 5 has no class bullet']);
 });
 
 test('NEGATIVE CONTROL: each binding gate fires on a planted mismatch', () => {
