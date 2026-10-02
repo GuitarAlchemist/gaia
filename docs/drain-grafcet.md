@@ -418,17 +418,19 @@ family, and would trip the breaker on the next repair.
   `merge-ready` included", and holds none of the exemption words the gate lists, in any case
   (`except`, `excepting`, `unless`, `other than`, `but not`, `save`, `excluded`, `excludes`,
   `however`). Each lead line after the first opens, after its indent, with an ASCII letter, a
-  backtick or a parenthesis, and the lead holds no `<li>` tag, in any case. The names, of lowercase
-  letters and dashes in backticks, that open step 5's lines after three spaces, a dash and a space
-  are exactly the six classes, in order. Step 4, step 5 after its lead, and each line of the
-  Coordinator classes section that opens with a cell holding such a name, read whole after that
-  cell, name none of `BLOCKED_REDESIGN`, `breaker`, `ENG-09` and `family`, in any case. The
-  `BLOCKED_REDESIGN` row says "whatever the class", and the breaker paragraph above says it with
-  "`dual-approved` and `merge-ready` included"; neither holds a listed exemption word. The lead
-  and the paragraph are read with whitespace normalized. The gate reads those words and forms, so
-  a wording or a Markdown structure outside them passes it: a code fence, a list item written
-  another way, a second step-5 heading, or a line ended by a lone carriage return, which the
-  LF-only gate refuses;
+  backtick or a parenthesis, and the lead holds no `<li>` tag, in any case. The names made of
+  `a`-`z` and dashes, in backticks, that open step 5's lines after three spaces, a dash and a
+  space are exactly the six classes, in order. Step 4, step 5 after its lead, and each line of
+  the first `## Coordinator classes` section that opens with a pipe, a space, such a name in
+  backticks, a space and a pipe, read whole after that pipe, name none of `BLOCKED_REDESIGN`,
+  `breaker`, `ENG-09` and `family`, in any case. The coordinator's first line that opens with a
+  pipe, a space, `BLOCKED_REDESIGN` in backticks, a space and a pipe says "whatever the class".
+  The first paragraph of the same classes section that opens "The breaker is not a class." says
+  it with "`dual-approved` and `merge-ready` included". Neither holds a listed exemption word.
+  The lead and the paragraph are read with whitespace normalized. The gate reads those words and
+  forms, so a wording or a Markdown structure outside them passes it: a code fence, a list item
+  or a class row written another way, a second step-5 heading or classes section, or a line
+  ended by a lone carriage return, which the LF-only gate refuses in the coordinator;
 - a negative control plants each mismatch and asserts the exact problem lists.
 
 ## What this slice does not do

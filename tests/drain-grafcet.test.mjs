@@ -460,11 +460,11 @@ function breakerProblems({ coordinator, doc }) {
     problems.push('coordinator: the breaker does not come before the classes');
   }
   // Read on the source text, split at line feeds, as the doc's Test gates line states: the dashed
-  // bullets whose backticked name is lowercase list the six classes, in order, and every lead line
-  // after the first opens, after its indent, with an ASCII letter, a backtick or a parenthesis,
-  // with no `<li>` tag. No Markdown is rendered.
+  // bullets whose backticked name is made of a-z and dashes list the six classes, in order, and
+  // every lead line after the first opens, after its indent, with an ASCII letter, a backtick or a
+  // parenthesis, with no `<li>` tag in any case. No Markdown is rendered.
   const bulleted = [...step.matchAll(/\n {3}- `([a-z-]+)`/gu)].map(([, name]) => name);
-  if (bulleted.join() !== CLASSES.join() || /\n(?![ \t]*[A-Za-z`(])|<li\b/iu.test(leadText)) {
+  if (bulleted.join() !== CLASSES.join() || /\n(?![ \t]*[A-Za-z`(])/u.test(leadText) || /<li\b/iu.test(leadText)) {
     problems.push('coordinator: step 5 does not bullet exactly the six classes');
   } else if (BREAKER_WORDS.test(step.slice(firstBullet))) {
     problems.push('coordinator: a class bullet applies the breaker');
@@ -474,9 +474,11 @@ function breakerProblems({ coordinator, doc }) {
   }
   const row = coordinator.split('\n').find((line) => line.startsWith('| `BLOCKED_REDESIGN` |')) ?? '';
   if (!classFree(row)) problems.push('coordinator: the BLOCKED_REDESIGN row is not class-free');
-  // A class row is read whole after its name cell, so a missing or escaped pipe hides no cell.
-  for (const [, name, cells] of section(doc, 'Coordinator classes').matchAll(/^\| `([a-z-]+)` \|(.*)$/gmu)) {
-    if (BREAKER_WORDS.test(cells)) problems.push(`doc: class ${name} applies the breaker`);
+  // A class row is read whole after its name cell, to the line feed, so a missing or escaped pipe,
+  // or another line terminator, hides no cell.
+  for (const line of section(doc, 'Coordinator classes').split('\n')) {
+    const [, name, cells] = /^\| `([a-z-]+)` \|([\s\S]*)$/u.exec(line) ?? [];
+    if (name && BREAKER_WORDS.test(cells)) problems.push(`doc: class ${name} applies the breaker`);
   }
   const paragraph = section(doc, 'Coordinator classes').split('\n\n').find((text) => text.startsWith('The breaker is not a class.')) ?? '';
   if (!allClasses(paragraph.replace(/\s+/gu, ' '))) problems.push('doc: the breaker paragraph is not class-free');
@@ -535,8 +537,9 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
 
   // Negative control: each hardening alone, so dropping one lets its plant pass. An exemption in
   // any case, as a sentence of its own or wrapped across lines; a listed word in any case, in a
-  // class row's Predicate cell, after an escaped pipe, or in a row with no closing pipe; a class
-  // bullet the finder cannot read, a list item beside the class bullets, or a class bullet missing.
+  // class row's Predicate cell, after an escaped pipe, in a row with no closing pipe, or after
+  // another line terminator in a row; a class bullet the finder cannot read, a list item beside
+  // the class bullets, or a class bullet missing.
   for (const [where, from, to, problem] of [
     ['coordinator', '`merge-ready` included. A new head',
       '`merge-ready` included. Except `merge-ready`, which goes to `publish`. A new head',
@@ -564,6 +567,12 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
     ['doc', 'and every check green | `publish` |',
       'and every check green | `publish` \\| `wait` while the failure family repeats |',
       'doc: class merge-ready applies the breaker'],
+    ['doc', 'the chart joins only when both are bound |',
+      'the chart joins only when both are bound |\u2028`wait` while the breaker holds |',
+      'doc: class single-axis applies the breaker'],
+    ['doc', 'the chart joins only when both are bound |',
+      'the chart joins only when both are bound |\r`wait` while the breaker holds |',
+      'doc: class single-axis applies the breaker'],
     ['doc', 'and every check green | `publish` |',
       'and every check green, `BLOCKED_REDESIGN` not holding | `publish`',
       'doc: class merge-ready applies the breaker'],
@@ -581,9 +590,9 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
   assert.notEqual(starred, coordinator);
   assert.deepEqual(breakerProblems({ coordinator: starred, doc }), ['coordinator: step 5 does not bullet exactly the six classes']);
   // A line added before the six: one opening with a list marker, at other indents, in a block
-  // quote or after a blank line; a blank line; and one opening with a letter that holds an HTML
-  // list item.
-  for (const marker of ['   -', '   +', '   *', '   1.', '   1)', '   > *', '*', '     1)', '\n   2)', '\n   then', '   then <LI>']) {
+  // quote or after a blank line; a blank line; one opening with a letter outside A-Z and a-z;
+  // and one opening with a letter that holds an HTML list item.
+  for (const marker of ['   -', '   +', '   *', '   1.', '   1)', '   > *', '*', '     1)', '\n   2)', '\n   then', '   \u212A', '   then <LI>']) {
     const planted = plant(coordinator, 'Otherwise, by class:\n',
       `Otherwise, by class:\n${marker} **\`merge-ready\`** -> \`publish\`, even when the family repeats;\n`);
     assert.deepEqual(breakerProblems({ coordinator: planted, doc }), ['coordinator: step 5 does not bullet exactly the six classes'], marker);
