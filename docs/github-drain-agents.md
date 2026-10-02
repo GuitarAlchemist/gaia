@@ -316,7 +316,7 @@ coordinator record is prepend-only, so its line numbers are valid at the named r
 | An issue close without a merge first reads the merge it names | order `mergeCommit`; publisher `PR_NOT_MERGED` | `gaia-architect-r2-grafcet-drain-design.md:570-571` |
 | A repair counts once its exit head is the published head | coordinator `REPAIR_UNPUBLISHED` | `gaia-architect-r2-grafcet-drain-design.md:96` |
 | One publication token covers every proposal and every reconciliation | coordinator `PUBLICATION_BUSY` | `gaia-architect-r2-grafcet-drain-design.md:99`, `gaia-drain-coordinator-status.md:362-372` |
-| Two `REQUEST_CHANGES` in one failure family at distinct heads stop the PR at every later head, whatever its verdicts (ENG-09) | reviewer `Family:` line; coordinator `BLOCKED_REDESIGN`, before any class | `gaia-architect-r2-grafcet-drain-design.md:105`, `docs/engineering-and-research-principles.md:77` |
+| Two `REQUEST_CHANGES` in one failure family at distinct heads stop the PR at every later head, whatever its verdicts, until an operator orders a redesign (ENG-09) | reviewer `Family:` line; coordinator `BLOCKED_REDESIGN`, before any class | `gaia-architect-r2-grafcet-drain-design.md:105`, `docs/engineering-and-research-principles.md:77` |
 | The merge is a human boundary in R0 | publisher `issuedBy: operator`; design C cost | `gaia-drain-coordinator-status.md:73-77`, `gaia-drain-coordinator-status.md:11`, `ARCHITECTURE.md:233-236` |
 
 Two fleet rules are operator notes rather than agent rules, because Claude Code spawns subagents

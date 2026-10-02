@@ -437,8 +437,8 @@ test('the reviewer writes a Family line the breaker reads, and never a placehold
   assert.doesNotMatch(reviewer, /Family: `?(?:none|n\/a|-)`?\s*$/mu, 'the reviewer never writes a placeholder family');
 });
 
-const BREAKER_WORDS = /BLOCKED_REDESIGN|breaker|ENG-09|Family|repeated family/u;
-const EXEMPTION_WORDS = /\b(?:except|unless|other than|but not|excluded|excludes)\b/u;
+const BREAKER_WORDS = /BLOCKED_REDESIGN|breaker|ENG-09|family/iu;
+const EXEMPTION_WORDS = /\b(?:except|excepting|unless|other than|but not|save|excluded|excludes|however)\b/iu;
 /** A sentence that applies the breaker to every class, approved heads named as included. */
 const classFree = (text) => text.includes('whatever the class') && !EXEMPTION_WORDS.test(text);
 const allClasses = (text) => classFree(text) && text.includes('`dual-approved` and `merge-ready` included');

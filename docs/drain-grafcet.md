@@ -319,17 +319,18 @@ prompt exactly would still disagree with the chart.
    request, and `T_BREAKER_TRIP` (priority 1) outranks `T_JOIN_APPROVE` as well as
    `T_JOIN_REPAIR`, but it consumes only the two verdict steps: the chart's breaker acts at a
    verdict join. A repetition visible at a join trips it, whatever the verdicts there, at a head
-   pushed before the repeating round's verdicts joined as well. The coordinator waits with
-   `BLOCKED_REDESIGN` as soon as the family has repeated, wherever the pull request is, so the
-   agents are stricter in three cases R0 reaches:
-   - while a verdict step is still open, the chart binds a review to it and trips at the join;
-   - when the repeating rejection, at a superseded head, lands while the chart is in `P_REPAIR`,
-     the chart publishes the repair and trips only at the next join;
-   - when it lands after an approving join, from a late review of a superseded head or a second
-     review of the joined head, the chart goes on from `P_DUAL_APPROVED` through `T_MERGEABLE`,
-     `T_READY` and `T_MERGE`, and never trips (`tests/drain-petri-net.test.mjs`).
+   pushed before the repeating round's verdicts joined as well. A repetition that becomes visible
+   anywhere else, from a late review of a superseded head or a second review of a joined head,
+   leaves the chart going until its next join, if it reaches one:
+   - before a join, the chart forks or binds the reviews and trips at the join;
+   - from `P_REPAIR`, it publishes the repair and trips at the next join;
+   - from `P_DUAL_APPROVED` and the steps after it, it goes on through `T_MERGEABLE`, `T_READY`
+     and `T_MERGE` without tripping (`tests/drain-petri-net.test.mjs`), unless a rejected
+     reconciliation returns it to review, where it trips at the next join.
 
-   Tripping the chart from those steps needs new transitions, outside this slice. After a
+   The coordinator waits with `BLOCKED_REDESIGN` as soon as the family has repeated, wherever the
+   pull request is, so in each of these cases the agents are the stricter side. Tripping the
+   chart from those steps needs new transitions, outside this slice. After a
    redesign order the two part the other way. The coordinator waits only until an operator
    orders a redesign, but the family fact is not scoped by the order: once `T_REDESIGN_RESUMED`
    returns the pull request to review, the same fact trips the breaker again at the next join.
@@ -407,11 +408,14 @@ family, and would trip the breaker on the next repair.
   `CLOSING_EFFECT_UNNAMED` before `HEAD_MISMATCH`, and `mergeCommit` is an order field;
 - the reviewer's artifact shape, filled in, is an artifact `parseArtifact` binds, with its
   `Family:` line read and an omitted line read as no family;
-- `T_BREAKER_TRIP` outranks both joins on their verdict steps, and the coordinator's step 5
-  applies `BLOCKED_REDESIGN` before the classes, whatever the class, `dual-approved` and
-  `merge-ready` included and none exempted. No class definition, class bullet, or class row
-  names the breaker, and the `BLOCKED_REDESIGN` row and the breaker paragraph above apply to
-  every class;
+- `T_BREAKER_TRIP` outranks both joins on their verdict steps. The coordinator's step 5 names
+  `BLOCKED_REDESIGN` before its class bullets, with "whatever the class" and "`dual-approved` and
+  `merge-ready` included", and with none of the exemption words the gate lists, in any case
+  (`except`, `excepting`, `unless`, `other than`, `but not`, `save`, `excluded`, `excludes`,
+  `however`). No class definition, class bullet, or class row names `BLOCKED_REDESIGN`,
+  `breaker`, `ENG-09` or `family`, in any case. The `BLOCKED_REDESIGN`
+  row and the breaker paragraph above say "whatever the class". The gate reads those words, so a
+  wording outside its lists passes it;
 - a negative control plants each mismatch and asserts the exact problem lists.
 
 ## What this slice does not do
