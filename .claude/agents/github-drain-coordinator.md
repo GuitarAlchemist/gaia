@@ -107,15 +107,18 @@ the publisher.
      `CLEAN`, every check green.
    - `draft` is recorded as a flag beside the class, because every PR in this repository opens as
      a draft and a merge command on a draft fails on GitHub.
-5. **Decide the next lane** per PR:
+5. **Decide the next lane** per PR. The breaker comes first: when two `REQUEST_CHANGES`
+   artifacts of this PR at distinct heads carry the same `Family:` token, the lane is `wait` with
+   `BLOCKED_REDESIGN` (named blockers, below), whatever the class of the published head,
+   `dual-approved` and `merge-ready` included. A new head is not a new design (ENG-09): the
+   breaker holds at every later head, one pushed before the repeating round's verdicts joined
+   included. Otherwise, by class:
    - `conflicting` -> `reconcile` (one PR at a time; the PR nearest to merge first; the reconciler
      derives the README gate counter from the tests directory and never hand-edits it; the
      reconciled head is proposed under the reconciliation class when step 3 classifies every
      commit, and reviewed on both axes otherwise);
    - `changes-requested` -> `bounded repair`, whose specification is the blocking findings of both
-     reviews, followed by both review axes again at the new head; when a `REQUEST_CHANGES`
-     artifact at this head and one at another head of this PR carry the same `Family:` token,
-     `wait` with `BLOCKED_REDESIGN` instead (named blockers, below);
+     reviews, followed by both review axes again at the new head;
    - `unreviewed` -> `review Spec` and `review Standards`, both, on one detached clean clone at
      the exact head, concurrently;
    - `single-axis` -> `review <missing axis>` on the same head;
@@ -143,7 +146,7 @@ A blocker is written in the ledger as its code and its subject, such as `PUBLICA
 | --- | --- | --- |
 | `PUBLICATION_BUSY` | another PR holds the publication token: its proposal is open, or it is being reconciled. The subject is that PR | `MERGE_LOCK` |
 | `REPAIR_UNPUBLISHED` | a bounded-repair handoff for this PR names an exit head that is not the published head: the repair has not reached origin, so no review is spawned. The subject is the exit head | `D_HEAD_ADVANCED` |
-| `BLOCKED_REDESIGN` | a `REQUEST_CHANGES` artifact at the published head and one at another head of this PR carry the same `Family:` token (ENG-09): no repair is spawned until an operator orders a redesign. A family repeated only at other heads does not block this one. The subject is the family | `D_FAILURE_FAMILY_REPEATED`, `P_BLOCKED_REDESIGN` |
+| `BLOCKED_REDESIGN` | two `REQUEST_CHANGES` artifacts of this PR at distinct heads carry the same `Family:` token (ENG-09), whatever the class of the published head: no review, repair, reconciliation or publication is proposed for this PR until an operator orders a redesign. The subject is the family | `D_FAILURE_FAMILY_REPEATED`, `P_BLOCKED_REDESIGN` |
 | `RECONCILIATION_UNCLASSIFIED` | a reconciled head's delta is outside the reconciliation class (step 3): the head is `unreviewed`. The subject is the first unclassified commit | `D_RECONCILIATION_CLASSIFIED`, `D_RECONCILIATION_UNCLASSIFIED` |
 | `NOT_MERGEABLE` | an approved head's `mergeable` is not `MERGEABLE`, or its `mergeStateStatus` is neither `CLEAN` nor, for a draft, `DRAFT`. The subject is the PR | `D_MERGEABLE_CLEAN` |
 | `CHECKS_NOT_GREEN` | an approved head has a check that is failing or still pending. The subject is the PR | `D_NOT_DRAFT` |

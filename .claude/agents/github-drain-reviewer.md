@@ -133,7 +133,7 @@ final section, nowhere else in that form. The caller reads the artifact; do not 
 `Family:` names the failure family the blocking findings share, as one token of letters, digits,
 `_`, `.` or `-`, such as `D1`. Write it only with `REQUEST_CHANGES`, and only when one family
 covers the blockers; otherwise leave the line out. It stays in the header block that the
-`Subject:` line opens, because the chart reads it there: a `REQUEST_CHANGES` artifact at the
-observed head and one at another head of the same PR with the same token trip the ENG-09
-breaker (`D_FAILURE_FAMILY_REPEATED`). Any token on that line is read as a family, a word such
-as `none` included, so a line with no real family would trip the breaker on the next repair.
+`Subject:` line opens, because the chart reads it there: two `REQUEST_CHANGES` artifacts of one
+PR at distinct heads with the same token trip the ENG-09 breaker
+(`D_FAILURE_FAMILY_REPEATED`). Any token on that line is read as a family, a word such as `none`
+included, so a line with no real family would trip the breaker on the next repair.

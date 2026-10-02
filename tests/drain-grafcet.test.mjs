@@ -437,6 +437,54 @@ test('the reviewer writes a Family line the breaker reads, and never a placehold
   assert.doesNotMatch(reviewer, /Family: `?(?:none|n\/a|-)`?\s*$/mu, 'the reviewer never writes a placeholder family');
 });
 
+/** Where the coordinator and the doc apply the breaker: before every class, never inside one. */
+function breakerProblems({ coordinator, doc }) {
+  const problems = [];
+  const start = coordinator.indexOf('5. **Decide the next lane**');
+  const end = coordinator.indexOf('\n6. **', start);
+  const step = start >= 0 && end > start ? coordinator.slice(start, end) : '';
+  const firstBullet = step.indexOf('\n   - `');
+  const lead = firstBullet >= 0 ? step.slice(0, firstBullet) : step;
+  if (!lead.includes('`BLOCKED_REDESIGN`') || !lead.includes('whatever the class')) {
+    problems.push('coordinator: the breaker does not come before the classes');
+  }
+  if (firstBullet >= 0 && step.slice(firstBullet).includes('BLOCKED_REDESIGN')) {
+    problems.push('coordinator: a class bullet applies the breaker');
+  }
+  for (const [, name, lane] of section(doc, 'Coordinator classes').matchAll(/^\| `([a-z-]+)` \| [^|]+ \| ([^|]+) \|/gmu)) {
+    if (lane.includes('BLOCKED_REDESIGN')) problems.push(`doc: class ${name} applies the breaker`);
+  }
+  return problems;
+}
+
+test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP outranks both joins', () => {
+  const byId = Object.fromEntries(DRAIN_NET_TEMPLATE.transitions.map((transition) => [transition.id, transition]));
+  const priority = (id) => byId[id].priority ?? 0;
+  for (const join of ['T_JOIN_APPROVE', 'T_JOIN_REPAIR']) {
+    assert.ok(priority('T_BREAKER_TRIP') > priority(join), `T_BREAKER_TRIP outranks ${join}`);
+    assert.ok(byId.T_BREAKER_TRIP.inputs.every((place) => byId[join].inputs.includes(place)),
+      `T_BREAKER_TRIP takes the verdict steps ${join} takes`);
+  }
+  const { coordinator } = readAgents();
+  const doc = read(DOC);
+  assert.deepEqual(breakerProblems({ coordinator, doc }), []);
+
+  // Negative control: the breaker held inside `changes-requested`, which let a dual-approved head
+  // after a repeated family go to publication while the chart trips.
+  const insideClass = coordinator
+    .replace(/5\. \*\*Decide the next lane\*\* per PR\.[\s\S]*?Otherwise, by class:/u, '5. **Decide the next lane** per PR:')
+    .replace('again at the new head;', 'again at the new head; `wait` with `BLOCKED_REDESIGN` when the family repeats;');
+  const rowInsideClass = doc.replace('one `REQUEST_CHANGES` | `bounded repair` |',
+    'one `REQUEST_CHANGES` | `bounded repair`, or `wait` with `BLOCKED_REDESIGN` when the family repeats |');
+  assert.notEqual(insideClass, coordinator);
+  assert.notEqual(rowInsideClass, doc);
+  assert.deepEqual(breakerProblems({ coordinator: insideClass, doc: rowInsideClass }), [
+    'coordinator: the breaker does not come before the classes',
+    'coordinator: a class bullet applies the breaker',
+    'doc: class changes-requested applies the breaker',
+  ]);
+});
+
 test('NEGATIVE CONTROL: each binding gate fires on a planted mismatch', () => {
   // The rendering moves with the template: a renamed refusal changes the block.
   const renamed = {

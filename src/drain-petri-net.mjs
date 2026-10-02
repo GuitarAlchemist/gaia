@@ -680,7 +680,7 @@ export const DRAIN_NET_TEMPLATE = deepFreeze({
     D_STANDARDS_VERDICT_BOUND: { kind: 'LEVEL', fact: 'a Standards review artifact bound as above', channel: 'artifact bytes: title, Subject header, **Verdict:** line, last non-empty line' },
     D_BOTH_APPROVE_AT_HEAD: { kind: 'LEVEL', fact: 'the bound Spec verdict and the bound Standards verdict are both APPROVE', channel: 'artifact bytes, both axes' },
     D_ANY_REQUEST_CHANGES_AT_HEAD: { kind: 'LEVEL', fact: 'both axes are bound and at least one verdict is REQUEST_CHANGES', channel: 'artifact bytes, both axes' },
-    D_FAILURE_FAMILY_REPEATED: { kind: 'LEVEL', fact: 'two REQUEST_CHANGES artifacts of this pull request carry the same non-empty Family token, one at the current head and one at a distinct head', channel: 'artifact bytes: Family: line' },
+    D_FAILURE_FAMILY_REPEATED: { kind: 'LEVEL', fact: 'two REQUEST_CHANGES artifacts of this pull request at distinct heads carry the same non-empty Family token', channel: 'artifact bytes: Family: line' },
     D_HEAD_ADVANCED: { kind: 'EDGE', fact: 'a recorded observation names a head different from the previous one', channel: 'bus message.sent kind pr-observation (head=)' },
     D_MERGEABLE_CLEAN: { kind: 'LEVEL', fact: 'the latest observation at the current head records mergeable=MERGEABLE', channel: 'bus pr-observation (mergeable=)' },
     D_CONFLICTING: { kind: 'LEVEL', fact: 'the latest observation at the current head records mergeable=CONFLICTING', channel: 'bus pr-observation (mergeable=)' },

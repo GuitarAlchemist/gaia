@@ -541,9 +541,10 @@ test('an unobserved fact is UNKNOWN and holds the chart; an observed false fact 
   assert.deepEqual(drain.facts['pr#92/D_FAILURE_FAMILY_REPEATED'], { value: true, evidence: { families: ['receipt-boundary'] } });
 });
 
-test('the breaker reads a family repeated at the current head, so it does not re-trip at a later redesigned head', () => {
-  const t = (second) => `2026-09-04T06:00:${String(second).padStart(2, '0')}.000Z`;
-  const observe = (text, at) => ({ type: 'message.sent', at, message: { from: 'act-0001', kind: 'pr-observation', text } });
+test('a repeated failure family trips the breaker at a head pushed before the repeating round joined (ENG-09)', () => {
+  let clock = 0;
+  const t = () => { clock += 1; return `2026-09-04T06:00:${String(clock).padStart(2, '0')}.000Z`; };
+  const observe = (head) => ({ type: 'message.sent', at: t(), message: { from: 'act-0001', kind: 'pr-observation', text: `pr=7;head=${head}` } });
   const review = (round, axis, head, verdict, family = null) => ({
     name: `pr7-${round.toLowerCase()}-${axis.toLowerCase()}-review.md`,
     bytes: bytes([
@@ -552,42 +553,45 @@ test('the breaker reads a family repeated at the current head, so it does not re
       `PR7_${round}_${axis.toUpperCase()}_COMPLETE`, '',
     ].join('\n')),
   });
-  // Each review becomes visible through its lane-complete send, then the coordinator observes `head`.
-  const levelAt = (head, reviews) => {
-    const records = [registerCoordinator(t(0)), { type: 'actor.registered', at: t(1), ref: 'act-0002', kind: 'lane' }];
-    reviews.forEach((artifact, index) => {
-      const { sha256, marker } = parseArtifact(artifact);
-      records.push({ type: 'message.sent', at: t(2 + index), message: { from: 'act-0002', kind: 'lane-complete', text: `${artifact.name};sha256=${sha256};marker=${marker}` } });
-    });
-    records.push(observe(`pr=7;head=${head}`, t(50)));
-    const facts = collectDrainFacts({ records, artifacts: reviews });
+  // A script of observed heads and reviews; each review becomes visible at its lane-complete send.
+  const drive = (script) => {
+    clock = 0;
+    const records = [registerCoordinator(t()), { type: 'actor.registered', at: t(), ref: 'act-0002', kind: 'lane' }];
+    const artifacts = [];
+    for (const entry of script) {
+      if (typeof entry === 'string') { records.push(observe(entry)); continue; }
+      const { sha256, marker } = parseArtifact(entry);
+      artifacts.push(entry);
+      records.push({ type: 'message.sent', at: t(), message: { from: 'act-0002', kind: 'lane-complete', text: `${entry.name};sha256=${sha256};marker=${marker}` } });
+    }
+    const facts = collectDrainFacts({ records, artifacts });
     assert.deepEqual(facts.refused, []);
-    return facts.drainEvents.at(-1).level;
+    const run = replay(drainFor(['7']), facts.drainEvents);
+    return { fired: run.history.flatMap(({ fired }) => fired), marking: run.marking, family: run.facts['pr#7/D_FAILURE_FAMILY_REPEATED'] };
   };
-  const r1 = [review('R1', 'Spec', H1, 'REQUEST_CHANGES', 'X'), review('R1', 'Standards', H1, 'APPROVE')];
-  const r2 = [review('R2', 'Spec', H2, 'REQUEST_CHANGES', 'X'), review('R2', 'Standards', H2, 'APPROVE')];
+  // R1 rejects H1 in family X and is repaired. R2's Spec rejects H2 in X too, but H3 is pushed
+  // before R2's Standards verdict lands, so the R2 verdicts never join at H2.
+  const prefix = (spec2) => [
+    H1, review('R1', 'Spec', H1, 'REQUEST_CHANGES', 'X'), review('R1', 'Standards', H1, 'APPROVE'),
+    H2, review('R2', 'Spec', H2, 'REQUEST_CHANGES', spec2), H3, review('R2', 'Standards', H2, 'APPROVE'),
+  ];
 
-  // At the head of the second same-family rejection the breaker holds, as ENG-09 requires.
-  assert.deepEqual(levelAt(H2, [...r1, ...r2])['pr#7/D_FAILURE_FAMILY_REPEATED'], { value: true, evidence: { families: ['X'] } });
+  // Both axes approve H3: a new head is not a new design, so the breaker outranks the approval.
+  const approved = drive([...prefix('X'), review('R3', 'Spec', H3, 'APPROVE'), review('R3', 'Standards', H3, 'APPROVE')]);
+  assert.equal(approved.fired.at(-1), 'pr#7/T_BREAKER_TRIP');
+  assert.deepEqual(active(approved.marking).filter((id) => id.startsWith('pr#7/')), ['pr#7/P_BLOCKED_REDESIGN']);
+  assert.deepEqual(approved.family, { value: true, evidence: { families: ['X'] } });
 
-  // After the redesign, both axes approve H3. The family repeated at H1 and H2 says nothing about H3.
-  const approved = levelAt(H3, [...r1, ...r2, review('R3', 'Spec', H3, 'APPROVE'), review('R3', 'Standards', H3, 'APPROVE')]);
-  assert.deepEqual(approved['pr#7/D_FAILURE_FAMILY_REPEATED'], { value: false, evidence: { families: [] } });
-  assert.equal(approved['pr#7/D_BOTH_APPROVE_AT_HEAD'].value, true);
-  const net = drainFor(['7']);
-  const joined = step(net, markingAt(net, '7', ['P_SPEC_VERDICT', 'P_STANDARDS_VERDICT']), approved);
-  assert.deepEqual(joined.fired, ['pr#7/T_JOIN_APPROVE'], 'the approved redesign joins instead of tripping the breaker');
-  assert.equal(joined.marking['pr#7/P_BLOCKED_REDESIGN'], 0);
+  // H3 rejected in a new family Y: the breaker, not another repair.
+  const rejected = drive([...prefix('X'), review('R3', 'Spec', H3, 'REQUEST_CHANGES', 'Y'), review('R3', 'Standards', H3, 'APPROVE')]);
+  assert.equal(rejected.fired.at(-1), 'pr#7/T_BREAKER_TRIP');
+  assert.equal(rejected.marking['pr#7/P_REPAIR'], 0);
 
-  // The same family rejected again at H3 is a third repetition, and the breaker trips at H3.
-  const again = levelAt(H3, [...r1, ...r2, review('R3', 'Spec', H3, 'REQUEST_CHANGES', 'X'), review('R3', 'Standards', H3, 'APPROVE')]);
-  assert.deepEqual(again['pr#7/D_FAILURE_FAMILY_REPEATED'], { value: true, evidence: { families: ['X'] } });
-  const tripped = step(net, markingAt(net, '7', ['P_SPEC_VERDICT', 'P_STANDARDS_VERDICT']), again);
-  assert.deepEqual(tripped.fired, ['pr#7/T_BREAKER_TRIP']);
-
-  // A rejection at H3 in a new family is an ordinary repair: no family is repeated at H3.
-  const fresh = levelAt(H3, [...r1, ...r2, review('R3', 'Spec', H3, 'REQUEST_CHANGES', 'Y'), review('R3', 'Standards', H3, 'APPROVE')]);
-  assert.deepEqual(fresh['pr#7/D_FAILURE_FAMILY_REPEATED'], { value: false, evidence: { families: [] } });
+  // Control: R2 rejects in family Y, so nothing repeats and the approved H3 joins.
+  const fresh = drive([...prefix('Y'), review('R3', 'Spec', H3, 'APPROVE'), review('R3', 'Standards', H3, 'APPROVE')]);
+  assert.equal(fresh.fired.at(-1), 'pr#7/T_JOIN_APPROVE');
+  assert.deepEqual(active(fresh.marking).filter((id) => id.startsWith('pr#7/')), ['pr#7/P_DUAL_APPROVED']);
+  assert.deepEqual(fresh.family, { value: false, evidence: { families: [] } });
 });
 
 // ---------------------------------------------------------------------------

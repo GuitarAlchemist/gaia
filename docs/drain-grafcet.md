@@ -44,7 +44,7 @@ steps whose work it guards, or the resource it found held.
 ## Chart
 
 <!-- BEGIN chart: rendered from DRAIN_NET_TEMPLATE by tests/drain-grafcet.test.mjs; edit the template, not this block -->
-Net `gaia.drain-petri-net.pr-drain`, template revision `sha256:b5586f16ce1611e43a5d62fc22603b5d715da1dbf5df143d12a01cd04fc67d27`.
+Net `gaia.drain-petri-net.pr-drain`, template revision `sha256:8fbd865b6330f5d4c8343b8e5755fc1ce463e8868d097a45c8a4d870bc034184`.
 
 ### Places
 
@@ -75,7 +75,7 @@ Net `gaia.drain-petri-net.pr-drain`, template revision `sha256:b5586f16ce1611e43
 | `D_STANDARDS_VERDICT_BOUND` | LEVEL | a Standards review artifact bound as above | artifact bytes: title, Subject header, \*\*Verdict:\*\* line, last non-empty line |
 | `D_BOTH_APPROVE_AT_HEAD` | LEVEL | the bound Spec verdict and the bound Standards verdict are both APPROVE | artifact bytes, both axes |
 | `D_ANY_REQUEST_CHANGES_AT_HEAD` | LEVEL | both axes are bound and at least one verdict is REQUEST_CHANGES | artifact bytes, both axes |
-| `D_FAILURE_FAMILY_REPEATED` | LEVEL | two REQUEST_CHANGES artifacts of this pull request carry the same non-empty Family token, one at the current head and one at a distinct head | artifact bytes: Family: line |
+| `D_FAILURE_FAMILY_REPEATED` | LEVEL | two REQUEST_CHANGES artifacts of this pull request at distinct heads carry the same non-empty Family token | artifact bytes: Family: line |
 | `D_HEAD_ADVANCED` | EDGE | a recorded observation names a head different from the previous one | bus message.sent kind pr-observation (head=) |
 | `D_MERGEABLE_CLEAN` | LEVEL | the latest observation at the current head records mergeable=MERGEABLE | bus pr-observation (mergeable=) |
 | `D_CONFLICTING` | LEVEL | the latest observation at the current head records mergeable=CONFLICTING | bus pr-observation (mergeable=) |
@@ -215,7 +215,7 @@ binding names that transition's receptivity.
 | `ARTIFACT_UNNAMED` | reviewer | `P_REVIEW_SPEC`, `P_REVIEW_STANDARDS` | the input missing, `artifact` or `marker` | the verdict receptivities read the artifact and its marker |
 | `PUBLICATION_BUSY` | coordinator | `MERGE_LOCK` | the pull request that holds the token | one `MERGE_LOCK` token covers every merge and reconciliation (B35) |
 | `REPAIR_UNPUBLISHED` | coordinator | `D_HEAD_ADVANCED` | the repair's exit head | the chart's refusal for `T_REPAIR_PUBLISHED`: a repair counts once origin's head moves |
-| `BLOCKED_REDESIGN` | coordinator | `D_FAILURE_FAMILY_REPEATED`, `P_BLOCKED_REDESIGN` | the family | `T_BREAKER_TRIP` outranks `T_JOIN_REPAIR`; the step inhibits new reviews and repairs (ENG-09) |
+| `BLOCKED_REDESIGN` | coordinator | `D_FAILURE_FAMILY_REPEATED`, `P_BLOCKED_REDESIGN` | the family | `T_BREAKER_TRIP` outranks `T_JOIN_APPROVE` and `T_JOIN_REPAIR`, so it trips whatever the head's verdicts; the step inhibits new reviews and repairs (ENG-09). The coordinator waits on it before any class |
 | `RECONCILIATION_UNCLASSIFIED` | coordinator, publisher | `D_RECONCILIATION_CLASSIFIED`, `D_RECONCILIATION_UNCLASSIFIED` | coordinator: the first unclassified commit; publisher: `#N` | the chart's refusal for `T_RECONCILED`; `T_RECONCILE_REJECTED` returns the head to review (see Divergences) |
 | `ISSUE_RECONCILIATION_PENDING` | coordinator | `D_ISSUE_RECONCILED` | the issue `#M` | the chart's refusal for `T_ISSUE_RECONCILED` |
 | `ORDER_DIGEST_MISMATCH` | publisher | `P_MERGEABLE`, `P_READY`, `P_MERGED` | the order path | the order is the operator's admission for the commands inside these steps: `ready`, `merge`, `issue-close`. No receptivity reads it |
@@ -268,7 +268,7 @@ The test gates enumerate the states.
 | Class | Predicate | Next lane |
 | --- | --- | --- |
 | `conflicting` | `D_BOTH_APPROVE_AT_HEAD` or `reconciled`, and `D_CONFLICTING` | `reconcile`: every way into `P_RECONCILE` starts from `P_DUAL_APPROVED`, `P_MERGEABLE`, or `P_READY`, steps reached only through `T_JOIN_APPROVE` |
-| `changes-requested` | `D_ANY_REQUEST_CHANGES_AT_HEAD`: both axes bound, one `REQUEST_CHANGES` | `bounded repair`, or `wait` with `BLOCKED_REDESIGN` when the family repeats |
+| `changes-requested` | `D_ANY_REQUEST_CHANGES_AT_HEAD`: both axes bound, one `REQUEST_CHANGES` | `bounded repair` |
 | `unreviewed` | `D_HEAD_PUBLISHED`, neither `D_SPEC_VERDICT_BOUND` nor `D_STANDARDS_VERDICT_BOUND`, and not `reconciled` | both review axes, as `T_FORK_REVIEWS` forks them |
 | `single-axis` | exactly one of `D_SPEC_VERDICT_BOUND` and `D_STANDARDS_VERDICT_BOUND` | the missing axis; the chart joins only when both are bound |
 | `dual-approved` | `D_BOTH_APPROVE_AT_HEAD` or `reconciled`, and neither `conflicting` nor `merge-ready` | `publish` once mergeable, green, and clean (or a draft), else `wait` with `NOT_MERGEABLE` or `CHECKS_NOT_GREEN` |
@@ -281,6 +281,12 @@ conflicting head that is not approved is classified by its verdicts, because the
 only from steps `T_JOIN_APPROVE` reaches, and a reconciled head that conflicts again after the
 next merge is still `conflicting`. A verdict on the head itself supersedes the reconciliation
 class, so a reconciled head is never also `unreviewed` or `single-axis`.
+
+The breaker is not a class. Once two `REQUEST_CHANGES` artifacts of a pull request at distinct
+heads carry the same `Family:` token, the coordinator's step 5 waits with `BLOCKED_REDESIGN`
+whatever the class of the published head, `dual-approved` and `merge-ready` included, because
+`T_BREAKER_TRIP` outranks both joins at the next verdict join. A new head is not a new design
+(ENG-09).
 
 ## Receptivities no agent reads
 
@@ -297,7 +303,7 @@ prompt exactly would still disagree with the chart.
    `approvedSha` plus classified reconciliation commits (`docs/github-drain-agents.md`,
    Reconciliation class). The chart's `D_RECONCILIATION_CLASSIFIED` also requires both axes to
    approve artifacts bound to the reconciled head itself (`src/drain-petri-net.mjs:687`,
-   `src/drain-petri-net-facts.mjs:455-476`). The chart is stricter. Choosing one rule is a
+   `src/drain-petri-net-facts.mjs:451-472`). The chart is stricter. Choosing one rule is a
    decision for the operator, outside this slice; until then, the coordinator's `dual-approved`
    bullet says so, and the chart would hold such a head in `P_RECONCILE`.
 2. **`NOT_MERGEABLE`.** The publisher also requires `mergeStateStatus` `CLEAN`; the chart's
@@ -309,16 +315,30 @@ prompt exactly would still disagree with the chart.
    (`gaia-architect-r2-grafcet-drain-design.md:567-569`). Their exits are `D_HEAD_ADVANCED` and
    the two reconciliation receptivities, which the coordinator reads as `REPAIR_UNPUBLISHED` and
    `RECONCILIATION_UNCLASSIFIED`.
-5. **`REPAIR_UNPUBLISHED`.** The coordinator requires the published head to be the handoff's exit
+5. **The breaker.** `D_FAILURE_FAMILY_REPEATED` is a level fact over every artifact of the pull
+   request, and `T_BREAKER_TRIP` (priority 1) outranks `T_JOIN_APPROVE` as well as
+   `T_JOIN_REPAIR`. Once a family has repeated, the chart trips at the next verdict join, whatever
+   the verdicts there, at a head pushed before the repeating round's verdicts joined as well. The
+   coordinator waits with `BLOCKED_REDESIGN` as soon as the family has repeated, even while a
+   verdict step is still open; the chart trips only at the join, so it still binds a review to
+   the open step. Both stop the pull request; the agents are stricter. After a redesign
+   order the two part: the coordinator waits only until an operator orders a redesign, while the
+   chart cannot see the order, so `T_REDESIGN_RESUMED` returns the pull request to review and the
+   same fact trips the breaker again at the next join. That part is unreachable in R0, where no
+   class-D order reaches the bus and `T_REDESIGN_RESUMED` never fires; scoping the fact to the
+   rejections after the order needs the order's channel. Binding the fact to the observed head
+   instead would drop a repetition whenever the head moves before the repeating round's verdicts
+   join, which R0 can reach (`tests/drain-petri-net.test.mjs`).
+6. **`REPAIR_UNPUBLISHED`.** The coordinator requires the published head to be the handoff's exit
    head; `D_HEAD_ADVANCED` holds on any head change. The agents are stricter.
-6. **Readiness.** The collector holds `D_NOT_DRAFT` only at the approved head with checks
-   `ALL_PASS` (`src/drain-petri-net-facts.mjs:275-279`). The publisher's `STILL_DRAFT` reads
+7. **Readiness.** The collector holds `D_NOT_DRAFT` only at the approved head with checks
+   `ALL_PASS` (`src/drain-petri-net-facts.mjs:271-275`). The publisher's `STILL_DRAFT` reads
    `isDraft`, and it reads the checks (`CHECKS_NOT_GREEN`) only for a merge, so a `ready`-only
    order completes while the chart may still refuse `T_READY`.
-7. **One issue per observation.** The collector's observation grammar takes one `issue=` value
+8. **One issue per observation.** The collector's observation grammar takes one `issue=` value
    (`src/drain-petri-net-facts.mjs:57`), so an order whose `autoCloses` names several issues has
    no single observation for `D_ISSUE_RECONCILED`. The publisher confirms each issue.
-8. **The closing effect is not observed.** No receptivity reads `closingIssuesReferences`.
+9. **The closing effect is not observed.** No receptivity reads `closingIssuesReferences`.
    `CLOSING_EFFECT_UNNAMED` and the re-read in `STATE_CHANGED` bind to `D_ISSUE_RECONCILED`, the
    receptivity the effect lands in, not to a fact the chart measures.
 
@@ -347,11 +367,8 @@ publisher reads the pull request `MERGED` with that commit first (`PR_NOT_MERGED
 
 ## The breaker's family line
 
-`T_BREAKER_TRIP` fires when two `REQUEST_CHANGES` artifacts of one pull request carry the same
-`Family:` token, one at the observed head and one at a distinct head (`D_FAILURE_FAMILY_REPEATED`,
-`src/drain-petri-net-facts.mjs:181-196`). A repetition at earlier heads says nothing about a later
-one, so after a redesign a head both axes approve joins at `T_JOIN_APPROVE`; the breaker trips
-there only if a rejection at that head repeats a family. The collector reads that line in
+`T_BREAKER_TRIP` fires when two `REQUEST_CHANGES` artifacts of one pull request at distinct heads
+carry the same `Family:` token (`D_FAILURE_FAMILY_REPEATED`). The collector reads that line in
 the header block the `Subject:` line opens, and reads any token there as a family
 (`src/drain-petri-net-facts.mjs:44`, `src/drain-petri-net-facts.mjs:129`). The reviewer's
 artifact shape now carries the line in that block, written only with `REQUEST_CHANGES` when one
@@ -381,6 +398,9 @@ family, and would trip the breaker on the next repair.
   `CLOSING_EFFECT_UNNAMED` before `HEAD_MISMATCH`, and `mergeCommit` is an order field;
 - the reviewer's artifact shape, filled in, is an artifact `parseArtifact` binds, with its
   `Family:` line read and an omitted line read as no family;
+- `T_BREAKER_TRIP` outranks both joins on their verdict steps, and the coordinator's step 5
+  applies `BLOCKED_REDESIGN` before the classes, whatever the class, while no class bullet or
+  class row applies it;
 - a negative control plants each mismatch and asserts the exact problem lists.
 
 ## What this slice does not do

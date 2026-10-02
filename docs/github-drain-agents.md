@@ -232,8 +232,9 @@ after merge; a failure records completed effects and stops the remaining actions
    full SHA, concurrently.
 3. Once both axes carry a verdict on the head, a `REQUEST_CHANGES` on either sends the PR to a
    bounded repair whose specification is the blocking findings of both reviews; the new head gets
-   both axes again. A second `REQUEST_CHANGES` at a new head in the same `Family:` stops repairs
-   until an operator orders a redesign (`BLOCKED_REDESIGN`).
+   both axes again. A second `REQUEST_CHANGES` at a new head in the same `Family:` stops the PR
+   until an operator orders a redesign (`BLOCKED_REDESIGN`): no review, repair or publication of
+   any later head, whatever its verdicts, because a new head is not a new design (ENG-09).
 4. Dual `APPROVE` on the exact published head, `MERGEABLE`, `CLEAN`, checks green: the
    coordinator proposes; the operator orders; the publisher marks ready and squash-merges with
    `--match-head-commit`.
