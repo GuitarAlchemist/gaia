@@ -13,12 +13,12 @@
  *   - no list of review verdicts holds a verdict besides `APPROVE` and `REQUEST_CHANGES`: an
  *     array literal of uppercase quoted tokens, or a regex group of alternatives in any case.
  * A seam listed in PINNED_SEAMS is exempt from the first two gates once its own test pins SCI-08;
- * a list with no model behind it joins ALLOWED_REVIEW_LISTS with its reason.
+ * a list with no model behind it joins ALLOWED_REVIEW_LISTS, by its exact tokens, with its reason.
  *
  * The scan is lexical. Words are split into identifier segments, so `askJev` and `JEV_MODEL` are
- * found and `Bernoulli` is not; comments are not code. A model verdict under a name none of these
- * patterns knows passes: the gates catch the vocabulary of the measured failure, not every way to
- * bring it back.
+ * found and `Bernoulli` is not; comments that open a line are not code. A model verdict under a
+ * name none of these patterns knows passes: the gates catch the vocabulary of the measured
+ * failure, not every way to bring it back.
  */
 
 import assert from 'node:assert/strict';
@@ -52,7 +52,10 @@ const RULE = [
  */
 const PINNED_SEAMS = {};
 
-/** Review lists with no model behind them, each with the extra tokens it may hold and why. */
+/**
+ * Review lists with no model behind them, per file: each list named by its exact tokens in order,
+ * and why. An allowance covers that list only, not another list in the same file.
+ */
 const ALLOWED_REVIEW_LISTS = {};
 
 /**
@@ -177,13 +180,6 @@ function pinProblems(root, seams) {
   });
 }
 
-/** The sources the judge and evidence gates read: every file but a seam whose pin holds. */
-function gatedSources(root = ROOT, seams = PINNED_SEAMS) {
-  const pinned = Object.keys(seams)
-    .filter((seam) => pinProblems(root, { [seam]: seams[seam] }).length === 0);
-  return shippedSources(root).filter(({ path }) => !pinned.includes(path));
-}
-
 /** `path: word` for every word that names a model evidence judge, comments included. */
 const judgeMentions = (sources) => sources.flatMap(({ path, text }) => words(text)
   .filter((word) => hasSegment(word, (part) => JUDGES.has(part)))
@@ -201,53 +197,80 @@ function evidenceSites(sources) {
   return sites;
 }
 
+const isReviewVerdict = (token) => REVIEW_VERDICTS.has(token.toUpperCase());
+
 /**
- * Every list in code that names a review verdict: an array literal, read as its uppercase quoted
- * tokens, or a regex group of alternatives, read whole in any case.
+ * Every list in code that names a review verdict, in any case: an array literal, read as its
+ * uppercase quoted tokens, or a regex group of alternatives, read whole once its named, lookaround
+ * or non-capturing prefix and its word boundaries are set aside.
  */
 function reviewLists(sources) {
   return sources.flatMap(({ path, text }) => {
     const program = code(text);
     const quoted = [...program.matchAll(/\[([^[\]]*)\]/gu)].map(([, body]) => (
       [...body.matchAll(/(['"`])([A-Z][A-Z0-9_]*)\1/gu)].map(([, , token]) => token)));
-    const groups = [...program.matchAll(/\((?:\?:)?([^()]*\|[^()]*)\)/gu)]
-      .map(([, body]) => body.split('|'));
+    const groups = [...program.matchAll(/\((?:\?(?:<[A-Za-z_$][\w$]*>|<=|<!|[:=!]))?([^()]*\|[^()]*)\)/gu)]
+      .map(([, body]) => body.split('|').map((token) => token.replaceAll(/\\[bB]/gu, '')));
     return [...quoted, ...groups]
-      .filter((tokens) => tokens.some((token) => REVIEW_VERDICTS.has(token)))
+      .filter((tokens) => tokens.some(isReviewVerdict))
       .map((tokens) => ({ path, tokens }));
   });
 }
 
-/** `path: verdict` for every verdict a review list holds besides the pair and its allowance. */
+const sameTokens = (left, right) => left.length === right.length
+  && left.every((token, index) => token === right[index]);
+const allowedList = (allowed, { path, tokens }) => (allowed[path] ?? [])
+  .some((entry) => sameTokens(entry.tokens, tokens));
+
+/** `path: verdict` for every verdict a review list holds besides the pair, unless allowed. */
 const widenedReviewVerdicts = (lists, allowed = ALLOWED_REVIEW_LISTS) => lists
+  .filter((list) => !allowedList(allowed, list))
   .flatMap(({ path, tokens }) => tokens
-    .filter((token) => !REVIEW_VERDICTS.has(token) && !(allowed[path]?.tokens ?? []).includes(token))
+    .filter((token) => !isReviewVerdict(token))
     .map((token) => `${path}: ${token}`));
 
-/** `path: token` for every allowance no list in that file uses any more. */
+/** `path: tokens` for every allowance that names no list in its file any more. */
 const staleAllowances = (lists, allowed = ALLOWED_REVIEW_LISTS) => Object.entries(allowed)
-  .flatMap(([path, { tokens }]) => tokens
-    .filter((token) => !lists.some((list) => list.path === path && list.tokens.includes(token)))
-    .map((token) => `${path}: ${token}`));
+  .flatMap(([path, entries]) => entries
+    .filter((entry) => !lists.some((list) => list.path === path && sameTokens(list.tokens, entry.tokens)))
+    .map((entry) => `${path}: ${entry.tokens.join(' | ')}`));
+
+/**
+ * What the three gates find under `root`. The judge and evidence gates skip a seam whose pin holds;
+ * the review gate reads every file, because pinning SCI-08 does not widen a review verdict.
+ */
+function gates(root = ROOT, seams = PINNED_SEAMS, allowed = ALLOWED_REVIEW_LISTS) {
+  const sources = shippedSources(root);
+  const pinned = Object.keys(seams)
+    .filter((seam) => pinProblems(root, { [seam]: seams[seam] }).length === 0);
+  const gated = sources.filter(({ path }) => !pinned.includes(path));
+  const lists = reviewLists(sources);
+  return {
+    gatedPaths: gated.map(({ path }) => path),
+    judges: judgeMentions(gated),
+    evidence: evidenceSites(gated),
+    lists,
+    widened: widenedReviewVerdicts(lists, allowed),
+    stale: staleAllowances(lists, allowed),
+  };
+}
 
 test('no shipped source names a model evidence judge', () => {
-  const sources = gatedSources();
+  const { gatedPaths, judges } = gates();
   // The scan reaches both trees: one known file from each.
-  const paths = sources.map(({ path }) => path);
   for (const path of ['src/reporting-context.mjs', 'scripts/architecture-drift.mjs']) {
-    assert.ok(paths.includes(path), `the scan reads ${path}`);
+    assert.ok(gatedPaths.includes(path), `the scan reads ${path}`);
   }
-  assert.deepEqual(judgeMentions(sources), [], RULE);
+  assert.deepEqual(judges, [], RULE);
 });
 
 test('evidence vocabulary in code stays at the deterministic sites that own it', () => {
-  assert.deepEqual(evidenceSites(gatedSources()), DETERMINISTIC_SITES,
+  assert.deepEqual(gates().evidence, DETERMINISTIC_SITES,
     `${RULE} A deterministic site joins DETERMINISTIC_SITES with the rule that makes it one.`);
 });
 
 test('no review verdict list holds a verdict besides APPROVE and REQUEST_CHANGES', () => {
-  // A pinned seam is still read here: pinning SCI-08 does not widen a review verdict.
-  const lists = reviewLists(shippedSources());
+  const { lists, widened, stale } = gates();
   // The scan reads the lists it guards: two vocabularies and the three verdict parsers.
   const paths = new Set(lists.map(({ path }) => path));
   for (const path of [
@@ -256,9 +279,9 @@ test('no review verdict list holds a verdict besides APPROVE and REQUEST_CHANGES
   ]) {
     assert.ok(paths.has(path), `the scan reads the review verdicts in ${path}`);
   }
-  assert.deepEqual(widenedReviewVerdicts(lists), [],
+  assert.deepEqual(widened, [],
     `${RULE} A list with no model behind it joins ALLOWED_REVIEW_LISTS with its reason.`);
-  assert.deepEqual(staleAllowances(lists), [], 'every allowance is still used');
+  assert.deepEqual(stale, [], 'every allowance still names a list');
 });
 
 test('every pinned seam has a test that pins SCI-08 on the measurement', () => {
@@ -280,6 +303,8 @@ test('NEGATIVE CONTROL: each gate fires on a planted violation, and only a real 
     "const KEYS = ['FRESH', byVerdict['APPROVE']];",
     "const PAIR = [\n  'APPROVE', // the reviewer's pass\n  'REQUEST_CHANGES',\n];",
     'const LINE = /^VERDICT: (APPROVE|REQUEST_CHANGES)$/u;',
+    'const NAMED = /^VERDICT: (?<verdict>APPROVE|REQUEST_CHANGES\\b)/u;',
+    'const BARE = /^verdict: (?:approve|request_changes)$/iu;',
     "// const OLD = ['APPROVE', 'REQUEST_CHANGES', 'ABSTAIN'];",
     '// Bernoulli, Sarajevo and IRREFUTABLE name no judge, and this comment says evidence',
     '// contradicts itself without being code.',
@@ -300,8 +325,13 @@ test('NEGATIVE CONTROL: each gate fires on a planted violation, and only a real 
     'const SIDES = [`REQUEST_CHANGES`, `ABSTAIN`];',
     "/* verdicts */ const V = ['APPROVE', 'REQUEST_CHANGES', 'HOLD'];",
     "/* a block\n   that closes */ const W = ['REQUEST_CHANGES', 'DEFER'];",
+    'const LOWER = /^verdict: (approve|request_changes|abstain)$/iu;',
+    "const copied = LABELS[verdict === 'APPROVE' ? 'READY' : 'BLOCKED'];",
   ));
-  plant('src/labels.mjs', lines("const label = LABELS[verdict === 'APPROVE' ? 'READY' : 'BLOCKED'];"));
+  plant('src/labels.mjs', lines(
+    "const label = LABELS[verdict === 'APPROVE' ? 'READY' : 'BLOCKED'];",
+    "const STATES = ['APPROVE', 'REQUEST_CHANGES', 'READY'];",
+  ));
   plant('src/pinned.mjs', lines(
     'export const askJev = (receipt) => receipt;',
     "export const VERDICTS = ['APPROVE', 'REQUEST_CHANGES', 'CONTRADICTED'];",
@@ -327,6 +357,7 @@ test('NEGATIVE CONTROL: each gate fires on a planted violation, and only a real 
     [pin('no-citation', { names: `// Pins SCI-08 on the ${CASES} cases.` }), unpinned],
     [pin('no-cases', { names: `// Pins SCI-08 on ${CITATION}.` }), unpinned],
     [pin('no-test', { declares: null }), unpinned],
+    [pin('commented-test', { declares: "// test('later', () => askJev({}));" }), unpinned],
     [pin('no-import', { imports: null }), unpinned],
     [DOCTRINE, 'is not a test of its own'],
     [SELF, 'is not a test of its own'],
@@ -335,39 +366,48 @@ test('NEGATIVE CONTROL: each gate fires on a planted violation, and only a real 
   ]) {
     assert.deepEqual(pinProblems(root, { 'src/pinned.mjs': path }), [problem(path, reason)]);
   }
+  // A complete pin outside `tests/*.test.mjs` is still not a test of its own.
+  plant('tests/helpers/pin.mjs', readFileSync(join(root, seams['src/pinned.mjs']), 'utf8'));
+  assert.deepEqual(pinProblems(root, { 'src/pinned.mjs': 'tests/helpers/pin.mjs' }),
+    [problem('tests/helpers/pin.mjs', 'is not a test of its own')]);
   assert.deepEqual(pinProblems(root, seams), [
     `src/unpinned.mjs: tests/unpinned.test.mjs ${unpinned}`,
   ]);
 
-  const gated = gatedSources(root, seams);
-  assert.deepEqual(gated.map(({ path }) => path), [
+  const labels = ['APPROVE', 'READY', 'BLOCKED'];
+  const allowed = { 'src/labels.mjs': [{ tokens: labels, why: 'presentation keys' }] };
+  const found = gates(root, seams, allowed);
+  assert.deepEqual(found.gatedPaths, [
     'scripts/scale.ps1', 'src/clean.mjs', 'src/evidence.mjs', 'src/labels.mjs',
     'src/nested/deep/judge.mjs', 'src/review.mjs', 'src/unpinned.mjs',
   ], 'the walk reaches nested files, and only the seam whose pin holds is exempt');
-  assert.deepEqual(judgeMentions(gated), [
+  assert.deepEqual(found.judges, [
     'scripts/scale.ps1: NOUL_SCALE', 'src/nested/deep/judge.mjs: askJev',
     'src/nested/deep/judge.mjs: JEV_MODEL', 'src/nested/deep/judge.mjs: hexavalent',
     'src/nested/deep/judge.mjs: JEVClient', 'src/nested/deep/judge.mjs: Noul',
     'src/unpinned.mjs: askNoul',
   ]);
-  assert.deepEqual(evidenceSites(gated), {
+  assert.deepEqual(found.evidence, {
     'src/evidence.mjs': ['Insufficient', 'V2_CONTRADICTED', 'contradicted', 'isRefuted'],
   });
 
-  // The review gate reads the pinned seam too, and an allowance covers only its own tokens.
-  const lists = reviewLists(shippedSources(root));
+  // The review gate reads the pinned seam too, and an allowance covers its own list only: not
+  // another list in its file, and not the same list in another file.
   const widened = [
-    'src/pinned.mjs: CONTRADICTED', 'src/review.mjs: DISPROVEN', 'src/review.mjs: ABSTAIN',
-    'src/review.mjs: HOLD', 'src/review.mjs: DEFER', 'src/review.mjs: unverified',
+    'src/labels.mjs: READY', 'src/pinned.mjs: CONTRADICTED', 'src/review.mjs: DISPROVEN',
+    'src/review.mjs: ABSTAIN', 'src/review.mjs: HOLD', 'src/review.mjs: DEFER',
+    'src/review.mjs: READY', 'src/review.mjs: BLOCKED', 'src/review.mjs: unverified',
+    'src/review.mjs: abstain',
   ];
-  const allowed = { 'src/labels.mjs': { tokens: ['READY', 'BLOCKED'], why: 'presentation keys' } };
-  assert.deepEqual(widenedReviewVerdicts(lists, allowed), widened);
-  assert.deepEqual(widenedReviewVerdicts(lists, {}),
+  assert.deepEqual(found.widened, widened);
+  assert.deepEqual(found.stale, []);
+  assert.deepEqual(gates(root, seams, {}).widened,
     ['src/labels.mjs: READY', 'src/labels.mjs: BLOCKED', ...widened]);
-  assert.deepEqual(staleAllowances(lists, allowed), []);
-  assert.deepEqual(staleAllowances(lists, { 'src/labels.mjs': { tokens: ['READY', 'PENDING'] } }),
-    ['src/labels.mjs: PENDING']);
-  assert.equal(lists.filter(({ path }) => path === 'src/clean.mjs').length, 7,
+  assert.deepEqual(gates(root, seams, {
+    'src/labels.mjs': [{ tokens: ['APPROVE', 'READY'] }],
+    'src/clean.mjs': [{ tokens: labels }],
+  }).stale, ['src/labels.mjs: APPROVE | READY', 'src/clean.mjs: APPROVE | READY | BLOCKED']);
+  assert.equal(found.lists.filter(({ path }) => path === 'src/clean.mjs').length, 9,
     'every clean list is read, a commented-out one is not, and none is widened');
 
   // A file that is not UTF-8 text fails by name rather than hiding a word.
