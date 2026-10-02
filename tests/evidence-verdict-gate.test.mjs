@@ -277,6 +277,7 @@ test('NEGATIVE CONTROL: each gate fires on a planted violation, and only a real 
     "const VERDICTS = Object.freeze(['APPROVE', 'REQUEST_CHANGES']);",
     "const approved = ['APPROVE'].includes(verdict) && byVerdict['APPROVE'];",
     "const ROLES = [['reviewer-final', 'APPROVE']];",
+    "const KEYS = ['FRESH', byVerdict['APPROVE']];",
     "const PAIR = [\n  'APPROVE', // the reviewer's pass\n  'REQUEST_CHANGES',\n];",
     'const LINE = /^VERDICT: (APPROVE|REQUEST_CHANGES)$/u;',
     "// const OLD = ['APPROVE', 'REQUEST_CHANGES', 'ABSTAIN'];",
@@ -366,7 +367,7 @@ test('NEGATIVE CONTROL: each gate fires on a planted violation, and only a real 
   assert.deepEqual(staleAllowances(lists, allowed), []);
   assert.deepEqual(staleAllowances(lists, { 'src/labels.mjs': { tokens: ['READY', 'PENDING'] } }),
     ['src/labels.mjs: PENDING']);
-  assert.equal(lists.filter(({ path }) => path === 'src/clean.mjs').length, 6,
+  assert.equal(lists.filter(({ path }) => path === 'src/clean.mjs').length, 7,
     'every clean list is read, a commented-out one is not, and none is widened');
 
   // A file that is not UTF-8 text fails by name rather than hiding a word.
