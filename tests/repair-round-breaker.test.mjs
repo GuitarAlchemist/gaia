@@ -99,9 +99,9 @@ test('the attempt past the round budget is refused before its effect runs', asyn
 
 test('the delivery-round BUDGET_EXHAUSTED refusal trips the scope, and the next attempt runs no effect', async () => {
   const fingerprint = createHash('sha256').update(`${REPAIR_BLOCKER.class}:${REPAIR_BLOCKER.reason}`).digest('hex');
-  const plan = (roundBudget) => {
+  const plan = (roundBudget, revision = advanceReceipt('NONE').revision) => {
     const r0 = createInitialManagedRound({ workKey: WORK_KEY, headRevision: HEAD, receipt: openReceipt(roundBudget) });
-    const receipt = advanceReceipt(r0.roundKey);
+    const receipt = { ...advanceReceipt(r0.roundKey), revision };
     return {
       receipt,
       plan: planManagedRoundUpdate({ workKey: WORK_KEY, observation: observation(r0.managedSection), receipt }),
@@ -131,8 +131,12 @@ test('the delivery-round BUDGET_EXHAUSTED refusal trips the scope, and the next 
   assert.equal(tripped.record.trip.fingerprint, fingerprint, 'the trip keeps the failure fingerprint');
   assert.equal((await stored(store)).status, 'TRIPPED', 'what the refusal said is now on record');
 
-  // A round the delivery history would admit is now refused on this scope, before its effect.
-  assert.equal((await runPlan(admitted)).kind, 'TRIPPED');
+  // Another advance the delivery history would admit, under its own key, is now refused on this
+  // scope, before its effect.
+  const later = plan(2, hex(0xc2));
+  assert.equal(later.plan.kind, 'PROPOSED');
+  assert.notEqual(later.receipt.revision, admitted.receipt.revision);
+  assert.equal((await runPlan(later)).kind, 'TRIPPED');
   assert.equal(calls.length, 1, 'no effect ran on the tripped scope');
 
   // Only those two plans are modelled.
@@ -327,7 +331,8 @@ test('input is copied from data fields once, and the store shares no record with
   assert.equal(reads, 0);
   const hidden = Object.defineProperty({ ...attempt(1) }, 'boundary', { value: 'ROUND_PROPOSED', enumerable: false });
   refused('InvalidAttempt', call({ attempt: hidden }));
-  // Inherited fields are not the object's own: a prototype other than Object's is refused.
+  // An object whose prototype is neither Object's nor null is refused, even when every field is
+  // also its own.
   refused('InvalidAttempt', call({ attempt: Object.assign(Object.create({}), attempt(1)) }));
   refused('InvalidPolicy', call({ policy: Object.assign(Object.create({ roundBudget: 2 }), POLICY) }));
   assert.equal(call({ attempt: Object.assign(Object.create(null), attempt(1)) })().kind, 'ALLOW');

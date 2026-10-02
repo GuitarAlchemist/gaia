@@ -65,8 +65,8 @@ The rows are checked in order:
   again, it is decided on the record that won, so a `BUDGET_EXHAUSTED` attempt that lost to an
   `ALLOW` still trips the scope.
 - **Scopes are separate.** A trip in one scope leaves sibling scopes armed.
-- **Only a reset lifts a trip.** No call reads a clock, and a larger `roundBudget` or a new policy
-  revision does not lift a trip: a changed policy is a reset basis.
+- **Only a reset lifts a recorded trip.** No call reads a clock, and a larger `roundBudget` or a
+  new policy revision does not lift a trip: a changed policy is a reset basis.
 - **The record lasts as long as the store keeps it.** The memory store keeps nothing across a
   restart, and a scope without a record is a fresh, armed one. So a restart, or deleting the record,
   arms the scope again. Making a trip survive both needs a durable, append-only store (#54).
