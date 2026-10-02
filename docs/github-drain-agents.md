@@ -3,7 +3,8 @@
 Status: R0 delivers three Claude Code subagent definitions under `.claude/agents/`, this
 document, and the `node:test` gates in `tests/github-drain-agents.test.mjs`. Nothing in `src/`
 or `scripts/` changes. The bus keeps its six non-privileged verbs and no agent is reachable from
-the kernel.
+the kernel. #102 binds every refusal, blocker, and coordinator class to the drain chart in
+`docs/drain-grafcet.md`, and names the refusals the fleet took without a name.
 
 ## Operator problem
 
@@ -116,9 +117,10 @@ The only authored output file is the ledger. Refuses to
 merge, mark ready, edit a body, close or comment, review, label, push, commit, checkout, repair,
 resolve a conflict, spawn or message a lane, or edit any other file.
 
-Classification vocabulary, in precedence order: `conflicting`, `changes-requested`,
-`unreviewed`, `single-axis`, `dual-approved`, `merge-ready`, with `draft` as a flag beside the
-class and `unknown` for a `mergeable` the provider has not computed. Next lane per class:
+Classification vocabulary, one predicate per class over the chart's receptivities, so no class
+overlaps another (`docs/drain-grafcet.md`, Coordinator classes): `conflicting`,
+`changes-requested`, `unreviewed`, `single-axis`, `dual-approved`, `merge-ready`, with `draft`
+as a flag beside the class and `unknown` for a `mergeable` the provider has not computed. Next lane per class:
 `reconcile`, `bounded repair`, `review Spec` plus `review Standards`, the missing axis,
 `publish` or `wait`, `publish`. The ledger ends with a publication *proposal* that grants
 nothing; only the operator turns it into an order.
@@ -132,7 +134,9 @@ clean clone at a named full SHA, with these named preconditions: `SUBJECT_MISSIN
 `AXIS_INVALID`, `BASE_UNREACHABLE`, `ARTIFACT_UNNAMED`. The artifact carries the fixed-point
 identity at start and end, the inputs treated as claims, reproducers with `file:line`,
 mechanism-revert controls, the exact commands with counts, residuals in their own section, exactly
-`APPROVE` or `REQUEST_CHANGES`, and the completion marker as its last line.
+`APPROVE` or `REQUEST_CHANGES`, and the completion marker as its last line. A `REQUEST_CHANGES`
+artifact whose blockers share one failure family carries a `Family:` line in its header, which
+the ENG-09 breaker reads; any other artifact leaves the line out.
 
 ### `github-drain-publisher`
 
@@ -149,21 +153,29 @@ gh issue close M --repo OWNER/NAME --comment "<closeComment>"
 
 ## Publisher refusal vocabulary
 
+The publisher's verification and confirmation tables, code for code. Each code's chart id and
+subject are in `docs/drain-grafcet.md`, Bindings.
+
 | Code | Meaning |
 | --- | --- |
 | `ORDER_DIGEST_MISMATCH` | the order file cannot be read, or its SHA-256 is not the digest the invocation names |
-| `ORDER_INCOMPLETE` | a required order field is missing, the SHA is not 40 lowercase hex, or an action is unknown |
+| `ORDER_INCOMPLETE` | a required order field is missing, the SHA is not 40 lowercase hex, an action is unknown, or `closeIssue` names an issue the merge closes by itself (`autoCloses`) |
 | `ARTIFACT_MISSING` | a named review artifact cannot be read, or both name one file |
 | `AXIS_MISSING` | the two artifacts do not cover Spec and Standards |
 | `SHA_NOT_BOUND` | an artifact's `Subject:` line does not state `detached at <headSha>` (`detached at <approvedSha>` under the reconciliation class), or its `# PR #N` title line does not name the ordered PR; a SHA named elsewhere in the text binds nothing |
 | `VERDICT_MISSING` | an artifact lacks the `APPROVE` verdict line or carries a `REQUEST_CHANGES` one |
 | `MARKER_MISSING` | an artifact does not end with a completion marker |
 | `RECONCILIATION_UNCLASSIFIED` | the order carries `approvedSha` and the commits between it and the head are not exactly the classified `base-merge`, `readme-counter`, and `architecture-record` commits, or the results at the head are absent |
+| `CLOSING_EFFECT_UNNAMED` | for a merge, the pull request's `closingIssuesReferences` are not exactly the issues the order's `autoCloses` names |
+| `PR_NOT_MERGED` | for an issue close without a merge, the pull request is not `MERGED` with the order's `mergeCommit` |
 | `HEAD_MISMATCH` | the published head is not the ordered SHA |
 | `NOT_MERGEABLE` | `mergeable` is not `MERGEABLE` or `mergeStateStatus` is not `CLEAN` |
 | `CHECKS_NOT_GREEN` | a check is failing or still pending |
 | `ACTION_NOT_ORDERED` | the caller asked for an action the order does not list |
-| `STATE_CHANGED` | the head moved between verification and the merge command |
+| `STATE_CHANGED` | the head, or the closing references, moved between verification and the merge command |
+| `STILL_DRAFT` | after `ready`, the pull request is still a draft |
+| `MERGE_UNCONFIRMED` | after the merge command, the pull request is not `MERGED` with a merge commit |
+| `ISSUE_CLOSE_UNCONFIRMED` | after an issue close, or after a merge for each `autoCloses` issue, the issue is not `CLOSED` (an `autoCloses` issue is read twice, since GitHub closes it asynchronously) |
 
 ## Publication order
 
@@ -175,6 +187,8 @@ headSha: <40 lowercase hex>
 specArtifact: <path>
 standardsArtifact: <path>
 actions: ready, merge
+autoCloses: <issue numbers from closingIssuesReferences, or none>
+mergeCommit: <40 lowercase hex>          (issue-close without merge only)
 approvedSha: <40 lowercase hex>          (reconciliation class only)
 reconciliation: <sha> <class>; ...       (reconciliation class only)
 reconciliationResults: <suite; gate at headSha>   (reconciliation class only)
@@ -192,6 +206,14 @@ A publication order never appears in a bus message, a label, a comment, or a rev
 the bus may carry a `send` whose text is the order's path and digest, a reference, never the
 order itself (`gaia-architect-r1-udp-bridge-design.md:441-453`, `gaia-architect-r1-udp-bridge-design.md:461-467`).
 
+`autoCloses` names the closing-keyword effect. GitHub closes every issue in a pull request's
+`closingIssuesReferences` when it merges, whatever the order lists; #92's body closed #91 that
+way and the coordinator reopened it by hand (`gaia-architect-r2-grafcet-drain-design.md:555-559`).
+The coordinator copies those issues into the proposal, the publisher refuses
+`CLOSING_EFFECT_UNNAMED` when the two differ and re-reads them with the head immediately before
+the merge command (`STATE_CHANGED`), and after the merge it confirms each issue closed instead of
+closing it again.
+
 What the channel does not yet do: reserve a receipt before the merge command runs. The R0
 publisher has no `Write`; its receipt is its reply, which records the head SHA read immediately
 before the merge command. The receipt reserved before authority is spent is the R1 operator
@@ -208,8 +230,10 @@ after merge; a failure records completed effects and stops the remaining actions
 1. Every PR opens as a draft and stays one until both axes approve its exact head.
 2. The coordinator classifies; unreviewed heads get both axes on one detached clean clone at the
    full SHA, concurrently.
-3. A `REQUEST_CHANGES` on either axis sends the PR to a bounded repair whose specification is
-   the blocking findings; the new head gets both axes again.
+3. Once both axes carry a verdict on the head, a `REQUEST_CHANGES` on either sends the PR to a
+   bounded repair whose specification is the blocking findings of both reviews; the new head gets
+   both axes again. A second `REQUEST_CHANGES` at a new head in the same `Family:` stops repairs
+   until an operator orders a redesign (`BLOCKED_REDESIGN`).
 4. Dual `APPROVE` on the exact published head, `MERGEABLE`, `CLEAN`, checks green: the
    coordinator proposes; the operator orders; the publisher marks ready and squash-merges with
    `--match-head-commit`.
@@ -218,7 +242,8 @@ after merge; a failure records completed effects and stops the remaining actions
    directory, its head proposed under the reconciliation class below when every commit is
    classified and reviewed on both axes otherwise, before the next order exists.
 6. A linked issue is closed with a comment naming the merge commit and the two verdicts, after
-   the merge, by order.
+   the merge, by order. An issue the PR body closes by keyword is named in the order's
+   `autoCloses` and confirmed closed after the merge, not closed again.
 
 ## Reconciliation class
 
@@ -283,6 +308,13 @@ coordinator record is prepend-only, so its line numbers are valid at the named r
 | B37: never delete a merged branch | publisher forbids `--delete-branch` | `gaia-drain-coordinator-status.md:13` |
 | Artifacts, not messages, are the channel between lanes | all three end with a marker or receipt and send nothing | `gaia-drain-coordinator-status.md:181-182`, `run-lane.ps1:25`, `prompts/pr92-r5-spec-review-fable.txt:17` |
 | One merge per publisher invocation; reclassify before the next order | publisher command rules | `gaia-drain-coordinator-status.md:21`, `gaia-drain-coordinator-status.md:68-69` |
+| Every refusal and blocker names the chart ids it reads and the subject it read; a transition the fleet took on an unnamed fact gets a name | the three agents' refusal tables; `docs/drain-grafcet.md` Bindings | `gaia-architect-r2-grafcet-drain-design.md:572-575`, `gaia-architect-r2-grafcet-drain-design.md:86-106` |
+| A command's exit code is not its effect: the publisher re-reads the fact the next step needs | publisher `STILL_DRAFT`, `MERGE_UNCONFIRMED`, `ISSUE_CLOSE_UNCONFIRMED` | `gaia-architect-r2-grafcet-drain-design.md:100`, `gaia-architect-r2-grafcet-drain-design.md:104`, `gaia-architect-r2-grafcet-drain-design.md:106` |
+| A merge's closing keywords are an effect the order names, or the publisher refuses | order `autoCloses`; publisher `CLOSING_EFFECT_UNNAMED`; coordinator step 6 | `gaia-architect-r2-grafcet-drain-design.md:555-559` |
+| An issue close without a merge first reads the merge it names | order `mergeCommit`; publisher `PR_NOT_MERGED` | `gaia-architect-r2-grafcet-drain-design.md:570-571` |
+| A repair counts once its exit head is the published head | coordinator `REPAIR_UNPUBLISHED` | `gaia-architect-r2-grafcet-drain-design.md:96` |
+| One publication token covers every proposal and every reconciliation | coordinator `PUBLICATION_BUSY` | `gaia-architect-r2-grafcet-drain-design.md:99`, `gaia-drain-coordinator-status.md:362-372` |
+| Two `REQUEST_CHANGES` in one failure family at distinct heads stop repairs (ENG-09) | reviewer `Family:` line; coordinator `BLOCKED_REDESIGN` | `gaia-architect-r2-grafcet-drain-design.md:105` |
 | The merge is a human boundary in R0 | publisher `issuedBy: operator`; design C cost | `gaia-drain-coordinator-status.md:73-77`, `gaia-drain-coordinator-status.md:11`, `ARCHITECTURE.md:233-236` |
 
 Two fleet rules are operator notes rather than agent rules, because Claude Code spawns subagents
@@ -352,10 +384,13 @@ artifact's `Subject:` line and `# PR #N` title with no containment wording; the 
 class is named with its three commit classes, its three order fields, and
 `RECONCILIATION_UNCLASSIFIED` in both prompts and here; the reviewer requires a full 40-hex SHA,
 a detached clean subject, one of two verdict tokens, and a byte-identical tree; the coordinator's classes
-and lanes match this document; `BUS_VERBS` is still the six and no `src/` or `scripts/` file
+and lanes match this document; the vocabulary above covers the publisher's verification and
+confirmation tables; `BUS_VERBS` is still the six and no `src/` or `scripts/` file
 names an agent; every touched file is LF-only; every rule row above cites at least one
 `file:line` anchor; and the Design It Twice section names at least three alternatives and one
-chosen.
+chosen. `tests/drain-grafcet.test.mjs` binds the agents to the drain chart: each refusal, blocker,
+and class to chart ids that exist, and each receptivity to an agent that reads it or a reason none
+does (`docs/drain-grafcet.md`, Test gates).
 
 ## Evidence manifest
 
@@ -377,6 +412,7 @@ shipped):
 | `gaia-drain-coordinator-status.md` (later revision) | `a957011736391180492d98c652048cc876b3aa290a3bf75288c1078e8091da6d` | 3028 lines; observation `2026-09-04T00:10:00Z`; the reconciliation-class anchors `:31`, `:43`, `:45`, `:51` resolve here, read on 2026-09-04 |
 | `gaia-architect-r1-udp-bridge-design.md` | `dbaa6a737674602b565ee549616cb214cf2fca0d434ffea358c2ce1b82c7464d` | sections 5.4 and 6: the order as a file with a digest; the `gh` shim as the merge-form mechanism |
 | `pr92-r4-standards-review.md` | `c33577d043670d257e2fbd40e594db2ef33500542cdfa1f7d5a4285bc3faa8c9` | the `REQUEST_CHANGES` at `e98df9e` that containment binding overrode |
+| `gaia-architect-r2-grafcet-drain-design.md` | `fc09041e6ab1106b747059da5c8575096f301138b631d8ce7e7a4750d936cc3c` | 607 lines, read on 2026-10-01; the receptivity table at 86-106 and the defects at 555-575 (#102) |
 
 Repository files cited are at `ba1034c17c2f4ee40f97822df40a33b903245329` (`origin/main` after the
 reconciliation merge; this branch changes none of the cited files except `README.md`).
