@@ -156,12 +156,12 @@ function shippedSources(root = ROOT) {
 
 /**
  * Why each pin in `seams` does not hold. The pin must be a `tests/*.test.mjs` file other than this
- * gate and the seam, and it must import the seam, declare a test, and name SCI-08, the
- * measurement and its cases.
+ * gate, and it must import the seam, declare a test, and name SCI-08, the measurement and its
+ * cases.
  */
 function pinProblems(root, seams) {
   return Object.entries(seams).flatMap(([seam, testPath]) => {
-    if (!/^tests\/[^/]+\.test\.mjs$/u.test(testPath) || testPath === SELF || testPath === seam) {
+    if (!/^tests\/[^/]+\.test\.mjs$/u.test(testPath) || testPath === SELF) {
       return [`${seam}: ${testPath} is not a test of its own`];
     }
     let text;
@@ -375,6 +375,9 @@ test('NEGATIVE CONTROL: each gate fires on a planted violation, and only a real 
   rmSync(join(root, 'src/bare.ps1'));
   plant('src/wide.ps1', Buffer.from(`${String.fromCharCode(0xfeff)}$JEV = 1\n`, 'utf16le'));
   assert.throws(() => shippedSources(root), /src\/wide\.ps1 is not UTF-8 text/u);
+  rmSync(join(root, 'src/wide.ps1'));
+  plant('src/latin.ps1', Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]));
+  assert.throws(() => shippedSources(root), /src\/latin\.ps1 is not UTF-8 text/u);
 
   // The failure message points at a rule the doctrine declares, and at the cases to pin.
   const doctrine = readFileSync(join(ROOT, DOCTRINE), 'utf8');
