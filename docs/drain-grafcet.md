@@ -22,8 +22,9 @@ issues no order named (`gaia-architect-r2-grafcet-drain-design.md:555-559`).
 ## How to read the chart
 
 - A **step** (`P_*`) holds the pull request while an actor works inside it. The agents are those
-  actors: a reviewer runs inside `P_REVIEW_SPEC` or `P_REVIEW_STANDARDS`, the publisher's ordered
-  commands run from `P_MERGEABLE` and `P_READY`.
+  actors: a reviewer runs inside `P_REVIEW_SPEC` or `P_REVIEW_STANDARDS`; the publisher's ordered
+  commands run inside `P_MERGEABLE` (`ready`), `P_READY` (`merge`), and `P_MERGED`
+  (`issue-close`).
 - A **receptivity** (`D_*`) is a fact a collector measured from the bus log and the artifact
   bytes, `true`, `false`, or `UNKNOWN`. `UNKNOWN` never fires. An `EDGE` receptivity holds for the
   one observation that changed it; a `LEVEL` one holds while the latest observation says so.
@@ -35,9 +36,10 @@ issues no order named (`gaia-architect-r2-grafcet-drain-design.md:555-559`).
   for. `MERGE_LOCK` is the publication token: `T_MERGEABLE`, `T_RECONCILE_START`, and
   `T_DUAL_APPROVED_HEAD_ADVANCED` take it, `T_MERGE` and `T_RECONCILE_REJECTED` return it.
 
-An agent never fires a transition and never evaluates the receptivity that ends its own step.
-A refusal an agent returns reads one chart id: a receptivity whose fact it measured false, the
-step whose work it guards, or the resource it found held.
+An agent never fires a transition. The collector evaluates every receptivity from the bus log and
+the artifact bytes; an agent reads the GitHub fields and artifact bytes behind them, and a refusal
+it returns names the chart ids it reads: the receptivities whose facts it measured false, the
+steps whose work it guards, or the resource it found held.
 
 ## Chart
 
@@ -216,8 +218,8 @@ binding names that transition's receptivity.
 | `BLOCKED_REDESIGN` | coordinator | `D_FAILURE_FAMILY_REPEATED`, `P_BLOCKED_REDESIGN` | the family | `T_BREAKER_TRIP` outranks `T_JOIN_REPAIR`; the step inhibits new reviews and repairs (ENG-09) |
 | `RECONCILIATION_UNCLASSIFIED` | coordinator, publisher | `D_RECONCILIATION_CLASSIFIED`, `D_RECONCILIATION_UNCLASSIFIED` | coordinator: the first unclassified commit; publisher: `#N` | the chart's refusal for `T_RECONCILED`; `T_RECONCILE_REJECTED` returns the head to review (see Divergences) |
 | `ISSUE_RECONCILIATION_PENDING` | coordinator | `D_ISSUE_RECONCILED` | the issue `#M` | the chart's refusal for `T_ISSUE_RECONCILED` |
-| `ORDER_DIGEST_MISMATCH` | publisher | `P_MERGEABLE` | the order path | the order is the operator's admission for the commands that leave this step; no receptivity reads it |
-| `ORDER_INCOMPLETE` | publisher | `P_MERGEABLE` | the order path | as above |
+| `ORDER_DIGEST_MISMATCH` | publisher | `P_MERGEABLE`, `P_READY`, `P_MERGED` | the order path | the order is the operator's admission for the commands inside these steps: `ready`, `merge`, `issue-close`. No receptivity reads it |
+| `ORDER_INCOMPLETE` | publisher | `P_MERGEABLE`, `P_READY`, `P_MERGED` | the order path | as above |
 | `ARTIFACT_MISSING` | publisher | `D_SPEC_VERDICT_BOUND`, `D_STANDARDS_VERDICT_BOUND` | the artifact path | an unreadable artifact binds no axis |
 | `AXIS_MISSING` | publisher | `D_SPEC_VERDICT_BOUND`, `D_STANDARDS_VERDICT_BOUND` | the artifact path | the axis is read from the title line |
 | `SHA_NOT_BOUND` | publisher | `D_SPEC_VERDICT_BOUND`, `D_STANDARDS_VERDICT_BOUND` | the artifact path | a verdict binds to the head its `Subject:` line declares |
@@ -226,40 +228,59 @@ binding names that transition's receptivity.
 | `CLOSING_EFFECT_UNNAMED` | publisher | `D_ISSUE_RECONCILED` | the first issue one list names and the other does not | the merge moves every issue in `closingIssuesReferences` toward `T_ISSUE_RECONCILED`; the order names them all |
 | `PR_NOT_MERGED` | publisher | `D_MERGE_CONFIRMED` | `#N` | an issue close without a merge starts from `P_MERGED`, which only `D_MERGE_CONFIRMED` reaches |
 | `HEAD_MISMATCH` | publisher | `D_HEAD_ADVANCED` | `#N` | a moved head preempts merge progress (the three `T_*_HEAD_ADVANCED`, priority 2) |
-| `NOT_MERGEABLE` | publisher | `D_MERGEABLE_CLEAN` | `#N` | the chart's refusal for `T_MERGEABLE` (see Divergences) |
-| `CHECKS_NOT_GREEN` | publisher | `D_NOT_DRAFT` | `#N` | the collector holds `D_NOT_DRAFT` only when checks read `ALL_PASS` |
-| `ACTION_NOT_ORDERED` | publisher | `P_MERGEABLE` | the action asked | as the order checks |
-| `STATE_CHANGED` | publisher | `D_HEAD_ADVANCED` | `#N` | `HEAD_MISMATCH` re-read immediately before the merge command |
+| `NOT_MERGEABLE` | coordinator, publisher | `D_MERGEABLE_CLEAN` | `#N` | the chart's refusal for `T_MERGEABLE`; the coordinator waits on it, the publisher refuses on it (see Divergences) |
+| `CHECKS_NOT_GREEN` | coordinator, publisher | `D_NOT_DRAFT` | `#N` | the collector holds `D_NOT_DRAFT` only when checks read `ALL_PASS` |
+| `ACTION_NOT_ORDERED` | publisher | `P_MERGEABLE`, `P_READY`, `P_MERGED` | the action asked | as the order checks |
+| `STATE_CHANGED` | publisher | `D_HEAD_ADVANCED`, `D_ISSUE_RECONCILED` | `#N` | `HEAD_MISMATCH` and `CLOSING_EFFECT_UNNAMED`, re-read immediately before the merge command |
 | `STILL_DRAFT` | publisher | `D_NOT_DRAFT` | `#N` | the chart's refusal for `T_READY`, read after `gh pr ready` |
 | `MERGE_UNCONFIRMED` | publisher | `D_MERGE_CONFIRMED` | `#N` | the chart's refusal for `T_MERGE`, read after the merge command |
 | `ISSUE_CLOSE_UNCONFIRMED` | publisher | `D_ISSUE_RECONCILED` | the issue `#M` | `T_ISSUE_RECONCILED` reads the issue closed, whether the order or the merge closed it |
 
-The chart's other refusals, `HEAD_UNOBSERVED`, `SPEC_VERDICT_NOT_BOUND`,
-`STANDARDS_VERDICT_NOT_BOUND`, `FAMILY_NOT_REPEATED`, `DUAL_APPROVAL_MISSING`,
-`NO_REQUEST_CHANGES`, `NOT_CONFLICTING`, `HEAD_UNCHANGED`, `RECONCILIATION_NOT_REJECTED`, and
-`REDESIGN_ORDER_ABSENT`, say that a step has not ended yet. No agent returns them: the coordinator
-reads the same receptivities as classes, below, and its lane for an unended step is the work
-inside it or `wait`.
+## Chart refusals no agent returns
+
+These say that a step has not ended yet. No agent returns them: the coordinator reads the same
+receptivities as classes, below, and its lane for an unended step is the work inside it or
+`wait`. Every refusal of the chart is either bound above or listed here, with the transitions that
+refuse with it.
+
+| Refusal | Transitions | Reading |
+| --- | --- | --- |
+| `HEAD_UNOBSERVED` | `T_FORK_REVIEWS` | no observation names a head yet |
+| `SPEC_VERDICT_NOT_BOUND` | `T_SPEC_VERDICT` | the Spec review is running, or its artifact does not bind |
+| `STANDARDS_VERDICT_NOT_BOUND` | `T_STANDARDS_VERDICT` | the same, for Standards |
+| `FAMILY_NOT_REPEATED` | `T_BREAKER_TRIP` | the breaker holds |
+| `DUAL_APPROVAL_MISSING` | `T_JOIN_APPROVE` | the two verdicts are not both `APPROVE` |
+| `NO_REQUEST_CHANGES` | `T_JOIN_REPAIR` | no verdict requests changes |
+| `NOT_CONFLICTING` | `T_RECONCILE_START`, `T_RECONFLICTED`, `T_READY_RECONFLICTED` | the head does not conflict |
+| `HEAD_UNCHANGED` | `T_DUAL_APPROVED_HEAD_ADVANCED`, `T_MERGEABLE_HEAD_ADVANCED`, `T_READY_HEAD_ADVANCED` | the head has not moved |
+| `RECONCILIATION_NOT_REJECTED` | `T_RECONCILE_REJECTED` | no unclassified reconciliation was observed |
+| `REDESIGN_ORDER_ABSENT` | `T_REDESIGN_RESUMED` | no operator order lifts the breaker |
 
 ## Coordinator classes
 
-The coordinator's six classes, each a predicate over the receptivities its step-4 bullet names.
-The predicates do not overlap, so no precedence decides between them.
+The coordinator's six classes, each a predicate over the receptivities its step-4 bullet names. A
+head is *approved* when `D_BOTH_APPROVE_AT_HEAD` holds or the head is `reconciled`: the
+reconciliation class of the coordinator's step 3, which applies only while neither axis carries a
+verdict on the head itself. Every head falls in exactly one class, by how many axes carry a verdict
+on it and then, for an approved head, by its mergeability, so no precedence decides between them.
+The test gates enumerate the states.
 
 | Class | Predicate | Next lane |
 | --- | --- | --- |
-| `conflicting` | `D_BOTH_APPROVE_AT_HEAD` and `D_CONFLICTING` | `reconcile`: the chart enters `P_RECONCILE` only from `P_DUAL_APPROVED` |
+| `conflicting` | `D_BOTH_APPROVE_AT_HEAD` or `reconciled`, and `D_CONFLICTING` | `reconcile`: every way into `P_RECONCILE` starts from `P_DUAL_APPROVED`, `P_MERGEABLE`, or `P_READY`, steps reached only through `T_JOIN_APPROVE` |
 | `changes-requested` | `D_ANY_REQUEST_CHANGES_AT_HEAD`: both axes bound, one `REQUEST_CHANGES` | `bounded repair`, or `wait` with `BLOCKED_REDESIGN` when the family repeats |
-| `unreviewed` | `D_HEAD_PUBLISHED`, and neither `D_SPEC_VERDICT_BOUND` nor `D_STANDARDS_VERDICT_BOUND` | both review axes, as `T_FORK_REVIEWS` forks them |
+| `unreviewed` | `D_HEAD_PUBLISHED`, neither `D_SPEC_VERDICT_BOUND` nor `D_STANDARDS_VERDICT_BOUND`, and not `reconciled` | both review axes, as `T_FORK_REVIEWS` forks them |
 | `single-axis` | exactly one of `D_SPEC_VERDICT_BOUND` and `D_STANDARDS_VERDICT_BOUND` | the missing axis; the chart joins only when both are bound |
-| `dual-approved` | `D_BOTH_APPROVE_AT_HEAD`, and neither `conflicting` nor `merge-ready` | `publish` once checks are green and the state is clean, else `wait` |
-| `merge-ready` | `D_BOTH_APPROVE_AT_HEAD`, `D_NOT_DRAFT`, and `D_MERGEABLE_CLEAN` | `publish` |
+| `dual-approved` | `D_BOTH_APPROVE_AT_HEAD` or `reconciled`, and neither `conflicting` nor `merge-ready` | `publish` once mergeable, green, and clean (or a draft), else `wait` with `NOT_MERGEABLE` or `CHECKS_NOT_GREEN` |
+| `merge-ready` | `D_BOTH_APPROVE_AT_HEAD` or `reconciled`, `D_NOT_DRAFT`, `D_MERGEABLE_CLEAN`, `mergeStateStatus` `CLEAN`, and every check green | `publish` |
 
-Two classes changed meaning in this slice to match the chart. `changes-requested` now needs both
-axes bound: a single `REQUEST_CHANGES` is `single-axis`, because `T_JOIN_REPAIR` consumes both
-verdict steps and a repair should take both reviews' findings. `conflicting` now needs dual
-approval: a conflicting head without it is classified by its verdicts, because
-`T_RECONCILE_START` consumes `P_DUAL_APPROVED`.
+Three rules changed in this slice to match the chart. `changes-requested` needs both axes bound:
+a single `REQUEST_CHANGES` is `single-axis`, because `T_JOIN_REPAIR` consumes both verdict steps
+and a repair should take both reviews' findings. `conflicting` needs an approved head: a
+conflicting head that is not approved is classified by its verdicts, because the chart reconciles
+only from steps `T_JOIN_APPROVE` reaches, and a reconciled head that conflicts again after the
+next merge is still `conflicting`. A verdict on the head itself supersedes the reconciliation
+class, so a reconciled head is never also `unreviewed` or `single-axis`.
 
 ## Receptivities no agent reads
 
@@ -282,11 +303,30 @@ prompt exactly would still disagree with the chart.
 2. **`NOT_MERGEABLE`.** The publisher also requires `mergeStateStatus` `CLEAN`; the chart's
    `D_MERGEABLE_CLEAN` reads `mergeable` only. The agents are stricter.
 3. **Order checks.** The order is the operator's admission (class D) and the chart has no
-   receptivity for it. Its three refusals guard `P_MERGEABLE`, the step whose commands it orders.
+   receptivity for it. Its three refusals guard the steps whose commands it orders: `P_MERGEABLE`
+   (`ready`), `P_READY` (`merge`), and `P_MERGED` (`issue-close`).
 4. **Lanes with no agent.** `bounded repair` and `reconcile` have no agent in the team
    (`gaia-architect-r2-grafcet-drain-design.md:567-569`). Their exits are `D_HEAD_ADVANCED` and
    the two reconciliation receptivities, which the coordinator reads as `REPAIR_UNPUBLISHED` and
    `RECONCILIATION_UNCLASSIFIED`.
+5. **The breaker after a redesign.** `D_FAILURE_FAMILY_REPEATED` is a level fact over every
+   artifact of the pull request, and `T_BREAKER_TRIP` (priority 1) outranks `T_JOIN_APPROVE` as
+   well as `T_JOIN_REPAIR`. Once a family has repeated, the chart trips again at any later head
+   both axes approve; the coordinator applies `BLOCKED_REDESIGN` only within
+   `changes-requested`. Unreachable in R0: no class-D order reaches the bus, so
+   `T_REDESIGN_RESUMED` never fires.
+6. **`REPAIR_UNPUBLISHED`.** The coordinator requires the published head to be the handoff's exit
+   head; `D_HEAD_ADVANCED` holds on any head change. The agents are stricter.
+7. **Readiness.** The collector holds `D_NOT_DRAFT` only at the approved head with checks
+   `ALL_PASS` (`src/drain-petri-net-facts.mjs:271-275`). The publisher's `STILL_DRAFT` reads
+   `isDraft`, and it reads the checks (`CHECKS_NOT_GREEN`) only for a merge, so a `ready`-only
+   order completes while the chart may still refuse `T_READY`.
+8. **One issue per observation.** The collector's observation grammar takes one `issue=` value
+   (`src/drain-petri-net-facts.mjs:57`), so an order whose `autoCloses` names several issues has
+   no single observation for `D_ISSUE_RECONCILED`. The publisher confirms each issue.
+9. **The closing effect is not observed.** No receptivity reads `closingIssuesReferences`.
+   `CLOSING_EFFECT_UNNAMED` and the re-read in `STATE_CHANGED` bind to `D_ISSUE_RECONCILED`, the
+   receptivity the effect lands in, not to a fact the chart measures.
 
 ## The closing-keyword effect
 
@@ -298,8 +338,14 @@ order named. It is now named:
   pending effect of that pull request's merge, and writes them in the proposal's `autoCloses`;
 - every publication order carries `autoCloses`, `none` or the issue numbers;
 - the publisher refuses `CLOSING_EFFECT_UNNAMED` before any GitHub head fact when
-  `closingIssuesReferences` is not exactly `autoCloses`, and after a confirmed merge it confirms
-  each `autoCloses` issue closed (`ISSUE_CLOSE_UNCONFIRMED`) instead of closing it again.
+  `closingIssuesReferences` is not exactly `autoCloses`, and re-reads both immediately before the
+  merge command (`STATE_CHANGED`);
+- `closeIssue` may not name an `autoCloses` issue (`ORDER_INCOMPLETE`): after a confirmed merge
+  the publisher confirms each `autoCloses` issue closed (`ISSUE_CLOSE_UNCONFIRMED`), reading it
+  twice because GitHub closes it asynchronously, and the merged pull request is its record.
+
+What remains open is the window between that last re-read and the merge command:
+`--match-head-commit` binds the head, and nothing binds the body.
 
 An issue close without a merge in the same invocation names the merge in `mergeCommit`, and the
 publisher reads the pull request `MERGED` with that commit first (`PR_NOT_MERGED`,
@@ -325,12 +371,17 @@ family, and would trip the breaker on the next repair.
   Confirmation tables, and the reviewer's Preconditions list has exactly one Bindings row, whose
   agents are exactly those that return it, whose chart ids all exist, and which names the
   receptivity of every transition the chart refuses with that code;
-- the Coordinator classes rows are the six classes, each naming a receptivity that exists and
-  that the coordinator's own bullet names;
+- every refusal of the chart is bound above or listed under Chart refusals no agent returns, not
+  both, and each listed row names exactly the transitions that refuse with it;
+- the Coordinator classes rows are the six classes; each row names exactly the receptivities of
+  that class's predicate in the test's model of the classes, each existing in the chart and named
+  by the coordinator's own bullet, and names `reconciled` as the model admits or excludes it;
+- the model's six predicates hold for exactly one class in every combination of verdicts,
+  reconciliation, mergeability, draft state, merge state, and checks;
 - every receptivity is read by a binding or a class, or listed above as read by no agent;
 - `autoCloses` and `closingIssuesReferences` appear in the coordinator, the publisher, and
-  `docs/github-drain-agents.md`, the publisher refuses `CLOSING_EFFECT_UNNAMED` before
-  `HEAD_MISMATCH`, and `mergeCommit` is an order field;
+  `docs/github-drain-agents.md`, the publisher's Verification table refuses
+  `CLOSING_EFFECT_UNNAMED` before `HEAD_MISMATCH`, and `mergeCommit` is an order field;
 - the reviewer's artifact shape, filled in, is an artifact `parseArtifact` binds, with its
   `Family:` line read and an omitted line read as no family;
 - a negative control plants each mismatch and asserts the exact problem lists.
@@ -345,6 +396,8 @@ family, and would trip the breaker on the next repair.
 - Wires no agent to the interpreter: the coordinator classifies from the same facts the collector
   reads, it does not call the collector.
 - Settles none of the divergences above.
+- Ships no regeneration command: the failing assertion names `renderChart(DRAIN_NET_TEMPLATE)`,
+  which lives in the test.
 
 ## Evidence manifest
 

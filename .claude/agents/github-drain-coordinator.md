@@ -64,9 +64,11 @@ the publisher.
    so a SHA found anywhere in the text binds nothing. The marker is evidence that the lane
    stopped, not approval; read the verdict line.
    - **Reconciliation class.** When both axes carry `APPROVE` on one `approvedSha` that is not the
-     published head, the head still counts as dual-approved, flagged `reconciled`, only when every
-     first-parent commit in `git log --first-parent approvedSha..headSha` is one of `base-merge`
-     (two parents, the second on `origin/main`), `readme-counter` (changes only `README.md`), or
+     published head, and neither axis carries a verdict on the published head itself (a verdict at
+     the head supersedes the class), the head still counts as approved, flagged `reconciled`,
+     only when every first-parent commit in `git log --first-parent approvedSha..headSha` is one
+     of `base-merge` (two parents, the second on `origin/main`), `readme-counter` (changes only
+     `README.md`), or
      `architecture-record` (changes only `package.json`); `git diff <tree> headSha`, with `<tree>`
      from `git merge-tree --write-tree approvedSha <second parent of the base-merge>`, touches
      nothing but `README.md` and `package.json`; the `README.md` delta is the gate counter lines
@@ -77,29 +79,32 @@ the publisher.
      entry per commit), and `reconciliationResults`. Any other delta is
      `RECONCILIATION_UNCLASSIFIED`: the head is `unreviewed` and both axes review it.
 4. **Classify** with the closed vocabulary. Each class is one predicate over the chart's
-   receptivities, read from step 3's verdict evidence and the `gh pr view` fields; the classes do
-   not overlap, so no precedence decides between them:
-   - `conflicting`: both axes carry `APPROVE` on the exact head (`D_BOTH_APPROVE_AT_HEAD`) and
-     `mergeable` is `CONFLICTING` (`D_CONFLICTING`). A conflicting head with no dual approval is
-     classified by its verdicts: the chart reconciles only an approved head.
+   receptivities, read from step 3's verdict evidence and the `gh pr view` fields. A head is
+   *approved* when both axes carry `APPROVE` on it (`D_BOTH_APPROVE_AT_HEAD`) or it is `reconciled`
+   (step 3). Every head falls in exactly one class: by how many axes carry a verdict on the head
+   itself, none, one, or both, and then, for an approved head, by its mergeability. So no
+   precedence decides between them:
+   - `conflicting`: approved (`D_BOTH_APPROVE_AT_HEAD`, or `reconciled`), and `mergeable` is
+     `CONFLICTING` (`D_CONFLICTING`). A conflicting head that is not approved is classified by its
+     verdicts: the chart reconciles only from the steps dual approval reaches.
      `UNKNOWN` is not conflict evidence; record it as `unknown` and re-read once before classifying.
    - `changes-requested`: both axes carry a verdict on the exact head and at least one is
      `REQUEST_CHANGES` (`D_ANY_REQUEST_CHANGES_AT_HEAD`). One `REQUEST_CHANGES` with no verdict on
      the other axis is `single-axis`: the repair takes both reviews' findings.
-   - `unreviewed`: the head is published (`D_HEAD_PUBLISHED`) and neither axis carries a verdict on
-     it, `D_SPEC_VERDICT_BOUND` and `D_STANDARDS_VERDICT_BOUND` both false (stale verdicts
-     included, and a reconciled head whose delta is `RECONCILIATION_UNCLASSIFIED`).
+   - `unreviewed`: the head is published (`D_HEAD_PUBLISHED`), neither axis carries a verdict on
+     it (`D_SPEC_VERDICT_BOUND` and `D_STANDARDS_VERDICT_BOUND` both false; stale verdicts count for
+     nothing), and the head is not `reconciled`, as when its delta is `RECONCILIATION_UNCLASSIFIED`.
    - `single-axis`: exactly one of `D_SPEC_VERDICT_BOUND` and `D_STANDARDS_VERDICT_BOUND` holds:
      one axis carries a verdict on the exact head, `APPROVE` or `REQUEST_CHANGES`, and the other
      has none.
-   - `dual-approved`: both axes carry `APPROVE` on the exact head (`D_BOTH_APPROVE_AT_HEAD`), or on
-     `approvedSha` under the reconciliation class (step 3, flag `reconciled`), the head is not `conflicting`, and the PR is not `merge-ready`: it is still a
-     draft, or `mergeStateStatus` is not `CLEAN`, or checks are not all green. The reconciliation
-     class is this team's rule, not the chart's: `D_RECONCILIATION_CLASSIFIED` also requires both
-     axes to approve the reconciled head itself (`docs/drain-grafcet.md`, Divergences).
-   - `merge-ready`: `D_BOTH_APPROVE_AT_HEAD` (or the reconciliation class), not a draft
-     (`D_NOT_DRAFT`), `mergeable` `MERGEABLE` and `mergeStateStatus` `CLEAN`
-     (`D_MERGEABLE_CLEAN`), every check green.
+   - `dual-approved`: approved (`D_BOTH_APPROVE_AT_HEAD`, or `reconciled`), not `conflicting`, and
+     not `merge-ready`: it is still a draft, or `mergeable` is not `MERGEABLE`, or
+     `mergeStateStatus` is not `CLEAN`, or checks are not all green. The reconciliation class is
+     this team's rule, not the chart's: `D_RECONCILIATION_CLASSIFIED` also requires both axes to
+     approve the reconciled head itself (`docs/drain-grafcet.md`, Divergences).
+   - `merge-ready`: approved (`D_BOTH_APPROVE_AT_HEAD`, or `reconciled`), not a draft
+     (`D_NOT_DRAFT`), `mergeable` `MERGEABLE` (`D_MERGEABLE_CLEAN`) and `mergeStateStatus`
+     `CLEAN`, every check green.
    - `draft` is recorded as a flag beside the class, because every PR in this repository opens as
      a draft and a merge command on a draft fails on GitHub.
 5. **Decide the next lane** per PR:
@@ -107,15 +112,16 @@ the publisher.
      derives the README gate counter from the tests directory and never hand-edits it; the
      reconciled head is proposed under the reconciliation class when step 3 classifies every
      commit, and reviewed on both axes otherwise);
-   - `changes-requested` -> `bounded repair`, whose specification is the blocking findings of the
-     review that requested changes, followed by both review axes again at the new head; when the
+   - `changes-requested` -> `bounded repair`, whose specification is the blocking findings of both
+     reviews, followed by both review axes again at the new head; when the
      two `REQUEST_CHANGES` artifacts of this PR at distinct heads carry the same `Family:` token,
      `wait` with `BLOCKED_REDESIGN` instead (named blockers, below);
    - `unreviewed` -> `review Spec` and `review Standards`, both, on one detached clean clone at
      the exact head, concurrently;
    - `single-axis` -> `review <missing axis>` on the same head;
-   - `dual-approved` -> `publish` (ready, then merge) once checks are green and the state is
-     `CLEAN`; otherwise `wait` with the named blocker;
+   - `dual-approved` -> `publish` (ready, then merge) once `mergeable` is `MERGEABLE`, checks are
+     green, and `mergeStateStatus` is `CLEAN`, or `DRAFT` while the PR is a draft (`ready` comes
+     first); otherwise `wait` with `NOT_MERGEABLE` or `CHECKS_NOT_GREEN`;
    - `merge-ready` -> `publish`.
    Only one publication proposal may be open at a time, and a reconciliation holds the same
    token: every other `publish` or `reconcile` lane is `wait` with `PUBLICATION_BUSY`. After any
@@ -139,6 +145,8 @@ A blocker is written in the ledger as its code and its subject, such as `PUBLICA
 | `REPAIR_UNPUBLISHED` | a bounded-repair handoff for this PR names an exit head that is not the published head: the repair has not reached origin, so no review is spawned. The subject is the exit head | `D_HEAD_ADVANCED` |
 | `BLOCKED_REDESIGN` | two `REQUEST_CHANGES` artifacts of this PR at distinct heads carry the same `Family:` token (ENG-09): no repair is spawned until an operator orders a redesign. The subject is the family | `D_FAILURE_FAMILY_REPEATED`, `P_BLOCKED_REDESIGN` |
 | `RECONCILIATION_UNCLASSIFIED` | a reconciled head's delta is outside the reconciliation class (step 3): the head is `unreviewed`. The subject is the first unclassified commit | `D_RECONCILIATION_CLASSIFIED`, `D_RECONCILIATION_UNCLASSIFIED` |
+| `NOT_MERGEABLE` | an approved head's `mergeable` is not `MERGEABLE`, or its `mergeStateStatus` is neither `CLEAN` nor, for a draft, `DRAFT`. The subject is the PR | `D_MERGEABLE_CLEAN` |
+| `CHECKS_NOT_GREEN` | an approved head has a check that is failing or still pending. The subject is the PR | `D_NOT_DRAFT` |
 | `ISSUE_RECONCILIATION_PENDING` | a merged PR named an issue that is still open. The subject is the issue | `D_ISSUE_RECONCILED` |
 
 ## Ledger shape

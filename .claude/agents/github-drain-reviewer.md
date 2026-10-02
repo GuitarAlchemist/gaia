@@ -135,5 +135,5 @@ final section, nowhere else in that form. The caller reads the artifact; do not 
 covers the blockers; otherwise leave the line out. It stays in the header block that the
 `Subject:` line opens, because the chart reads it there: two `REQUEST_CHANGES` artifacts of one
 PR at distinct heads with the same token trip the ENG-09 breaker
-(`D_FAILURE_FAMILY_REPEATED`). Any token on that line is read as a family, a placeholder
+(`D_FAILURE_FAMILY_REPEATED`). Any token on that line is read as a family, a word such as `none`
 included, so a line with no real family would trip the breaker on the next repair.
