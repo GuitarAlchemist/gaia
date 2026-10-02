@@ -178,7 +178,10 @@ export function bindAxis(artifacts, { pullRequest, axis, head }) {
   };
 }
 
-function familyRepeated(artifacts, pullRequest) {
+// A family repeats at `head` only when one of its rejections names `head` as its subject. Earlier
+// repetitions describe earlier heads: after a redesign they must not trip the breaker again at a
+// head no rejection names. An unobserved head (null) is no artifact's subject, so nothing repeats.
+function familyRepeated(artifacts, pullRequest, head) {
   const rejected = artifacts.filter((artifact) => artifact.kind === 'REVIEW' && artifact.pullRequest === pullRequest
     && artifact.verdict === 'REQUEST_CHANGES' && artifact.family !== null && artifact.subjectSha !== null);
   const byFamily = new Map();
@@ -187,7 +190,8 @@ function familyRepeated(artifacts, pullRequest) {
     heads.add(artifact.subjectSha);
     byFamily.set(artifact.family, heads);
   }
-  const repeated = [...byFamily.entries()].filter(([, heads]) => heads.size >= 2).map(([family]) => family).sort();
+  const repeated = [...byFamily.entries()].filter(([, heads]) => heads.size >= 2 && heads.has(head))
+    .map(([family]) => family).sort();
   return { value: repeated.length > 0, evidence: { families: repeated } };
 }
 
@@ -251,7 +255,7 @@ function drainLevelFacts(prefix, state, artifacts) {
   // naming a different head is, by construction, unreviewed at that head.
   if (bothApprove && head !== null) state.approvedHead = head;
   const approvedAtHead = head !== null && state.approvedHead === head;
-  const family = familyRepeated(artifacts, state.pullRequest);
+  const family = familyRepeated(artifacts, state.pullRequest, head);
   const token = (key) => observation[key];
   const checksAllPass = token('checks') === 'ALL_PASS';
   const facts = {

@@ -7,9 +7,11 @@ channel, the wiring into the live pump path and the other breaker classes stay o
 Two stops on repeated repair ship already, and neither is a breaker:
 
 - **ENG-09** in the drain net (`T_BREAKER_TRIP` in `src/drain-petri-net.mjs`): two
-  `REQUEST_CHANGES` reviews of one pull request, at distinct heads, carrying the same `Family:`
-  token put a token in `P_BLOCKED_REDESIGN`. That place inhibits new reviews and repairs until an
-  operator order (`T_REDESIGN_RESUMED`) lifts it. It lives in one pull request's replayed net.
+  `REQUEST_CHANGES` reviews of one pull request carrying the same `Family:` token, one at the
+  observed head and one at another head, put a token in `P_BLOCKED_REDESIGN`. That place inhibits
+  new reviews and repairs until an operator order (`T_REDESIGN_RESUMED`) lifts it; a family
+  repeated only at earlier heads does not trip it again at the redesigned head. It lives in one
+  pull request's replayed net.
 - **`BUDGET_EXHAUSTED`**: `planManagedRoundUpdate` in `src/pr-delivery-round-history.mjs` refuses
   to propose a round past the R0 receipt's round budget. That refusal is stateless: it stops one
   advance, records nothing, and needs no reset.
