@@ -453,15 +453,20 @@ function breakerProblems({ coordinator, doc }) {
   };
   const step = between('5. **Decide the next lane**', '\n6. **');
   const firstBullet = step.indexOf('\n   - `');
+  const leadText = firstBullet >= 0 ? step.slice(0, firstBullet) : step;
   // Whitespace is normalized so a wrapped line cannot split a listed exemption.
-  const lead = (firstBullet >= 0 ? step.slice(0, firstBullet) : step).replace(/\s+/gu, ' ');
+  const lead = leadText.replace(/\s+/gu, ' ');
   if (!lead.includes('`BLOCKED_REDESIGN`') || !allClasses(lead)) {
     problems.push('coordinator: the breaker does not come before the classes');
   }
-  // The bullets must name the six classes, so a bullet written another way is not read as lead.
+  // The dashed bullets name the six classes and the lead holds no list item, so a bullet written
+  // another way, in place of a class bullet or beside it, is never read as lead.
   const bulleted = [...step.matchAll(/\n {3}- `([a-z-]+)`/gu)].map(([, name]) => name);
-  if (bulleted.join() !== CLASSES.join()) problems.push('coordinator: step 5 does not bullet the six classes');
-  else if (BREAKER_WORDS.test(step.slice(firstBullet))) problems.push('coordinator: a class bullet applies the breaker');
+  if (bulleted.join() !== CLASSES.join() || /\n\s*(?:[-*+]|\d+\.)\s/u.test(leadText)) {
+    problems.push('coordinator: step 5 does not bullet exactly the six classes');
+  } else if (BREAKER_WORDS.test(step.slice(firstBullet))) {
+    problems.push('coordinator: a class bullet applies the breaker');
+  }
   if (BREAKER_WORDS.test(between('4. **Classify**', '5. **Decide the next lane**'))) {
     problems.push('coordinator: a class definition names the breaker');
   }
@@ -529,7 +534,7 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
   // Negative control: each hardening alone, so dropping one lets its plant pass. An exemption in
   // any case, as a sentence of its own or wrapped across lines; a listed word in any case, in a
   // class row's Predicate cell, after an escaped pipe, or in a row with no closing pipe; a class
-  // bullet the finder cannot read.
+  // bullet the finder cannot read, a list item beside the class bullets, or a class bullet missing.
   for (const [where, from, to, problem] of [
     ['coordinator', '`merge-ready` included. A new head',
       '`merge-ready` included. Except `merge-ready`, which goes to `publish`. A new head',
@@ -542,7 +547,12 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
       'coordinator: the breaker does not come before the classes'],
     ['coordinator', '\n   - `conflicting` -> `reconcile`',
       '\n    - `conflicting` -> `wait` with `BLOCKED_REDESIGN`, else `reconcile`',
-      'coordinator: step 5 does not bullet the six classes'],
+      'coordinator: step 5 does not bullet exactly the six classes'],
+    ['coordinator', 'Otherwise, by class:\n',
+      'Otherwise, by class:\n   * `merge-ready` -> `publish`, even when the family repeats;\n',
+      'coordinator: step 5 does not bullet exactly the six classes'],
+    ['coordinator', '\n   - `single-axis` -> `review <missing axis>` on the same head;', '',
+      'coordinator: step 5 does not bullet exactly the six classes'],
     ['doc', 'one `REQUEST_CHANGES` | `bounded repair` |',
       'one `REQUEST_CHANGES` | `bounded repair`, or `wait` on the Breaker |',
       'doc: class changes-requested applies the breaker'],
@@ -567,7 +577,7 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
   const step = coordinator.slice(coordinator.indexOf('5. **Decide the next lane**'), coordinator.indexOf('\n6. **'));
   const starred = coordinator.replace(step, () => step.replaceAll('\n   - `', '\n   * `'));
   assert.notEqual(starred, coordinator);
-  assert.deepEqual(breakerProblems({ coordinator: starred, doc }), ['coordinator: step 5 does not bullet the six classes']);
+  assert.deepEqual(breakerProblems({ coordinator: starred, doc }), ['coordinator: step 5 does not bullet exactly the six classes']);
   // Every exemption word the Test gates line lists, planted alone after the lead.
   for (const word of ['except', 'excepting', 'unless', 'other than', 'but not', 'save', 'excluded', 'excludes', 'however']) {
     const planted = plant(coordinator, '`merge-ready` included. A new head',
