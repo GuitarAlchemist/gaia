@@ -552,7 +552,7 @@ test('an unobserved fact is UNKNOWN and holds the chart; an observed false fact 
   assert.deepEqual(drain.facts['pr#92/D_FAILURE_FAMILY_REPEATED'], { value: true, evidence: { families: ['receipt-boundary'] } });
 });
 
-test('the breaker trips at a head pushed before the repeating round joined, and from the approved head when the repetition lands after a later join (ENG-09)', () => {
+test('the breaker trips at a head pushed before the repeating round joined, and after a later join, recording a merge ordered before it (ENG-09)', () => {
   let clock = 0;
   const t = () => { clock += 1; return `2026-09-04T06:00:${String(clock).padStart(2, '0')}.000Z`; };
   const observe = (head) => ({ type: 'message.sent', at: t(), message: { from: 'act-0001', kind: 'pr-observation', text: `pr=7;head=${head}` } });
@@ -605,22 +605,40 @@ test('the breaker trips at a head pushed before the repeating round joined, and 
   assert.deepEqual(fresh.family, { value: false, evidence: { families: [] } });
 
   // When R2's rejection of H2 lands after both axes approved H3 and the chart joined, the family
-  // has repeated: the chart trips from P_DUAL_APPROVED and never reaches the merge, as the
-  // coordinator waits with BLOCKED_REDESIGN.
+  // has repeated: the chart trips from P_DUAL_APPROVED and publishes nothing, as the coordinator
+  // waits with BLOCKED_REDESIGN.
   const ready = `${H3};mergeable=MERGEABLE;draft=false;checks=ALL_PASS`;
-  const late = drive([
+  const merged = `${ready};state=MERGED;mergeCommit=${'4'.repeat(40)};issue=none`;
+  const approvedH3 = [
     H1, review('R1', 'Spec', H1, 'REQUEST_CHANGES', 'X'), review('R1', 'Standards', H1, 'APPROVE'), H2, H3,
     review('R3', 'Spec', H3, 'APPROVE'), review('R3', 'Standards', H3, 'APPROVE'),
-    review('R2', 'Spec', H2, 'REQUEST_CHANGES', 'X'), review('R2', 'Standards', H2, 'APPROVE'),
-    ready, `${ready};state=MERGED;mergeCommit=${'4'.repeat(40)};issue=none`,
-  ]);
-  assert.deepEqual(late.fired.filter((id) => /\/T_(JOIN_APPROVE|\w*BREAKER_TRIP|MERGEABLE|READY|MERGE)$/u.test(id)),
-    ['pr#7/T_JOIN_APPROVE', 'pr#7/T_DUAL_APPROVED_BREAKER_TRIP']);
+  ];
+  const repeated = [review('R2', 'Spec', H2, 'REQUEST_CHANGES', 'X'), review('R2', 'Standards', H2, 'APPROVE')];
+  const steps = /\/T_(JOIN_APPROVE|\w*BREAKER_TRIP|MERGEABLE|READY|\w*MERGE|ISSUE_RECONCILED)$/u;
+  const late = drive([...approvedH3, ...repeated, ready]);
+  assert.deepEqual(late.fired.filter((id) => steps.test(id)), ['pr#7/T_JOIN_APPROVE', 'pr#7/T_DUAL_APPROVED_BREAKER_TRIP']);
   assert.deepEqual(active(late.marking), ['MERGE_LOCK', 'PROVIDER_CAPACITY', 'pr#7/P_BLOCKED_REDESIGN']);
   assert.deepEqual(late.family, { value: true, evidence: { families: ['X'] } });
+  // A merge ordered before the repetition still lands, and the chart records it from the step it
+  // tripped to, whichever record comes first: the same facts end in the same marking.
+  const done = ['MERGE_LOCK', 'PROVIDER_CAPACITY', 'pr#7/P_ISSUE_RECONCILED'];
+  const afterTrip = drive([...approvedH3, ...repeated, ready, merged]);
+  assert.deepEqual(afterTrip.fired.filter((id) => steps.test(id)),
+    ['pr#7/T_JOIN_APPROVE', 'pr#7/T_DUAL_APPROVED_BREAKER_TRIP', 'pr#7/T_BLOCKED_REDESIGN_MERGE', 'pr#7/T_ISSUE_RECONCILED']);
+  assert.deepEqual(active(afterTrip.marking), done);
+  const publishing = drive([...approvedH3, ready, ...repeated, merged]);
+  assert.deepEqual(publishing.fired.filter((id) => steps.test(id)), [
+    'pr#7/T_JOIN_APPROVE', 'pr#7/T_MERGEABLE', 'pr#7/T_READY', 'pr#7/T_READY_BREAKER_TRIP',
+    'pr#7/T_BLOCKED_PUBLICATION_MERGE', 'pr#7/T_ISSUE_RECONCILED',
+  ]);
+  assert.deepEqual(active(publishing.marking), done);
+  const mergedFirst = drive([...approvedH3, ready, merged, ...repeated]);
+  assert.deepEqual(mergedFirst.fired.filter((id) => steps.test(id)),
+    ['pr#7/T_JOIN_APPROVE', 'pr#7/T_MERGEABLE', 'pr#7/T_READY', 'pr#7/T_MERGE', 'pr#7/T_ISSUE_RECONCILED']);
+  assert.deepEqual(active(mergedFirst.marking), done);
 });
 
-test('the breaker trips from every step where no lane runs, outranks its other exits, and returns the lock it holds (ENG-09)', () => {
+test('the breaker trips from the draft head, the approved head and the publication steps, outranks their other exits, and returns no resource (ENG-09)', () => {
   const net = drainFor(['7']);
   const family = { 'pr#7/D_FAILURE_FAMILY_REPEATED': true };
   // Every other exit of each step holds too, and the breaker outranks them all.
@@ -628,21 +646,44 @@ test('the breaker trips from every step where no lane runs, outranks its other e
     'pr#7/D_HEAD_PUBLISHED': true, 'pr#7/D_HEAD_ADVANCED': true, 'pr#7/D_MERGEABLE_CLEAN': true,
     'pr#7/D_CONFLICTING': true, 'pr#7/D_NOT_DRAFT': true, 'pr#7/D_MERGE_CONFIRMED': true,
   };
-  for (const [place, transition, lock] of [
-    ['P_DRAFT_HEAD', 'T_DRAFT_HEAD_BREAKER_TRIP', 1],
-    ['P_DUAL_APPROVED', 'T_DUAL_APPROVED_BREAKER_TRIP', 1],
-    ['P_MERGEABLE', 'T_MERGEABLE_BREAKER_TRIP', 0],
-    ['P_READY', 'T_READY_BREAKER_TRIP', 0],
+  for (const [place, transition, blocked, lock] of [
+    ['P_DRAFT_HEAD', 'T_DRAFT_HEAD_BREAKER_TRIP', 'P_BLOCKED_REDESIGN', 1],
+    ['P_DUAL_APPROVED', 'T_DUAL_APPROVED_BREAKER_TRIP', 'P_BLOCKED_REDESIGN', 1],
+    ['P_MERGEABLE', 'T_MERGEABLE_BREAKER_TRIP', 'P_BLOCKED_PUBLICATION', 0],
+    ['P_READY', 'T_READY_BREAKER_TRIP', 'P_BLOCKED_PUBLICATION', 0],
   ]) {
     const at = markingAt(net, '7', [place], { MERGE_LOCK: lock });
     const trip = step(net, at, { ...exits, ...family });
     assert.deepEqual(trip.fired, [`pr#7/${transition}`], place);
-    assert.deepEqual(active(trip.marking), ['MERGE_LOCK', 'PROVIDER_CAPACITY', 'pr#7/P_BLOCKED_REDESIGN'], place);
-    assert.equal(trip.marking.MERGE_LOCK, 1, `${place}: the lock comes back`);
+    assert.deepEqual(active(trip.marking).filter((id) => id.startsWith('pr#7/')), [`pr#7/${blocked}`], place);
+    assert.equal(trip.marking.MERGE_LOCK, lock, `${place}: a publication step keeps the lock`);
     assert.equal(trip.marking.PROVIDER_CAPACITY, DEFAULT_PROVIDER_CAPACITY, place);
     // Control: without the repetition, the step's own exits move the token.
     assert.notDeepEqual(step(net, at, { ...exits, 'pr#7/D_FAILURE_FAMILY_REPEATED': false }).fired, [], place);
   }
+  // The publisher's ordered command may still run: the lock stays held until the merge is
+  // confirmed or a new head rules it out, and a re-conflict does not start a reconciliation.
+  const held = markingAt(net, '7', ['P_BLOCKED_PUBLICATION'], { MERGE_LOCK: 0 });
+  for (const facts of [{}, { 'pr#7/D_CONFLICTING': true }, { 'pr#7/D_NOT_DRAFT': true }]) {
+    assert.deepEqual(step(net, held, { ...family, ...facts }).fired, [], JSON.stringify(facts));
+  }
+  const confirmed = step(net, held, { ...family, 'pr#7/D_MERGE_CONFIRMED': true });
+  assert.deepEqual(confirmed.fired, ['pr#7/T_BLOCKED_PUBLICATION_MERGE']);
+  assert.deepEqual(active(confirmed.marking), ['MERGE_LOCK', 'PROVIDER_CAPACITY', 'pr#7/P_MERGED']);
+  const moved = step(net, held, { ...family, 'pr#7/D_HEAD_ADVANCED': true });
+  assert.deepEqual(moved.fired, ['pr#7/T_BLOCKED_PUBLICATION_HEAD_ADVANCED']);
+  assert.deepEqual(active(moved.marking), ['MERGE_LOCK', 'PROVIDER_CAPACITY', 'pr#7/P_BLOCKED_REDESIGN']);
+  // Another pull request waits for the lock until the tripped one's merge is confirmed.
+  const pair = drainFor(['7', '8']);
+  const both = { ...markingAt(pair, '7', ['P_READY'], { MERGE_LOCK: 0 }), 'pr#8/P_DRAFT_HEAD': 0, 'pr#8/P_DUAL_APPROVED': 1 };
+  const waiting = { ...family, 'pr#8/D_FAILURE_FAMILY_REPEATED': false, 'pr#8/D_MERGEABLE_CLEAN': true };
+  const queued = replay(pair, [{ at: null, level: waiting }, { at: null, level: { ...waiting, 'pr#7/D_MERGE_CONFIRMED': true } }], { marking: both });
+  assert.deepEqual(queued.history.map(({ fired }) => fired),
+    [['pr#7/T_READY_BREAKER_TRIP'], ['pr#7/T_BLOCKED_PUBLICATION_MERGE', 'pr#8/T_MERGEABLE']]);
+  // A merge confirmed after a trip that held no lock is recorded too.
+  const blockedMerge = step(net, markingAt(net, '7', ['P_BLOCKED_REDESIGN']), { ...family, 'pr#7/D_MERGE_CONFIRMED': true });
+  assert.deepEqual(blockedMerge.fired, ['pr#7/T_BLOCKED_REDESIGN_MERGE']);
+  assert.deepEqual(active(blockedMerge.marking), ['MERGE_LOCK', 'PROVIDER_CAPACITY', 'pr#7/P_MERGED']);
   // A step with a running lane trips at the step its lane exits to. A repair publishes its head,
   // returning its lane, then the draft head trips before new reviews fork.
   const repairing = markingAt(net, '7', ['P_REPAIR'], { PROVIDER_CAPACITY: DEFAULT_PROVIDER_CAPACITY - 1 });
@@ -650,11 +691,16 @@ test('the breaker trips from every step where no lane runs, outranks its other e
   assert.deepEqual(repaired.history[0].fired, ['pr#7/T_REPAIR_PUBLISHED', 'pr#7/T_DRAFT_HEAD_BREAKER_TRIP']);
   assert.deepEqual(active(repaired.marking), ['MERGE_LOCK', 'PROVIDER_CAPACITY', 'pr#7/P_BLOCKED_REDESIGN']);
   assert.equal(repaired.marking.PROVIDER_CAPACITY, DEFAULT_PROVIDER_CAPACITY);
-  // A classified reconciliation returns its lane, then the mergeable head trips and returns the lock.
+  // A classified reconciliation returns its lane, then the mergeable head trips and keeps the
+  // lock; a rejected one returns both, then the draft head trips.
   const reconciling = markingAt(net, '7', ['P_RECONCILE'], { MERGE_LOCK: 0, PROVIDER_CAPACITY: DEFAULT_PROVIDER_CAPACITY - 1 });
   const reconciled = replay(net, [{ at: null, level: family, edge: { 'pr#7/D_RECONCILIATION_CLASSIFIED': true } }], { marking: reconciling });
   assert.deepEqual(reconciled.history[0].fired, ['pr#7/T_RECONCILED', 'pr#7/T_MERGEABLE_BREAKER_TRIP']);
-  assert.deepEqual([reconciled.marking.MERGE_LOCK, reconciled.marking.PROVIDER_CAPACITY], [1, DEFAULT_PROVIDER_CAPACITY]);
+  assert.deepEqual(active(reconciled.marking), ['PROVIDER_CAPACITY', 'pr#7/P_BLOCKED_PUBLICATION']);
+  assert.equal(reconciled.marking.PROVIDER_CAPACITY, DEFAULT_PROVIDER_CAPACITY);
+  const unclassified = replay(net, [{ at: null, level: family, edge: { 'pr#7/D_RECONCILIATION_UNCLASSIFIED': true } }], { marking: reconciling });
+  assert.deepEqual(unclassified.history[0].fired, ['pr#7/T_RECONCILE_REJECTED', 'pr#7/T_DRAFT_HEAD_BREAKER_TRIP']);
+  assert.deepEqual([unclassified.marking.MERGE_LOCK, unclassified.marking.PROVIDER_CAPACITY], [1, DEFAULT_PROVIDER_CAPACITY]);
   // The review steps hold their lanes: the chart waits for the verdicts and trips at the join.
   const reviewing = markingAt(net, '7', ['P_REVIEW_SPEC', 'P_REVIEW_STANDARDS'], { PROVIDER_CAPACITY: DEFAULT_PROVIDER_CAPACITY - 2 });
   assert.deepEqual(step(net, reviewing, family).fired, []);
@@ -1048,25 +1094,27 @@ test('readiness and merge confirmation hold only once checks read ALL_PASS (chec
 
 test('explicit reachability on the bounded nets finds no deadlock and no dead transition, and states its bound', () => {
   const one = checkReachability(drainFor(['97']));
-  assert.deepEqual([one.states, one.deadlocks.length, one.deadTransitions, one.sound, one.bounded], [13, 0, [], true, true]);
+  assert.deepEqual([one.states, one.deadlocks.length, one.deadTransitions, one.sound, one.bounded], [14, 0, [], true, true]);
   assert.deepEqual(one.bound, { maxStates: 20_000, placeCapacity: DEFAULT_PROVIDER_CAPACITY });
   const two = checkReachability(drainFor(['92', '97']));
-  assert.deepEqual([two.states, two.deadlocks.length, two.deadTransitions], [160, 0, []]);
+  assert.deepEqual([two.states, two.deadlocks.length, two.deadTransitions], [180, 0, []]);
   const three = checkReachability(drainFor(['92', '95', '97']));
-  assert.deepEqual([three.states, three.sound], [1887, true]);
+  assert.deepEqual([three.states, three.sound], [2187, true]);
   const lanes = checkReachability(instantiate(LANE_NET_TEMPLATE, ['act-0002', 'act-0003']));
   assert.deepEqual([lanes.states, lanes.sound], [64, true]);
   assert.ok(isProperCompletion(drainFor(['97']), { ...initialMarking(drainFor(['97'])), 'pr#97/P_DRAFT_HEAD': 0, 'pr#97/P_ISSUE_RECONCILED': 1 }));
   assert.ok(!isProperCompletion(drainFor(['97']), { ...initialMarking(drainFor(['97'])), 'pr#97/P_DRAFT_HEAD': 0, 'pr#97/P_ISSUE_RECONCILED': 1, MERGE_LOCK: 0 }), 'a held lock is not a completion');
   // Negative controls: a starved net and a net with a trap are reported, not smoothed over.
-  // A starved net cannot fork its reviews: only the breaker's trip from the draft head and the
-  // redesign order move its token, so every other transition is dead.
+  // A starved net cannot fork its reviews: only the breaker's trip from the draft head, the
+  // redesign order and the merge recorded after the trip move its token, so every other
+  // transition is dead.
   const starved = checkReachability(drainFor(['97'], { capacity: 1 }));
-  assert.deepEqual([starved.states, starved.deadlocks.length, starved.sound], [2, 0, false]);
-  assert.deepEqual(starved.deadTransitions.filter((id) => /BREAKER_TRIP|REDESIGN_RESUMED/u.test(id)), [
-    'pr#97/T_DUAL_APPROVED_BREAKER_TRIP', 'pr#97/T_MERGEABLE_BREAKER_TRIP', 'pr#97/T_READY_BREAKER_TRIP', 'pr#97/T_BREAKER_TRIP',
+  assert.deepEqual([starved.states, starved.deadlocks.length, starved.sound], [4, 0, false]);
+  assert.deepEqual(starved.deadTransitions.filter((id) => /BREAKER_TRIP|REDESIGN|BLOCKED/u.test(id)), [
+    'pr#97/T_DUAL_APPROVED_BREAKER_TRIP', 'pr#97/T_MERGEABLE_BREAKER_TRIP', 'pr#97/T_READY_BREAKER_TRIP',
+    'pr#97/T_BREAKER_TRIP', 'pr#97/T_BLOCKED_PUBLICATION_HEAD_ADVANCED', 'pr#97/T_BLOCKED_PUBLICATION_MERGE',
   ]);
-  assert.equal(starved.deadTransitions.length, 22);
+  assert.equal(starved.deadTransitions.length, 23);
   const trap = buildNet({
     netId: 'trap',
     places: [{ id: 'A', initial: 1 }, { id: 'B' }, { id: 'C', terminal: true }],

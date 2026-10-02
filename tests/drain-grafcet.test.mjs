@@ -485,7 +485,7 @@ function breakerProblems({ coordinator, doc }) {
   return problems;
 }
 
-test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP outranks both joins and every other trip the other exits of its step', () => {
+test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP outranks both joins and every other trip outranks the other exits of its step', () => {
   const byId = Object.fromEntries(DRAIN_NET_TEMPLATE.transitions.map((transition) => [transition.id, transition]));
   const priority = (id) => byId[id].priority ?? 0;
   for (const join of ['T_JOIN_APPROVE', 'T_JOIN_REPAIR']) {
@@ -493,14 +493,18 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
     assert.ok(byId.T_BREAKER_TRIP.inputs.every((place) => byId[join].inputs.includes(place)),
       `T_BREAKER_TRIP takes the verdict steps ${join} takes`);
   }
-  // Every other breaker trip outranks every other transition that consumes its step.
-  const trips = DRAIN_NET_TEMPLATE.transitions
-    .filter(({ id, receptivity }) => receptivity === 'D_FAILURE_FAMILY_REPEATED' && id !== 'T_BREAKER_TRIP');
-  assert.deepEqual(trips.map(({ id }) => id),
-    ['T_DRAFT_HEAD_BREAKER_TRIP', 'T_DUAL_APPROVED_BREAKER_TRIP', 'T_MERGEABLE_BREAKER_TRIP', 'T_READY_BREAKER_TRIP']);
+  // Every other breaker trip outranks every other transition that consumes its step, and no trip
+  // returns a resource: a step's lane or publication keeps what it holds.
+  const placeOf = (arc) => (typeof arc === 'string' ? arc : arc.place);
+  const shared = DRAIN_NET_TEMPLATE.shared.map(({ id }) => id);
+  const trips = DRAIN_NET_TEMPLATE.transitions.filter(({ receptivity }) => receptivity === 'D_FAILURE_FAMILY_REPEATED');
+  assert.deepEqual(trips.map(({ id }) => id), ['T_BREAKER_TRIP', 'T_DRAFT_HEAD_BREAKER_TRIP',
+    'T_DUAL_APPROVED_BREAKER_TRIP', 'T_MERGEABLE_BREAKER_TRIP', 'T_READY_BREAKER_TRIP']);
   for (const trip of trips) {
+    assert.deepEqual(trip.outputs.map(placeOf).filter((place) => shared.includes(place)), [], `${trip.id} returns no resource`);
+    if (trip.id === 'T_BREAKER_TRIP') continue;
     const rivals = DRAIN_NET_TEMPLATE.transitions
-      .filter(({ id, inputs }) => id !== trip.id && inputs.some((input) => trip.inputs.includes(input)));
+      .filter(({ id, inputs }) => id !== trip.id && inputs.some((input) => trip.inputs.map(placeOf).includes(placeOf(input))));
     assert.ok(rivals.length > 0, `${trip.id} has rivals`);
     for (const rival of rivals) assert.ok(priority(trip.id) > priority(rival.id), `${trip.id} outranks ${rival.id}`);
   }
@@ -691,9 +695,9 @@ test('NEGATIVE CONTROL: each binding gate fires on a planted mismatch', () => {
     'STILL_A_DRAFT: the chart refuses with it, and it is neither bound nor listed',
   ]);
   assert.deepEqual(chartRefusalProblems({
-    doc: realDoc.replace('`T_DUAL_APPROVED_HEAD_ADVANCED`, `T_MERGEABLE_HEAD_ADVANCED`, `T_READY_HEAD_ADVANCED`', '`T_READY_HEAD_ADVANCED`'),
+    doc: realDoc.replace('`T_BLOCKED_PUBLICATION_HEAD_ADVANCED`, `T_DUAL_APPROVED_HEAD_ADVANCED`, `T_MERGEABLE_HEAD_ADVANCED`, `T_READY_HEAD_ADVANCED`', '`T_READY_HEAD_ADVANCED`'),
   }), [
-    'HEAD_UNCHANGED: lists T_READY_HEAD_ADVANCED, the chart refuses '
+    'HEAD_UNCHANGED: lists T_READY_HEAD_ADVANCED, the chart refuses T_BLOCKED_PUBLICATION_HEAD_ADVANCED, '
       + 'T_DUAL_APPROVED_HEAD_ADVANCED, T_MERGEABLE_HEAD_ADVANCED, T_READY_HEAD_ADVANCED with it',
   ]);
   assert.deepEqual(chartRefusalProblems({ doc: listedRow('| `STILL_DRAFT` | `T_READY` | x |\n| `HEAD_WANDERED` | `T_MERGE` | x |') }), [

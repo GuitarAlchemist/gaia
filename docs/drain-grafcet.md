@@ -24,7 +24,8 @@ issues no order named (`gaia-architect-r2-grafcet-drain-design.md:555-559`).
 - A **step** (`P_*`) holds the pull request while an actor works inside it. The agents are those
   actors: a reviewer runs inside `P_REVIEW_SPEC` or `P_REVIEW_STANDARDS`; the publisher's ordered
   commands run inside `P_MERGEABLE` (`ready`), `P_READY` (`merge`), and `P_MERGED`
-  (`issue-close`).
+  (`issue-close`). A command ordered before the breaker tripped may still complete after it
+  (divergence 5).
 - A **receptivity** (`D_*`) is a fact a collector measured from the bus log and the artifact
   bytes, `true`, `false`, or `UNKNOWN`. `UNKNOWN` never fires. An `EDGE` receptivity holds for the
   one observation that changed it; a `LEVEL` one holds while the latest observation says so.
@@ -34,8 +35,8 @@ issues no order named (`gaia-architect-r2-grafcet-drain-design.md:555-559`).
   the same tokens, the higher priority wins.
 - A **shared resource** (`MERGE_LOCK`, `PROVIDER_CAPACITY`) is a place many pull requests compete
   for. `MERGE_LOCK` is the publication token: `T_MERGEABLE`, `T_RECONCILE_START`, and
-  `T_DUAL_APPROVED_HEAD_ADVANCED` take it; `T_MERGE`, `T_RECONCILE_REJECTED`, and the breaker's
-  trips from `P_MERGEABLE` and `P_READY` return it.
+  `T_DUAL_APPROVED_HEAD_ADVANCED` take it; `T_MERGE`, `T_RECONCILE_REJECTED`,
+  `T_BLOCKED_PUBLICATION_MERGE`, and `T_BLOCKED_PUBLICATION_HEAD_ADVANCED` return it.
 
 An agent never fires a transition. The collector evaluates every receptivity from the bus log and
 the artifact bytes; an agent reads the GitHub fields and artifact bytes behind them, and a refusal
@@ -45,7 +46,7 @@ steps whose work it guards, or the resource it found held.
 ## Chart
 
 <!-- BEGIN chart: rendered from DRAIN_NET_TEMPLATE by tests/drain-grafcet.test.mjs; edit the template, not this block -->
-Net `gaia.drain-petri-net.pr-drain`, template revision `sha256:bec6ea495bd7c01306087b12aa35db2966e32f73f992938a42d770472aaf5c56`.
+Net `gaia.drain-petri-net.pr-drain`, template revision `sha256:98e67ceae4ee6f37343942abdf53a8123456192efd324af71b470513e021ac5e`.
 
 ### Places
 
@@ -66,6 +67,7 @@ Net `gaia.drain-petri-net.pr-drain`, template revision `sha256:bec6ea495bd7c0130
 | `P_MERGED` | step | 0 / 1 | merge confirmed |
 | `P_ISSUE_RECONCILED` | step, terminal | 0 / 1 | linked issue reconciled |
 | `P_BLOCKED_REDESIGN` | step | 0 / 1 | ENG-09 breaker tripped |
+| `P_BLOCKED_PUBLICATION` | step | 0 / 1 | ENG-09 breaker tripped, publication token held |
 
 ### Receptivities
 
@@ -97,8 +99,11 @@ Net `gaia.drain-petri-net.pr-drain`, template revision `sha256:bec6ea495bd7c0130
 | `T_BREAKER_TRIP` | `P_SPEC_VERDICT`, `P_STANDARDS_VERDICT` | `P_BLOCKED_REDESIGN` | — | `D_FAILURE_FAMILY_REPEATED` | `FAMILY_NOT_REPEATED` | 1 |
 | `T_DRAFT_HEAD_BREAKER_TRIP` | `P_DRAFT_HEAD` | `P_BLOCKED_REDESIGN` | — | `D_FAILURE_FAMILY_REPEATED` | `FAMILY_NOT_REPEATED` | 3 |
 | `T_DUAL_APPROVED_BREAKER_TRIP` | `P_DUAL_APPROVED` | `P_BLOCKED_REDESIGN` | — | `D_FAILURE_FAMILY_REPEATED` | `FAMILY_NOT_REPEATED` | 3 |
-| `T_MERGEABLE_BREAKER_TRIP` | `P_MERGEABLE` | `P_BLOCKED_REDESIGN`, `MERGE_LOCK` | — | `D_FAILURE_FAMILY_REPEATED` | `FAMILY_NOT_REPEATED` | 3 |
-| `T_READY_BREAKER_TRIP` | `P_READY` | `P_BLOCKED_REDESIGN`, `MERGE_LOCK` | — | `D_FAILURE_FAMILY_REPEATED` | `FAMILY_NOT_REPEATED` | 3 |
+| `T_MERGEABLE_BREAKER_TRIP` | `P_MERGEABLE` | `P_BLOCKED_PUBLICATION` | — | `D_FAILURE_FAMILY_REPEATED` | `FAMILY_NOT_REPEATED` | 3 |
+| `T_READY_BREAKER_TRIP` | `P_READY` | `P_BLOCKED_PUBLICATION` | — | `D_FAILURE_FAMILY_REPEATED` | `FAMILY_NOT_REPEATED` | 3 |
+| `T_BLOCKED_PUBLICATION_HEAD_ADVANCED` | `P_BLOCKED_PUBLICATION` | `P_BLOCKED_REDESIGN`, `MERGE_LOCK` | — | `D_HEAD_ADVANCED` | `HEAD_UNCHANGED` | 0 |
+| `T_BLOCKED_PUBLICATION_MERGE` | `P_BLOCKED_PUBLICATION` | `P_MERGED`, `MERGE_LOCK` | — | `D_MERGE_CONFIRMED` | `MERGE_UNCONFIRMED` | 0 |
+| `T_BLOCKED_REDESIGN_MERGE` | `P_BLOCKED_REDESIGN` | `P_MERGED` | — | `D_MERGE_CONFIRMED` | `MERGE_UNCONFIRMED` | 0 |
 | `T_JOIN_APPROVE` | `P_SPEC_VERDICT`, `P_STANDARDS_VERDICT` | `P_DUAL_APPROVED` | — | `D_BOTH_APPROVE_AT_HEAD` | `DUAL_APPROVAL_MISSING` | 0 |
 | `T_JOIN_REPAIR` | `P_SPEC_VERDICT`, `P_STANDARDS_VERDICT`, `PROVIDER_CAPACITY` | `P_REPAIR` | — | `D_ANY_REQUEST_CHANGES_AT_HEAD` | `NO_REQUEST_CHANGES` | 0 |
 | `T_REPAIR_PUBLISHED` | `P_REPAIR` | `P_DRAFT_HEAD`, `PROVIDER_CAPACITY` | `P_BLOCKED_REDESIGN` | `D_HEAD_ADVANCED` | `REPAIR_UNPUBLISHED` | 0 |
@@ -133,6 +138,7 @@ flowchart TD
   P_MERGED(["P_MERGED"])
   P_ISSUE_RECONCILED((("P_ISSUE_RECONCILED")))
   P_BLOCKED_REDESIGN(["P_BLOCKED_REDESIGN"])
+  P_BLOCKED_PUBLICATION(["P_BLOCKED_PUBLICATION"])
   T_FORK_REVIEWS{{"T_FORK_REVIEWS: D_HEAD_PUBLISHED"}}
   P_DRAFT_HEAD --> T_FORK_REVIEWS
   T_FORK_REVIEWS --> P_REVIEW_SPEC
@@ -156,10 +162,19 @@ flowchart TD
   T_DUAL_APPROVED_BREAKER_TRIP --> P_BLOCKED_REDESIGN
   T_MERGEABLE_BREAKER_TRIP{{"T_MERGEABLE_BREAKER_TRIP: D_FAILURE_FAMILY_REPEATED"}}
   P_MERGEABLE --> T_MERGEABLE_BREAKER_TRIP
-  T_MERGEABLE_BREAKER_TRIP --> P_BLOCKED_REDESIGN
+  T_MERGEABLE_BREAKER_TRIP --> P_BLOCKED_PUBLICATION
   T_READY_BREAKER_TRIP{{"T_READY_BREAKER_TRIP: D_FAILURE_FAMILY_REPEATED"}}
   P_READY --> T_READY_BREAKER_TRIP
-  T_READY_BREAKER_TRIP --> P_BLOCKED_REDESIGN
+  T_READY_BREAKER_TRIP --> P_BLOCKED_PUBLICATION
+  T_BLOCKED_PUBLICATION_HEAD_ADVANCED{{"T_BLOCKED_PUBLICATION_HEAD_ADVANCED: D_HEAD_ADVANCED"}}
+  P_BLOCKED_PUBLICATION --> T_BLOCKED_PUBLICATION_HEAD_ADVANCED
+  T_BLOCKED_PUBLICATION_HEAD_ADVANCED --> P_BLOCKED_REDESIGN
+  T_BLOCKED_PUBLICATION_MERGE{{"T_BLOCKED_PUBLICATION_MERGE: D_MERGE_CONFIRMED"}}
+  P_BLOCKED_PUBLICATION --> T_BLOCKED_PUBLICATION_MERGE
+  T_BLOCKED_PUBLICATION_MERGE --> P_MERGED
+  T_BLOCKED_REDESIGN_MERGE{{"T_BLOCKED_REDESIGN_MERGE: D_MERGE_CONFIRMED"}}
+  P_BLOCKED_REDESIGN --> T_BLOCKED_REDESIGN_MERGE
+  T_BLOCKED_REDESIGN_MERGE --> P_MERGED
   T_JOIN_APPROVE{{"T_JOIN_APPROVE: D_BOTH_APPROVE_AT_HEAD"}}
   P_SPEC_VERDICT --> T_JOIN_APPROVE
   P_STANDARDS_VERDICT --> T_JOIN_APPROVE
@@ -232,7 +247,7 @@ binding names that transition's receptivity.
 | `ARTIFACT_UNNAMED` | reviewer | `P_REVIEW_SPEC`, `P_REVIEW_STANDARDS` | the input missing, `artifact` or `marker` | the verdict receptivities read the artifact and its marker |
 | `PUBLICATION_BUSY` | coordinator | `MERGE_LOCK` | the pull request that holds the token | one `MERGE_LOCK` token covers every merge and reconciliation (B35) |
 | `REPAIR_UNPUBLISHED` | coordinator | `D_HEAD_ADVANCED` | the repair's exit head | the chart's refusal for `T_REPAIR_PUBLISHED`: a repair counts once origin's head moves |
-| `BLOCKED_REDESIGN` | coordinator | `D_FAILURE_FAMILY_REPEATED`, `P_BLOCKED_REDESIGN` | the family | `T_BREAKER_TRIP` outranks `T_JOIN_APPROVE` and `T_JOIN_REPAIR`, so it trips whatever the head's verdicts, and each trip from `P_DRAFT_HEAD`, `P_DUAL_APPROVED`, `P_MERGEABLE` and `P_READY` outranks every other exit of its step; the step inhibits new reviews and repairs (ENG-09). The coordinator waits on it before any class |
+| `BLOCKED_REDESIGN` | coordinator | `D_FAILURE_FAMILY_REPEATED`, `P_BLOCKED_REDESIGN` | the family | `T_BREAKER_TRIP` outranks `T_JOIN_APPROVE` and `T_JOIN_REPAIR`, so it trips whatever the head's verdicts, and each trip from `P_DRAFT_HEAD`, `P_DUAL_APPROVED`, `P_MERGEABLE` and `P_READY` outranks every other exit of its step; the trips from `P_MERGEABLE` and `P_READY` hold `MERGE_LOCK` in `P_BLOCKED_PUBLICATION` until the merge is confirmed or the head moves; `P_BLOCKED_REDESIGN` inhibits new reviews and repairs (ENG-09). The coordinator waits on it before any class |
 | `RECONCILIATION_UNCLASSIFIED` | coordinator, publisher | `D_RECONCILIATION_CLASSIFIED`, `D_RECONCILIATION_UNCLASSIFIED` | coordinator: the first unclassified commit; publisher: `#N` | the chart's refusal for `T_RECONCILED`; `T_RECONCILE_REJECTED` returns the head to review (see Divergences) |
 | `ISSUE_RECONCILIATION_PENDING` | coordinator | `D_ISSUE_RECONCILED` | the issue `#M` | the chart's refusal for `T_ISSUE_RECONCILED` |
 | `ORDER_DIGEST_MISMATCH` | publisher | `P_MERGEABLE`, `P_READY`, `P_MERGED` | the order path | the order is the operator's admission for the commands inside these steps: `ready`, `merge`, `issue-close`. No receptivity reads it |
@@ -250,7 +265,7 @@ binding names that transition's receptivity.
 | `ACTION_NOT_ORDERED` | publisher | `P_MERGEABLE`, `P_READY`, `P_MERGED` | the action asked | as the order checks |
 | `STATE_CHANGED` | publisher | `D_HEAD_ADVANCED`, `D_ISSUE_RECONCILED` | `#N` | `HEAD_MISMATCH` and `CLOSING_EFFECT_UNNAMED`, re-read immediately before the merge command |
 | `STILL_DRAFT` | publisher | `D_NOT_DRAFT` | `#N` | the chart's refusal for `T_READY`, read after `gh pr ready` |
-| `MERGE_UNCONFIRMED` | publisher | `D_MERGE_CONFIRMED` | `#N` | the chart's refusal for `T_MERGE`, read after the merge command |
+| `MERGE_UNCONFIRMED` | publisher | `D_MERGE_CONFIRMED` | `#N` | the chart's refusal for `T_MERGE`, read after the merge command, and for the merges recorded after the breaker tripped (`T_BLOCKED_PUBLICATION_MERGE`, `T_BLOCKED_REDESIGN_MERGE`) |
 | `ISSUE_CLOSE_UNCONFIRMED` | publisher | `D_ISSUE_RECONCILED` | the issue `#M` | `T_ISSUE_RECONCILED` reads the issue closed, whether the order or the merge closed it |
 
 ## Chart refusals no agent returns
@@ -269,7 +284,7 @@ refuse with it.
 | `DUAL_APPROVAL_MISSING` | `T_JOIN_APPROVE` | the two verdicts are not both `APPROVE` |
 | `NO_REQUEST_CHANGES` | `T_JOIN_REPAIR` | no verdict requests changes |
 | `NOT_CONFLICTING` | `T_RECONCILE_START`, `T_RECONFLICTED`, `T_READY_RECONFLICTED` | the head does not conflict |
-| `HEAD_UNCHANGED` | `T_DUAL_APPROVED_HEAD_ADVANCED`, `T_MERGEABLE_HEAD_ADVANCED`, `T_READY_HEAD_ADVANCED` | the head has not moved |
+| `HEAD_UNCHANGED` | `T_BLOCKED_PUBLICATION_HEAD_ADVANCED`, `T_DUAL_APPROVED_HEAD_ADVANCED`, `T_MERGEABLE_HEAD_ADVANCED`, `T_READY_HEAD_ADVANCED` | the head has not moved |
 | `RECONCILIATION_NOT_REJECTED` | `T_RECONCILE_REJECTED` | no unclassified reconciliation was observed |
 | `REDESIGN_ORDER_ABSENT` | `T_REDESIGN_RESUMED` | no operator order lifts the breaker |
 
@@ -302,9 +317,9 @@ class, so a reconciled head is never also `unreviewed` or `single-axis`.
 The breaker is not a class. Once two `REQUEST_CHANGES` artifacts of a pull request at distinct
 heads carry the same `Family:` token, the coordinator's step 5 waits with `BLOCKED_REDESIGN`
 whatever the class of the published head, `dual-approved` and `merge-ready` included. A new head
-is not a new design (ENG-09). The chart agrees at every step where no lane runs: at a verdict
-join, where `T_BREAKER_TRIP` outranks both joins, and from `P_DRAFT_HEAD`, `P_DUAL_APPROVED`,
-`P_MERGEABLE` and `P_READY`. Divergence 5 lists where the two still differ.
+is not a new design (ENG-09). The chart trips at a verdict join, where `T_BREAKER_TRIP` outranks
+both joins, and from `P_DRAFT_HEAD`, `P_DUAL_APPROVED`, `P_MERGEABLE` and `P_READY`. Divergence 5
+says where it holds the pull request instead, and where the two still differ.
 
 ## Receptivities no agent reads
 
@@ -334,28 +349,44 @@ prompt exactly would still disagree with the chart.
    the two reconciliation receptivities, which the coordinator reads as `REPAIR_UNPUBLISHED` and
    `RECONCILIATION_UNCLASSIFIED`.
 5. **The breaker.** `D_FAILURE_FAMILY_REPEATED` is a level fact over every artifact of the pull
-   request, and the chart trips on it from every step where no lane runs. `T_BREAKER_TRIP`
-   (priority 1) outranks `T_JOIN_APPROVE` and `T_JOIN_REPAIR` on the verdict steps, so a
-   repetition visible at a join trips it whatever the verdicts there, at a head pushed before the
-   repeating round's verdicts joined as well. A trip from `P_DRAFT_HEAD`, `P_DUAL_APPROVED`,
-   `P_MERGEABLE` or `P_READY` (priority 3) outranks every other exit of its step, the
-   head-advanced ones included, and returns the `MERGE_LOCK` the step holds. A step with a
-   running lane trips at the step its lane exits to: the review steps at the verdict join,
-   `P_REPAIR` at the draft head its published repair returns to, and `P_RECONCILE` at
-   `P_MERGEABLE` or at the draft head (`tests/drain-petri-net.test.mjs`). The coordinator waits
-   with `BLOCKED_REDESIGN` as soon as the family has repeated, wherever the pull request is, so
-   while such a lane runs the chart still holds the pull request in that lane's step, where the
-   coordinator proposes no new work for it.
+   request. `T_BREAKER_TRIP` (priority 1) outranks `T_JOIN_APPROVE` and `T_JOIN_REPAIR` on the
+   verdict steps, so a repetition visible at a join trips it whatever the verdicts there, at a
+   head pushed before the repeating round's verdicts joined as well. The trips from
+   `P_DRAFT_HEAD`, `P_DUAL_APPROVED`, `P_MERGEABLE` and `P_READY` (priority 3) outrank every other
+   exit of their step, the head-advanced ones included, and no trip returns a resource. The
+   first two go to `P_BLOCKED_REDESIGN`. In `P_MERGEABLE` and `P_READY` the publisher's ordered
+   command may still run, so their trips go to `P_BLOCKED_PUBLICATION` and keep `MERGE_LOCK`
+   there. A confirmed merge moves the pull request on to `P_MERGED`, and a new head, which the
+   order issued for the old one cannot merge (`HEAD_MISMATCH`), to `P_BLOCKED_REDESIGN`; each
+   returns the lock. A merge confirmed while the pull request is in `P_BLOCKED_REDESIGN` moves it
+   to `P_MERGED` too, so a merge ordered before the trip is recorded wherever the trip left the
+   pull request. The review steps, `P_REPAIR` and `P_RECONCILE` hold a running lane, and the
+   chart trips at the step the lane exits to: the review steps at the verdict join, `P_REPAIR` at
+   the draft head its published repair returns to, and `P_RECONCILE` at the draft head or at
+   `P_MERGEABLE` (`tests/drain-petri-net.test.mjs`). `P_MERGED` has no trip: the pull request is
+   merged, and the coordinator lists open pull requests only and reconciles the issue in its
+   step 6.
+
+   The two still differ in two places. While a lane runs, the chart holds the pull request in
+   that lane's step, where the coordinator already waits with `BLOCKED_REDESIGN` and proposes no
+   new work for it. The chart cannot see whether an order is in flight (divergence 3), so it
+   holds `MERGE_LOCK` in `P_BLOCKED_PUBLICATION` until the merge is confirmed or the head moves,
+   however long that takes. The coordinator binds `PUBLICATION_BUSY` to an open proposal or a
+   running reconciliation, so once it no longer counts the blocked pull request's proposal as
+   open, the chart is the stricter side. Neither stops an order already issued: the publisher
+   reads no `Family:` line, so an order issued from a proposal written before the family
+   repeated still runs, and the chart records its merge.
 
    After a redesign order the two part the other way. The coordinator waits only until an operator
    orders a redesign, but the family fact is not scoped by the order. Once `T_REDESIGN_RESUMED`
    returns the pull request to `P_DRAFT_HEAD`, the same fact trips the breaker again at once;
    with the order held as a level fact, `replay` cycles between the two steps and refuses the
-   event as `EvolutionUnstable` (`tests/drain-petri-net.test.mjs`). That part is unreachable in
-   R0, where no class-D order reaches the bus and `T_REDESIGN_RESUMED` never fires; scoping the
-   fact to the rejections after the order needs the order's channel. Binding the fact to the
-   observed head instead would drop a repetition whenever the head moves before the repeating
-   round's verdicts join, which R0 can reach (`tests/drain-petri-net.test.mjs`).
+   event as `EvolutionUnstable` (`tests/drain-petri-net.test.mjs`); the refusal stops the whole
+   replay, every pull request in the net with it. That part is unreachable in R0, where no
+   class-D order reaches the bus and `T_REDESIGN_RESUMED` never fires; scoping the fact to the
+   rejections after the order needs the order's channel. Binding the fact to the observed head
+   instead would drop a repetition whenever the head moves before the repeating round's verdicts
+   join, which R0 can reach (`tests/drain-petri-net.test.mjs`).
 6. **`REPAIR_UNPUBLISHED`.** The coordinator requires the published head to be the handoff's exit
    head; `D_HEAD_ADVANCED` holds on any head change. The agents are stricter.
 7. **Readiness.** The collector holds `D_NOT_DRAFT` only at the approved head with checks
@@ -425,8 +456,9 @@ family, and would trip the breaker on the next repair.
   `CLOSING_EFFECT_UNNAMED` before `HEAD_MISMATCH`, and `mergeCommit` is an order field;
 - the reviewer's artifact shape, filled in, is an artifact `parseArtifact` binds, with its
   `Family:` line read and an omitted line read as no family;
-- `T_BREAKER_TRIP` outranks both joins on their verdict steps, and every other breaker trip
-  outranks every other transition that consumes its step. The breaker gate is lexical, and
+- `T_BREAKER_TRIP` outranks both joins on their verdict steps, every other breaker trip
+  outranks every other transition that consumes its step, and no trip returns a resource. The
+  breaker gate is lexical, and
   `breakerProblems` in `tests/drain-grafcet.test.mjs` is the definition of what it reads; this
   line claims no form beyond that function. Its intent is that the coordinator's step 5 applies
   the breaker before any class, and that no class bullet or definition of the coordinator, and no
