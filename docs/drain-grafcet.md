@@ -409,28 +409,12 @@ family, and would trip the breaker on the next repair.
   `CLOSING_EFFECT_UNNAMED` before `HEAD_MISMATCH`, and `mergeCommit` is an order field;
 - the reviewer's artifact shape, filled in, is an artifact `parseArtifact` binds, with its
   `Family:` line read and an omitted line read as no family;
-- `T_BREAKER_TRIP` outranks both joins on their verdict steps. The breaker gate reads source
-  text, split at line feeds, and renders no Markdown. It takes step 5 as the text from the
-  coordinator's first `5. **Decide the next lane**` to the next line opening `6. **`, step 4 as
-  the text from the first `4. **Classify**` to the next `5. **Decide the next lane**`, and the
-  lead as the text before step 5's first line opening with three spaces, a dash, a space and a
-  backtick. The lead names `BLOCKED_REDESIGN`, says "whatever the class" and "`dual-approved` and
-  `merge-ready` included", and holds none of the exemption words the gate lists, in any case
-  (`except`, `excepting`, `unless`, `other than`, `but not`, `save`, `excluded`, `excludes`,
-  `however`). Each lead line after the first opens, after its indent, with an ASCII letter, a
-  backtick or a parenthesis, and the lead holds no `<li>` tag, in any case. The names made of
-  `a`-`z` and dashes, in backticks, that open step 5's lines after three spaces, a dash and a
-  space are exactly the six classes, in order. Step 4, step 5 after its lead, and each line of
-  the first `## Coordinator classes` section that opens with a pipe, a space, such a name in
-  backticks, a space and a pipe, read whole after that pipe, name none of `BLOCKED_REDESIGN`,
-  `breaker`, `ENG-09` and `family`, in any case. The coordinator's first line that opens with a
-  pipe, a space, `BLOCKED_REDESIGN` in backticks, a space and a pipe says "whatever the class".
-  The first paragraph of the same classes section that opens "The breaker is not a class." says
-  it with "`dual-approved` and `merge-ready` included". Neither holds a listed exemption word.
-  The lead and the paragraph are read with whitespace normalized. The gate reads those words and
-  forms, so a wording or a Markdown structure outside them passes it: a code fence, a list item
-  or a class row written another way, a second step-5 heading or classes section, or a line
-  ended by a lone carriage return, which the LF-only gate refuses in the coordinator;
+- `T_BREAKER_TRIP` outranks both joins on their verdict steps. The breaker gate is lexical, and
+  `breakerProblems` in `tests/drain-grafcet.test.mjs` is the definition of what it reads; this
+  line claims no form beyond that function. Its intent is that the coordinator's step 5 applies
+  the breaker before any class, and that no class bullet or definition of the coordinator, and no
+  class row of this document, applies or exempts it. An exemption or a breaker clause in a form
+  the function does not match passes it;
 - a negative control plants each mismatch and asserts the exact problem lists.
 
 ## What this slice does not do

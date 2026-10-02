@@ -443,7 +443,11 @@ const EXEMPTION_WORDS = /\b(?:except|excepting|unless|other than|but not|save|ex
 const classFree = (text) => text.includes('whatever the class') && !EXEMPTION_WORDS.test(text);
 const allClasses = (text) => classFree(text) && text.includes('`dual-approved` and `merge-ready` included');
 
-/** Where the coordinator and the doc apply the breaker: before every class, never inside one. */
+/**
+ * Where the coordinator and the doc apply the breaker: before every class, never inside one. This
+ * function is the definition of what the gate reads, as the doc's Test gates line says. No Markdown
+ * is rendered.
+ */
 function breakerProblems({ coordinator, doc }) {
   const problems = [];
   const between = (from, to) => {
@@ -459,10 +463,6 @@ function breakerProblems({ coordinator, doc }) {
   if (!lead.includes('`BLOCKED_REDESIGN`') || !allClasses(lead)) {
     problems.push('coordinator: the breaker does not come before the classes');
   }
-  // Read on the source text, split at line feeds, as the doc's Test gates line states: the dashed
-  // bullets whose backticked name is made of a-z and dashes list the six classes, in order, and
-  // every lead line after the first opens, after its indent, with an ASCII letter, a backtick or a
-  // parenthesis, with no `<li>` tag in any case. No Markdown is rendered.
   const bulleted = [...step.matchAll(/\n {3}- `([a-z-]+)`/gu)].map(([, name]) => name);
   if (bulleted.join() !== CLASSES.join() || /\n(?![ \t]*[A-Za-z`(])/u.test(leadText) || /<li\b/iu.test(leadText)) {
     problems.push('coordinator: step 5 does not bullet exactly the six classes');
@@ -597,7 +597,7 @@ test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP o
       `Otherwise, by class:\n${marker} **\`merge-ready\`** -> \`publish\`, even when the family repeats;\n`);
     assert.deepEqual(breakerProblems({ coordinator: planted, doc }), ['coordinator: step 5 does not bullet exactly the six classes'], marker);
   }
-  // Every exemption word the Test gates line lists, planted alone after the lead.
+  // Every word `EXEMPTION_WORDS` lists, planted alone after the lead.
   for (const word of ['except', 'excepting', 'unless', 'other than', 'but not', 'save', 'excluded', 'excludes', 'however']) {
     const planted = plant(coordinator, '`merge-ready` included. A new head',
       `\`merge-ready\` included. Every class waits, ${word} \`merge-ready\`. A new head`);
