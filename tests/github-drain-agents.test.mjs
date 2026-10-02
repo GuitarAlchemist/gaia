@@ -202,10 +202,13 @@ test('the publisher gh write commands are exactly the four the doc declares', ()
 
 test('the publisher refusal vocabulary and the doc agree code for code', () => {
   const docCodes = codesInTable(section(readDoc(), 'Publisher refusal vocabulary'));
-  const publisherCodes = codesInTable(section(readAgent('github-drain-publisher'), 'Verification, in this order, each a refusal with its name'));
+  const publisher = readAgent('github-drain-publisher');
+  const publisherCodes = codesInTable(section(publisher, 'Verification, in this order, each a refusal with its name'));
+  const confirmationCodes = codesInTable(section(publisher, 'Confirmation after each command, each a refusal with its name'));
   assert.ok(docCodes.length >= 10, `the doc declares the vocabulary: ${docCodes.length} codes`);
-  assert.deepEqual([...publisherCodes].sort(), [...docCodes].sort());
-  for (const code of ['HEAD_MISMATCH', 'MARKER_MISSING', 'VERDICT_MISSING', 'AXIS_MISSING', 'SHA_NOT_BOUND', 'CHECKS_NOT_GREEN', 'NOT_MERGEABLE', 'ORDER_DIGEST_MISMATCH', 'RECONCILIATION_UNCLASSIFIED']) {
+  assert.deepEqual([...publisherCodes, ...confirmationCodes].sort(), [...docCodes].sort());
+  for (const code of ['HEAD_MISMATCH', 'MARKER_MISSING', 'VERDICT_MISSING', 'AXIS_MISSING', 'SHA_NOT_BOUND', 'CHECKS_NOT_GREEN', 'NOT_MERGEABLE', 'ORDER_DIGEST_MISMATCH', 'RECONCILIATION_UNCLASSIFIED',
+    'CLOSING_EFFECT_UNNAMED', 'PR_NOT_MERGED', 'STILL_DRAFT', 'MERGE_UNCONFIRMED', 'ISSUE_CLOSE_UNCONFIRMED']) {
     assert.ok(docCodes.includes(code), `${code} is in the vocabulary`);
   }
   assert.equal(publisherCodes[0], 'ORDER_DIGEST_MISMATCH', 'the order file is read by its digest before any other check');
