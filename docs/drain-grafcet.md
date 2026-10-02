@@ -324,9 +324,10 @@ prompt exactly would still disagree with the chart.
    leaves the chart going until its next join, if it reaches one:
    - before a join, the chart forks or binds the reviews and trips at the join;
    - from `P_REPAIR`, it publishes the repair and trips at the next join;
-   - from `P_DUAL_APPROVED` and the steps after it, it goes on through `T_MERGEABLE`, `T_READY`
-     and `T_MERGE` without tripping (`tests/drain-petri-net.test.mjs`), unless a rejected
-     reconciliation returns it to review, where it trips at the next join.
+   - from `P_DUAL_APPROVED` and the steps after it, it goes on to `T_MERGE` without tripping,
+     through `T_MERGEABLE` or an accepted reconciliation (`T_RECONCILED`), then `T_READY`
+     (`tests/drain-petri-net.test.mjs` pins the first path). Only a rejected reconciliation
+     returns it to review, where it trips at the next join.
 
    The coordinator waits with `BLOCKED_REDESIGN` as soon as the family has repeated, wherever the
    pull request is, so in each of these cases the agents are the stricter side. Tripping the

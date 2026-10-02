@@ -453,7 +453,8 @@ function breakerProblems({ coordinator, doc }) {
   };
   const step = between('5. **Decide the next lane**', '\n6. **');
   const firstBullet = step.indexOf('\n   - `');
-  const lead = firstBullet >= 0 ? step.slice(0, firstBullet) : step;
+  // Whitespace is normalized so a wrapped line cannot split a listed exemption.
+  const lead = (firstBullet >= 0 ? step.slice(0, firstBullet) : step).replace(/\s+/gu, ' ');
   if (!lead.includes('`BLOCKED_REDESIGN`') || !allClasses(lead)) {
     problems.push('coordinator: the breaker does not come before the classes');
   }
@@ -465,11 +466,11 @@ function breakerProblems({ coordinator, doc }) {
   }
   const row = coordinator.split('\n').find((line) => line.startsWith('| `BLOCKED_REDESIGN` |')) ?? '';
   if (!classFree(row)) problems.push('coordinator: the BLOCKED_REDESIGN row is not class-free');
-  for (const [, name, lane] of section(doc, 'Coordinator classes').matchAll(/^\| `([a-z-]+)` \| [^|]+ \| ([^|]+) \|/gmu)) {
-    if (BREAKER_WORDS.test(lane)) problems.push(`doc: class ${name} applies the breaker`);
+  for (const [, name, predicate, lane] of section(doc, 'Coordinator classes').matchAll(/^\| `([a-z-]+)` \| ([^|]+) \| ([^|]+) \|/gmu)) {
+    if (BREAKER_WORDS.test(`${predicate} ${lane}`)) problems.push(`doc: class ${name} applies the breaker`);
   }
   const paragraph = section(doc, 'Coordinator classes').split('\n\n').find((text) => text.startsWith('The breaker is not a class.')) ?? '';
-  if (!allClasses(paragraph.replaceAll('\n', ' '))) problems.push('doc: the breaker paragraph is not class-free');
+  if (!allClasses(paragraph.replace(/\s+/gu, ' '))) problems.push('doc: the breaker paragraph is not class-free');
   return problems;
 }
 
