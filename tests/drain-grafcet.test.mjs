@@ -485,13 +485,24 @@ function breakerProblems({ coordinator, doc }) {
   return problems;
 }
 
-test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP outranks both joins', () => {
+test('the coordinator waits on the breaker before any class, as T_BREAKER_TRIP outranks both joins and every other trip the other exits of its step', () => {
   const byId = Object.fromEntries(DRAIN_NET_TEMPLATE.transitions.map((transition) => [transition.id, transition]));
   const priority = (id) => byId[id].priority ?? 0;
   for (const join of ['T_JOIN_APPROVE', 'T_JOIN_REPAIR']) {
     assert.ok(priority('T_BREAKER_TRIP') > priority(join), `T_BREAKER_TRIP outranks ${join}`);
     assert.ok(byId.T_BREAKER_TRIP.inputs.every((place) => byId[join].inputs.includes(place)),
       `T_BREAKER_TRIP takes the verdict steps ${join} takes`);
+  }
+  // Every other breaker trip outranks every other transition that consumes its step.
+  const trips = DRAIN_NET_TEMPLATE.transitions
+    .filter(({ id, receptivity }) => receptivity === 'D_FAILURE_FAMILY_REPEATED' && id !== 'T_BREAKER_TRIP');
+  assert.deepEqual(trips.map(({ id }) => id),
+    ['T_DRAFT_HEAD_BREAKER_TRIP', 'T_DUAL_APPROVED_BREAKER_TRIP', 'T_MERGEABLE_BREAKER_TRIP', 'T_READY_BREAKER_TRIP']);
+  for (const trip of trips) {
+    const rivals = DRAIN_NET_TEMPLATE.transitions
+      .filter(({ id, inputs }) => id !== trip.id && inputs.some((input) => trip.inputs.includes(input)));
+    assert.ok(rivals.length > 0, `${trip.id} has rivals`);
+    for (const rival of rivals) assert.ok(priority(trip.id) > priority(rival.id), `${trip.id} outranks ${rival.id}`);
   }
   const { coordinator } = readAgents();
   const doc = read(DOC);

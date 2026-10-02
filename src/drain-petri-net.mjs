@@ -696,6 +696,14 @@ export const DRAIN_NET_TEMPLATE = deepFreeze({
     { id: 'T_SPEC_VERDICT', receptivity: 'D_SPEC_VERDICT_BOUND', refusal: 'SPEC_VERDICT_NOT_BOUND', inputs: ['P_REVIEW_SPEC'], outputs: ['P_SPEC_VERDICT', 'PROVIDER_CAPACITY'] },
     { id: 'T_STANDARDS_VERDICT', receptivity: 'D_STANDARDS_VERDICT_BOUND', refusal: 'STANDARDS_VERDICT_NOT_BOUND', inputs: ['P_REVIEW_STANDARDS'], outputs: ['P_STANDARDS_VERDICT', 'PROVIDER_CAPACITY'] },
     { id: 'T_BREAKER_TRIP', receptivity: 'D_FAILURE_FAMILY_REPEATED', refusal: 'FAMILY_NOT_REPEATED', priority: 1, inputs: ['P_SPEC_VERDICT', 'P_STANDARDS_VERDICT'], outputs: ['P_BLOCKED_REDESIGN'] },
+    // The breaker also trips from every step where no lane runs, returning the resource the step
+    // holds and outranking the step's other exits, the head-advanced ones (priority 2) included.
+    // A step with a running lane (a review, a repair, a reconciliation) trips at the step its lane
+    // exits to.
+    { id: 'T_DRAFT_HEAD_BREAKER_TRIP', receptivity: 'D_FAILURE_FAMILY_REPEATED', refusal: 'FAMILY_NOT_REPEATED', priority: 3, inputs: ['P_DRAFT_HEAD'], outputs: ['P_BLOCKED_REDESIGN'] },
+    { id: 'T_DUAL_APPROVED_BREAKER_TRIP', receptivity: 'D_FAILURE_FAMILY_REPEATED', refusal: 'FAMILY_NOT_REPEATED', priority: 3, inputs: ['P_DUAL_APPROVED'], outputs: ['P_BLOCKED_REDESIGN'] },
+    { id: 'T_MERGEABLE_BREAKER_TRIP', receptivity: 'D_FAILURE_FAMILY_REPEATED', refusal: 'FAMILY_NOT_REPEATED', priority: 3, inputs: ['P_MERGEABLE'], outputs: ['P_BLOCKED_REDESIGN', 'MERGE_LOCK'] },
+    { id: 'T_READY_BREAKER_TRIP', receptivity: 'D_FAILURE_FAMILY_REPEATED', refusal: 'FAMILY_NOT_REPEATED', priority: 3, inputs: ['P_READY'], outputs: ['P_BLOCKED_REDESIGN', 'MERGE_LOCK'] },
     { id: 'T_JOIN_APPROVE', receptivity: 'D_BOTH_APPROVE_AT_HEAD', refusal: 'DUAL_APPROVAL_MISSING', inputs: ['P_SPEC_VERDICT', 'P_STANDARDS_VERDICT'], outputs: ['P_DUAL_APPROVED'] },
     { id: 'T_JOIN_REPAIR', receptivity: 'D_ANY_REQUEST_CHANGES_AT_HEAD', refusal: 'NO_REQUEST_CHANGES', inputs: ['P_SPEC_VERDICT', 'P_STANDARDS_VERDICT', 'PROVIDER_CAPACITY'], outputs: ['P_REPAIR'] },
     { id: 'T_REPAIR_PUBLISHED', receptivity: 'D_HEAD_ADVANCED', refusal: 'REPAIR_UNPUBLISHED', inputs: ['P_REPAIR'], outputs: ['P_DRAFT_HEAD', 'PROVIDER_CAPACITY'], inhibitors: ['P_BLOCKED_REDESIGN'] },
