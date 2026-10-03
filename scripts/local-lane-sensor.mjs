@@ -13,7 +13,8 @@
  *
  * WHAT IT WILL NOT DO
  * -------------------
- * The argv it can construct is exactly `agent list`, built from a frozen constant rather than
+ * The argv it can construct is exactly `agent list`, plus `agent-state` under `--activity` (see
+ * THE ACTIVITY AXIS below), each built from a frozen constant rather than
  * assembled from flags, so there is no input that makes this send text to a pane, spawn or end an
  * agent, read a screen, drive a browser or shut a surface. It passes no `--workspace`, so it
  * observes every workspace — which is the whole point, since the operator's reviews were spread
@@ -97,8 +98,8 @@ const DEFAULT_WMUX_PATHS = Object.freeze([
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const READ_TIMEOUT_MS = 10_000;
 
-export class UsageError extends Error {}
-export class SensorRefusalError extends Error {}
+export class UsageError extends Error { name = 'UsageError'; }
+export class SensorRefusalError extends Error { name = 'SensorRefusalError'; }
 
 const KNOWN_FLAGS = new Set(['out', 'wmux', 'bindings', 'activity']);
 
