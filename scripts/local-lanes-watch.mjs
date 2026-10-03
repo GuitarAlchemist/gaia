@@ -16,8 +16,8 @@
  * So the concern constrains the script instead:
  *
  *   - **No mechanism of its own.** One tick calls `runLocalLaneSensorCli` and then
- *     `runFactoryDashboardCli`, in this process. The only subprocess anywhere is the single
- *     `wmux agent list` the sensor already makes.
+ *     `runFactoryDashboardCli`, in this process. The only subprocesses anywhere are the wmux
+ *     reads the sensor already makes: `wmux agent list`, and `wmux agent-state` under `--activity`.
  *   - **Non-overlapping.** The next tick is scheduled after the current one settles, so a slow
  *     tick delays the next rather than racing it.
  *   - **No retry.** A failed tick prints its typed error, leaves the previous artifacts exactly
@@ -36,8 +36,8 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { LOCAL_LANE_OBSERVATION_FRESH_MS } from '../src/local-lane-observation.mjs';
-import { runFactoryDashboardCli } from './factory-dashboard.mjs';
-import { runLocalLaneSensorCli } from './local-lane-sensor.mjs';
+import { UsageError as DashboardUsageError, runFactoryDashboardCli } from './factory-dashboard.mjs';
+import { UsageError as SensorUsageError, runLocalLaneSensorCli } from './local-lane-sensor.mjs';
 
 /**
  * At most half the window the control room ages the observation against.
@@ -64,7 +64,7 @@ export const DEFAULT_WATCH_INTERVAL_MS = 5_000;
  */
 const OWN_FLAGS = new Set(['lanes-out', 'interval-ms', 'wmux', 'bindings', 'activity']);
 
-export class UsageError extends Error {}
+export class UsageError extends Error { name = 'UsageError'; }
 
 export function parseArgs(argv) {
   const own = {};
@@ -141,8 +141,11 @@ if (directExecution) {
       runLocalLanesTick(argv);
     } catch (error) {
       process.stderr.write(`${error.name}: ${error.message}\n`);
-      process.exitCode = error instanceof UsageError ? 2 : 1;
-      if (error instanceof UsageError) { stop(); return; }
+      // A usage error is the same on every tick, so it stops the watcher instead of repeating.
+      const usage = error instanceof UsageError || error instanceof SensorUsageError
+        || error instanceof DashboardUsageError;
+      process.exitCode = usage ? 2 : 1;
+      if (usage) { stop(); return; }
     }
     if (!stopped) timer = setTimeout(tick, interval);
   };

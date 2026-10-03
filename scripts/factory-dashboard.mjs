@@ -15,7 +15,7 @@ import {
 } from '../src/factory-telemetry-log.mjs';
 import { reconcilePortfolioDrain } from '../src/portfolio-drain.mjs';
 
-class UsageError extends Error {}
+export class UsageError extends Error { name = 'UsageError'; }
 
 /**
  * Every argv name this adapter reads. A name absent from this set is refused.
