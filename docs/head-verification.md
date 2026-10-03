@@ -82,7 +82,7 @@ This slice wires it into none of the following, and each would be a later, separ
 - The run executes the repository's own tests as the host user, as `node --test` always does. The factory's mutation checks detect changes to the worktree and to Git state, not effects elsewhere on the machine.
 - The pin is enforced only when the repository has one. Without a `.node-version` at the worktree root, the factory runs on any Node and records `runtime.pinned: null`, and such a receipt can still say PASS. A consumer that needs a pinned run checks that field.
 - "Clean" is the factory's definition: `git status --porcelain`, which does not list ignored files. A gitignored file in the worktree is not reported, and the tests can read it.
-- A base equal to HEAD is accepted. Its receipt has an empty change-set, so it binds the run to no changed bytes at all, and every such receipt has the same identity.
+- A base equal to HEAD is accepted. Its receipt has an empty change-set, so it binds the run to no changed bytes at all: its identity then depends only on the base commit.
 - `--out` is not containment-checked. A receipt written inside the worktree leaves it dirty, so the next run refuses it until the file is moved.
 
 ## Falsifiers
