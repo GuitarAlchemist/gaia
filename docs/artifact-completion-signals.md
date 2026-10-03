@@ -383,7 +383,8 @@ compares serialized bytes.
   state. This slice emits truthful state so that a later slice can be written against a
   transition instead of against a guess.
 - **No polling of providers, no network, no install, no paid call.** The only subprocess is
-  the single `wmux agent list` the sensor already made.
+  the single `wmux agent list` the sensor already made (the later, opt-in activity axis adds
+  `wmux agent-state`; see [lane activity signals](lane-activity-signals.md)).
 - **No new bus verb, and no widened authority.** The six verbs are exactly as they were.
 - **No inference.** An unbound lane stays `UNBOUND` forever until an operator writes a
   binding for it. That is the point.

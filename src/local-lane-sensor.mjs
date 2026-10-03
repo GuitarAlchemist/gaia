@@ -39,10 +39,19 @@
  * The two axes never learn from each other. A wrapper that outlives its provider makes
  * `RUNNING` beside `COMPLETED_EVIDENCE` the normal reading rather than a contradiction, and the
  * whole point of R0 is that both can be said at once. docs/artifact-completion-signals.md.
+ *
+ * THE THIRD AXIS
+ * --------------
+ * `deriveLaneActivityStates` restates what `wmux agent-state` claims each running agent is doing,
+ * from ALREADY-READ records, by the same two-named-reads construction as the lanes: `surfaceId`
+ * and `state`, and nothing else. A reason the agent typed, its choices, its session and every
+ * instant stay unread, so no free text and no elapsed time can reach the observation. wmux is the
+ * only producer; Gaia adds no writer of this fact. docs/lane-activity-signals.md.
  */
 
 import {
-  ARTIFACT_REFUSAL_REASONS, LANE_TASK_STATES, LOCAL_LANE_LIFECYCLES, LOCAL_LANE_LABEL_STATES,
+  ARTIFACT_REFUSAL_REASONS, LANE_ACTIVITIES, LANE_ACTIVITY_REASONS, LANE_TASK_STATES,
+  LOCAL_LANE_LIFECYCLES, LOCAL_LANE_LABEL_STATES, LOCAL_LANE_LIVE_LIFECYCLE,
   MAX_LANE_GENERATION, UNKNOWN_IDENTITY,
   isSafeLaneIdentity, isSafeLaneLabel, isSha256Hex, laneArtifactBindingRevision,
   laneCompletionEvidenceRevision, laneOrderKey, sealLocalLaneObservation,
@@ -125,6 +134,7 @@ function lifecycle(record) {
 export function observeLocalLanes({
   agents, observedAt,
   bindings = [], artifactEvidence = new Map(), previousTaskStates = [],
+  agentStates = null,
 } = {}) {
   if (!Array.isArray(agents)) {
     throw new LocalLaneSensorError(
@@ -167,6 +177,9 @@ export function observeLocalLanes({
     taskStates: deriveLaneTaskStates({
       lanes, bindings, artifactEvidence, previousTaskStates, observedAt,
     }),
+    // `null` means wmux's activity was not read this tick, and the axis is then omitted rather
+    // than published as a list of guesses.
+    activityStates: agentStates === null ? null : deriveLaneActivityStates({ lanes, agentStates }),
   });
 }
 
@@ -367,5 +380,82 @@ function reconcile({ binding, carried, processLifecycle, observedAt, evidence })
   );
 }
 
+// ---------------------------------------------------------------------------
+// the third axis: what wmux claims the agent is doing
+// ---------------------------------------------------------------------------
+
+/** The exact fields this sensor reads from one `wmux agent-state` record. It cannot reach a third. */
+export const WMUX_ACTIVITY_FIELDS = Object.freeze(['surfaceId', 'state']);
+
+/**
+ * Exact-equality map from the three states wmux assigns to the reason that names an activity.
+ *
+ * Null-prototype, so `constructor` is not a wmux state. No case folding and no prefix match, so a
+ * state a later wmux invents is `UNRECOGNISED_CLAIM` until this map learns it on evidence.
+ */
+export const WMUX_STATE_ACTIVITY_REASON = Object.freeze(Object.assign(Object.create(null), {
+  working: 'WMUX_WORKING',
+  idle: 'WMUX_IDLE',
+  blocked: 'WMUX_BLOCKED',
+}));
+
+/**
+ * One activity per observed lane, from already-read `wmux agent-state` records, with no clock.
+ *
+ * The lanes are the domain and the records only ever enrich them: a record for a surface no lane
+ * reported is dropped, so this axis can neither create a lane nor resurrect one. Every way of not
+ * knowing is `UNKNOWN` under its own reason, and none of them is `IDLE`:
+ *
+ *   - a lane that is not running waits for nobody, whatever wmux last said about it;
+ *   - a lane whose surface is the sentinel can match no claim;
+ *   - a surface with no record has made no claim;
+ *   - a surface with two records has made no single claim, even if they agree, because wmux keys
+ *     its state by surface and a second record is already an anomaly;
+ *   - a state outside the exact map is not understood.
+ *
+ * A structurally invalid record throws rather than degrading: the process boundary has already
+ * refused anything that is not an array of objects, so one here is a defect, not an input.
+ */
+export function deriveLaneActivityStates({ lanes = [], agentStates } = {}) {
+  if (!Array.isArray(agentStates)) {
+    throw new LocalLaneSensorError(
+      'AgentStatesUnreadable', "structured wmux agent-state records are required: an exact array",
+    );
+  }
+  const claimsBySurface = new Map();
+  for (const record of agentStates) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) {
+      throw new LocalLaneSensorError(
+        'AgentStatesUnreadable', 'each wmux agent-state record must be a structured object',
+      );
+    }
+    // Two named reads. `blockedReason`, `choices`, `sessionId`, `metadata` and every instant stay
+    // where they are, because nothing here spreads the record or walks its keys.
+    const { surfaceId } = record;
+    if (typeof surfaceId !== 'string') continue;
+    claimsBySurface.set(surfaceId, [...(claimsBySurface.get(surfaceId) ?? []), record.state]);
+  }
+
+  return lanes.map((lane) => {
+    const entry = (activityReason) => ({
+      workspaceId: lane.workspaceId,
+      paneId: lane.paneId,
+      surfaceId: lane.surfaceId,
+      agentId: lane.agentId,
+      processLifecycle: lane.lifecycle,
+      activity: LANE_ACTIVITY_REASONS[activityReason],
+      activityReason,
+    });
+    if (lane.lifecycle !== LOCAL_LANE_LIVE_LIFECYCLE) return entry('PROCESS_NOT_RUNNING');
+    if (lane.surfaceId === UNKNOWN_IDENTITY) return entry('SURFACE_UNKNOWN');
+    const claims = claimsBySurface.get(lane.surfaceId) ?? [];
+    if (claims.length === 0) return entry('NO_CLAIM');
+    if (claims.length > 1) return entry('CONFLICTING_CLAIMS');
+    const [state] = claims;
+    const reason = typeof state === 'string' ? WMUX_STATE_ACTIVITY_REASON[state] : undefined;
+    return entry(reason ?? 'UNRECOGNISED_CLAIM');
+  });
+}
+
 /** Re-exported so a reader of this module sees the vocabularies it maps onto, in one place. */
-export { LOCAL_LANE_LIFECYCLES, LOCAL_LANE_LABEL_STATES, LANE_TASK_STATES };
+export { LOCAL_LANE_LIFECYCLES, LOCAL_LANE_LABEL_STATES, LANE_TASK_STATES, LANE_ACTIVITIES };

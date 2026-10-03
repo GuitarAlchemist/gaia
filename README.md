@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 2359 gates
+node --test                                   # 2376 gates
 ```
 
 Use the single Node.js version in `.node-version` (26.8.1, the latest Current release
@@ -684,9 +684,9 @@ authoritative for their named contracts.
 | `scripts/bootstrap-deadlock.mjs` | Read-only runner that analyses the issue #80 bootstrap nets through a named IX extension and prints the document `tests/fixtures/bootstrap-deadlock/hosted-draft-pump.json` records. |
 | `src/engineering-flow.mjs` | The closed `gaia-engineering-flow/1` schema, its total verifier, the single digest recipe and the one derivation to the published throughput block. Pure; holds no clock; imports `node:crypto` and the shared exact-instant predicate. |
 | `src/local-lane-observation.mjs` | The closed `gaia-local-lane-observation/1` schema and its total verifier: bounded identities, a positive Unicode label allowlist, a three-value lifecycle and a three-value label state. Pure; imports `node:crypto` only. |
-| `src/local-lane-sensor.mjs` | Structured wmux agent metadata → one sealed observation, as a pure function that reads six named fields and can reach no seventh. |
+| `src/local-lane-sensor.mjs` | Structured wmux agent metadata → one sealed observation, as a pure function that reads six named fields of an agent record and can reach no seventh; the optional activity axis reads two named fields of an `agent-state` record. |
 | `src/path-identity.mjs` | One definition of "is this output the same file as an input?", decided on filesystem identity rather than on path spelling. |
-| `scripts/local-lane-sensor.mjs` | The sensor's process boundary: one `wmux agent list`, no shell, no workspace filter, no mutating verb, one observation file. |
+| `scripts/local-lane-sensor.mjs` | The sensor's process boundary: one `wmux agent list`, plus one `wmux agent-state` under `--activity agent-state`, no shell, no workspace filter, no mutating verb, one observation file. |
 | `scripts/local-lanes-watch.mjs` | One command that refreshes the observation and the control room on a bounded, stoppable, non-overlapping interval. Holds no mechanism of its own. |
 | `scripts/factory-telemetry-step.mjs` | One real, bounded, instrumented portfolio-drain transition: reads the ledger, records the closed telemetry arc, attempts exactly one compare-and-swap receipt, and publishes the three control-room views. No provider, no worker, no authority. |
 | `scripts/factory-telemetry-phase.mjs` | Records exactly one lifecycle phase of one run, then exits. The operator-facing half of the phase sensor; refuses to rebind a run's subject or to overwrite a durable evidence log. |
@@ -707,7 +707,7 @@ authoritative for their named contracts.
 | `src/draft-ambiguity-settlement.mjs` | Pure settlement decision for one `EFFECT_AMBIGUOUS` Draft operation, its identity recomputed from its envelope, from a saved marker lookup bound to its ambiguous revision: `SETTLE_REUSED`, `SETTLE_ABANDONED` only on a complete search that finds no pull request on the head, else `STAY_UNSETTLED`. No network, clock or ledger; `authority: NONE`. Every ledger read of an `ABANDONED` record re-checks its evidence here (`validateAbandonmentEvidence`). |
 | `scripts/draft-ambiguity-settlement.mjs` | Dry run of that decision over two files (`npm run draft:settle-ambiguous`). No `--apply`: the write is `hosted-draft-pump.mjs settle`, an operator dispatch of the intake workflow that runs its own marker search and writes `ABANDONED` only when that search is empty and began at least 65 minutes after the run that started the effect completed, once that run's token has expired (#161). Exit `0` decided / `1` refused / `2` usage / `3` fail-closed. |
 | `src/repair-round-breaker.mjs` | Repair-round circuit breaker on the delivery-round `BUDGET_EXHAUSTED` boundary: one compare-and-set record per work identity scope, tripped before the effect runs. While the store keeps the record, only a reset receipt bound to that trip arms it again. Receipts are checked for binding, not authenticity, and the store is in memory, so a restart arms every scope again and the breaker is not wired into the live pump yet (#54). See [`docs/repair-round-breaker.md`](docs/repair-round-breaker.md). |
-| `tests/` | 2359 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 2376 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

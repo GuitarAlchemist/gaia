@@ -1153,3 +1153,40 @@ test('T23: the browser reads no local file, and no artifact path or marker reach
     assert.equal(html.includes(leak), false, `${leak} must never reach the page`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// LANE ACTIVITY SIGNALS R0 — the third axis, and the control room is downstream of it unchanged.
+// docs/lane-activity-signals.md.
+// ---------------------------------------------------------------------------
+
+test('T24: an observation carrying activity states still projects to exactly the process axis', () => {
+  const lanes = [lane(1), lane(2, { lifecycle: 'EXITED' })];
+  const activity = (n, overrides = {}) => ({
+    workspaceId: `ws-${n}`,
+    paneId: `pane-${n}`,
+    surfaceId: `surf-${n}`,
+    agentId: `agent-${n}`,
+    processLifecycle: 'RUNNING',
+    activity: 'NEEDS_OPERATOR',
+    activityReason: 'WMUX_BLOCKED',
+    ...overrides,
+  });
+  const withActivity = {
+    ...observation(lanes),
+    activityStates: [
+      activity(1),
+      activity(2, {
+        processLifecycle: 'EXITED', activity: 'UNKNOWN', activityReason: 'PROCESS_NOT_RUNNING',
+      }),
+    ],
+  };
+
+  const plain = renderControlRoomHtml(requireControlRoomSnapshot(snapshotWith(observation(lanes))));
+  const enriched = renderControlRoomHtml(requireControlRoomSnapshot(snapshotWith(withActivity)));
+
+  assert.equal(enriched, plain, 'R0 of the third axis changes no rendered byte');
+  const snapshot = JSON.stringify(snapshotWith(withActivity));
+  for (const leak of ['activityStates', 'activityReason', 'NEEDS_OPERATOR', 'WMUX_BLOCKED']) {
+    assert.equal(snapshot.includes(leak), false, `${leak} must not reach the snapshot`);
+  }
+});
