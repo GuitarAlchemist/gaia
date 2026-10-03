@@ -19,6 +19,7 @@
     "issues:repair": "node scripts/issue-consistency.mjs repair --repository GuitarAlchemist/gaia --policy .github/issue-policy.json",
     "doctor": "node scripts/gaia-interagent.mjs doctor",
     "verify": "node scripts/gaia-interagent.mjs verify",
+    "verify:head": "node scripts/verify-head.mjs",
     "architecture:verify": "node scripts/architecture-drift.mjs",
     "handshake": "node src/mcp-client.mjs",
     "factory:smoke": "node scripts/factory-smoke.mjs",

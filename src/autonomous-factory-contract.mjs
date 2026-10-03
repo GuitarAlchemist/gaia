@@ -238,4 +238,6 @@ export {
   validateIntent as validateAutonomousIntent,
   validateJob as validateAutonomousJob,
   validateReceipt as validateAutonomousReceipt,
+  validateChangeSet as validateAutonomousChangeSet,
+  validateVerification as validateAutonomousVerification,
 };

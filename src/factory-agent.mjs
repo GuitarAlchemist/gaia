@@ -934,6 +934,55 @@ async function verifyCandidate({
   return { record, output: result.output };
 }
 
+// The factory's own host verification, applied to a committed head (#217). Agents, reviewers
+// and authors otherwise run `node --test` under whatever Node is on PATH and report the result
+// in prose; this runs the same pinned-runtime check, command, bounded run, output evidence and
+// mutation checks as a candidate gets, and returns the same record. The candidate is the clean
+// worktree's base..HEAD change-set, measured by the recipe the publisher shares, so "tests
+// passed" binds to exact bytes rather than to a branch name. It grants nothing.
+export async function verifyCommittedHead({
+  worktree: suppliedWorktree,
+  baseHead,
+  evidenceDir: suppliedEvidenceDir,
+  runVerification = runNodeTestVerification,
+} = {}) {
+  const worktree = resolve(suppliedWorktree ?? '');
+  if (typeof baseHead !== 'string' || !/^[0-9a-f]{40}$/u.test(baseHead)) {
+    throw new FactoryAgentError('BaseHeadInvalid', 'the base must be a full lowercase 40-hex commit');
+  }
+  if (typeof runVerification !== 'function') {
+    throw new FactoryAgentError('AdapterRequired', 'the verification adapter must be a function');
+  }
+  let insideWorktree = false;
+  try {
+    insideWorktree = git(worktree, ['rev-parse', '--is-inside-work-tree']).trim() === 'true';
+  } catch {
+    insideWorktree = false;
+  }
+  if (!insideWorktree) throw new FactoryAgentError('GitWorktreeRequired', 'the supplied path is not a Git worktree');
+  // A subdirectory is inside the work tree too, but the pin, the change-set paths and the
+  // test discovery are all rooted at the top: from below, the pin reads as absent.
+  const top = git(worktree, ['rev-parse', '--show-toplevel']).trim();
+  if (realpathSync.native(top) !== realpathSync.native(worktree)) {
+    throw new FactoryAgentError('WorktreeRootRequired', 'the supplied path must be the root of its Git worktree');
+  }
+  if (git(worktree, ['status', '--porcelain=v1', '-z'], null).length !== 0) {
+    throw new FactoryAgentError('CleanWorktreeRequired', 'a committed head is verified only from a clean worktree');
+  }
+  try {
+    git(worktree, ['merge-base', '--is-ancestor', baseHead, 'HEAD']);
+  } catch {
+    throw new FactoryAgentError('BaseNotAncestor', 'the base is unknown or not an ancestor of HEAD');
+  }
+  const control = gitControlState(worktree);
+  const candidate = changeSet(worktree, baseHead);
+  const evidenceDir = reserveEvidenceStore(suppliedEvidenceDir, worktree);
+  const { record } = await verifyCandidate({
+    runVerification, worktree, head: baseHead, control, candidate, evidenceDir, role: 'verification',
+  });
+  return { headSha: control.head, changeSet: structuredClone(candidate), verification: record };
+}
+
 // What the reviewer and the repair worker see: the observed facts plus a bounded
 // tail of a failing output, as data, never as a verdict they could overrule.
 function verificationBrief({ record, output }) {
