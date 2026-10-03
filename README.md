@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 2370 gates
+node --test                                   # 2371 gates
 ```
 
 Use the single Node.js version in `.node-version` (26.8.1, the latest Current release
@@ -63,8 +63,9 @@ npm run verify:head -- --base <full base sha> --evidence-dir ../evidence/<new di
 # Head verification: PASS | head 1a2b… | base 0dbb… | node v26.8.1 (pinned 26.8.1) | exit 0 | tests … | receipt 9f3c…
 ```
 
-It refuses a Node other than the pin, a dirty tree and a base that is not an ancestor, and it
-never overwrites a receipt. The `gaia-head-verification/1` receipt holds the factory's unmodified
+It refuses a Node other than the pin, a path below the worktree root, a dirty tree and a base
+that is not an ancestor, and it never overwrites a receipt. The `gaia-head-verification/1`
+receipt holds the factory's unmodified
 `gaia-factory-verification/1` record, bound to the base..HEAD change-set. It is evidence of
 one run (`effect: NONE`, `authority: NONE`), never an approval or a check status. See
 [`docs/head-verification.md`](docs/head-verification.md).
@@ -721,7 +722,7 @@ authoritative for their named contracts.
 | `src/draft-ambiguity-settlement.mjs` | Pure settlement decision for one `EFFECT_AMBIGUOUS` Draft operation, its identity recomputed from its envelope, from a saved marker lookup bound to its ambiguous revision: `SETTLE_REUSED`, `SETTLE_ABANDONED` only on a complete search that finds no pull request on the head, else `STAY_UNSETTLED`. No network, clock or ledger; `authority: NONE`. Every ledger read of an `ABANDONED` record re-checks its evidence here (`validateAbandonmentEvidence`). |
 | `scripts/draft-ambiguity-settlement.mjs` | Dry run of that decision over two files (`npm run draft:settle-ambiguous`). No `--apply`: the write is `hosted-draft-pump.mjs settle`, an operator dispatch of the intake workflow that runs its own marker search and writes `ABANDONED` only when that search is empty and began at least 65 minutes after the run that started the effect completed, once that run's token has expired (#161). Exit `0` decided / `1` refused / `2` usage / `3` fail-closed. |
 | `src/repair-round-breaker.mjs` | Repair-round circuit breaker on the delivery-round `BUDGET_EXHAUSTED` boundary: one compare-and-set record per work identity scope, tripped before the effect runs. While the store keeps the record, only a reset receipt bound to that trip arms it again. Receipts are checked for binding, not authenticity, and the store is in memory, so a restart arms every scope again and the breaker is not wired into the live pump yet (#54). See [`docs/repair-round-breaker.md`](docs/repair-round-breaker.md). |
-| `tests/` | 2370 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 2371 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

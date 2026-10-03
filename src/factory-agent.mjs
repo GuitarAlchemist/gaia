@@ -960,6 +960,12 @@ export async function verifyCommittedHead({
     insideWorktree = false;
   }
   if (!insideWorktree) throw new FactoryAgentError('GitWorktreeRequired', 'the supplied path is not a Git worktree');
+  // A subdirectory is inside the work tree too, but the pin, the change-set paths and the
+  // test discovery are all rooted at the top: from below, the pin reads as absent.
+  const top = git(worktree, ['rev-parse', '--show-toplevel']).trim();
+  if (realpathSync.native(top) !== realpathSync.native(worktree)) {
+    throw new FactoryAgentError('WorktreeRootRequired', 'the supplied path must be the root of its Git worktree');
+  }
   if (git(worktree, ['status', '--porcelain=v1', '-z'], null).length !== 0) {
     throw new FactoryAgentError('CleanWorktreeRequired', 'a committed head is verified only from a clean worktree');
   }

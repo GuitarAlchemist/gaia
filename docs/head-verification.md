@@ -21,7 +21,7 @@ the suite on Node v24.12.0 against the v26.8.1 pin, and nothing in the sentence 
 
 `npm run verify:head -- --base <40-hex> --evidence-dir <new dir> --out <new file> [--worktree <path>]`
 
-1. **Checks the subject before running anything.** The base must be a full lowercase 40-hex commit (`BaseHeadInvalid`). The path must be a Git worktree (`GitWorktreeRequired`) with an empty `git status --porcelain` (`CleanWorktreeRequired`). The base must be an ancestor of HEAD (`BaseNotAncestor`). An existing `--out` is refused (`ReceiptExists`).
+1. **Checks the subject before running anything.** The base must be a full lowercase 40-hex commit (`BaseHeadInvalid`). The path must be a Git worktree (`GitWorktreeRequired`) and its root, not a subdirectory, from which the pin would read as absent (`WorktreeRootRequired`). It must have an empty `git status --porcelain` (`CleanWorktreeRequired`). The base must be an ancestor of HEAD (`BaseNotAncestor`). An existing `--out` is refused (`ReceiptExists`).
 2. **Runs the factory's own verification, unmodified.** `verifyCandidate` with `runNodeTestVerification` refuses a Node other than `.node-version` (`VerificationRuntimeMismatch`), then runs `node --test --test-reporter=spec` with the subscription allow-list environment, under bounded time and output. It keeps the output as content-addressed evidence in a newly reserved directory outside the worktree. It refuses a run that changed Git HEAD, the index or the worktree tree (`VerificationMutation`).
 3. **Binds the record to bytes.** The candidate identity is the base..HEAD change-set of the clean worktree, measured by `measureAgentFactoryChangeSet`, the recipe the publisher shares. Its status is empty by construction.
 4. **Seals and writes the receipt.** It writes the receipt with exclusive creation and prints one summary line.
@@ -70,7 +70,7 @@ This slice wires it into none of the following, and each would be a later, separ
 
 ## Design It Twice
 
-- **Selected: a sibling envelope** around the unmodified factory record. The factory contract and the receipts it already persisted do not change. The inner record passes the factory's own validators. A rollback deletes one module, one CLI, one test file and one npm script, and removes the two re-exports.
+- **Selected: a sibling envelope** around the unmodified factory record. The factory contract and the receipts it already persisted do not change. The inner record passes the factory's own validators. A rollback deletes one module, one CLI, one test file and one npm script. It also removes the `verifyCommittedHead` export from `src/factory-agent.mjs`, the two re-exports and the README paragraph.
 - **Rejected: widening the record to `gaia-factory-verification/2` with `headSha`.** It would change a contract that autonomous receipts already persist, and every verifier of it, to serve a new consumer.
 - **Rejected: a runtime-checking wrapper with no receipt.** It fixes the runtime and leaves the result in prose, so a reviewer or a publisher still cannot bind "tests passed" to a head.
 
@@ -80,11 +80,16 @@ This slice wires it into none of the following, and each would be a later, separ
 - A refusal from the runtime check happens after the evidence directory is reserved, so that directory is left empty. No receipt is written.
 - `headSha` is what HEAD was when the run started. The receipt proves the bytes of the base..HEAD change-set, not that the commit is still the tip of any branch. A consumer re-measures before relying on it.
 - The run executes the repository's own tests as the host user, as `node --test` always does. The factory's mutation checks detect changes to the worktree and to Git state, not effects elsewhere on the machine.
+- The pin is enforced only when the repository has one. Without a `.node-version` at the worktree root, the factory runs on any Node and records `runtime.pinned: null`, and such a receipt can still say PASS. A consumer that needs a pinned run checks that field.
+- "Clean" is the factory's definition: `git status --porcelain`, which does not list ignored files. A gitignored file in the worktree is not reported, and the tests can read it.
+- A base equal to HEAD is accepted. Its receipt has an empty change-set, so it binds the run to no changed bytes at all, and every such receipt has the same identity.
+- `--out` is not containment-checked. A receipt written inside the worktree leaves it dirty, so the next run refuses it until the file is moved.
 
 ## Falsifiers
 
-`tests/head-verification.test.mjs` holds 11 tests. Removing any of the following makes at least one of them fail:
+`tests/head-verification.test.mjs` holds 12 tests. Removing any of the following makes at least one of them fail:
 - the pin check;
+- the worktree-root check;
 - the clean-tree, base or ancestor checks;
 - the revision equality;
 - either factory validator;

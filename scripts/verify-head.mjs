@@ -6,7 +6,8 @@
  *   node scripts/verify-head.mjs --base <40-hex> --evidence-dir <new dir> --out <new receipt.json>
  *        [--worktree <path>]
  *
- * The worktree (default: the current directory) must be clean, and the base an ancestor of HEAD.
+ * The worktree (default: the current directory) must be the root of a clean Git worktree, and
+ * the base an ancestor of HEAD.
  * The run is the autonomous factory's: the Node pinned in `.node-version` or a refusal, then
  * `node --test --test-reporter=spec`, bounded, with its output kept as content-addressed evidence
  * in the evidence directory, which must not exist yet. See src/head-verification.mjs for what
@@ -43,7 +44,7 @@ export function parseArgs(argv) {
     const name = token.slice(2);
     if (!KNOWN_FLAGS.has(name)) throw new UsageError(`unknown flag: ${token}`);
     const value = argv[index += 1];
-    if (value === undefined) throw new UsageError(`--${name} needs a value`);
+    if (value === undefined || value.startsWith('--')) throw new UsageError(`--${name} needs a value`);
     flags[name] = value;
   }
   for (const name of REQUIRED_FLAGS) {

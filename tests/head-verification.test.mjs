@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -130,6 +130,32 @@ test('a dirty tree, a malformed base and a base that is not an ancestor are refu
     refusedWith('CleanWorktreeRequired'),
   );
   assert.equal(runs, 0);
+});
+
+test('a subdirectory of the worktree is refused before any test runs, from the function and the CLI', async () => {
+  // Git calls a subdirectory "inside the work tree", but from there `.node-version` is
+  // absent, so a head pinned to another Node would run and pass unpinned.
+  const { repo, base } = fixture({ pin: '0.0.1' });
+  const sub = join(repo, 'sub');
+  mkdirSync(sub);
+  writeFileSync(join(sub, 'sub.test.mjs'), PASSING, 'utf8');
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'sub');
+  let runs = 0;
+  const runVerification = async () => { runs += 1; return fixedRunner()(); };
+  const unused = evidenceDir();
+  await assert.rejects(
+    verifyCommittedHead({ worktree: sub, baseHead: base, evidenceDir: unused, runVerification }),
+    refusedWith('WorktreeRootRequired'),
+  );
+  assert.equal(runs, 0);
+  assert.equal(existsSync(unused), false);
+
+  const out = join(scratch, `receipt-${fixtures += 1}.json`);
+  const run = cli(repo, ['--base', base, '--evidence-dir', evidenceDir(), '--out', out, '--worktree', 'sub']);
+  assert.equal(run.status, 2, run.stdout);
+  assert.match(run.stderr, /WorktreeRootRequired/u);
+  assert.equal(existsSync(out), false);
 });
 
 test('a verification run that writes into the worktree is the factory\'s VerificationMutation', async () => {
@@ -271,11 +297,13 @@ test('CLI: a refusal or a usage error exits 2 and writes no receipt; an existing
   assert.equal(existsSync(out), false);
 
   const { repo, base } = fixture();
-  for (const args of [[], ['--base', base], ['--base', base, '--out', out], ['--bogus', 'x'], ['stray']]) {
+  const flagAsValue = ['--base', base, '--evidence-dir', evidenceDir(), '--out', '--worktree'];
+  for (const args of [[], ['--base', base], ['--base', base, '--out', out], ['--bogus', 'x'], ['stray'], flagAsValue]) {
     const run = cli(repo, args);
     assert.equal(run.status, 2, args.join(' '));
     assert.equal(existsSync(out), false);
   }
+  assert.equal(existsSync(join(repo, '--worktree')), false, 'a flag is never taken as a value');
 
   writeFileSync(out, 'earlier receipt\n', 'utf8');
   const unused = evidenceDir();
