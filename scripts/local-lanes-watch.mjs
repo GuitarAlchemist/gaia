@@ -59,8 +59,10 @@ export const DEFAULT_WATCH_INTERVAL_MS = 5_000;
  * sensor. The dashboard adapter renders a page a browser reads: handing it a binding file would
  * be the first step towards a page that opens local files, which docs/artifact-completion-signals.md
  * rules out by name.
+ *
+ * `--activity` is owned for a simpler reason: it names a wmux read, and only the sensor reads wmux.
  */
-const OWN_FLAGS = new Set(['lanes-out', 'interval-ms', 'wmux', 'bindings']);
+const OWN_FLAGS = new Set(['lanes-out', 'interval-ms', 'wmux', 'bindings', 'activity']);
 
 export class UsageError extends Error {}
 
@@ -101,6 +103,7 @@ export function runLocalLanesTick(argv, options = {}) {
     [
       '--out', lanesOut,
       ...(own.bindings ? ['--bindings', own.bindings] : []),
+      ...(own.activity ? ['--activity', own.activity] : []),
       ...(own.wmux ? ['--wmux', own.wmux] : []),
     ],
     options,
