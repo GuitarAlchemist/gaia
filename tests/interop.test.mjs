@@ -413,7 +413,10 @@ test('B1: a bus verb against a corrupt log exits 3, as the CLI header documents'
   ];
   for (const args of verbs) {
     const res = await cli(dir, ...args);
-    assert.equal(res.code, 3, `${args[0]} reports fail-closed I/O, not a bus refusal: ${res.stderr}`);
+    // A bus refusal (exit 1) speaks on stdout; under parallel load this once exited 1 (#221),
+    // so both streams go in the message.
+    assert.equal(res.code, 3,
+      `${args[0]} reports fail-closed I/O, not a bus refusal:\nstderr: ${res.stderr}\nstdout: ${res.stdout}`);
     assert.match(res.stderr, /FAIL-CLOSED/, `${args[0]} names the condition on stderr`);
   }
   assert.equal(readFileSync(logIn(dir), 'utf8'), `${before}not json at all\n`, 'and nothing was written');

@@ -145,7 +145,14 @@ function run(root, command, args, env = {}) {
 
 function git(root, args) {
   const result = run(root, 'git', args);
-  assert.equal(result.status, 0, result.stderr);
+  // A failure here has been seen only under parallel load (#221), once, with an empty stderr;
+  // keep every observable so the next one names its cause.
+  assert.equal(result.status, 0, [
+    `git ${args.join(' ')} exited ${result.status}${result.signal ? ` (${result.signal})` : ''}`,
+    `error: ${result.error?.message ?? 'none'}`,
+    `stderr: ${result.stderr}`,
+    `stdout: ${result.stdout}`,
+  ].join('\n'));
   return result.stdout.trim();
 }
 
