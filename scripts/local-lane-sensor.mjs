@@ -9,6 +9,7 @@
  *
  * Usage
  *   node scripts/local-lane-sensor.mjs --out <path> [--wmux <path>] [--bindings <path>]
+ *        [--activity agent-state]
  *
  * WHAT IT WILL NOT DO
  * -------------------
@@ -41,6 +42,17 @@
  *
  * docs/artifact-completion-signals.md is the normative contract for all three.
  *
+ * THE ACTIVITY AXIS
+ * -----------------
+ * `--activity agent-state` is the ONE way this sensor makes a second wmux call, and its value names
+ * that call: `agent-state`, from a frozen constant, read-only like the first. Without the flag the
+ * sensor makes exactly one wmux call, as it always has, and publishes no activity.
+ *
+ * This read is the one that does NOT fail the tick. Lifecycle stays truthful without it, so an
+ * `agent-state` call that errors, exits non-zero or returns no exact `states` array omits the axis,
+ * names the reason on the summary line, and writes the lane observation anyway. An absent axis
+ * means "not observed"; it is never published as a list of guesses. docs/lane-activity-signals.md.
+ *
  * Exit codes: 0 ok · 1 refused · 2 usage.
  */
 
@@ -60,6 +72,9 @@ import { observeLocalLanes } from '../src/local-lane-sensor.mjs';
 
 /** The one invocation this sensor can make. Frozen so no flag can extend it. */
 export const WMUX_LANE_ARGV = Object.freeze(['agent', 'list']);
+
+/** The second invocation, made only under `--activity agent-state`. Frozen for the same reason. */
+export const WMUX_ACTIVITY_ARGV = Object.freeze(['agent-state']);
 
 /**
  * Where the wmux CLI actually lives, resolved without a shell.
@@ -85,7 +100,7 @@ const READ_TIMEOUT_MS = 10_000;
 export class UsageError extends Error {}
 export class SensorRefusalError extends Error {}
 
-const KNOWN_FLAGS = new Set(['out', 'wmux', 'bindings']);
+const KNOWN_FLAGS = new Set(['out', 'wmux', 'bindings', 'activity']);
 
 export function parseArgs(argv) {
   const flags = {};
@@ -99,6 +114,10 @@ export function parseArgs(argv) {
     flags[name] = value;
   }
   if (!flags.out) throw new UsageError('missing --out');
+  // The value names the call, and only the one call exists, so no flag value can reach the argv.
+  if (flags.activity !== undefined && flags.activity !== WMUX_ACTIVITY_ARGV.join(' ')) {
+    throw new UsageError(`--activity takes exactly ${JSON.stringify(WMUX_ACTIVITY_ARGV.join(' '))}`);
+  }
   return flags;
 }
 
@@ -115,13 +134,7 @@ function resolveWmux(explicit) {
  * sensor exists to fix.
  */
 function readAgentsFromWmux(wmuxPath) {
-  // A `.mjs` or `.js` target runs under this Node binary, which is what gives the test suite a
-  // real process seam without a live wmux.
-  const runner = /\.[cm]?js$/u.test(wmuxPath) ? process.execPath : wmuxPath;
-  const args = /\.[cm]?js$/u.test(wmuxPath) ? [wmuxPath, ...WMUX_LANE_ARGV] : [...WMUX_LANE_ARGV];
-  const result = spawnSync(runner, args, {
-    encoding: 'utf8', shell: false, timeout: READ_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES,
-  });
+  const result = spawnWmuxRead(wmuxPath, WMUX_LANE_ARGV);
   if (result.error) {
     throw new SensorRefusalError(`wmux could not be run at ${wmuxPath}: ${result.error.message}`);
   }
@@ -144,6 +157,45 @@ function readAgentsFromWmux(wmuxPath) {
     throw new SensorRefusalError("wmux agent list returned no exact 'agents' array; failing closed");
   }
   return payload.agents;
+}
+
+/**
+ * One frozen read-only argv, run without a shell under the shared timeout and output bound.
+ *
+ * A `.mjs` or `.js` target runs under this Node binary, which is what gives the test suite a real
+ * process seam without a live wmux.
+ */
+function spawnWmuxRead(wmuxPath, argv) {
+  const script = /\.[cm]?js$/u.test(wmuxPath);
+  return spawnSync(script ? process.execPath : wmuxPath, script ? [wmuxPath, ...argv] : [...argv], {
+    encoding: 'utf8', shell: false, timeout: READ_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES,
+  });
+}
+
+/**
+ * Run `wmux agent-state` once and return `{ states }`, or `{ refusal }` naming why not.
+ *
+ * Never a throw: a failed activity read omits one axis rather than refusing a tick whose lifecycle
+ * is still truthful. The record shape is checked here, at the boundary, so the pure derivation
+ * downstream can treat a malformed record as a defect rather than as an input.
+ */
+export function readAgentStatesFromWmux(wmuxPath) {
+  const result = spawnWmuxRead(wmuxPath, WMUX_ACTIVITY_ARGV);
+  if (result.error) return { refusal: `wmux agent-state could not be run (${result.error.code ?? 'error'})` };
+  if (result.status !== 0) return { refusal: `wmux agent-state exited ${result.status}` };
+  const out = (result.stdout ?? '').trim();
+  if (!out) return { refusal: 'wmux agent-state returned no output' };
+  let payload;
+  try {
+    payload = JSON.parse(out);
+  } catch {
+    return { refusal: 'wmux agent-state returned output that is not structured JSON' };
+  }
+  if (!payload || !Array.isArray(payload.states)
+      || !payload.states.every((record) => record && typeof record === 'object' && !Array.isArray(record))) {
+    return { refusal: "wmux agent-state returned no exact 'states' array of records" };
+  }
+  return { states: payload.states };
 }
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -290,6 +342,7 @@ function readPreviousTaskStates(outPath, observedAt) {
 export function runLocalLaneSensorCli(argv, {
   now = () => new Date(),
   readAgents = readAgentsFromWmux,
+  readAgentStates = readAgentStatesFromWmux,
   readBytes,
   writeStdout = (chunk) => process.stdout.write(chunk),
 } = {}) {
@@ -302,12 +355,15 @@ export function runLocalLaneSensorCli(argv, {
   const bindings = flags.bindings === undefined
     ? [] : readLaneArtifactBindings(resolve(flags.bindings));
   const agents = readAgents(wmuxPath);
+  // After the lane read, so a claim is never older than the lanes it is joined to.
+  const activityRead = flags.activity === undefined ? null : readAgentStates(wmuxPath);
   const artifactEvidence = readAllArtifactEvidence(
     bindings, readBytes === undefined ? {} : { readBytes },
   );
 
   const observation = observeLocalLanes({
     agents, observedAt, bindings, artifactEvidence, previousTaskStates,
+    agentStates: activityRead?.states ?? null,
   });
 
   mkdirSync(dirname(outPath), { recursive: true });
@@ -321,9 +377,22 @@ export function runLocalLaneSensorCli(argv, {
     + ` | bound ${bindings.length}`
     + ` | marker evidence ${tally('COMPLETED_EVIDENCE')}`
     + ` | evidence refused ${tally('REFUSED_EVIDENCE')}`
+    + activitySummary(observation, activityRead)
     + ` | observation ${observation.revision}\n`,
   );
   return observation;
+}
+
+/** Nothing without the flag, so the summary line of a sensor that did not ask is unchanged. */
+function activitySummary(observation, activityRead) {
+  if (activityRead === null) return '';
+  if (activityRead.refusal !== undefined) return ` | activity not observed: ${activityRead.refusal}`;
+  const count = (activity) => observation.activityStates
+    .filter((entry) => entry.activity === activity).length;
+  return ` | needs operator ${count('NEEDS_OPERATOR')}`
+    + ` | working ${count('WORKING')}`
+    + ` | idle ${count('IDLE')}`
+    + ` | activity unknown ${count('UNKNOWN')}`;
 }
 
 const directExecution = process.argv[1] !== undefined
