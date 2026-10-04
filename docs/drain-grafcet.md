@@ -23,7 +23,7 @@ issues no order named (`gaia-architect-r2-grafcet-drain-design.md:555-559`).
 
 - A **step** (`P_*`) holds the pull request while an actor works inside it. The agents are those
   actors: a reviewer runs inside `P_REVIEW_SPEC` or `P_REVIEW_STANDARDS`; the publisher's ordered
-  commands run inside `P_MERGEABLE` (`ready`), `P_READY` (`merge`), and `P_MERGED`
+  commands run inside `P_MERGEABLE` (`ready`), `P_READY` (`enqueue`), and `P_MERGED`
   (`issue-close`).
 - A **receptivity** (`D_*`) is a fact a collector measured from the bus log and the artifact
   bytes, `true`, `false`, or `UNKNOWN`. `UNKNOWN` never fires. An `EDGE` receptivity holds for the
@@ -218,23 +218,23 @@ binding names that transition's receptivity.
 | `BLOCKED_REDESIGN` | coordinator | `D_FAILURE_FAMILY_REPEATED`, `P_BLOCKED_REDESIGN` | the family | `T_BREAKER_TRIP` outranks `T_JOIN_APPROVE` and `T_JOIN_REPAIR`, so it trips whatever the head's verdicts; the step inhibits new reviews and repairs (ENG-09). The coordinator waits on it before any class |
 | `RECONCILIATION_UNCLASSIFIED` | coordinator, publisher | `D_RECONCILIATION_CLASSIFIED`, `D_RECONCILIATION_UNCLASSIFIED` | coordinator: the first unclassified commit; publisher: `#N` | the chart's refusal for `T_RECONCILED`; `T_RECONCILE_REJECTED` returns the head to review (see Divergences) |
 | `ISSUE_RECONCILIATION_PENDING` | coordinator | `D_ISSUE_RECONCILED` | the issue `#M` | the chart's refusal for `T_ISSUE_RECONCILED` |
-| `ORDER_DIGEST_MISMATCH` | publisher | `P_MERGEABLE`, `P_READY`, `P_MERGED` | the order path | the order is the operator's admission for the commands inside these steps: `ready`, `merge`, `issue-close`. No receptivity reads it |
+| `ORDER_DIGEST_MISMATCH` | publisher | `P_MERGEABLE`, `P_READY`, `P_MERGED` | the order path | the order is the operator's admission for the commands inside these steps: `ready`, `enqueue`, `issue-close`. No receptivity reads it |
 | `ORDER_INCOMPLETE` | publisher | `P_MERGEABLE`, `P_READY`, `P_MERGED` | the order path | as above |
 | `ARTIFACT_MISSING` | publisher | `D_SPEC_VERDICT_BOUND`, `D_STANDARDS_VERDICT_BOUND` | the artifact path | an unreadable artifact binds no axis |
 | `AXIS_MISSING` | publisher | `D_SPEC_VERDICT_BOUND`, `D_STANDARDS_VERDICT_BOUND` | the artifact path | the axis is read from the title line |
 | `SHA_NOT_BOUND` | publisher | `D_SPEC_VERDICT_BOUND`, `D_STANDARDS_VERDICT_BOUND` | the artifact path | a verdict binds to the head its `Subject:` line declares |
 | `VERDICT_MISSING` | publisher | `D_BOTH_APPROVE_AT_HEAD` | the artifact path | both bound verdicts are `APPROVE` |
 | `MARKER_MISSING` | publisher | `D_SPEC_VERDICT_BOUND`, `D_STANDARDS_VERDICT_BOUND` | the artifact path | a bound artifact ends with its marker |
-| `CLOSING_EFFECT_UNNAMED` | publisher | `D_ISSUE_RECONCILED` | the first issue one list names and the other does not | the merge moves every issue in `closingIssuesReferences` toward `T_ISSUE_RECONCILED`; the order names them all |
-| `PR_NOT_MERGED` | publisher | `D_MERGE_CONFIRMED` | `#N` | an issue close without a merge starts from `P_MERGED`, which only `D_MERGE_CONFIRMED` reaches |
+| `CLOSING_EFFECT_UNNAMED` | publisher | `D_ISSUE_RECONCILED` | the first issue one list names and the other does not | the queued merge moves every issue in `closingIssuesReferences` toward `T_ISSUE_RECONCILED`; the order names them all |
+| `PR_NOT_MERGED` | publisher | `D_MERGE_CONFIRMED` | `#N` | an issue close starts from `P_MERGED`, which only `D_MERGE_CONFIRMED` reaches |
 | `HEAD_MISMATCH` | publisher | `D_HEAD_ADVANCED` | `#N` | a moved head preempts merge progress (the three `T_*_HEAD_ADVANCED`, priority 2) |
 | `NOT_MERGEABLE` | coordinator, publisher | `D_MERGEABLE_CLEAN` | `#N` | the chart's refusal for `T_MERGEABLE`; the coordinator waits on it, the publisher refuses on it (see Divergences) |
 | `CHECKS_NOT_GREEN` | coordinator, publisher | `D_NOT_DRAFT` | `#N` | the collector holds `D_NOT_DRAFT` only when checks read `ALL_PASS` |
 | `ACTION_NOT_ORDERED` | publisher | `P_MERGEABLE`, `P_READY`, `P_MERGED` | the action asked | as the order checks |
-| `STATE_CHANGED` | publisher | `D_HEAD_ADVANCED`, `D_ISSUE_RECONCILED` | `#N` | `HEAD_MISMATCH` and `CLOSING_EFFECT_UNNAMED`, re-read immediately before the merge command |
+| `STATE_CHANGED` | publisher | `D_HEAD_ADVANCED`, `D_ISSUE_RECONCILED` | `#N` | `HEAD_MISMATCH` and `CLOSING_EFFECT_UNNAMED`, re-read immediately before the enqueue command |
 | `STILL_DRAFT` | publisher | `D_NOT_DRAFT` | `#N` | the chart's refusal for `T_READY`, read after `gh pr ready` |
-| `MERGE_UNCONFIRMED` | publisher | `D_MERGE_CONFIRMED` | `#N` | the chart's refusal for `T_MERGE`, read after the merge command |
-| `ISSUE_CLOSE_UNCONFIRMED` | publisher | `D_ISSUE_RECONCILED` | the issue `#M` | `T_ISSUE_RECONCILED` reads the issue closed, whether the order or the merge closed it |
+| `QUEUE_ENTRY_UNCONFIRMED` | publisher | `P_READY` | `#N` | the enqueue command runs inside `P_READY`, and the token stays there until `T_MERGE` reads `D_MERGE_CONFIRMED`, after the queue merges |
+| `ISSUE_CLOSE_UNCONFIRMED` | publisher | `D_ISSUE_RECONCILED` | the issue `#M` | `T_ISSUE_RECONCILED` reads the issue closed; the publisher reads it after its ordered close, the coordinator after the queue's merge |
 
 ## Chart refusals no agent returns
 
@@ -255,6 +255,7 @@ refuse with it.
 | `HEAD_UNCHANGED` | `T_DUAL_APPROVED_HEAD_ADVANCED`, `T_MERGEABLE_HEAD_ADVANCED`, `T_READY_HEAD_ADVANCED` | the head has not moved |
 | `RECONCILIATION_NOT_REJECTED` | `T_RECONCILE_REJECTED` | no unclassified reconciliation was observed |
 | `REDESIGN_ORDER_ABSENT` | `T_REDESIGN_RESUMED` | no operator order lifts the breaker |
+| `MERGE_UNCONFIRMED` | `T_MERGE` | the pull request waits in the merge queue, or the queue removed it; the merge lands after the publisher's invocation (#228) |
 
 ## Coordinator classes
 
@@ -310,7 +311,7 @@ prompt exactly would still disagree with the chart.
    `D_MERGEABLE_CLEAN` reads `mergeable` only. The agents are stricter.
 3. **Order checks.** The order is the operator's admission (class D) and the chart has no
    receptivity for it. Its three refusals guard the steps whose commands it orders: `P_MERGEABLE`
-   (`ready`), `P_READY` (`merge`), and `P_MERGED` (`issue-close`).
+   (`ready`), `P_READY` (`enqueue`), and `P_MERGED` (`issue-close`).
 4. **Lanes with no agent.** `bounded repair` and `reconcile` have no agent in the team
    (`gaia-architect-r2-grafcet-drain-design.md:567-569`). Their exits are `D_HEAD_ADVANCED` and
    the two reconciliation receptivities, which the coordinator reads as `REPAIR_UNPUBLISHED` and
@@ -364,16 +365,17 @@ order named. It is now named:
 - every publication order carries `autoCloses`, `none` or the issue numbers;
 - the publisher refuses `CLOSING_EFFECT_UNNAMED` before any GitHub head fact when
   `closingIssuesReferences` is not exactly `autoCloses`, and re-reads both immediately before the
-  merge command (`STATE_CHANGED`);
-- `closeIssue` may not name an `autoCloses` issue (`ORDER_INCOMPLETE`): after a confirmed merge
-  the publisher confirms each `autoCloses` issue closed (`ISSUE_CLOSE_UNCONFIRMED`), reading it
-  twice because GitHub closes it asynchronously, and the merged pull request is its record.
+  enqueue command (`STATE_CHANGED`);
+- `closeIssue` may not name an `autoCloses` issue (`ORDER_INCOMPLETE`). The queue merges after
+  the publisher's invocation ends (#228), so the coordinator reads each `autoCloses` issue closed
+  (`ISSUE_RECONCILIATION_PENDING`), and the merged pull request is its record.
 
-What remains open is the window between that last re-read and the merge command:
-`--match-head-commit` binds the head, and nothing binds the body.
+What remains open is the window between that last re-read and the queue's merge. `expectedHeadOid`
+binds the head at the enqueue command; nothing binds the body, which can still change while the pull
+request waits in the queue.
 
-An issue close without a merge in the same invocation names the merge in `mergeCommit`, and the
-publisher reads the pull request `MERGED` with that commit first (`PR_NOT_MERGED`,
+An issue close names the merge in `mergeCommit`, and the publisher reads the pull request
+`MERGED` with that commit first (`PR_NOT_MERGED`,
 `gaia-architect-r2-grafcet-drain-design.md:570-571`).
 
 ## The breaker's family line

@@ -3,7 +3,7 @@
  *
  * The three subagent definitions under .claude/agents/ are edge adapters: prompts, not code.
  * What can be bound is bound here: existence, frontmatter validity against the document that
- * declares the roles, the write-authority split, the matched-head merge form, the refusal
+ * declares the roles, the write-authority split, the head-pinned merge-queue entry, the refusal
  * vocabulary, the six-verb bus invariant, and LF-only bytes. Everything the prompts encode is
  * cited to fleet evidence in docs/github-drain-agents.md; that document is the declaration these
  * gates compare the agents against.
@@ -168,24 +168,34 @@ test('the coordinator and the reviewer carry no GitHub write command', () => {
   }
 });
 
-test('every merge instruction in the agents and the doc carries --match-head-commit and no widening flag', () => {
-  const texts = [...AGENTS.map(readAgent), readDoc()];
-  let merges = 0;
-  for (const text of texts) {
-    for (const line of commandLines(text, /gh pr merge/)) {
-      merges += 1;
-      assert.match(line, /--match-head-commit/, `merge line requires the head match: ${line}`);
-      assert.doesNotMatch(line, /--(?:admin|auto|delete-branch|rebase|merge)\b/, `merge line has no widening flag: ${line}`);
-    }
+// #228: under the merge queue, `gh pr merge` falls back to enabling auto-merge, which the
+// repository refuses. The queue's own head pin is enqueuePullRequest's expectedHeadOid.
+const ENQUEUE = "gh api graphql -f query='mutation($id:ID!,$oid:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$oid}){mergeQueueEntry{state}}}' -f id=<pullRequestId> -f oid=<headSha>";
+
+test('the publisher merges only through a merge-queue entry pinned to the head, and no text states a direct merge', () => {
+  for (const text of [...AGENTS.map(readAgent), readDoc()]) {
+    assert.deepEqual(commandLines(text, /^\s*gh pr merge\b/), [], 'no direct merge command line');
   }
-  assert.ok(merges >= 2, 'the publisher and the doc both state the merge form');
-  assert.match(readAgent('github-drain-publisher'), /gh pr merge N --repo OWNER\/NAME --squash --match-head-commit <headSha>/);
+  for (const [name, text] of [['publisher', readAgent('github-drain-publisher')], ['doc', readDoc()]]) {
+    const enqueues = commandLines(text, /^\s*gh .*enqueuePullRequest/).map((l) => l.trim());
+    assert.deepEqual(enqueues, [ENQUEUE], `${name}: exactly one enqueue form`);
+    const [line] = enqueues;
+    assert.match(line, /expectedHeadOid:\$oid\b/, `${name}: the entry is pinned to the expected head`);
+    assert.match(line, / -f oid=<headSha>$/, `${name}: the pinned head is the ordered headSha, as a string`);
+    assert.doesNotMatch(line, /dequeue|AutoMerge|mergePullRequest|mergeMethod/i, `${name}: no widening mutation`);
+  }
+  // The coordinator's proposal is what the operator copies into an order.
+  for (const [name, text] of [['publisher', readAgent('github-drain-publisher')], ['doc', readDoc()],
+    ['coordinator', readAgent('github-drain-coordinator')]]) {
+    assert.match(text, /^actions: .*\benqueue\b/m, `${name}: the order names enqueue`);
+    assert.doesNotMatch(text, /^actions: .*\bmerge\b/m, `${name}: the order names no merge action`);
+  }
 });
 
 test('the publisher gh write commands are exactly the four the doc declares', () => {
   const four = [
     'gh pr ready N --repo OWNER/NAME',
-    'gh pr merge N --repo OWNER/NAME --squash --match-head-commit <headSha>',
+    ENQUEUE,
     'gh pr edit N --repo OWNER/NAME --body-file <bodyFile>',
     'gh issue close M --repo OWNER/NAME --comment "<closeComment>"',
   ];
@@ -195,7 +205,7 @@ test('the publisher gh write commands are exactly the four the doc declares', ()
     assert.ok(publisher.includes(command), `publisher states: ${command}`);
     assert.ok(doc.includes(command), `doc states: ${command}`);
   }
-  const writes = new Set(commandLines(publisher, /^gh (?:pr (?:ready|merge|edit)|issue close) /).map((l) => l.trim()));
+  const writes = new Set(commandLines(publisher, /^gh (?:pr (?:ready|merge|edit)|issue close|api graphql -f query='mutation)/).map((l) => l.trim()));
   assert.deepEqual([...writes].sort(), [...four].sort(), 'no fifth write command form in the publisher');
   assert.doesNotMatch(publisher, /^\s*(?:git push|gh pr review|gh pr comment|gh pr create)\b/m);
 });
@@ -208,9 +218,11 @@ test('the publisher refusal vocabulary and the doc agree code for code', () => {
   assert.ok(docCodes.length >= 10, `the doc declares the vocabulary: ${docCodes.length} codes`);
   assert.deepEqual([...publisherCodes, ...confirmationCodes].sort(), [...docCodes].sort());
   for (const code of ['HEAD_MISMATCH', 'MARKER_MISSING', 'VERDICT_MISSING', 'AXIS_MISSING', 'SHA_NOT_BOUND', 'CHECKS_NOT_GREEN', 'NOT_MERGEABLE', 'ORDER_DIGEST_MISMATCH', 'RECONCILIATION_UNCLASSIFIED',
-    'CLOSING_EFFECT_UNNAMED', 'PR_NOT_MERGED', 'STILL_DRAFT', 'MERGE_UNCONFIRMED', 'ISSUE_CLOSE_UNCONFIRMED']) {
+    'CLOSING_EFFECT_UNNAMED', 'PR_NOT_MERGED', 'STILL_DRAFT', 'QUEUE_ENTRY_UNCONFIRMED', 'ISSUE_CLOSE_UNCONFIRMED']) {
     assert.ok(docCodes.includes(code), `${code} is in the vocabulary`);
   }
+  // The queue merges after the invocation ends, so no publisher reads the merge right after its command.
+  assert.ok(!docCodes.includes('MERGE_UNCONFIRMED'), 'MERGE_UNCONFIRMED is the chart\'s, not the publisher\'s');
   assert.equal(publisherCodes[0], 'ORDER_DIGEST_MISMATCH', 'the order file is read by its digest before any other check');
   assert.match(readAgent('github-drain-publisher'), /sha256sum <orderPath>/, 'the publisher measures the order digest');
 });

@@ -72,7 +72,7 @@ measured rules:
 
 This is deeper than A at the same width: the operator still says "classify", "review", or
 "publish", but the dual-axis requirement, the exact-head binding, the draft-then-ready sequence,
-the matched-head merge, and the one-merge-then-reclassify ordering are inside the roles instead
+the head-pinned merge, and the one-merge-then-reclassify ordering are inside the roles instead
 of inside the operator's memory. It is shallower than B by design: no kernel change, no new
 seam, freely reversible by deleting three files.
 
@@ -146,10 +146,13 @@ pushes, labels, comments outside the ordered issue close, or deletes a branch.
 
 ```
 gh pr ready N --repo OWNER/NAME
-gh pr merge N --repo OWNER/NAME --squash --match-head-commit <headSha>
+gh api graphql -f query='mutation($id:ID!,$oid:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$oid}){mergeQueueEntry{state}}}' -f id=<pullRequestId> -f oid=<headSha>
 gh pr edit N --repo OWNER/NAME --body-file <bodyFile>
 gh issue close M --repo OWNER/NAME --comment "<closeComment>"
 ```
+
+The second command puts the pull request in the merge queue pinned to `headSha`; the queue merges
+it later, with its own merge method (see **Merging under the merge queue**).
 
 ## Publisher refusal vocabulary
 
@@ -166,16 +169,16 @@ subject are in `docs/drain-grafcet.md`, Bindings.
 | `VERDICT_MISSING` | an artifact lacks the `APPROVE` verdict line or carries a `REQUEST_CHANGES` one |
 | `MARKER_MISSING` | an artifact does not end with a completion marker |
 | `RECONCILIATION_UNCLASSIFIED` | the order carries `approvedSha` and the commits between it and the head are not exactly the classified `base-merge`, `readme-counter`, and `architecture-record` commits, or the results at the head are absent |
-| `CLOSING_EFFECT_UNNAMED` | for a merge, the pull request's `closingIssuesReferences` are not exactly the issues the order's `autoCloses` names |
-| `PR_NOT_MERGED` | for an issue close without a merge, the pull request is not `MERGED` with the order's `mergeCommit` |
+| `CLOSING_EFFECT_UNNAMED` | for an enqueue, the pull request's `closingIssuesReferences` are not exactly the issues the order's `autoCloses` names |
+| `PR_NOT_MERGED` | for an issue close, the pull request is not `MERGED` with the order's `mergeCommit` |
 | `HEAD_MISMATCH` | the published head is not the ordered SHA |
 | `NOT_MERGEABLE` | `mergeable` is not `MERGEABLE` or `mergeStateStatus` is not `CLEAN` |
 | `CHECKS_NOT_GREEN` | a check is failing or still pending |
 | `ACTION_NOT_ORDERED` | the caller asked for an action the order does not list |
-| `STATE_CHANGED` | the head, or the closing references, moved between verification and the merge command |
+| `STATE_CHANGED` | the head, or the closing references, moved between verification and the enqueue command |
 | `STILL_DRAFT` | after `ready`, the pull request is still a draft |
-| `MERGE_UNCONFIRMED` | after the merge command, the pull request is not `MERGED` with a merge commit |
-| `ISSUE_CLOSE_UNCONFIRMED` | after an issue close, or after a merge for each `autoCloses` issue, the issue is not `CLOSED` (an `autoCloses` issue is read twice, since GitHub closes it asynchronously) |
+| `QUEUE_ENTRY_UNCONFIRMED` | after the enqueue command, the pull request is neither in the merge queue with its head commit equal to `headSha` nor `MERGED` |
+| `ISSUE_CLOSE_UNCONFIRMED` | after an issue close, the issue is not `CLOSED` |
 
 ## Publication order
 
@@ -186,9 +189,9 @@ pullRequest: N
 headSha: <40 lowercase hex>
 specArtifact: <path>
 standardsArtifact: <path>
-actions: ready, merge
+actions: ready, enqueue
 autoCloses: <issue numbers from closingIssuesReferences, or none>
-mergeCommit: <40 lowercase hex>          (issue-close without merge only)
+mergeCommit: <40 lowercase hex>          (issue-close only)
 approvedSha: <40 lowercase hex>          (reconciliation class only)
 reconciliation: <sha> <class>; ...       (reconciliation class only)
 reconciliationResults: <suite; gate at headSha>   (reconciliation class only)
@@ -211,12 +214,13 @@ order itself (`gaia-architect-r1-udp-bridge-design.md:441-453`, `gaia-architect-
 way and the coordinator reopened it by hand (`gaia-architect-r2-grafcet-drain-design.md:555-559`).
 The coordinator copies those issues into the proposal, the publisher refuses
 `CLOSING_EFFECT_UNNAMED` when the two differ and re-reads them with the head immediately before
-the merge command (`STATE_CHANGED`), and after the merge it confirms each issue closed instead of
-closing it again.
+the enqueue command (`STATE_CHANGED`). The queue merges after the publisher's invocation ends, so
+the coordinator, not the publisher, reads each issue closed after the merge
+(`ISSUE_RECONCILIATION_PENDING`); nobody closes it again.
 
-What the channel does not yet do: reserve a receipt before the merge command runs. The R0
+What the channel does not yet do: reserve a receipt before the enqueue command runs. The R0
 publisher has no `Write`; its receipt is its reply, which records the head SHA read immediately
-before the merge command. The receipt reserved before authority is spent is the R1 operator
+before the enqueue command. The receipt reserved before authority is spent is the R1 operator
 command under **Should an Ed25519 grant gate the publisher?** below.
 
 ## The drain sequence the roles encode
@@ -224,8 +228,9 @@ command under **Should an Ed25519 grant gate the publisher?** below.
 Review identity includes a digest of actual tracked working-tree bytes at entry and exit,
 plus a clean-status check at both points. An unchanged Git index alone cannot prove restoration.
 The reviewer definition supplies the executable measurement. Publisher completion means every
-ordered action for the single PR has a verified result, including ordered body/issue updates
-after merge; a failure records completed effects and stops the remaining actions.
+ordered action for the single PR has a verified result, including an ordered body update after the
+enqueue, or an issue close after a merge that already landed; a failure records completed effects
+and stops the remaining actions.
 
 1. Every PR opens as a draft and stays one until both axes approve its exact head.
 2. The coordinator classifies; unreviewed heads get both axes on one detached clean clone at the
@@ -237,8 +242,9 @@ after merge; a failure records completed effects and stops the remaining actions
    publication of any later head, whatever its verdicts, because a new head is not a new design
    (ENG-09).
 4. Dual `APPROVE` on the exact published head, `MERGEABLE`, `CLEAN`, checks green: the
-   coordinator proposes; the operator orders; the publisher marks ready and squash-merges with
-   `--match-head-commit`.
+   coordinator proposes; the operator orders; the publisher marks ready and puts the head in the
+   merge queue, pinned by `expectedHeadOid`. The queue merges it later; the coordinator reads the
+   merge.
 5. After one merge, every other open PR re-conflicts on the README gate counter. The
    coordinator reclassifies; the next PR is reconciled alone, its counter derived from the tests
    directory, its head proposed under the reconciliation class below when every commit is
@@ -281,8 +287,38 @@ base branch; a `readme-counter` commit changes only `README.md`; an `architectur
 commit changes only `package.json`; no file outside those two differs between `approvedSha` and
 `headSha` unless the base changed it. Any other delta, an unclassified commit, an unknown class,
 or missing results is `RECONCILIATION_UNCLASSIFIED`, and the head is `unreviewed`. The artifacts
-bind to `approvedSha`; `HEAD_MISMATCH`, `NOT_MERGEABLE`, `CHECKS_NOT_GREEN`, and the merge
+bind to `approvedSha`; `HEAD_MISMATCH`, `NOT_MERGEABLE`, `CHECKS_NOT_GREEN`, and the enqueue
 command still name `headSha`.
+
+## Merging under the merge queue
+
+On 2026-10-04 the publisher's only merge form, `gh pr merge` with `--squash` and
+`--match-head-commit`, could not merge anything in GuitarAlchemist/gaia. Ruleset `23997362` puts
+`main` under a merge queue and the repository has `allow_auto_merge: false`. Under a merge queue
+`gh pr merge` falls back to enabling auto-merge, and GitHub refused it for the dual-approved, clean,
+green #216 (#228). Three designs were weighed:
+
+1. **Enqueue only (chosen; operator decision, 2026-10-04).** The `merge` action becomes `enqueue`:
+   `enqueuePullRequest` with `expectedHeadOid` set to `headSha`, which GitHub refuses when the head
+   has moved. The publisher confirms the entry (`QUEUE_ENTRY_UNCONFIRMED`); the merge lands later,
+   and the coordinator observes it.
+2. **Queue-aware merge.** The publisher reads the sealed capability artifact
+   (`gaia-merge-queue-capability/1`, `docs/merge-queue-capability.md`). It enqueues when the capability is
+   `ACTIVE`, keeps the squash merge when it is `ABSENT`, and refuses `MISCONFIG` and `UNKNOWN`.
+   This keeps two merge forms for one repository whose queue is active, and adds a third artifact
+   to verify per order.
+3. **Allow auto-merge on the repository.** This restores the old command, but it changes a
+   repository setting the drain does not own, and the merge still goes through the queue.
+
+What the choice changes:
+- **Merge method.** The queue picks it; in this repository it lands merge commits, not squashes.
+- **Confirmation.** It is asynchronous. The publisher's receipt records a queue entry, never a merge.
+  `MERGE_UNCONFIRMED` is now only the chart's refusal for `T_MERGE`, which the coordinator waits on.
+- **Issue close.** An `issue-close` needs a merge that already landed, so an order cannot pair it
+  with `enqueue` (`ORDER_INCOMPLETE`).
+- **Re-issued orders.** An `enqueue` on a pull request already queued at `headSha` is a recorded
+  no-op. The coordinator does not yet tell a queued head from a `merge-ready` one, so it may propose
+  the same order again.
 
 ## Rules and the evidence that motivated them
 
@@ -297,7 +333,7 @@ coordinator record is prepend-only, so its line numbers are valid at the named r
 | Never merge on a stale verdict | coordinator step 3 ("counts for nothing"); publisher `HEAD_MISMATCH`, `STATE_CHANGED` | counterexamples the rule closes: `gaia-drain-coordinator-status.md:389` (#85 merged with no verdict at the merged commit), `gaia-drain-coordinator-status.md:161-163` (an R6 verdict carried to an R8 head by a diff argument); the rule as adopted: `gaia-drain-coordinator-status.md:54` |
 | A completion marker is evidence that a lane stopped, not approval | coordinator step 3; publisher `MARKER_MISSING` and `VERDICT_MISSING` as two checks | `prompts/gaia-drain-coordinator-claude.txt:14`, `gaia-drain-coordinator-status.md:2357-2358`, `docs/artifact-completion-signals.md:23-38`, `docs/engineering-and-research-principles.md:73` |
 | Every PR opens as a draft; `ready` precedes `merge` | coordinator `draft` flag; publisher action order | `gaia-drain-coordinator-status.md:73-77`, `gaia-drain-coordinator-status.md:19`, `gaia-drain-coordinator-status.md:66` |
-| The only merge form is squash matched to the head | publisher commands; test gate | `gaia-drain-coordinator-status.md:11`, `gaia-drain-coordinator-status.md:67`, `gaia-drain-coordinator-status.md:77`, `gaia-drain-coordinator-status.md:167-168` |
+| The only merge form is pinned to the head: a squash matched to the head until 2026-10-04, a merge-queue entry pinned by `expectedHeadOid` since #228 | publisher commands; test gate | `gaia-drain-coordinator-status.md:11`, `gaia-drain-coordinator-status.md:67`, `gaia-drain-coordinator-status.md:77`, `gaia-drain-coordinator-status.md:167-168` |
 | B35: reconcile one PR at a time after each merge; derive the README gate counter from the tests directory, never hand-edit it | coordinator step 5 and `reconcile`; publisher stops after one merge | `gaia-drain-coordinator-status.md:362-372`, `gaia-drain-coordinator-status.md:68-69`, `gaia-drain-coordinator-status.md:21`, `gaia-drain-coordinator-status.md:11`, `gaia-drain-coordinator-status.md:169-170`, `gaia-architect-r0-design.md:250-254`, `prompts/pr92-r5-repair-writer-fable.txt:21` |
 | Reconciliation class: a published head may be the dual-approved head plus classified reconciliation-only commits; anything else is re-reviewed | coordinator step 3 (`reconciled` flag); publisher `RECONCILIATION_UNCLASSIFIED`; order fields `approvedSha`, `reconciliation`, `reconciliationResults` | `gaia-drain-coordinator-status.md:31`, `gaia-drain-coordinator-status.md:43`, `gaia-drain-coordinator-status.md:45`, `gaia-drain-coordinator-status.md:51` (later record revision, see manifest) |
 | A review subject is a detached, clean clone at a named full SHA with `npm ci` done | reviewer preconditions | `gaia-drain-coordinator-status.md:37`, `gaia-drain-coordinator-status.md:126`, `prompts/pr92-r5-spec-review-fable.txt:3-4`, `prompts/pr92-r4-standards-review-fable.txt:3-4`, `gaia-architect-r0-design.md:48-60` (the same refusals proposed for spawn time) |
@@ -308,11 +344,11 @@ coordinator record is prepend-only, so its line numbers are valid at the named r
 | `mergeable: UNKNOWN` is not conflict evidence | coordinator `unknown` | `docs/pr-conflict-reconciler.md:11-12` |
 | PR body edits are file-based and carry the architecture declaration lines | publisher `body` action | `gaia-drain-coordinator-status.md:71`, `gaia-drain-coordinator-status.md:82`, `scripts/architecture-drift.mjs:89-93` |
 | An issue is closed after the merge, with a comment naming the merge and the two verdicts | publisher `issue-close` | `gaia-drain-coordinator-status.md:11`, `gaia-drain-coordinator-status.md:164-165` |
-| B37: never delete a merged branch | publisher forbids `--delete-branch` | `gaia-drain-coordinator-status.md:13` |
+| B37: never delete a merged branch | the publisher has no branch-deletion action | `gaia-drain-coordinator-status.md:13` |
 | Artifacts, not messages, are the channel between lanes | all three end with a marker or receipt and send nothing | `gaia-drain-coordinator-status.md:181-182`, `run-lane.ps1:25`, `prompts/pr92-r5-spec-review-fable.txt:17` |
-| One merge per publisher invocation; reclassify before the next order | publisher command rules | `gaia-drain-coordinator-status.md:21`, `gaia-drain-coordinator-status.md:68-69` |
+| One merge per publisher invocation, now one enqueue; reclassify after the merge lands, before the next order | publisher command rules | `gaia-drain-coordinator-status.md:21`, `gaia-drain-coordinator-status.md:68-69` |
 | Every refusal and blocker names the chart ids it reads and the subject it read; a transition the fleet took on an unnamed fact gets a name | the three agents' refusal tables; `docs/drain-grafcet.md` Bindings | `gaia-architect-r2-grafcet-drain-design.md:572-575`, `gaia-architect-r2-grafcet-drain-design.md:86-106` |
-| A command's exit code is not its effect: the publisher re-reads the fact the next step needs | publisher `STILL_DRAFT`, `MERGE_UNCONFIRMED`, `ISSUE_CLOSE_UNCONFIRMED` | `gaia-architect-r2-grafcet-drain-design.md:100`, `gaia-architect-r2-grafcet-drain-design.md:104`, `gaia-architect-r2-grafcet-drain-design.md:106` |
+| A command's exit code is not its effect: the publisher re-reads the fact the next step needs | publisher `STILL_DRAFT`, `QUEUE_ENTRY_UNCONFIRMED`, `ISSUE_CLOSE_UNCONFIRMED` | `gaia-architect-r2-grafcet-drain-design.md:100`, `gaia-architect-r2-grafcet-drain-design.md:104`, `gaia-architect-r2-grafcet-drain-design.md:106` |
 | A merge's closing keywords are an effect the order names, or the publisher refuses | order `autoCloses`; publisher `CLOSING_EFFECT_UNNAMED`; coordinator step 6 | `gaia-architect-r2-grafcet-drain-design.md:555-559` |
 | An issue close without a merge first reads the merge it names | order `mergeCommit`; publisher `PR_NOT_MERGED` | `gaia-architect-r2-grafcet-drain-design.md:570-571` |
 | A repair counts once its exit head is the published head | coordinator `REPAIR_UNPUBLISHED` | `gaia-architect-r2-grafcet-drain-design.md:96` |
@@ -352,7 +388,7 @@ R0 uses an explicit order instead of a grant for three reasons:
    artifact the caller supplies, whose pinned identity can drift from the executed one
    (`docs/github-portfolio-operator.md:34-52`).
 
-What R1 keeps from R0 unchanged: the thirteen refusal codes, the four commands, the matched-head
+What R1 keeps from R0 unchanged: the thirteen refusal codes, the four commands, the head-pinned
 merge, the one-merge-then-reclassify ordering, and the two artifacts as the only verdict
 evidence. What R1 adds: `PREPARE_MERGE_INTENT` as the coordinator's proposal output, a signed
 one-use grant consumed through the drain ledger before the merge command, and a receipt reserved
@@ -368,19 +404,22 @@ before authority is spent.
   outside the repository.
 - Confers no sandbox: the tool lists bound the harness surface and the prompts bound the shell
   by policy. Enforcement is the permission mode and, in R1, the grant.
-- Makes `--match-head-commit` a mechanism. The merge-form gate is a test over prompt prose. The
-  mechanism is a `gh` shim on the launcher's PATH that refuses a `pr merge` without the flag or
-  with a widening flag; that is a launcher concern
-  (`gaia-architect-r1-udp-bridge-design.md:472-474`) and an R1 launcher slice, not this one.
+- Makes the merge form a mechanism. The merge-form gate is a test over prompt prose; GitHub
+  enforces only the head pin, through `expectedHeadOid`. The mechanism is a `gh` shim on the
+  launcher's PATH that refuses any merge other than the ordered, head-pinned one; that is a
+  launcher concern (`gaia-architect-r1-udp-bridge-design.md:472-474`) and an R1 launcher slice,
+  not this one.
 
 ## Test gates
 
 `tests/github-drain-agents.test.mjs` binds: the three files exist and nothing else uses the
 prefix; frontmatter parses with `name` equal to the filename, a non-empty `description`, `tools`
 equal to the row above and within the declared universe, and the model named above; the
-coordinator and reviewer contain no GitHub write command; every merge-command line in the agents
-and this document carries `--match-head-commit` and no `--admin`, `--auto`, or
-`--delete-branch`; the publisher's `gh` write commands are exactly the four above; the refusal
+coordinator and reviewer contain no GitHub write command; no agent and not this document carries
+a `gh pr merge` command line, and the publisher and this document state one enqueue form, which
+pins `expectedHeadOid` to `<headSha>` and names no dequeue, auto-merge, or merge-method mutation;
+the order names `enqueue` and no `merge` action; the publisher's `gh` write commands are exactly
+the four above; the refusal
 vocabulary here and in the publisher agree, with `ORDER_DIGEST_MISMATCH` first; the publisher's
 `SHA_NOT_BOUND` row, the coordinator's step 3, and the table here bind a verdict to the
 artifact's `Subject:` line and `# PR #N` title with no containment wording; the reconciliation
