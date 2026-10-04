@@ -434,7 +434,8 @@ The pair's underlying concern is accepted in full and constrains the script inst
   under `--activity agent-state`;
 - ticks are **non-overlapping**: the next tick is scheduled after the current one settles;
 - there is **no retry**. A failed tick prints its typed error, leaves the previous artifacts
-  untouched, and waits for the next interval;
+  untouched, and waits for the next interval. A usage error, from the script, the sensor or the
+  control room, is the same on every tick, so it stops the script with exit 2 instead;
 - the interval is explicit, bounded to 1000-15000 ms per Blocker 2, and stops on SIGINT/SIGTERM.
 
 ## S5 — the golden fixture and the digest-bound receipt

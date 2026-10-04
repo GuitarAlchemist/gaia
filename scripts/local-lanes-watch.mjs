@@ -21,8 +21,10 @@
  *   - **Non-overlapping.** The next tick is scheduled after the current one settles, so a slow
  *     tick delays the next rather than racing it.
  *   - **No retry.** A failed tick prints its typed error, leaves the previous artifacts exactly
- *     where they are, and waits for the next interval. A retry loop around a subprocess is the
- *     thing this product rules out elsewhere by name.
+ *     where they are, and waits for the next interval. A usage error, from the watcher, the
+ *     sensor or the control room, is the same on every tick, so it stops the watcher with exit 2
+ *     instead. A retry loop around a subprocess is the thing this product rules out elsewhere by
+ *     name.
  *   - **Bounded and stoppable.** The interval is explicit, capped at half the observation
  *     freshness window so no legal configuration can render permanently stale, and SIGINT or
  *     SIGTERM ends it.
@@ -135,7 +137,8 @@ if (directExecution) {
   process.once('SIGTERM', stop);
 
   // Scheduled after the tick settles, never on a fixed interval, so a slow tick delays the next
-  // one instead of overlapping it. A failure is reported and waited out; it is never retried.
+  // one instead of overlapping it. A failure is reported and waited out, except a usage error,
+  // which stops the watcher; neither is retried.
   const tick = () => {
     try {
       runLocalLanesTick(argv);
