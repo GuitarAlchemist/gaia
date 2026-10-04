@@ -304,6 +304,7 @@ coordinator record is prepend-only, so its line numbers are valid at the named r
 | Inputs are claims to verify, never conclusions to inherit | reviewer step 2 | `prompts/pr92-r5-spec-review-fable.txt:8`, `pr92-r5-spec-review.md:12-15`, `prompts/pr92-r4-standards-review-fable.txt:1` |
 | The review artifact shape: identity, commands, reproducers with `file:line`, controls, residuals apart, one verdict token, marker last, tree byte-identical at start and end | reviewer artifact shape | `pr92-r5-spec-review.md:1-9`, `pr92-r5-spec-review.md:204-215`, `pr92-r5-spec-review.md:226`, `pr92-r5-spec-review.md:243`, `pr92-r5-spec-review.md:302-323`, `pr92-r5-standards-review.md:22-46`, `pr92-r5-standards-review.md:338-352`, `pr92-r5-standards-review.md:363`, `pr92-r5-standards-review.md:381`, `prompts/pr92-r5-spec-review-fable.txt:13-15` |
 | Mechanism-revert controls: a gate that passes under the revert binds nothing | reviewer step 4 | `pr94-r1-repair-handoff.md:41-46`, `pr92-r5-standards-review.md:12`, `pr92-r5-standards-review.md:39-46`, `prompts/pr92-r5-repair-writer-fable.txt:20` |
+| A document sentence a change makes false is a Standards finding even when the change does not edit it: the reviewer reads the unchanged present-tense sentences in `README.md` and `docs/*.md` about a module whose surface the change widens or narrows | reviewer step 3 (`Standards`); `REVIEW.md` Spec row | `pr216-r0-standards-review.md:45`, `pr216-r0-standards-review.md:85-100` (B1, at `ba8e447`: a widened sensor left `docs/local-wmux-lanes.md:214-215` and `README.md:687` false while the question named only changed sentences; #223) |
 | `mergeable: UNKNOWN` is not conflict evidence | coordinator `unknown` | `docs/pr-conflict-reconciler.md:11-12` |
 | PR body edits are file-based and carry the architecture declaration lines | publisher `body` action | `gaia-drain-coordinator-status.md:71`, `gaia-drain-coordinator-status.md:82`, `scripts/architecture-drift.mjs:89-93` |
 | An issue is closed after the merge, with a comment naming the merge and the two verdicts | publisher `issue-close` | `gaia-drain-coordinator-status.md:11`, `gaia-drain-coordinator-status.md:164-165` |
@@ -385,8 +386,9 @@ vocabulary here and in the publisher agree, with `ORDER_DIGEST_MISMATCH` first; 
 artifact's `Subject:` line and `# PR #N` title with no containment wording; the reconciliation
 class is named with its three commit classes, its three order fields, and
 `RECONCILIATION_UNCLASSIFIED` in both prompts and here; the reviewer requires a full 40-hex SHA,
-a detached clean subject, one of two verdict tokens, and a byte-identical tree; the coordinator's classes
-and lanes match this document; the vocabulary above covers the publisher's verification and
+a detached clean subject, one of two verdict tokens, and a byte-identical tree; the reviewer and
+`REVIEW.md` name the unchanged sentences about a widened or narrowed module in the same words;
+the coordinator's classes and lanes match this document; the vocabulary above covers the publisher's verification and
 confirmation tables; `BUS_VERBS` is still the six and no `src/` or `scripts/` file
 names an agent; every touched file is LF-only; every rule row above cites at least one
 `file:line` anchor; and the Design It Twice section names at least three alternatives and one
@@ -415,6 +417,7 @@ shipped):
 | `gaia-architect-r1-udp-bridge-design.md` | `dbaa6a737674602b565ee549616cb214cf2fca0d434ffea358c2ce1b82c7464d` | sections 5.4 and 6: the order as a file with a digest; the `gh` shim as the merge-form mechanism |
 | `pr92-r4-standards-review.md` | `c33577d043670d257e2fbd40e594db2ef33500542cdfa1f7d5a4285bc3faa8c9` | the `REQUEST_CHANGES` at `e98df9e` that containment binding overrode |
 | `gaia-architect-r2-grafcet-drain-design.md` | `fc09041e6ab1106b747059da5c8575096f301138b631d8ce7e7a4750d936cc3c` | 607 lines, read on 2026-10-01; the receptivity table at 86-106 and the defects at 555-575 (#102) |
+| `pr216-r0-standards-review.md` | `e5a0adaab941b2649182f1f17e3d1168aee2268ee8b5d57125adfb052a2b0f23` | 170 lines, in the drain reviews directory `%LOCALAPPDATA%\gaia-interagent\reviews`, read on 2026-10-04; the #216 R0 Standards `REQUEST_CHANGES` whose B1 motivated #223 |
 
 Repository files cited are at `ba1034c17c2f4ee40f97822df40a33b903245329` (`origin/main` after the
 reconciliation merge; this branch changes none of the cited files except `README.md`).
