@@ -103,7 +103,9 @@ for (const [name, shimBody, expected] of [
       else process.env.NODE_OPTIONS = saved.NODE_OPTIONS;
       if (tty) Object.defineProperty(process.stdout, 'isTTY', tty);
       else delete process.stdout.isTTY;
-      rmSync(root, { recursive: true, force: true });
+      // The copied gh.exe has exited (execFileSync), yet CI run 36571921700 saw EPERM removing
+      // this root on Windows. rmSync retries EPERM.
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
   });
 }

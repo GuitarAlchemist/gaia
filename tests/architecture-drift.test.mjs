@@ -143,9 +143,20 @@ function run(root, command, args, env = {}) {
   });
 }
 
+// A child can fail with an empty stderr (`git commit` reports "nothing to commit" on stdout), so
+// the message names the argv, exit, signal, spawn error and both streams (issue #221).
+function describeChild(argv, result) {
+  return [
+    `${argv.join(' ')} exited ${result.status} (signal ${result.signal})`,
+    ...(result.error ? [`spawn error: ${result.error.message}`] : []),
+    `stderr: ${result.stderr?.trim() || '(empty)'}`,
+    `stdout: ${result.stdout?.trim() || '(empty)'}`,
+  ].join('\n');
+}
+
 function git(root, args) {
   const result = run(root, 'git', args);
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0, describeChild(['git', ...args], result));
   return result.stdout.trim();
 }
 
@@ -443,7 +454,8 @@ test('the public CLI derives changed paths from Git for commit and canonical-ref
     assert.deepEqual(JSON.parse(updated.stdout).violations, []);
     for (const base of [fixture.reviewedCommit, 'refs/heads/base-fixture']) {
       const result = runCli(fixture.root, ['--base', base]);
-      assert.equal(result.status, 1, result.stderr);
+      assert.equal(result.status, 1,
+        describeChild(['node', 'scripts/architecture-drift.mjs', '--base', base], result));
       assert.deepEqual(JSON.parse(result.stdout).violations,
         [{ code: 'ARCHITECTURE_IMPACT_UNDECLARED', subject: 'package.json' }], base);
     }
