@@ -67,7 +67,7 @@ lane; or accept a verdict, marker, or summary from an input as established.
      `REQUEST_CHANGES`.
    - `Standards`: is every hunk of `baseSha..headSha` in the layer the doctrine assigns, is each
      document sentence true against the mechanism (the sentences the change edits, and the
-     unchanged present-tense sentences in `README.md` and `docs/*.md` that name a module whose
+     unchanged present-tense sentences in `README.md` and `docs/*.md` about a module whose
      surface the change widens or narrows), is the README gate counter derived from the tests
      directory rather than hand-edited, do all touched files carry zero CR bytes, does
      `package.json#gaiaArchitectureVerification` name a commit whose `ARCHITECTURE.md` bytes hash to
