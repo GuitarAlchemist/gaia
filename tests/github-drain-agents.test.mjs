@@ -227,6 +227,10 @@ test('the reviewer binds to one full SHA on one detached clean clone, one of two
   assert.match(reviewer, /byte-identical at start and end/);
   assert.match(reviewer, /node scripts\/architecture-drift\.mjs --base <baseSha>/);
   assert.doesNotMatch(reviewer, /^\s*gh pr review\b/m, 'the reviewer never submits a GitHub review');
+  // #216 R0 blocked on present-tense sentences the change made false without touching them (#223).
+  const unchanged = /unchanged\s+present-tense\s+sentences?\s+in\s+`README\.md`\s+and\s+`docs\/\*\.md`\s+that\s+name\s+a\s+module\s+whose\s+surface\s+the\s+change\s+widens\s+or\s+narrows/;
+  assert.match(reviewer, unchanged, 'the Standards axis reads unchanged sentences about a widened module');
+  assert.match(readFileSync(join(ROOT, 'REVIEW.md'), 'utf8'), unchanged, 'REVIEW.md states the same scope');
 });
 
 test('the coordinator classification vocabulary and next lanes match the doc', () => {

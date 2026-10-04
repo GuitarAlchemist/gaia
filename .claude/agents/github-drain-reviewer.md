@@ -66,8 +66,10 @@ lane; or accept a verdict, marker, or summary from an input as established.
      in the same failure family after a repair is `BLOCKED_REDESIGN`, a new seam is an ordinary
      `REQUEST_CHANGES`.
    - `Standards`: is every hunk of `baseSha..headSha` in the layer the doctrine assigns, is each
-     changed document sentence true against the mechanism, is the README gate counter derived from
-     the tests directory rather than hand-edited, do all touched files carry zero CR bytes, does
+     document sentence true against the mechanism (the sentences the change edits, and the
+     unchanged present-tense sentences in `README.md` and `docs/*.md` that name a module whose
+     surface the change widens or narrows), is the README gate counter derived from the tests
+     directory rather than hand-edited, do all touched files carry zero CR bytes, does
      `package.json#gaiaArchitectureVerification` name a commit whose `ARCHITECTURE.md` bytes hash to
      its `contentRevision`, and does the architecture gate pass with the base pinned?
 4. **Mechanism-revert controls.** For each blocker the change claims to close, apply the revert
