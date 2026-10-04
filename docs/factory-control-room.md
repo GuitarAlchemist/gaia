@@ -1019,6 +1019,15 @@ Both are ruled out by name in the upstream contract.
 R0 emits the state. It closes no pane and ends no provider; a reaper is a later slice, and it will
 be written against a transition rather than against a guess.
 
+## The third axis, activity: also nothing, deliberately
+
+An observation may also carry `activityStates`, wmux's own claim about whether each running agent
+is working, idle or waiting for the operator. `docs/lane-activity-signals.md` is the normative
+contract. The control room accepts the field through the shared verifier and renders nothing from
+it. T24 compares the two renderings byte for byte and keeps every activity token out of the
+snapshot. A column for it is the next slice. Like this page, that column will be display evidence
+and never an input to a decision.
+
 ## R3 — The hosted Draft pump transition, as one read-only section
 
 Issue #70 names the defect: the control room "cannot distinguish a healthy empty queue from a pump

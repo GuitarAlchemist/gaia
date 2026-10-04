@@ -80,9 +80,12 @@ Three small pieces with one file between them:
 - `src/local-lane-observation.mjs` — the closed `gaia-local-lane-observation/1` schema, its total
   verifier, and nothing else. It knows nothing about wmux.
 - `src/local-lane-sensor.mjs` — a pure function from already-parsed structured agent metadata to a
-  sealed observation. It reads six fields by name and cannot read a seventh.
-- `scripts/local-lane-sensor.mjs` — the process boundary: one `wmux agent list` invocation, no
-  shell, no workspace filter, no mutating verb, writing the observation file.
+  sealed observation. It reads six fields of an agent record by name and cannot read a seventh;
+  the optional activity axis reads two fields of an `agent-state` record, `surfaceId` and `state`
+  ([lane activity signals](lane-activity-signals.md)).
+- `scripts/local-lane-sensor.mjs` — the process boundary: one `wmux agent list` invocation, and one
+  `wmux agent-state` only under `--activity agent-state`; no shell, no workspace filter, no mutating
+  verb, writing the observation file.
 
 The control room takes the observation as an **explicit input** (`localLanes`), exactly as it
 already takes `telemetryProjection` and `dependencies`. It never discovers the file, so a dashboard
@@ -211,8 +214,9 @@ localLanes: null | {
   observation of exited lanes only leaves a paused drain `PAUSED`.
 - Local lanes are an additional sensor source. They do not enter `items`, `blockers`, `capacity`,
   the obstruction classifier, the activity summary, pace or ETA, and they add no backlog.
-- The sensor is read-only with respect to wmux: it invokes exactly `agent list`, passes no
-  workspace filter and refuses to construct any other verb.
+- The sensor is read-only with respect to wmux: it invokes `agent list`, and `agent-state` only
+  under `--activity agent-state`; it passes no workspace filter and refuses to construct any other
+  verb. Both verbs read; neither changes wmux.
 - `effect` and `authority` are `NONE` on the observation and unchanged on the snapshot.
 
 ## Interfaces
@@ -220,8 +224,8 @@ localLanes: null | {
 | Unit | Contract |
 | --- | --- |
 | `src/local-lane-observation.mjs` | `requireLocalLaneObservation`, `sealLocalLaneObservation`, the closed vocabularies and the safe patterns. Pure; imports only `node:crypto`. |
-| `src/local-lane-sensor.mjs` | `observeLocalLanes({ agents, observedAt })` — pure structured metadata to sealed observation. Reads six named fields. No I/O, no clock, no process. |
-| `scripts/local-lane-sensor.mjs` | `wmux agent list` once, no shell, no filter, no mutation; writes the observation file. `--out` required. |
+| `src/local-lane-sensor.mjs` | `observeLocalLanes({ agents, observedAt })` — pure structured metadata to sealed observation. Reads six named fields. No I/O, no clock, no process. With the activity axis, `deriveLaneActivityStates` reads two named fields of an `agent-state` record. |
+| `scripts/local-lane-sensor.mjs` | `wmux agent list` once, and `wmux agent-state` once under `--activity agent-state`; no shell, no filter, no mutation; writes the observation file. `--out` required. |
 | `scripts/factory-dashboard.mjs` | `--local-lanes <path>` explicit input. Absent flag renders exactly as before. |
 | `scripts/local-lanes-watch.mjs` | One command: refresh the observation, then the control room. `--interval-ms` is explicit, bounded to 1000-60000, and stops on SIGINT/SIGTERM. |
 
@@ -247,7 +251,7 @@ compensate. The sensor's only durable output is one file the operator chose the 
 | F5 | A future, corrupt or extra-field observation is displayed. | Three refusal tests, one per failure. |
 | F6 | A label carrying markup reaches the document unescaped. | Schema refusal, sensor withholding, and renderer escaping — three prongs. |
 | F7 | The sensor ingests a screen, prompt, stdout or command line. | The negative control: the fake wmux emits all of them with unique markers and asserts none reaches any artifact. |
-| F8 | The sensor invokes a mutating or screen-reading wmux verb. | The fake wmux exits non-zero for every verb but `agent list` and records the exact argv it saw. |
+| F8 | The sensor invokes a mutating or screen-reading wmux verb. | The fake wmux exits non-zero for every verb but the two reads, `agent list` and `agent-state`, refuses `report-agent`, `answer-agent` and `release-agent` by name, and records the exact argv it saw. |
 
 ## Rejection criterion
 
@@ -426,7 +430,8 @@ dropping it would fail the request rather than simplify it.
 The pair's underlying concern is accepted in full and constrains the script instead:
 
 - it holds **no mechanism** — one tick calls the two existing entry points in this process, and
-  spawns no subprocess of its own beyond the single `wmux agent list` the sensor already makes;
+  spawns no subprocess of its own beyond the sensor's `wmux agent list`, and its `wmux agent-state`
+  under `--activity agent-state`;
 - ticks are **non-overlapping**: the next tick is scheduled after the current one settles;
 - there is **no retry**. A failed tick prints its typed error, leaves the previous artifacts
   untouched, and waits for the next interval;

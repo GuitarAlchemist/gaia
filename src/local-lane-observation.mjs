@@ -45,6 +45,14 @@
  * operator-authored, content-addressed `gaia-lane-artifact-bindings/1` record. Neither is ever
  * inferred from the other. docs/artifact-completion-signals.md is the normative contract.
  *
+ * THE THIRD AXIS: WHAT WMUX CLAIMS THE AGENT IS DOING
+ * ---------------------------------------------------
+ * `activityStates` answers the operator's third question — is this pane waiting for me? — and
+ * only by restating what `wmux agent-state` claims. It is display evidence: never an approval, a
+ * permission, a blocker or an input to any decision. It enriches a lane wmux already reported and
+ * never creates one, and every answer outside the exact map is `UNKNOWN`, which is never `IDLE`.
+ * docs/lane-activity-signals.md is the normative contract.
+ *
  * This module reads nothing, opens nothing, and holds no clock. It imports `node:crypto` for the
  * digests and `node:path` for the two lexical path rules, both of which are pure.
  */
@@ -97,7 +105,8 @@ export const UNKNOWN_IDENTITY = 'UNKNOWN';
 
 /** The exact top-level and per-lane field sets. Anything else is refused, never ignored. */
 export const LOCAL_LANE_OBSERVATION_FIELDS = Object.freeze([
-  'schema', 'source', 'effect', 'authority', 'observedAt', 'lanes', 'taskStates', 'revision',
+  'schema', 'source', 'effect', 'authority', 'observedAt', 'lanes', 'taskStates', 'activityStates',
+  'revision',
 ]);
 export const LOCAL_LANE_FIELDS = Object.freeze([
   'workspaceId', 'paneId', 'surfaceId', 'agentId', 'label', 'labelState', 'lifecycle',
@@ -177,6 +186,42 @@ export const MAX_LANE_TASK_STATES = 128;
  * cannot be grown into a duration by a caller who increments it on a timer.
  */
 export const MAX_LANE_GENERATION = 1_000_000;
+
+// ---------------------------------------------------------------------------
+// the third axis: what wmux claims the agent is doing
+// ---------------------------------------------------------------------------
+
+/**
+ * The closed activity vocabulary. Four answers, and no fifth.
+ *
+ * `NEEDS_OPERATOR` is spelled for the reader of the page rather than borrowed from wmux's
+ * `blocked`, because a blocker already means something in this product's portfolio and the two
+ * must never be read as one another. It is a display signal and nothing else.
+ */
+export const LANE_ACTIVITIES = Object.freeze(['WORKING', 'IDLE', 'NEEDS_OPERATOR', 'UNKNOWN']);
+
+/**
+ * Every reason names exactly one activity, for the reason the evidence reasons do: `IDLE` beside
+ * `PROCESS_NOT_RUNNING` is a contradiction the verifier refuses rather than one an operator has to
+ * notice by reading. Four ways of not knowing are kept apart, so an `UNKNOWN` can say why.
+ *
+ * Null-prototype, so `constructor` and `toString` are not activity reasons.
+ */
+export const LANE_ACTIVITY_REASONS = Object.freeze(Object.assign(Object.create(null), {
+  WMUX_WORKING: 'WORKING',
+  WMUX_IDLE: 'IDLE',
+  WMUX_BLOCKED: 'NEEDS_OPERATOR',
+  NO_CLAIM: 'UNKNOWN',
+  UNRECOGNISED_CLAIM: 'UNKNOWN',
+  CONFLICTING_CLAIMS: 'UNKNOWN',
+  SURFACE_UNKNOWN: 'UNKNOWN',
+  PROCESS_NOT_RUNNING: 'UNKNOWN',
+}));
+
+export const LANE_ACTIVITY_STATE_FIELDS = Object.freeze([
+  'workspaceId', 'paneId', 'surfaceId', 'agentId',
+  'processLifecycle', 'activity', 'activityReason',
+]);
 
 /** Four mebibytes of handoff is already implausible; past it the sensor refuses rather than reads. */
 export const MAX_ARTIFACT_BYTES = 4 * 1024 * 1024;
@@ -377,6 +422,16 @@ const projectLaneTaskState = (state) => ({
   completionEvidenceRevision: state.completionEvidenceRevision,
 });
 
+const projectLaneActivityState = (state) => ({
+  workspaceId: state.workspaceId,
+  paneId: state.paneId,
+  surfaceId: state.surfaceId,
+  agentId: state.agentId,
+  processLifecycle: state.processLifecycle,
+  activity: state.activity,
+  activityReason: state.activityReason,
+});
+
 export const isSafeLaneIdentity = (value) => typeof value === 'string' && IDENTITY.test(value);
 export const isSafeLaneLabel = (value) => typeof value === 'string' && LABEL.test(value);
 
@@ -477,7 +532,80 @@ export function requireLocalLaneObservation(value) {
     }
     requireLaneTaskStates(value.taskStates, value.lanes, refuse);
   }
+  // The third axis, absent in exactly the same way: an observation that did not read wmux's
+  // activity omits the key, and an observation that did carries one entry per lane.
+  if (Object.hasOwn(value, 'activityStates')) {
+    if (!Array.isArray(value.activityStates)) {
+      refuse('an absent activity axis omits the field entirely, and never publishes null');
+    }
+    requireLaneActivityStates(value.activityStates, value.lanes, refuse);
+  }
   return deepFreeze(value);
+}
+
+/**
+ * Total verification of the activity axis, against the lanes it must agree with.
+ *
+ * Stricter than the task-state axis in one respect, and on purpose. A task state may name a
+ * binding whose pane wmux never reported; an activity may only describe a lane that was observed.
+ * Every observed lane carries exactly one entry and no entry names anything else, so a resealed
+ * observation can neither invent a waiting pane nor hide one.
+ */
+function requireLaneActivityStates(activityStates, lanes, refuse) {
+  if (activityStates.length !== lanes.length) {
+    refuse('an activity axis carries exactly one entry per observed lane');
+  }
+  const laneByKey = new Map(lanes.map((lane) => [laneOrderKey(lane), lane]));
+
+  let previous = null;
+  for (const state of activityStates) {
+    if (!state || typeof state !== 'object' || Array.isArray(state)) {
+      refuse('an activity state must be an object');
+    }
+    for (const field of Object.keys(state)) {
+      if (!LANE_ACTIVITY_STATE_FIELDS.includes(field)) {
+        refuse(`an activity state carries an unknown field ${JSON.stringify(field)}`);
+      }
+    }
+    for (const identity of ['workspaceId', 'paneId', 'surfaceId', 'agentId']) {
+      if (!isSafeLaneIdentity(state[identity])) {
+        refuse(`an activity state ${identity} is not a bounded identity`);
+      }
+    }
+    if (!LANE_ACTIVITIES.includes(state.activity)) {
+      refuse(`an activity must be one of ${LANE_ACTIVITIES.join(', ')}`);
+    }
+    if (LANE_ACTIVITY_REASONS[state.activityReason] !== state.activity) {
+      refuse(
+        `the activity reason ${JSON.stringify(state.activityReason)} does not name the activity`
+        + ` ${JSON.stringify(state.activity)}`,
+      );
+    }
+    const key = laneOrderKey(state);
+    const lane = laneByKey.get(key) ?? null;
+    if (lane === null || lane.paneId !== state.paneId) {
+      refuse('an activity state describes an observed lane, and never one wmux did not report');
+    }
+    if (state.processLifecycle !== lane.lifecycle) {
+      refuse('an activity state processLifecycle must be the lifecycle its own lane reported');
+    }
+    // Only a running process can be claimed to be doing anything. An exited one waits for nobody,
+    // whatever wmux last said about it, and a running one is never excused by this reason.
+    const running = state.processLifecycle === LOCAL_LANE_LIVE_LIFECYCLE;
+    if (running === (state.activityReason === 'PROCESS_NOT_RUNNING')) {
+      refuse('an activity state names PROCESS_NOT_RUNNING exactly when its lane is not running');
+    }
+    // The sentinel is an identity nobody supplied, so it can match no claim — and a running lane
+    // that has a real surface cannot hide behind it.
+    if ((running && state.surfaceId === UNKNOWN_IDENTITY)
+        !== (state.activityReason === 'SURFACE_UNKNOWN')) {
+      refuse('an activity state names SURFACE_UNKNOWN exactly when a running lane has no surface');
+    }
+    if (previous !== null && ordinal(previous, key) >= 0) {
+      refuse('activity states must be in strictly ascending identity order, with no repeated identity');
+    }
+    previous = key;
+  }
 }
 
 /**
@@ -674,13 +802,20 @@ export function sealLaneArtifactBindings({ bindings = [] } = {}) {
  * byte-identical; the verifier still enforces the order, so a hand-written file gets no
  * dispensation the sensor enjoys.
  */
-export function sealLocalLaneObservation({ observedAt, lanes = [], taskStates = null } = {}) {
+export function sealLocalLaneObservation({
+  observedAt, lanes = [], taskStates = null, activityStates = null,
+} = {}) {
   if (!Array.isArray(lanes)) {
     throw new LocalLaneObservationError('InvalidLocalLaneObservation', 'lanes must be an array');
   }
   if (taskStates !== null && !Array.isArray(taskStates)) {
     throw new LocalLaneObservationError(
       'InvalidLocalLaneObservation', 'taskStates must be an array when it is supplied',
+    );
+  }
+  if (activityStates !== null && !Array.isArray(activityStates)) {
+    throw new LocalLaneObservationError(
+      'InvalidLocalLaneObservation', 'activityStates must be an array when it is supplied',
     );
   }
   const ordered = [...lanes]
@@ -732,6 +867,27 @@ export function sealLocalLaneObservation({ observedAt, lanes = [], taskStates = 
     })
     .sort((left, right) => ordinal(laneOrderKey(left), laneOrderKey(right)));
 
+  // The third axis, sealed the same way. It is outside the revision recipe for the reason the
+  // second one is: the control room re-derives that revision from the lanes alone.
+  const orderedActivityStates = activityStates === null ? null : [...activityStates]
+    .map((state) => {
+      if (!state || typeof state !== 'object' || Array.isArray(state)) {
+        throw new LocalLaneObservationError(
+          'InvalidLocalLaneObservation', 'an activity state must be an object',
+        );
+      }
+      for (const field of Object.keys(state)) {
+        if (!LANE_ACTIVITY_STATE_FIELDS.includes(field)) {
+          throw new LocalLaneObservationError(
+            'InvalidLocalLaneObservation',
+            `an activity state carries an unknown field ${JSON.stringify(field)}`,
+          );
+        }
+      }
+      return projectLaneActivityState(state);
+    })
+    .sort((left, right) => ordinal(laneOrderKey(left), laneOrderKey(right)));
+
   return requireLocalLaneObservation({
     schema: LOCAL_LANE_OBSERVATION_SCHEMA,
     source: LOCAL_LANE_SOURCE,
@@ -740,6 +896,7 @@ export function sealLocalLaneObservation({ observedAt, lanes = [], taskStates = 
     observedAt,
     lanes: ordered,
     ...(orderedTaskStates === null ? {} : { taskStates: orderedTaskStates }),
+    ...(orderedActivityStates === null ? {} : { activityStates: orderedActivityStates }),
     revision: localLaneObservationRevision({ observedAt, lanes: ordered }),
   });
 }
