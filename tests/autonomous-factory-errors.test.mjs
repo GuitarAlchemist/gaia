@@ -103,7 +103,9 @@ for (const [name, shimBody, expected] of [
       else process.env.NODE_OPTIONS = saved.NODE_OPTIONS;
       if (tty) Object.defineProperty(process.stdout, 'isTTY', tty);
       else delete process.stdout.isTTY;
-      rmSync(root, { recursive: true, force: true });
+      // `bin` holds a freshly copied executable; Windows can still hold it for a moment after
+      // the child exits (EPERM on CI, #221), so the cleanup retries instead of failing the test.
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
   });
 }
