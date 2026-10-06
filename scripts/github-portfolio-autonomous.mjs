@@ -5,8 +5,8 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { openAutonomousFactoryStore } from '../src/autonomous-factory-store.mjs';
 import { autonomousJobKey } from '../src/autonomous-factory-contract.mjs';
-import { diagnosticCode, runAutonomousFactory, reconcileAutonomousJob, retireClosedAutonomousJob } from '../src/autonomous-factory.mjs';
-import { collectHostedDraftReceipts, prepareAutonomousWorktree, ensureHostDirectories, realDirectory, runHost, readClosedJobDisposition } from '../src/autonomous-factory-host.mjs';
+import { diagnosticCode, publishReadyCandidates, runAutonomousFactory, reconcileAutonomousJob, retireClosedAutonomousJob } from '../src/autonomous-factory.mjs';
+import { collectHostedDraftReceipts, createAutonomousDraftPublicationEffects, prepareAutonomousWorktree, ensureHostDirectories, realDirectory, runHost, readClosedJobDisposition } from '../src/autonomous-factory-host.mjs';
 import { createGitHubReadAdapter } from '../src/github-read-adapter.mjs';
 import { createGitHubDraftAdmissionAdapter } from '../src/github-draft-admission.mjs';
 import { createAgentFactoryExecutionAdapter } from '../src/github-portfolio-execution.mjs';
@@ -21,7 +21,10 @@ const usage = `usage: github-portfolio-autonomous.mjs
   tick|watch --state DIR --clone TRUSTED_CLONE [--timeout-ms 600000] [--interval-seconds 60]
 Local standing authority, one host slot, one candidate per Draft. No per-run prompt.
 State must be outside the trusted clone and owned by its operator. Enable is one-time;
-revoke prevents future starts. Retain this state directory on restart. No auto-merge.
+revoke prevents future starts and pushes. Retain this state directory on restart.
+A ready, approved and verified candidate is pushed, fast-forward only, to its own Draft's
+branch with the clone's Git credentials; each push spends one run. The Draft stays a
+draft: no ready, merge, enqueue or issue close.
 Watch reads the latest 20 successful main hosted-draft-intake runs. Exceptions are
 reported; missing/ambiguous receipts are never blindly rerun. Ctrl+C stops watch.
 Retirement defaults to preview. Stop the old host and owned providers before apply;
@@ -52,8 +55,18 @@ function integer(value, fallback, minimum, maximum) {
   return n;
 }
 
-/** One bounded tick; injected ports exercise the actual CLI scheduling seam. */
-export async function runAutonomousTick({ store, collect, execution, githubRead, admission }) {
+/**
+ * One bounded tick; injected ports exercise the actual CLI scheduling seam. With a `publication`
+ * port, every completed ready candidate is then published to its own Draft's branch (#236).
+ */
+export async function runAutonomousTick({ store, collect, execution, githubRead, admission, publication }) {
+  const result = await scheduleAutonomousWork({ store, collect, execution, githubRead, admission });
+  if (publication === undefined) return result;
+  const publications = await publishReadyCandidates({ store, publication });
+  return publications.length === 0 ? result : { ...result, publications };
+}
+
+async function scheduleAutonomousWork({ store, collect, execution, githubRead, admission }) {
   const state = store.status();
   if (state.activeJobKey) return reconcileAutonomousJob({ store, execution, jobKey: state.activeJobKey });
   if (!state.enabled) return { status: 'REFUSED', code: 'PolicyDisabled' };
@@ -195,6 +208,9 @@ export async function runAutonomousCli(argv, { write = value => process.stdout.w
     const tick = () => runAutonomousTick({ store, execution, githubRead: createGitHubReadAdapter(),
       collect: () => collectHostedDraftReceipts({ repository, cacheDir: paths.cache }),
       admission: entry => createGitHubDraftAdmissionAdapter({ expectedRepository: repository, receiptText: entry.receiptText }),
+      // The candidate's own worktree, bound to the Draft it was admitted with (#236).
+      publication: job => createAutonomousDraftPublicationEffects({ repository: job.intent.repository,
+        worktree: join(paths.worktrees, autonomousJobKey(job.intent)), draft: job.intent.draft }),
     });
     const once = () => runAutonomousHostTick({ store, evidenceRoot: paths.evidence, tick });
     if (command === 'tick') {

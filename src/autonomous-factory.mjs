@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createPortfolioFactory } from './github-portfolio.mjs';
-import { autonomousJobKey, validateAutonomousReceipt } from './autonomous-factory-contract.mjs';
+import { buildGitHubCandidatePublishIntent } from './github-portfolio-publish.mjs';
+import { autonomousJobKey, autonomousPublicationOperationId, validateAutonomousReceipt } from './autonomous-factory-contract.mjs';
 
 const canonical = value => value && typeof value === 'object'
   ? Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
@@ -98,4 +99,115 @@ export async function runAutonomousFactory({
   } catch (error) {
     return started ? uncertain(jobKey) : refuse(diagnosticCode(error, 'AutonomousRunFailed'));
   }
+}
+
+const publicationResult = (jobKey, status, code) => ({ schema: 'gaia-autonomous-publication-result/1', status, jobKey, code });
+
+// The stored terminal job, projected into the transition schema the publication intent consumes.
+// Autonomous transitions are never persisted; the source named here is the repository decision
+// snapshot that the intent and its authority bind, not the organization portfolio.
+function candidateTransition(job) {
+  const factory = job.receipt.factory;
+  const body = { schema: 'gaia-github-portfolio-transition/1', status: 'CANDIDATE_READY',
+    fromRevision: job.intent.snapshotRevision, intent: job.intent,
+    authority: { grantId: job.jobKey, intentRevision: job.intent.intentRevision },
+    execution: { idempotencyKey: job.idempotencyKey, receiptRevision: digest(factory), receipt: factory } };
+  return { ...body, revision: digest(body) };
+}
+
+const closed = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
+function draftObservation(value) {
+  if (!closed(value, ['pullRequest', 'git'])
+    || !closed(value.pullRequest, ['number', 'isDraft', 'state', 'headRef', 'headRepository'])
+    || !closed(value.git, ['repository', 'headOid', 'baseOid', 'changeSetIdentity'])
+    || typeof value.pullRequest.headRepository !== 'string') {
+    throw Object.assign(new Error('PublicationObservationInvalid'), { code: 'PublicationObservationInvalid' });
+  }
+  return value;
+}
+
+/**
+ * Publish one ready candidate to its own Draft's branch (#236): a deterministic commit whose one
+ * parent is the admitted Draft head, then a leased fast-forward push of that head ref. Every
+ * refusal precedes the first effect; the store's publication row is the authority point and the
+ * operation identity under which a retry recognises an earlier push instead of repeating it.
+ * `effects` is closed: observe, commit and push. Nothing here can mark ready, merge or close.
+ */
+export async function publishAutonomousCandidate({ store, jobKey, effects }) {
+  const job = store.get(jobKey);
+  const refused = code => publicationResult(job?.jobKey ?? jobKey, 'REFUSED', code);
+  if (!job || job.state !== 'COMPLETED' || job.receipt?.status !== 'CANDIDATE_READY') return refused('CandidateNotReady');
+  if (job.receipt.factory.verification?.passed !== true) return refused('CandidateUnverified');
+  const pending = store.publication(job.jobKey);
+  if (pending?.state === 'COMPLETED') return pending.receipt;
+  // Once its operation is recorded, a publication that stops is unsettled, not refused.
+  const uncertain = code => publicationResult(job.jobKey, 'RECONCILIATION_REQUIRED', code);
+  const stop = pending ? uncertain : refused;
+  const { draft, repository } = job.intent;
+  let observed;
+  try { observed = draftObservation(await effects.observe()); }
+  catch (error) { return stop(diagnosticCode(error, 'PublicationObservationFailed')); }
+  const { pullRequest, git } = observed;
+  if (pullRequest.number !== draft.number || pullRequest.headRef !== draft.headRef
+    || pullRequest.headRepository.toLowerCase() !== repository.toLowerCase()) return stop('DraftBranchMismatch');
+  const openDraft = pullRequest.state === 'OPEN' && pullRequest.isDraft === true;
+  let intent = pending?.intent;
+  if (!intent) {
+    if (!openDraft) return refused('DraftNotDraft');
+    try { intent = buildGitHubCandidatePublishIntent({ transition: candidateTransition(job), gitObservation: git }); }
+    catch (error) {
+      const code = diagnosticCode(error, 'PublicationIntentInvalid');
+      return refused(code === 'CandidateStale' && git.baseOid !== draft.headRevision ? 'DraftHeadMoved' : code);
+    }
+    try { store.beginPublication({ jobKey: job.jobKey, intent }); }
+    catch (error) { return refused(diagnosticCode(error, 'PublicationRefused')); }
+  }
+  if (git.repository !== repository) return uncertain('RepositoryIdentityMismatch');
+  if (git.headOid !== draft.headRevision) return uncertain('CandidateStale');
+  if (git.changeSetIdentity !== intent.candidate.changeSetIdentity) return uncertain('CandidateChanged');
+  const operationId = autonomousPublicationOperationId(job, intent.revision);
+  let commitOid;
+  try {
+    ({ commitOid } = await effects.commit({ operationId, parentOid: draft.headRevision,
+      changeSetIdentity: intent.candidate.changeSetIdentity,
+      message: `chore: resolve issue #${job.intent.itemNumber}\n\nGaia-Publication-Operation: ${operationId}\n` }));
+  } catch (error) { return uncertain(diagnosticCode(error, 'PublicationCommitFailed')); }
+  if (typeof commitOid !== 'string' || !/^[a-f0-9]{40}$/u.test(commitOid)) return uncertain('PublicationCommitInvalid');
+  // The same operation always yields the same commit, so a Draft head already equal to it is
+  // this operation's earlier push whose acknowledgement was lost: record it, push nothing.
+  if (git.baseOid !== commitOid) {
+    if (git.baseOid !== draft.headRevision) return uncertain('DraftHeadMoved');
+    if (pending) {
+      if (!openDraft) return uncertain('DraftNotDraft');
+      try { store.beginPublication({ jobKey: job.jobKey, intent }); }
+      catch (error) { return uncertain(diagnosticCode(error, 'PublicationRefused')); }
+    }
+    try {
+      const pushed = await effects.push({ headRef: draft.headRef, commitOid, expectedOid: draft.headRevision });
+      if (pushed?.headOid !== commitOid) return uncertain('PublicationPushUncertain');
+    } catch (error) { return uncertain(diagnosticCode(error, 'PublicationPushUncertain')); }
+  }
+  try {
+    return store.finishPublication({ jobKey: job.jobKey, receipt: {
+      schema: 'gaia-autonomous-publication-receipt/1', status: 'PUBLISHED', jobKey: job.jobKey,
+      operationId, intentRevision: intent.revision, repository,
+      draft: { number: draft.number, headRef: draft.headRef, previousHeadOid: draft.headRevision },
+      commitOid, changeSetIdentity: intent.candidate.changeSetIdentity } });
+  } catch (error) { return uncertain(diagnosticCode(error, 'PublicationRecordFailed')); }
+}
+
+/** Visit every completed ready job without a completed publication; one outcome per job. */
+export async function publishReadyCandidates({ store, publication }) {
+  const { jobs, publications } = store.status();
+  const outcomes = [];
+  for (const job of jobs) {
+    if (job.state !== 'COMPLETED' || job.receipt?.status !== 'CANDIDATE_READY'
+      || publications.some(item => item.jobKey === job.jobKey && item.state === 'COMPLETED')) continue;
+    let effects;
+    try { effects = publication(job); }
+    catch (error) { outcomes.push(publicationResult(job.jobKey, 'REFUSED', diagnosticCode(error, 'PublicationUnavailable'))); continue; }
+    outcomes.push(await publishAutonomousCandidate({ store, jobKey: job.jobKey, effects }));
+  }
+  return outcomes;
 }
