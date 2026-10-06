@@ -404,6 +404,19 @@ test('the real adapter recomputes the same commit after a lost acknowledgement a
   assert.equal(host.commands.filter(([, args]) => args[0] === 'push').length, 1);
 });
 
+test('the real adapter refuses before pushing when a Git filter would publish other bytes', async t => {
+  const repo = draftRepository(t);
+  repo.git(repo.clone, 'config', 'core.autocrlf', 'true');
+  writeFileSync(join(repo.worktree, 'changed.txt'), 'after\r\n');
+  const w = world(t, { head: repo.head, factory: { changeSet: measureAgentFactoryChangeSet(repo.worktree, repo.head) } });
+  const host = hostRunner(repo);
+  const result = await w.tick({ publication: host.publication });
+  assert.deepEqual(result.publications.map(({ status, code }) => ({ status, code })),
+    [{ status: 'RECONCILIATION_REQUIRED', code: 'PublishedTreeMismatch' }]);
+  assert.equal(repo.draftHead(), repo.head, 'nothing reaches the Draft');
+  assert.equal(host.commands.filter(([, args]) => args[0] === 'push').length, 0);
+});
+
 test('the real adapter lease refuses a Draft head that moves between observation and push', async t => {
   // A sibling head would also stop a plain push; a rewound head would not, only the lease does.
   for (const move of ['sibling', 'rewound']) {
