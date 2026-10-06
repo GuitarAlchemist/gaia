@@ -14,7 +14,8 @@ import { runAutonomousTick } from '../scripts/github-portfolio-autonomous.mjs';
 const HEAD = 'b'.repeat(40);
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 
-function factoryReceipt(intent, { status = 'completed', verification = 'passed', changeSet = null } = {}) {
+function factoryReceipt(intent, { status = 'completed', verification = 'passed', changeSet = null,
+  finalVerdict = null } = {}) {
   const evidence = role => {
     const digest = sha256(role);
     return { role, path: `/evidence/${role}-${digest}.txt`, bytes: 3, sha256: digest,
@@ -36,17 +37,28 @@ function factoryReceipt(intent, { status = 'completed', verification = 'passed',
   const measured = changeSet ?? { ...body, identity: sha256(`${JSON.stringify(body)}\n`) };
   const { identity } = measured;
   const passed = verification === 'passed';
-  return { schema: 'gaia-agent-factory-receipt/1', status, task: intent.task, base, worker,
-    changeSet: measured,
-    reviewer: { provider: 'fixture-reviewer', evidence: evidence('reviewer'),
-      authority: 'sandbox-requested-read-only',
-      verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged', verdict: 'APPROVE' },
-    ...(verification === 'absent' ? {} : { verification: { schema: 'gaia-factory-verification/1',
-      authority: 'host-user-process', command: 'node --test --test-reporter=spec',
-      runtime: { version: 'v26.8.1', pinned: '26.8.1' }, candidateIdentity: identity,
-      termination: 'exit', exitCode: passed ? 0 : 1,
-      counts: { tests: 1, pass: passed ? 1 : 0, fail: passed ? 0 : 1 }, passed,
-      evidence: evidence('verification') } }) };
+  const review = (role, verdict) => ({ provider: 'fixture-reviewer', evidence: evidence(role),
+    authority: 'sandbox-requested-read-only',
+    verifiedPostcondition: 'git-head-index-and-worktree-tree-unchanged', verdict });
+  const run = (role, candidateIdentity) => ({ schema: 'gaia-factory-verification/1',
+    authority: 'host-user-process', command: 'node --test --test-reporter=spec',
+    runtime: { version: 'v26.8.1', pinned: '26.8.1' }, candidateIdentity,
+    termination: 'exit', exitCode: passed ? 0 : 1,
+    counts: { tests: 1, pass: passed ? 1 : 0, fail: passed ? 0 : 1 }, passed, evidence: evidence(role) });
+  const receipt = { schema: 'gaia-agent-factory-receipt/1', status, task: intent.task, base, worker,
+    changeSet: measured, reviewer: review('reviewer', 'APPROVE'),
+    ...(verification === 'absent' ? {} : { verification: run('verification', identity) }) };
+  if (finalVerdict === null) return receipt;
+  // A repaired candidate whose final review carries `finalVerdict` over the passing final run.
+  const initialIdentity = sha256('initial candidate');
+  const final = review('reviewer-final', finalVerdict);
+  return { ...receipt, reviewer: final,
+    repair: { provider: 'fixture-repairer', evidence: evidence('repair'), authority: 'host-user-process',
+      requestedScope: 'linked-worktree-only', observedScope: 'git-candidate-and-worktree-tree',
+      initialCandidateIdentity: initialIdentity, repairedCandidateIdentity: identity },
+    reviews: { initial: review('reviewer-initial', 'REQUEST_CHANGES'), final },
+    verification: run('verification-final', identity),
+    verifications: { initial: run('verification', initialIdentity), final: run('verification-final', identity) } };
 }
 
 // The pump's world: one ready issue, its admitted Draft, a worker that yields the receipt
@@ -209,6 +221,9 @@ function legacyReadyJob(store) {
 test('rejected, empty, unreconciled and unverified candidates never publish', async t => {
   const rejected = world(t, { factory: { status: 'rejected', verification: 'failed' } });
   assert.equal((await rejected.tick()).status, 'CANDIDATE_REJECTED');
+  // Its tests pass, so only the status keeps the reviewer's rejection off the Draft.
+  const disapproved = world(t, { factory: { status: 'rejected', finalVerdict: 'REQUEST_CHANGES' } });
+  assert.equal((await disapproved.tick()).status, 'CANDIDATE_REJECTED');
   const empty = world(t, { factory: { status: 'no-change' } });
   assert.equal((await empty.tick()).status, 'NO_CANDIDATE');
   const blocked = world(t);
@@ -216,7 +231,7 @@ test('rejected, empty, unreconciled and unverified candidates never publish', as
     findReceipt: async () => null } });
   assert.equal(lost.status, 'RECONCILIATION_REQUIRED');
   assert.equal((await blocked.tick()).status, 'RECONCILIATION_REQUIRED');
-  for (const w of [rejected, empty, blocked]) {
+  for (const w of [rejected, disapproved, empty, blocked]) {
     assert.deepEqual(w.calls, [], 'no observation, commit or push for a candidate that is not ready');
   }
 
