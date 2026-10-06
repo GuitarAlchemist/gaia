@@ -143,16 +143,21 @@ function run(root, command, args, env = {}) {
   });
 }
 
+// Every observable of a finished child process, so a failed check names its cause (#221).
+function spawnEvidence(command, args, result) {
+  return [
+    `${command} ${args.join(' ')} exited ${result.status}${result.signal ? ` (${result.signal})` : ''}`,
+    `error: ${result.error?.message ?? 'none'}`,
+    `stderr: ${result.stderr}`,
+    `stdout: ${result.stdout}`,
+  ].join('\n');
+}
+
 function git(root, args) {
   const result = run(root, 'git', args);
   // A failure here has been seen only under parallel load (#221), once, with an empty stderr;
   // keep every observable so the next one names its cause.
-  assert.equal(result.status, 0, [
-    `git ${args.join(' ')} exited ${result.status}${result.signal ? ` (${result.signal})` : ''}`,
-    `error: ${result.error?.message ?? 'none'}`,
-    `stderr: ${result.stderr}`,
-    `stdout: ${result.stdout}`,
-  ].join('\n'));
+  assert.equal(result.status, 0, spawnEvidence('git', args, result));
   return result.stdout.trim();
 }
 
@@ -266,19 +271,14 @@ function runCli(root, args, env = {}) {
   });
 }
 
-// The CLI reports on stdout and refuses on stderr, so a failed check prints the command, its exit
-// and both streams (#221).
-function cliEvidence(args, result) {
-  return `architecture-drift ${args.join(' ')} exited ${result.status}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`;
-}
-
-// A run that exits with the expected code but prints no JSON report, a crash for instance, fails
-// with that evidence instead of a bare SyntaxError.
+// The CLI reports on stdout and refuses on stderr. A run that exits with the expected code but
+// prints no JSON report, a crash for instance, fails with the CLI's evidence instead of a bare
+// SyntaxError (#221).
 function cliReport(args, result) {
   try {
     return JSON.parse(result.stdout);
   } catch (error) {
-    return assert.fail(`no JSON report (${error.message}): ${cliEvidence(args, result)}`);
+    assert.fail(`no JSON report (${error.message}): ${spawnEvidence('architecture-drift', args, result)}`);
   }
 }
 
@@ -463,12 +463,12 @@ test('the public CLI derives changed paths from Git for commit and canonical-ref
   try {
     const updatedArgs = ['--base', fixture.olderCommit];
     const updated = runCli(fixture.root, updatedArgs);
-    assert.equal(updated.status, 0, cliEvidence(updatedArgs, updated));
+    assert.equal(updated.status, 0, spawnEvidence('architecture-drift', updatedArgs, updated));
     assert.deepEqual(cliReport(updatedArgs, updated).violations, []);
     for (const base of [fixture.reviewedCommit, 'refs/heads/base-fixture']) {
       const args = ['--base', base];
       const result = runCli(fixture.root, args);
-      assert.equal(result.status, 1, cliEvidence(args, result));
+      assert.equal(result.status, 1, spawnEvidence('architecture-drift', args, result));
       assert.deepEqual(cliReport(args, result).violations,
         [{ code: 'ARCHITECTURE_IMPACT_UNDECLARED', subject: 'package.json' }], base);
     }
