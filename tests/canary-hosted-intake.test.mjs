@@ -89,7 +89,17 @@ async function fixture(t, { stopped = false, expired = false, unrelated = false,
   };
   const evidence = createMemoryManagedRoundEvidencePort();
   let recoveryTime = false; let runtime;
-  const dependencies = { createGhGitDataApi, createGhDraftCollectorApi, createHostedDraftCollector,
+  // The intake reads the selected issue's frontier facts; no other observation may reach GitHub.
+  const observeIssue = async (args) => {
+    const number = Number(args[1]?.match(/^repos\/test-org\/test-repo\/issues\/(\d+)$/u)?.[1]);
+    if (args[0] !== 'api' || !Number.isSafeInteger(number)) {
+      throw new Error(`Unexpected gh observation: ${args.join(' ')}`);
+    }
+    return { number, state: 'open', body: null,
+      issue_dependencies_summary: { blocked_by: 0 }, sub_issues_summary: { total: 0 } };
+  };
+  const dependencies = { createGhGitDataApi, createHostedDraftCollector,
+    createGhDraftCollectorApi: () => createGhDraftCollectorApi({ run: observeIssue }),
     createGitDataDraftOperationStore: () => seed.store,
     createGhDraftOperationProvider: options => createGhDraftOperationProvider({ ...options, run }),
     createGitHubManagedRoundEvidencePort: () => evidence,

@@ -173,6 +173,70 @@ function skipReason(error) {
   return typeof code === 'string' && code.length > 0 ? code : 'OperationFailed';
 }
 
+function readyIssue(value) {
+  if (value === null || typeof value !== 'object' || typeof value.body !== 'string'
+      || !Number.isSafeInteger(value.openBlockers) || value.openBlockers < 0
+      || !Number.isSafeInteger(value.subIssues) || value.subIssues < 0) {
+    fail('InvalidHostedDraftPump');
+  }
+  return {
+    number: candidateNumber(value.number), body: value.body,
+    openBlockers: value.openBlockers, subIssues: value.subIssues,
+  };
+}
+
+/** One issue's dependency facts, read through the per-issue port and bound to the number asked. */
+async function readIssue(readIssueDependencies, repository, number) {
+  if (typeof readIssueDependencies !== 'function') fail('InvalidHostedDraftPump');
+  const issue = await readIssueDependencies({ repository, number });
+  if (issue === null || typeof issue !== 'object' || issue.number !== number) {
+    fail('InvalidHostedDraftPump');
+  }
+  return issue;
+}
+
+// A `Blocked by:` line, in prose or as the `Blocked-By:` trailer the issue audit writes.
+const DECLARED_BLOCKERS = /^[\t >*-]*Blocked[ -]by[ \t]*:(.*)$/iu;
+// `#n` or `owner/name#n`; a bare `name#n` is not a reference.
+const ISSUE_REFERENCE = /(?<![\w./-])(?:([\w.-]+)\/([\w.-]+))?#([1-9]\d*)\b/gu;
+
+/**
+ * The issues a `Blocked by` line names, in the order they appear. A reference into another
+ * repository cannot be read through this repository's port, so it is `null`: not proven closed.
+ */
+function declaredBlockers(body, repository) {
+  const blockers = new Set();
+  for (const line of body.split(/\r?\n/u)) {
+    const declared = line.match(DECLARED_BLOCKERS);
+    if (declared === null) continue;
+    for (const [, owner, name, number] of declared[1].matchAll(ISSUE_REFERENCE)) {
+      const local = owner === undefined
+        || (owner.toLowerCase() === repository.owner.toLowerCase()
+          && name.toLowerCase() === repository.name.toLowerCase());
+      blockers.add(local ? Number(number) : null);
+    }
+  }
+  return [...blockers];
+}
+
+/**
+ * Why a ready issue is not on the frontier, as a closed skip reason, or null when it is.
+ *
+ * Only a blocker read as `CLOSED` releases the issue: any other state, or a reference this port
+ * cannot read, keeps it waiting, because a blocker read as "no blocker" is the direction this
+ * selection must never fail in.
+ */
+async function outsideFrontier(issue, repository, readIssueDependencies) {
+  if (issue.subIssues > 0) return 'HasSubIssues';
+  if (issue.openBlockers > 0) return 'NativeBlockerOpen';
+  for (const number of declaredBlockers(issue.body, repository)) {
+    if (number === null) return 'DeclaredBlockerOpen';
+    const blocker = await readIssue(readIssueDependencies, repository, number);
+    if (blocker.state !== 'CLOSED') return 'DeclaredBlockerOpen';
+  }
+  return null;
+}
+
 async function boundPorts(create, argument) {
   const ports = await create(argument);
   if (ports === null || typeof ports !== 'object') fail('InvalidHostedDraftPump');
@@ -262,6 +326,7 @@ export async function runHostedDraftIntake({
   operationPortsFor,
   operationPortsForSelector,
   listReadyIssues = null,
+  readIssueDependencies = null,
   listUnsettledDrafts = listUnsettledDraftsCore,
   enqueueDraft = enqueueDraftCore,
   reconcileDraft = reconcileDraftCore,
@@ -322,17 +387,41 @@ export async function runHostedDraftIntake({
   }
 
   let numbers;
+  let readyIssues = null;
   if (candidates === null) {
     if (typeof listReadyIssues !== 'function') fail('InvalidHostedDraftPump');
     const rows = await listReadyIssues({ repository: canonicalRepository });
     if (!Array.isArray(rows)) fail('InvalidHostedDraftPump');
-    numbers = rows.map((row) => candidateNumber(row?.number));
+    readyIssues = new Map(rows.map(readyIssue).map((issue) => [issue.number, issue]));
+    numbers = [...readyIssues.keys()];
   } else {
     numbers = explicitNumbers;
   }
-  const ordered = [...new Set(numbers)].sort((left, right) => left - right).slice(0, limit);
+  const ordered = [...new Set(numbers)].sort((left, right) => left - right);
 
+  // The limit bounds Draft probes, so only frontier issues count against it: an issue waiting on
+  // a blocker or a spec costs no probe and cannot starve the frontier behind it.
+  let probes = 0;
   for (const number of ordered) {
+    if (probes === limit) break;
+    let frontierRefusal;
+    try {
+      // A labeled lane names its candidate without listing it, so it reads that issue's facts.
+      const issue = readyIssues === null
+        ? readyIssue(await readIssue(readIssueDependencies, canonicalRepository, number))
+        : readyIssues.get(number);
+      frontierRefusal = await outsideFrontier(issue, canonicalRepository, readIssueDependencies);
+    } catch (error) {
+      // An unreadable blocker keeps its own issue waiting, not every issue behind it.
+      if (error?.code === 'GitHubRateLimited') throw error;
+      skipped.push({ number, reason: skipReason(error) });
+      continue;
+    }
+    if (frontierRefusal !== null) {
+      skipped.push({ number, reason: frontierRefusal });
+      continue;
+    }
+    probes += 1;
     const canonicalSelector = selector({
       repository: canonicalRepository, workItem: { kind: 'ISSUE', number },
     });

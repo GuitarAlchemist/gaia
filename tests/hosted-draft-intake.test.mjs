@@ -16,6 +16,11 @@ function selectorFor(number) {
   });
 }
 
+/** The per-issue read of an issue on the frontier: open, unblocked, and not a spec. */
+async function onFrontier({ number }) {
+  return { number, state: 'OPEN', body: '', openBlockers: 0, subIssues: 0 };
+}
+
 const moduleResult = import(MODULE_URL).catch((loadError) => ({ loadError }));
 
 async function loaded() {
@@ -225,7 +230,7 @@ test('scheduled recovery admits one candidate after every probed message stays a
     async listUnsettledDrafts() { return [record]; },
     async listReadyIssues() {
       candidateLists += 1;
-      return [{ number: 61 }];
+      return [readyIssue(61)];
     },
     async enqueueDraft(candidate) {
       admissions += 1;
@@ -265,6 +270,7 @@ test('concurrent issue lanes cannot be consumed by unrelated unsettled recovery 
     ledgerPorts: {},
     operationPortsFor() { return {}; },
     operationPortsForSelector() { return {}; },
+    readIssueDependencies: onFrontier,
     async listUnsettledDrafts() {
       return [{
         operationId: SHA_A, workKey: SHA_B, committedRevision: SHA_C,
@@ -342,6 +348,7 @@ test('candidates are probed in ascending order, terminal keys skipped, at most o
     ledgerPorts: {},
     operationPortsFor() { return {}; },
     operationPortsForSelector() { return {}; },
+    readIssueDependencies: onFrontier,
     async listUnsettledDrafts() { return []; },
     async enqueueDraft(selector, expected) {
       assert.equal(expected, 'NONE');
@@ -397,6 +404,7 @@ test('a typed collection failure skips the candidate and never admits a second o
     ledgerPorts: {},
     operationPortsFor() { return {}; },
     operationPortsForSelector() { return {}; },
+    readIssueDependencies: onFrontier,
     async listUnsettledDrafts() { return []; },
     async enqueueDraft(selector) {
       const { number } = selector.workItem;
@@ -429,6 +437,7 @@ test('a rate-limited candidate ends the tick instead of spending the quota on th
     ledgerPorts: {},
     operationPortsFor() { return {}; },
     operationPortsForSelector() { return {}; },
+    readIssueDependencies: onFrontier,
     async listUnsettledDrafts() { return []; },
     async enqueueDraft(selector) {
       enqueued.push(selector.workItem.number);
@@ -446,6 +455,7 @@ test('a contended candidate is skipped by name and the next candidate is still p
     ledgerPorts: {},
     operationPortsFor() { return {}; },
     operationPortsForSelector() { return {}; },
+    readIssueDependencies: onFrontier,
     async listUnsettledDrafts() { return []; },
     async enqueueDraft(selector) {
       enqueued.push(selector.workItem.number);
@@ -471,6 +481,7 @@ test('probing is bounded and stops without admitting when every candidate is ter
       ledgerPorts: {},
       operationPortsFor() { return {}; },
       operationPortsForSelector() { return {}; },
+      readIssueDependencies: onFrontier,
       async listUnsettledDrafts() { return []; },
       async enqueueDraft(selector) {
         enqueued.push(selector.workItem.number);
@@ -513,6 +524,7 @@ test('the intake receipt binds the issue the transition belongs to, on every act
     ledgerPorts: {},
     operationPortsFor() { return {}; },
     operationPortsForSelector() { return {}; },
+    readIssueDependencies: onFrontier,
     async listUnsettledDrafts() { return []; },
     async enqueueDraft() {
       return { kind: 'Enqueued', operationId: SHA_A, workKey: SHA_B,
@@ -579,6 +591,7 @@ test('the receipt counts what stayed unsettled after the run, not what it found 
   const admitted = await run({ repository: REPOSITORY, candidates: [63] }, {
     ledgerPorts: {},
     operationPortsFor() { return {}; },
+    readIssueDependencies: onFrontier,
     operationPortsForSelector() { return {}; },
     async listUnsettledDrafts() { return []; },
     async enqueueDraft() {
@@ -600,6 +613,222 @@ test('the receipt counts what stayed unsettled after the run, not what it found 
     async reconcileDraft() { assert.fail('no candidate means no effect'); },
   });
   assert.equal(none.unsettledCount, 0);
+});
+
+// --- #235: the intake admits only the frontier ------------------------------------------------
+//
+// A ready issue is on the frontier when no issue blocking it is open and it has no sub-issues.
+// Blocking comes from GitHub's native dependency summary, with a `Blocked by: #n` line in the body
+// as the fallback. The listing and the per-issue read are the only GitHub facts the intake sees.
+
+function readyIssue(number, { body = '', openBlockers = 0, subIssues = 0 } = {}) {
+  return { number, body, openBlockers, subIssues };
+}
+
+/** The Draft side of a frontier run: every probe it enqueues, and an admission that settles. */
+function frontierPorts(enqueued) {
+  return {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return []; },
+    async enqueueDraft(selector) {
+      enqueued.push(selector.workItem.number);
+      return { kind: 'Enqueued', operationId: SHA_A, workKey: SHA_B,
+        generationKey: SHA_C, committedRevision: SHA_C };
+    },
+    async reconcileDraft(operationId) {
+      return { kind: 'Terminal', outcome: 'CREATED', effect: 'CREATE_DRAFT',
+        operationId, committedRevision: SHA_D };
+    },
+  };
+}
+
+test('an issue with an open native blocker is skipped by name and the next frontier issue admitted', async () => {
+  const run = await intake();
+  const enqueued = [];
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
+    ...frontierPorts(enqueued),
+    async listReadyIssues() {
+      return [readyIssue(51, { openBlockers: 1 }), readyIssue(52)];
+    },
+    async readIssueDependencies() { assert.fail('native facts arrive with the listing'); },
+  });
+
+  assert.deepEqual(enqueued, [52], 'the blocked issue is never enqueued');
+  assert.equal(receipt.phase, 'ADMIT');
+  assert.equal(receipt.workItem.number, 52);
+  assert.deepEqual(receipt.skipped, [{ number: 51, reason: 'NativeBlockerOpen' }]);
+});
+
+/** A per-issue read over fixed issue states, recording every issue the intake asked about. */
+function issueStates(states, reads) {
+  return async ({ repository, number }) => {
+    assert.deepEqual(repository, REPOSITORY);
+    reads.push(number);
+    assert.ok(Object.hasOwn(states, number), `the fixture knows #${number}`);
+    return { ...readyIssue(number), state: states[number] };
+  };
+}
+
+test('an issue whose Blocked by line names an open issue is skipped by name', async () => {
+  const run = await intake();
+  const enqueued = [];
+  const reads = [];
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
+    ...frontierPorts(enqueued),
+    async listReadyIssues() {
+      return [
+        // A read that does not say CLOSED is not proof that the blocker closed.
+        readyIssue(49, { body: 'Blocked by: #41' }),
+        // Another repository's issue cannot be read through this port, so it is not proven closed.
+        readyIssue(50, { body: 'Blocked by: other-org/other-repo#39' }),
+        readyIssue(51, { body: '## Why\n\nBlocked by: #39, #40\n' }),
+        readyIssue(52, { body: 'Blocked-By: GuitarAlchemist/gaia#39\n' }),
+      ];
+    },
+    readIssueDependencies: issueStates({ 39: 'CLOSED', 40: 'OPEN', 41: undefined }, reads),
+  });
+
+  assert.deepEqual(reads, [41, 39, 40, 39], 'each named blocker is resolved against GitHub');
+  assert.deepEqual(enqueued, [52], 'a closed declared blocker leaves the issue on the frontier');
+  assert.equal(receipt.phase, 'ADMIT');
+  assert.equal(receipt.workItem.number, 52);
+  assert.deepEqual(receipt.skipped, [
+    { number: 49, reason: 'DeclaredBlockerOpen' },
+    { number: 50, reason: 'DeclaredBlockerOpen' },
+    { number: 51, reason: 'DeclaredBlockerOpen' },
+  ]);
+});
+
+test('an issue with sub-issues is a spec, never admitted as work', async () => {
+  const run = await intake();
+  const enqueued = [];
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
+    ...frontierPorts(enqueued),
+    async listReadyIssues() { return [readyIssue(234, { subIssues: 4 })]; },
+    async readIssueDependencies() { assert.fail('sub-issue facts arrive with the listing'); },
+  });
+
+  assert.deepEqual(enqueued, []);
+  assert.equal(receipt.phase, 'EXPECTED_NONE');
+  assert.deepEqual(receipt.skipped, [{ number: 234, reason: 'HasSubIssues' }]);
+});
+
+// A blocker GitHub cannot read keeps its own issue waiting, by name; it must not stop the tick for
+// every other issue. A rate limit still ends the tick, as it does for a Draft probe.
+test('an unreadable declared blocker skips its issue by code and the tick goes on', async () => {
+  const run = await intake();
+  const failure = (code) => Object.assign(new Error(code), { code });
+  const enqueued = [];
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
+    ...frontierPorts(enqueued),
+    async listReadyIssues() {
+      return [readyIssue(51, { body: 'Blocked by: #999' }), readyIssue(52)];
+    },
+    async readIssueDependencies() { throw failure('GitHubObservationUnavailable'); },
+  });
+  assert.deepEqual(enqueued, [52]);
+  assert.equal(receipt.phase, 'ADMIT');
+  assert.deepEqual(receipt.skipped, [{ number: 51, reason: 'GitHubObservationUnavailable' }]);
+
+  const rateLimited = failure('GitHubRateLimited');
+  await assert.rejects(run({ repository: REPOSITORY, candidates: null }, {
+    ...frontierPorts(enqueued),
+    async listReadyIssues() {
+      return [readyIssue(51, { body: 'Blocked by: #40' }), readyIssue(52)];
+    },
+    async readIssueDependencies() { throw rateLimited; },
+  }), (error) => error === rateLimited);
+  assert.deepEqual(enqueued, [52], 'a rate-limited tick probes nothing further');
+});
+
+test('a waiting issue is admitted on the first intake after its last blocker closes', async () => {
+  const run = await intake();
+  const enqueued = [];
+  // Issue 52 is blocked natively and by a `Blocked by` line; GitHub closes the two one at a time.
+  const world = { openBlockers: 1, states: { 40: 'OPEN' } };
+  const tick = () => run({ repository: REPOSITORY, candidates: null }, {
+    ...frontierPorts(enqueued),
+    async listReadyIssues() {
+      return [readyIssue(52, { body: 'Blocked by: #40', openBlockers: world.openBlockers })];
+    },
+    readIssueDependencies: issueStates(world.states, []),
+  });
+
+  const first = await tick();
+  world.openBlockers = 0;
+  const second = await tick();
+  world.states[40] = 'CLOSED';
+  const third = await tick();
+
+  assert.deepEqual(first.skipped, [{ number: 52, reason: 'NativeBlockerOpen' }]);
+  assert.deepEqual(second.skipped, [{ number: 52, reason: 'DeclaredBlockerOpen' }]);
+  assert.deepEqual(enqueued, [52], 'enqueued once, on the tick after the last blocker closed');
+  assert.equal(third.phase, 'ADMIT');
+  assert.equal(third.workItem.number, 52);
+  assert.deepEqual(third.skipped, []);
+});
+
+// The probe limit bounds Draft work, so it counts frontier issues only: a spec or a blocked ticket
+// with a low number must not use up the probes and starve the frontier behind it.
+test('frontier issues keep issue-number order and the probe limit; waiting issues spend none', async () => {
+  const run = await intake();
+  const enqueued = [];
+  const receipt = await run({ repository: REPOSITORY, candidates: null, limit: 2 }, {
+    ...frontierPorts(enqueued),
+    async enqueueDraft(selector) {
+      enqueued.push(selector.workItem.number);
+      return { kind: 'StaleRevision', currentCommittedRevision: SHA_D };
+    },
+    async reconcileDraft() { assert.fail('nothing was admitted'); },
+    async listReadyIssues() {
+      return [
+        readyIssue(55, { openBlockers: 1 }), readyIssue(53), readyIssue(51, { subIssues: 2 }),
+        readyIssue(52), readyIssue(54),
+      ];
+    },
+    readIssueDependencies: onFrontier,
+  });
+
+  assert.deepEqual(enqueued, [52, 53], 'two probes, in number order, both on the frontier');
+  assert.equal(receipt.phase, 'EXPECTED_NONE');
+  assert.deepEqual(receipt.skipped, [
+    { number: 51, reason: 'HasSubIssues' },
+    { number: 52, reason: 'StaleRevision' },
+    { number: 53, reason: 'StaleRevision' },
+  ]);
+});
+
+// Labelling an issue starts its own lane with that issue as the explicit candidate. Without the
+// same frontier there, labelling a spec and its tickets at once would admit all of them.
+test('a labeled lane reads its own issue and admits it only on the frontier', async () => {
+  const run = await intake();
+  const enqueued = [];
+  const reads = [];
+  const facts = { 234: { subIssues: 4 }, 236: { openBlockers: 1 }, 235: {} };
+  const ports = {
+    ...frontierPorts(enqueued),
+    async listReadyIssues() { assert.fail('an issue lane never lists the global queue'); },
+    async readIssueDependencies({ repository, number }) {
+      assert.deepEqual(repository, REPOSITORY);
+      reads.push(number);
+      return { ...readyIssue(number, facts[number]), state: 'OPEN' };
+    },
+  };
+
+  const spec = await run({ repository: REPOSITORY, candidates: [234] }, ports);
+  const blocked = await run({ repository: REPOSITORY, candidates: [236] }, ports);
+  const frontier = await run({ repository: REPOSITORY, candidates: [235] }, ports);
+
+  assert.deepEqual(reads, [234, 236, 235]);
+  assert.deepEqual(enqueued, [235], 'only the frontier issue reaches the Draft ledger');
+  assert.equal(spec.phase, 'EXPECTED_NONE');
+  assert.deepEqual(spec.skipped, [{ number: 234, reason: 'HasSubIssues' }]);
+  assert.equal(blocked.phase, 'EXPECTED_NONE');
+  assert.deepEqual(blocked.skipped, [{ number: 236, reason: 'NativeBlockerOpen' }]);
+  assert.equal(frontier.phase, 'ADMIT');
+  assert.equal(frontier.workItem.number, 235);
 });
 
 // --- Spec R1 blocker S1: the observation denominator ------------------------------------------
@@ -702,6 +931,39 @@ test('positive control: a genuinely empty ledger still publishes EXPECTED_NONE a
   assert.equal(block.unsettledCount, 0, 'an empty ledger is genuinely zero');
 });
 
+// A spec in flight leaves its later tickets waiting on every scheduled tick. Those skips are the
+// frontier working as designed; an observation refused over them would leave the Control Room with
+// no reading while the pump is healthy, which is the #172 defect again.
+test('a tick whose ready issues all wait outside the frontier still publishes EXPECTED_NONE', async () => {
+  const run = await intake();
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
+    ledgerPorts: {},
+    operationPortsFor() { return {}; },
+    operationPortsForSelector() { return {}; },
+    async listUnsettledDrafts() { return []; },
+    async listReadyIssues() {
+      return [
+        readyIssue(234, { subIssues: 4 }),
+        readyIssue(236, { openBlockers: 1 }),
+        readyIssue(237, { body: 'Blocked by: #236' }),
+      ];
+    },
+    readIssueDependencies: issueStates({ 236: 'OPEN' }, []),
+    async enqueueDraft() { assert.fail('no frontier issue means no admission'); },
+    async reconcileDraft() { assert.fail('no frontier issue means no effect'); },
+  });
+  assert.deepEqual(receipt.skipped, [
+    { number: 234, reason: 'HasSubIssues' },
+    { number: 236, reason: 'NativeBlockerOpen' },
+    { number: 237, reason: 'DeclaredBlockerOpen' },
+  ]);
+
+  const block = await renderThrough(receipt, 'SCHEDULE');
+  assert.equal(block.state, 'EXPECTED_NONE');
+  assert.equal(block.severity, 'healthy');
+  assert.equal(block.unsettledCount, 0);
+});
+
 // S1, first interleaving: the recovery lane snapshots an empty unsettled set, a labeled lane for
 // issue 62 durably enqueues while the recovery lane is still selecting, and the recovery lane
 // publishes the pre-action zero. Since R1 the recovery lane is the only lane with an observation
@@ -755,7 +1017,7 @@ test('a recovery run that loses the enqueue race publishes the winner as unsettl
     operationPortsFor() { return {}; },
     operationPortsForSelector() { return {}; },
     async listUnsettledDrafts() { return durable.list(); },
-    async listReadyIssues() { return [{ number: 62 }]; },
+    async listReadyIssues() { return [readyIssue(62)]; },
     async enqueueDraft(candidate) {
       assert.equal(candidate.workItem.number, 62);
       // The labeled lane's enqueue is already committed; this one is the CAS loser.
@@ -788,6 +1050,7 @@ test('a post-action read that returns less than the run projected cannot lower t
     ledgerPorts: {},
     operationPortsFor() { return {}; },
     operationPortsForSelector() { return {}; },
+    readIssueDependencies: onFrontier,
     // Both reads answer empty, while this run admits an operation that never settles.
     async listUnsettledDrafts() { return []; },
     async enqueueDraft() {
@@ -815,6 +1078,7 @@ test('the operation this run admitted is counted once, not twice', async () => {
     ledgerPorts: {},
     operationPortsFor() { return {}; },
     operationPortsForSelector() { return {}; },
+    readIssueDependencies: onFrontier,
     async listUnsettledDrafts() { return durable.list(); },
     async enqueueDraft(candidate) {
       const row = durable.add(candidate.workItem.number);

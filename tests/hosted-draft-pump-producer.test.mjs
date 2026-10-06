@@ -567,7 +567,10 @@ function stubRuntime(reconciled) {
       };
     },
     async reconcile() { return reconciled; },
-    async listReadyIssues() { return [{ number: 70 }]; },
+    async listReadyIssues() { return [{ number: 70, body: '', openBlockers: 0, subIssues: 0 }]; },
+    async readIssueDependencies({ number }) {
+      return { number, state: 'OPEN', body: '', openBlockers: 0, subIssues: 0 };
+    },
   });
 }
 

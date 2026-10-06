@@ -157,9 +157,12 @@ runtime methods:
            skip for this tick and continue
          otherwise emit receipt phase RESUME and stop
 4. candidates:
-       issues-labeled run -> [ the event issue number ]
-       scheduled run      -> open ready-for-agent issues, number ascending, capped at N = 5
-5. for each candidate, at most N probes:
+       issues-labeled run -> [ the event issue number ], its dependency facts read for it
+       scheduled run      -> open ready-for-agent issues with their dependency facts, number ascending
+5. for each candidate, until N probes (#235):
+       not on the frontier -> record HasSubIssues (it has sub-issues: a spec), NativeBlockerOpen
+         (an open native blocker) or DeclaredBlockerOpen (a `Blocked by` line names an issue not
+         read as CLOSED) and continue, spending no probe; an unreadable blocker skips by its code
        enqueue; on a typed collector error or any non-Enqueued result, record a skip and continue
        reconcile the enqueued operation at its committed revision
        emit receipt phase ADMIT; stop
@@ -230,6 +233,8 @@ non-negotiable details:
 3. It is a hint list only. Every value is re-derived and re-authorized by `collect()`: open state,
    current `ready-for-agent` label, label-event actor holding `TRIAGE` or above, a unique evidence
    branch with exact `Gaia-Issue` and `Gaia-Ready-Receipt` trailers, and two stable read-backs.
+   The dependency facts each row carries since #235 (open native blockers, sub-issues, the body)
+   only ever withhold a candidate from the frontier; they never authorize one.
 
 ### Evidence head seeding
 

@@ -578,6 +578,9 @@ export function createHostedDraftPumpRuntime(
     async listReadyIssues() {
       return github.listReadyIssues({ repository: configuration.repository });
     },
+    async readIssueDependencies({ number }) {
+      return github.readIssueDependencies({ repository: configuration.repository, number });
+    },
   });
 }
 
@@ -717,6 +720,7 @@ export async function main({
         operationPortsForSelector() { return { workKey: null }; },
         async listUnsettledDrafts() { return runtime.listUnsettled(); },
         async listReadyIssues(request) { return runtime.listReadyIssues(request); },
+        async readIssueDependencies(request) { return runtime.readIssueDependencies(request); },
         async enqueueDraft(canonicalSelector) { return runtime.enqueue(canonicalSelector); },
         async reconcileDraft(operationId, expectedRevision, ports) {
           return runtime.reconcile({ operationId, workKey: ports.workKey, expectedRevision });

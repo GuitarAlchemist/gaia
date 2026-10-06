@@ -166,7 +166,10 @@ the truth. Refusing is `no effect + typed refusal`, which is the contract.
 **Skips are read only where they are the whole story.** On `RESUME` / `ADMIT` the transition
 describes the operation that actually moved and an incidental skip is not part of it. On
 `EXPECTED_NONE` the skips *are* the run: a `StaleRevision` skip is the ordinary result of probing
-forward past settled work keys and stays benign. Three skips have a settled meaning and each publishes
+forward past settled work keys and stays benign. So do the three frontier skips (#235),
+`HasSubIssues`, `NativeBlockerOpen` and `DeclaredBlockerOpen`: an issue left for a later tick
+because it is a spec or waits on an open blocker is the intake working as designed, and refusing on
+it would leave every tick of a spec in flight without a reading (#172). Three skips have a settled meaning and each publishes
 a blocker, so the reading is `BLOCKED`, not a reassuring healthy `EXPECTED_NONE`:
 `EFFECT_AMBIGUOUS` (a quarantined ambiguous recovery, which the intake keeps nonterminal but inert)
 publishes `EFFECT_AMBIGUOUS`, `CrossGenerationIntent` publishes `CROSS_GENERATION_INTENT`, and

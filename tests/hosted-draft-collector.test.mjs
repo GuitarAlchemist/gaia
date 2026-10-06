@@ -521,3 +521,45 @@ test('head commits are read once per intake run, in bounded parallel, and failur
   await retrying.collect(SELECTOR);
   assert.equal(fresh.counters.reads, 21, 'only the failed read is repeated');
 });
+
+// #235: the intake keeps only the frontier, so the listing carries each issue's dependency facts
+// and a single issue can be read for them. `blocked_by` counts open blockers only; the total also
+// counts closed ones and would keep a released ticket waiting.
+test('the gh adapter carries ready issues dependency facts, and refuses a row without them', async () => {
+  const { createGhDraftCollectorApi, HostedDraftCollectorError } = await api();
+  const repository = { owner: 'GuitarAlchemist', name: 'gaia' };
+  const row = (number, { openBlockers = 0, subIssues = 0, body = null, state = 'open' } = {}) => ({
+    number, state, body,
+    issue_dependencies_summary: {
+      blocked_by: openBlockers, total_blocked_by: openBlockers + 1, blocking: 0, total_blocking: 0,
+    },
+    sub_issues_summary: { total: subIssues, completed: 0, percent_completed: 0 },
+  });
+  const responses = [
+    [[row(237, { openBlockers: 1, body: 'Blocked by: #236' }), { ...row(230), pull_request: {} },
+      row(234, { subIssues: 4 })]],
+    row(236, { state: 'closed' }),
+    [[{ number: 238, state: 'open', body: null }]],
+  ];
+  const calls = [];
+  const github = createGhDraftCollectorApi({
+    async run(args) {
+      calls.push(args);
+      return structuredClone(responses.shift());
+    },
+  });
+
+  assert.deepEqual(await github.listReadyIssues({ repository }), [
+    { number: 234, body: '', openBlockers: 0, subIssues: 4 },
+    { number: 237, body: 'Blocked by: #236', openBlockers: 1, subIssues: 0 },
+  ]);
+  assert.deepEqual(await github.readIssueDependencies({ repository, number: 236 }), {
+    number: 236, state: 'CLOSED', body: '', openBlockers: 0, subIssues: 0,
+  });
+  assert.deepEqual(calls[1], ['api', 'repos/GuitarAlchemist/gaia/issues/236']);
+  await assert.rejects(
+    github.listReadyIssues({ repository }),
+    (error) => error instanceof HostedDraftCollectorError && error.code === 'IssueObservationInvalid',
+    'a row without its dependency summary cannot prove it is on the frontier',
+  );
+});
