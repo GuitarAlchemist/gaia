@@ -9,7 +9,8 @@ implementation plan for this bounded slice; it is not an activation receipt.
 The operator had to type a digest and unlock a key for each routine run. The hosted
 pump produces a Draft receipt; the portfolio operator starts a factory interactively.
 The accepted outcome is automatic continuation to a local candidate under standing
-authority, not automatic publication or merge.
+authority, then publication of a ready candidate to its own Draft's branch
+([#236](#decision-the-pump-publishes-its-candidate-to-its-own-draft-eng-02-236)), never merge.
 
 Three alternatives were considered before implementation:
 
@@ -350,6 +351,79 @@ with `requireVerification`, so a composition without the adapter cannot settle a
 receipts from before #163 carry no verification and remain readable. The same change aligns the
 contract with the factory's `reviewer-initial` evidence role for a repaired receipt, which it
 previously refused.
+
+### Decision: the pump publishes its candidate to its own Draft (ENG-02, #236)
+
+Until #236 the pump ended at a local candidate: the reviewed and verified change never reached
+GitHub, and its Draft kept one empty evidence commit. The operator decided on 2026-10-06
+([spec #234](https://github.com/GuitarAlchemist/gaia/issues/234)) that the pump may push its
+candidate to its own Draft's branch, the Draft staying a draft, on one host slot, one pull
+request per ticket. [INTENT.md](../INTENT.md#standing-publication-authority) records that
+authority and its limits.
+
+Constraints and invariants, each refused before any effect:
+
+- only a `COMPLETED` job whose receipt is `CANDIDATE_READY` with an `APPROVE` and a passing host
+  verification publishes; rejected, no-candidate, retired, unreconciled and unverified (pre-#163)
+  jobs do not;
+- the target is the head ref of the Draft the job was admitted with: the observed pull request
+  must carry that number, that head ref and the policy's repository as head repository;
+- that pull request must still be an open draft;
+- fast-forward only: the observed Draft head must equal `intent.draft.headRevision`, which is the
+  receipt's base, the commit's one parent is that head, and the push leases it;
+- authority is the existing policy row: `beginPublication` checks under `BEGIN IMMEDIATE` that the
+  policy is enabled and that jobs plus publications stay below `--max-runs`, then records the
+  operation before the first effect; a retry re-checks the policy, not the budget, before pushing.
+
+Usage sketch: after the unchanged scheduling pass, the tick visits every completed ready job
+without a completed publication: observe the Draft and the worktree, build the publication
+intent (pure), begin the publication, commit, push, finish.
+
+Three designs were compared:
+
+- **Rejected: reuse `createGitHubCandidatePublicationAdapter` and its Git/`gh` effects.** It pushes
+  a new deterministic `gaia/issue-N-…` branch and opens a second pull request beside the Draft,
+  which breaks "own Draft branch only" and "one pull request per ticket"; it consumes a signed
+  single-use `PUBLISH_CANDIDATE` grant, the per-run ceremony this intent removed; and its commit
+  moves local HEAD, so a crash after the commit fails closed forever
+  ([publication](github-portfolio-publication.md#deliberate-exclusions)).
+- **Rejected: stateless publication recognised only by observation.** A deterministic commit and
+  a remote readback are enough to avoid a second push, with no schema change. But nothing durable
+  records that authority was spent, so a publication cannot count against the budget or refuse
+  when it is exhausted, and a push is linked to its authority only by inference.
+- **Selected: store-mediated Draft-branch publication.** An additive `autonomous_publications`
+  table in the same SQLite ledger holds one row per job, keyed by job and by operation identity
+  `sha256({ grantId: jobKey, intentRevision: <publication intent revision> })`. The commit is built
+  with `git commit-tree` from a temporary index, with a fixed identity, the parent's committer date
+  and no signature, so its object id is a function of the operation and local HEAD never moves.
+  The push is `--force-with-lease=refs/heads/<head ref>:<admitted head>` after an ancestry check.
+  `finishPublication` stores `gaia-autonomous-publication-receipt/1`.
+
+The existing pure intent builder is reused, widened by one closed form. Autonomous transitions
+are never persisted, and a Draft-bound transition's `fromRevision` is the organization portfolio,
+not the repository decision snapshot the intent signs. The tick therefore projects the stored
+terminal job into the transition schema with `fromRevision` equal to `intent.snapshotRevision`,
+the snapshot the intent and its authority bind. `buildGitHubCandidatePublishIntent` accepts an
+intent carrying `draft`, requires the receipt base to equal the Draft head, and emits `draft` with
+the closed operations `COMMIT_CANDIDATE` and `PUSH_DRAFT_BRANCH`. The new-branch adapter refuses
+that form, so a Draft-bound intent cannot open a pull request.
+
+Recovery: a push whose acknowledgement is lost returns `RECONCILIATION_REQUIRED` and leaves the
+row `STARTED`. The next tick recomputes the same commit; if the Draft head already equals it, the
+publication completes without a push; if the head is still the admitted one, it re-checks the
+policy and pushes under the same operation; any other head refuses `DraftHeadMoved` and the row
+stays. A pending publication does not occupy the host slot. Publication runs after scheduling,
+so a candidate completed in a tick is published in that tick, and a candidate completed by
+reconciliation or before this change is published by a later tick when it meets every rule above.
+
+Reversibility class: **compensatable**. The Draft stays a draft, so nothing merges without the
+drain. The operator undoes a push with
+`git push --force-with-lease=refs/heads/<head ref>:<commit> origin <previous head>:refs/heads/<head ref>`
+from the receipt, or closes the Draft; the spent budget unit is not refunded. Removing the
+`publication` composition from the CLI stops publication; a reader older than this change refuses
+a ledger holding the publications table rather than misreading its budget. Known interaction: the
+hosted Draft provider compares a Draft head with its generation head, so a re-run of hosted intake
+for a published issue reads `ProviderConflict`; the drain itself is unchanged.
 
 ## Ownership and recovery
 
