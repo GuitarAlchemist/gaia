@@ -151,7 +151,7 @@ function nonNegativeInteger(value, code) {
 
 /**
  * What the intake reads to keep only the frontier: open native blockers, sub-issues, and the body
- * whose `Blocked by` lines are the fallback. `blocked_by` counts open blockers; the total would
+ * whose declared relationships are the fallback. `blocked_by` counts open blockers; the total would
  * also count closed ones. A row without its summaries cannot prove nothing blocks it, so it refuses.
  */
 function dependencyFacts(raw) {

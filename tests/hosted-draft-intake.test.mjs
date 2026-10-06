@@ -618,8 +618,9 @@ test('the receipt counts what stayed unsettled after the run, not what it found 
 // --- #235: the intake admits only the frontier ------------------------------------------------
 //
 // A ready issue is on the frontier when no issue blocking it is open and it has no sub-issues.
-// Blocking comes from GitHub's native dependency summary, with a `Blocked by: #n` line in the body
-// as the fallback. The listing and the per-issue read are the only GitHub facts the intake sees.
+// Blocking comes from GitHub's native dependency summary, with the body's declared relationships
+// (the `Blocked-By` and `Depends-On` trailers every other reader of an issue shares) as the
+// fallback. The listing and the per-issue read are the only GitHub facts the intake sees.
 
 function readyIssue(number, { body = '', openBlockers = 0, subIssues = 0 } = {}) {
   return { number, body, openBlockers, subIssues };
@@ -671,7 +672,7 @@ function issueStates(states, reads) {
   };
 }
 
-test('an issue whose Blocked by line names an open issue is skipped by name', async () => {
+test('an issue whose Blocked-By or Depends-On trailer names an open issue is skipped by name', async () => {
   const run = await intake();
   const enqueued = [];
   const reads = [];
@@ -680,11 +681,13 @@ test('an issue whose Blocked by line names an open issue is skipped by name', as
     async listReadyIssues() {
       return [
         // A read that does not say CLOSED is not proof that the blocker closed.
-        readyIssue(49, { body: 'Blocked by: #41' }),
+        readyIssue(49, { body: 'Blocked-By: #41' }),
         // Another repository's issue cannot be read through this port, so it is not proven closed.
-        readyIssue(50, { body: 'Blocked by: other-org/other-repo#39' }),
-        readyIssue(51, { body: '## Why\n\nBlocked by: #39, #40\n' }),
-        readyIssue(52, { body: 'Blocked-By: GuitarAlchemist/gaia#39\n' }),
+        readyIssue(50, { body: 'Blocked-By: other-org/other-repo#39' }),
+        readyIssue(51, { body: '## Why\n\nBlocked-By: #39\nDepends-On: #40\n' }),
+        // Prose is not the contract: the issue audit repairs it into a trailer, and until then the
+        // intake reads only the qualified trailer that names a closed issue.
+        readyIssue(52, { body: 'Blocked by: #40\n\nBlocked-By: GuitarAlchemist/gaia#39\n' }),
       ];
     },
     readIssueDependencies: issueStates({ 39: 'CLOSED', 40: 'OPEN', 41: undefined }, reads),
@@ -699,6 +702,24 @@ test('an issue whose Blocked by line names an open issue is skipped by name', as
     { number: 50, reason: 'DeclaredBlockerOpen' },
     { number: 51, reason: 'DeclaredBlockerOpen' },
   ]);
+});
+
+// A relationship block the shared parser rejects is that issue's defect, which the issue audit
+// reports; it waits under its own reason and never stops the tick for the issues behind it.
+test('an issue whose declared relationships do not parse is skipped by name, not the tick', async () => {
+  const run = await intake();
+  const enqueued = [];
+  const receipt = await run({ repository: REPOSITORY, candidates: null }, {
+    ...frontierPorts(enqueued),
+    async listReadyIssues() {
+      return [readyIssue(51, { body: 'Blocked-By: NONE\n' }), readyIssue(52)];
+    },
+    async readIssueDependencies() { assert.fail('an unparsed block names no issue to read'); },
+  });
+
+  assert.deepEqual(enqueued, [52]);
+  assert.equal(receipt.phase, 'ADMIT');
+  assert.deepEqual(receipt.skipped, [{ number: 51, reason: 'DeclaredRelationshipInvalid' }]);
 });
 
 test('an issue with sub-issues is a spec, never admitted as work', async () => {
@@ -724,7 +745,7 @@ test('an unreadable declared blocker skips its issue by code and the tick goes o
   const receipt = await run({ repository: REPOSITORY, candidates: null }, {
     ...frontierPorts(enqueued),
     async listReadyIssues() {
-      return [readyIssue(51, { body: 'Blocked by: #999' }), readyIssue(52)];
+      return [readyIssue(51, { body: 'Blocked-By: #999' }), readyIssue(52)];
     },
     async readIssueDependencies() { throw failure('GitHubObservationUnavailable'); },
   });
@@ -736,7 +757,7 @@ test('an unreadable declared blocker skips its issue by code and the tick goes o
   await assert.rejects(run({ repository: REPOSITORY, candidates: null }, {
     ...frontierPorts(enqueued),
     async listReadyIssues() {
-      return [readyIssue(51, { body: 'Blocked by: #40' }), readyIssue(52)];
+      return [readyIssue(51, { body: 'Blocked-By: #40' }), readyIssue(52)];
     },
     async readIssueDependencies() { throw rateLimited; },
   }), (error) => error === rateLimited);
@@ -746,12 +767,12 @@ test('an unreadable declared blocker skips its issue by code and the tick goes o
 test('a waiting issue is admitted on the first intake after its last blocker closes', async () => {
   const run = await intake();
   const enqueued = [];
-  // Issue 52 is blocked natively and by a `Blocked by` line; GitHub closes the two one at a time.
+  // Issue 52 is blocked natively and by a `Blocked-By` trailer; GitHub closes the two one at a time.
   const world = { openBlockers: 1, states: { 40: 'OPEN' } };
   const tick = () => run({ repository: REPOSITORY, candidates: null }, {
     ...frontierPorts(enqueued),
     async listReadyIssues() {
-      return [readyIssue(52, { body: 'Blocked by: #40', openBlockers: world.openBlockers })];
+      return [readyIssue(52, { body: 'Blocked-By: #40', openBlockers: world.openBlockers })];
     },
     readIssueDependencies: issueStates(world.states, []),
   });
@@ -945,7 +966,7 @@ test('a tick whose ready issues all wait outside the frontier still publishes EX
       return [
         readyIssue(234, { subIssues: 4 }),
         readyIssue(236, { openBlockers: 1 }),
-        readyIssue(237, { body: 'Blocked by: #236' }),
+        readyIssue(237, { body: 'Blocked-By: #236' }),
       ];
     },
     readIssueDependencies: issueStates({ 236: 'OPEN' }, []),

@@ -161,13 +161,19 @@ runtime methods:
        scheduled run      -> open ready-for-agent issues with their dependency facts, number ascending
 5. for each candidate, until N probes (#235):
        not on the frontier -> record HasSubIssues (it has sub-issues: a spec), NativeBlockerOpen
-         (an open native blocker) or DeclaredBlockerOpen (a `Blocked by` line names an issue not
-         read as CLOSED) and continue, spending no probe; an unreadable blocker skips by its code
+         (an open native blocker), DeclaredBlockerOpen (a `Blocked-By` or `Depends-On` trailer
+         names an issue not read as CLOSED) or DeclaredRelationshipInvalid (the shared parser
+         refuses the block) and continue, spending no probe; an unreadable blocker skips by its code
        enqueue; on a typed collector error or any non-Enqueued result, record a skip and continue
        reconcile the enqueued operation at its committed revision
        emit receipt phase ADMIT; stop
 5. emit receipt phase EXPECTED_NONE
 ```
+
+The declared fallback reads `declaredRelationships` (`src/issue-relationships.mjs`) and nothing else,
+so by design `Blocked by:` prose stays unread until the issue audit's repair turns it into a trailer,
+and a `## Blocked by` section, which the audit reports as an undeclared reference, until one is
+added ([GitHub issue consistency](github-issue-consistency.md)).
 
 Step 3 remains fail-closed for issue-triggered intake: the lane resumes only the operation for its
 own issue and returns its result, so unrelated recovery cannot steal the lane. Scheduled recovery

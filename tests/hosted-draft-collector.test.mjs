@@ -536,7 +536,7 @@ test('the gh adapter carries ready issues dependency facts, and refuses a row wi
     sub_issues_summary: { total: subIssues, completed: 0, percent_completed: 0 },
   });
   const responses = [
-    [[row(237, { openBlockers: 1, body: 'Blocked by: #236' }), { ...row(230), pull_request: {} },
+    [[row(237, { openBlockers: 1, body: 'Blocked-By: #236' }), { ...row(230), pull_request: {} },
       row(234, { subIssues: 4 })]],
     row(236, { state: 'closed' }),
     [[{ number: 238, state: 'open', body: null }]],
@@ -551,7 +551,7 @@ test('the gh adapter carries ready issues dependency facts, and refuses a row wi
 
   assert.deepEqual(await github.listReadyIssues({ repository }), [
     { number: 234, body: '', openBlockers: 0, subIssues: 4 },
-    { number: 237, body: 'Blocked by: #236', openBlockers: 1, subIssues: 0 },
+    { number: 237, body: 'Blocked-By: #236', openBlockers: 1, subIssues: 0 },
   ]);
   assert.deepEqual(await github.readIssueDependencies({ repository, number: 236 }), {
     number: 236, state: 'CLOSED', body: '', openBlockers: 0, subIssues: 0,

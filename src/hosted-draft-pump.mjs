@@ -3,6 +3,7 @@ import {
   listUnsettledDrafts as listUnsettledDraftsCore,
   reconcileDraft as reconcileDraftCore,
 } from './draft-operation-envelope.mjs';
+import { declaredRelationships } from './issue-relationships.mjs';
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 
@@ -195,28 +196,22 @@ async function readIssue(readIssueDependencies, repository, number) {
   return issue;
 }
 
-// A `Blocked by:` line, in prose or as the `Blocked-By:` trailer the issue audit writes.
-const DECLARED_BLOCKERS = /^[\t >*-]*Blocked[ -]by[ \t]*:(.*)$/iu;
-// `#n` or `owner/name#n`; a bare `name#n` is not a reference.
-const ISSUE_REFERENCE = /(?<![\w./-])(?:([\w.-]+)\/([\w.-]+))?#([1-9]\d*)\b/gu;
-
 /**
- * The issues a `Blocked by` line names, in the order they appear. A reference into another
+ * The issues the body declares as blocking, through the one declared-relationship contract the
+ * ranker, the issue audit and the read adapter share: its `Blocked-By` and `Depends-On` trailers.
+ * A body that declares none leaves the native facts alone to decide. A reference into another
  * repository cannot be read through this repository's port, so it is `null`: not proven closed.
  */
 function declaredBlockers(body, repository) {
-  const blockers = new Set();
-  for (const line of body.split(/\r?\n/u)) {
-    const declared = line.match(DECLARED_BLOCKERS);
-    if (declared === null) continue;
-    for (const [, owner, name, number] of declared[1].matchAll(ISSUE_REFERENCE)) {
-      const local = owner === undefined
-        || (owner.toLowerCase() === repository.owner.toLowerCase()
-          && name.toLowerCase() === repository.name.toLowerCase());
-      blockers.add(local ? Number(number) : null);
-    }
-  }
-  return [...blockers];
+  const local = `${repository.owner}/${repository.name}`;
+  const { dependencies } = declaredRelationships(body, local);
+  if (!Array.isArray(dependencies)) return [];
+  return dependencies.map((reference) => {
+    const separator = reference.lastIndexOf('#');
+    return reference.slice(0, separator).toLowerCase() === local.toLowerCase()
+      ? Number(reference.slice(separator + 1))
+      : null;
+  });
 }
 
 /**
@@ -229,7 +224,14 @@ function declaredBlockers(body, repository) {
 async function outsideFrontier(issue, repository, readIssueDependencies) {
   if (issue.subIssues > 0) return 'HasSubIssues';
   if (issue.openBlockers > 0) return 'NativeBlockerOpen';
-  for (const number of declaredBlockers(issue.body, repository)) {
+  let blockers;
+  try {
+    blockers = declaredBlockers(issue.body, repository);
+  } catch {
+    // The shared parser refuses a block it cannot reconcile; the issue audit names that defect.
+    return 'DeclaredRelationshipInvalid';
+  }
+  for (const number of blockers) {
     if (number === null) return 'DeclaredBlockerOpen';
     const blocker = await readIssue(readIssueDependencies, repository, number);
     if (blocker.state !== 'CLOSED') return 'DeclaredBlockerOpen';
