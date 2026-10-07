@@ -69,9 +69,9 @@ All three refuse these paths:
 | `GIT_DIR=<other>/.git`, `GIT_WORK_TREE=<plain>` | refuses | accepts `<plain>` | accepts `<plain>` |
 
 That environment is ordinary. Git exports `GIT_DIR`, `GIT_WORK_TREE` and others to every hook
-(githooks(5)), so a `verify:head` started from a hook inherits them. `src/resume-manifest-git.mjs`
-already strips these variables before every Git call. The factory's two Git helpers do not, so
-both factory entry points can be redirected.
+(githooks(5)), so a `verify:head` started from a hook inherits them. At the base,
+`src/resume-manifest-git.mjs` already stripped these variables before every Git call, but the
+factory's two Git helpers did not, so both factory entry points could be redirected.
 
 So the failure family has two members:
 
@@ -177,7 +177,8 @@ openWorktree(path) -> { root, git(args) -> stdout }   // refuses like D1
   receipt field.
 - **Reversibility:** freely reversible. Reverting restores the three inline checks, and nothing
   persisted depends on the module.
-- **Inputs:** base `37ba7bd`, issue #224, Git 2.45.1.windows.1, Node v26.8.1.
+- **Inputs:** base `37ba7bdd1808f91915cf16573f1eaf5d58348c09`, issue #224, Git 2.45.1.windows.1,
+  Node v26.8.1.
   `tests/worktree-root.test.mjs` re-runs the measurement above as its case table.
 
 This receipt selects an implementation candidate. It is not independent review, and it grants no

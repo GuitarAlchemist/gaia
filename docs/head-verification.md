@@ -87,7 +87,7 @@ This slice wires it into none of the following, and each would be a later, separ
 
 ## Falsifiers
 
-`tests/head-verification.test.mjs` holds 12 tests. Removing any of the following makes at least one of them fail:
+`tests/head-verification.test.mjs` holds 13 tests. Removing any of the following makes at least one of them fail:
 - the pin check;
 - the worktree-root check;
 - the clean-tree, base or ancestor checks;
