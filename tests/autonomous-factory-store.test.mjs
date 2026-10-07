@@ -186,7 +186,7 @@ test('standing policy persists and cannot be reset, including after revocation',
   assert.equal(a.status().enabled, false);
   fails(() => a.start(request()), 'PolicyDisabled');
   configure(a); const b = open();
-  assert.deepEqual(b.status(), { configured: true, enabled: true, repository: 'GuitarAlchemist/gaia', maxRuns: 2, usedRuns: 0, activeJobKey: null, jobs: [] });
+  assert.deepEqual(b.status(), { configured: true, enabled: true, repository: 'GuitarAlchemist/gaia', maxRuns: 2, usedRuns: 0, activeJobKey: null, jobs: [], publications: [] });
   fails(() => configure(b), 'PolicyExists');
   b.revoke(); assert.equal(a.status().enabled, false);
   fails(() => a.start(request()), 'PolicyDisabled');

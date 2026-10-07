@@ -231,7 +231,62 @@ function validateReceipt(value, job, { requireVerification = false } = {}) {
   return serialized;
 }
 
+// One publication per ready job (#236): its operation identity derives from the job's grant and
+// the publication intent, as the existing publication adapter derives its idempotency key.
+export function autonomousPublicationOperationId(job, intentRevision) {
+  if (!digest(intentRevision)) fail('InvalidPublication');
+  return sha256(encode({ grantId: job.jobKey, intentRevision }, 'InvalidPublication'));
+}
+const DRAFT_OPERATIONS = ['COMMIT_CANDIDATE', 'PUSH_DRAFT_BRANCH'];
+// A publication row binds a Draft-form publication intent to its exact completed ready job, and a
+// completed row binds the receipt of the one fast-forward push the intent requested.
+function validatePublication(value, job, code = 'InvalidPublication') {
+  exact(value, ['jobKey', 'operationId', 'intent', 'state', 'receipt'], code);
+  const factory = job.receipt?.factory;
+  if (value.jobKey !== job.jobKey || job.state !== 'COMPLETED' || job.receipt?.status !== 'CANDIDATE_READY'
+    || !['STARTED', 'COMPLETED'].includes(value.state)) fail(code);
+  const intent = JSON.parse(encode(value.intent, code));
+  exact(intent, ['schema', 'effect', 'source', 'repository', 'item', 'candidate', 'draft',
+    'requestedOperations', 'revision'], code);
+  const { revision, ...body } = intent;
+  const { draft } = job.intent;
+  exact(intent.source, ['transitionRevision', 'executionReceiptRevision', 'intentRevision',
+    'portfolioRevision', 'idempotencyKey'], code);
+  exact(intent.candidate, ['headOid', 'baseOid', 'changeSetIdentity', 'observation'], code);
+  if (intent.schema !== 'gaia-github-candidate-publish-intent/1' || intent.effect !== 'NONE'
+    || !digest(revision) || sha256(encode(body, code)) !== revision
+    || !Object.values(intent.source).every(digest)
+    || intent.source.idempotencyKey !== job.idempotencyKey
+    || intent.source.intentRevision !== job.intent.intentRevision
+    || intent.source.portfolioRevision !== job.intent.snapshotRevision
+    || intent.repository !== job.intent.repository
+    || encode(intent.item, code) !== encode({ kind: 'ISSUE', id: job.intent.itemId, number: job.intent.itemNumber }, code)
+    || encode(intent.draft, code) !== encode(draft, code)
+    || intent.candidate.headOid !== draft.headRevision || intent.candidate.baseOid !== draft.headRevision
+    || intent.candidate.changeSetIdentity !== factory.changeSet.identity
+    || intent.candidate.observation !== 'CALLER_OBSERVED_READ_ONLY_DATA'
+    || encode(intent.requestedOperations, code) !== encode(DRAFT_OPERATIONS, code)
+    || value.operationId !== autonomousPublicationOperationId(job, revision)) fail(code);
+  if (value.state === 'STARTED') {
+    if (value.receipt !== null) fail(code);
+    return { jobKey: job.jobKey, operationId: value.operationId, intent, state: 'STARTED', receipt: null };
+  }
+  const receipt = JSON.parse(encode(value.receipt, code));
+  exact(receipt, ['schema', 'status', 'jobKey', 'operationId', 'intentRevision', 'repository',
+    'draft', 'commitOid', 'changeSetIdentity'], code);
+  exact(receipt.draft, ['number', 'headRef', 'previousHeadOid'], code);
+  if (receipt.schema !== 'gaia-autonomous-publication-receipt/1' || receipt.status !== 'PUBLISHED'
+    || receipt.jobKey !== job.jobKey || receipt.operationId !== value.operationId
+    || receipt.intentRevision !== revision || receipt.repository !== job.intent.repository
+    || receipt.draft.number !== draft.number || receipt.draft.headRef !== draft.headRef
+    || receipt.draft.previousHeadOid !== draft.headRevision
+    || !/^[a-f0-9]{40}$/u.test(receipt.commitOid) || receipt.commitOid === draft.headRevision
+    || receipt.changeSetIdentity !== factory.changeSet.identity) fail(code);
+  return { jobKey: job.jobKey, operationId: value.operationId, intent, state: 'COMPLETED', receipt };
+}
+
 export {
+  validatePublication as validateAutonomousPublication,
   encode as canonicalAutonomousJson,
   digest as isAutonomousDigest,
   repositoryName as isAutonomousRepository,

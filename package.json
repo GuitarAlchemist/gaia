@@ -9,9 +9,9 @@
   },
   "gaiaArchitectureVerification": {
     "schema": "gaia-architecture-verification/1",
-    "commit": "a64059155b0d80461e455253eabdc2bdcd3a3708",
-    "date": "2026-10-01",
-    "contentRevision": "sha256:f8c7a3dfcdb0e4a5e4e3afc20e44670017a99918ef1e691b2b1fb845dcb2990f"
+    "commit": "b7f77b5886b4f943ebca0477628a0ac8015c4258",
+    "date": "2026-10-06",
+    "contentRevision": "sha256:701b3bbb3dd6e72601737353d5553880415042098425164f50f63f82018458b7"
   },
   "scripts": {
     "test": "node --test",
@@ -38,7 +38,7 @@
     "pump:candidates": "node scripts/pump-candidates.mjs --repository GuitarAlchemist/gaia",
     "resume:check": "node scripts/check-resume-prompt.mjs",
     "draft:settle-ambiguous": "node scripts/draft-ambiguity-settlement.mjs",
-    "test:autonomy": "node --test tests/autonomous-factory.test.mjs tests/autonomous-factory-store.test.mjs tests/autonomous-factory-host.test.mjs tests/autonomous-factory-no-change.test.mjs tests/autonomous-factory-errors.test.mjs tests/github-portfolio-execution.test.mjs tests/factory-agent.test.mjs tests/factory-headless-claude.test.mjs tests/factory-visible-claude.test.mjs tests/factory-streaming-claude.test.mjs tests/artifact-chain.test.mjs tests/artifact-chain-bounds.test.mjs tests/artifact-chain-cli.test.mjs",
+    "test:autonomy": "node --test tests/autonomous-factory.test.mjs tests/autonomous-factory-store.test.mjs tests/autonomous-factory-host.test.mjs tests/autonomous-factory-no-change.test.mjs tests/autonomous-factory-errors.test.mjs tests/autonomous-factory-publication.test.mjs tests/github-portfolio-execution.test.mjs tests/factory-agent.test.mjs tests/factory-headless-claude.test.mjs tests/factory-visible-claude.test.mjs tests/factory-streaming-claude.test.mjs tests/artifact-chain.test.mjs tests/artifact-chain-bounds.test.mjs tests/artifact-chain-cli.test.mjs",
     "pr-review:watch": "node scripts/pr-review-thread-supervisor.mjs",
     "lanes:sensor": "node scripts/local-lane-sensor.mjs",
     "lanes:watch": "node scripts/local-lanes-watch.mjs"

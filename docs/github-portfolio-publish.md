@@ -3,8 +3,8 @@
 ## Decision
 
 `buildGitHubCandidatePublishIntent({ transition, gitObservation })` is a pure dry-run seam
-between Gaia's independently reviewed local candidate and a future, separately
-authorized GitHub effect adapter. It accepts only a content-addressed
+between Gaia's independently reviewed local candidate and a separately authorized GitHub
+effect adapter. It accepts only a content-addressed
 `gaia-github-portfolio-transition/1` whose status is exactly `CANDIDATE_READY`.
 
 The module revalidates, in order:
@@ -22,6 +22,14 @@ the candidate `CALLER_OBSERVED_READ_ONLY_DATA`, has `effect: NONE`, and carries 
 requested-operation list:
 `COMMIT_CANDIDATE`, `PUSH_CANDIDATE_BRANCH`, and `OPEN_PULL_REQUEST`. These strings are
 descriptive data. They execute nothing and grant no authority.
+
+The intent has exactly two forms. When the nested factory intent carries the autonomous
+pump's admitted `draft` (`number`, `headRef`, `headRevision`), the receipt's base HEAD must
+equal that Draft head, and the result also carries `draft` with the closed list
+`COMMIT_CANDIDATE` and `PUSH_DRAFT_BRANCH`: the candidate fast-forwards its existing Draft
+and opens no pull request. Its consumer is the
+[autonomous Draft publication](autonomous-factory.md#decision-the-pump-publishes-its-candidate-to-its-own-draft-eng-02-236);
+the new-branch adapter refuses this form.
 
 ## Seam and invariants
 
@@ -60,7 +68,8 @@ than something this pure module independently measured.
 Putting `git push` or `gh pr create` behind a boolean flag would make a dry-run module
 carry latent authority. A generic effect plan would also let callers smuggle arbitrary
 operations through an apparently safe output. R1 instead emits one closed, deterministic
-description. A later slice must consume it through a separately reviewed, explicitly
-authorized effect seam and must independently remeasure repository, HEAD, base and
-change-set freshness again immediately before mutation. This R1 intent is advisory and
-is not evidence that its caller supplied a recent observation.
+description. Its consumers are separately reviewed, explicitly authorized effect seams
+([new branch](github-portfolio-publication.md), [own Draft](autonomous-factory.md#decision-the-pump-publishes-its-candidate-to-its-own-draft-eng-02-236)),
+which independently remeasure repository, HEAD, base and change-set freshness again
+immediately before mutation. This R1 intent is advisory and is not evidence that its
+caller supplied a recent observation.
