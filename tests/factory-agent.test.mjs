@@ -59,6 +59,58 @@ test('refuses a primary checkout instead of risking the caller repository', asyn
   );
 });
 
+test('refuses a .git file that Git cannot read as GitWorktreeRequired, not a raw Git failure', async () => {
+  const path = join(scratch, 'unreadable-gitfile');
+  mkdirSync(path);
+  writeFileSync(join(path, '.git'), 'gitdir: nowhere\n', 'utf8');
+
+  await assert.rejects(
+    executeAgentFactory({
+      worktree: path,
+      evidenceDir: evidenceDir('unreadable-gitfile'),
+      task: 'change candidate.txt',
+      runWorker: async () => ({ output: 'unused' }),
+      runReviewer: async () => ({ verdict: 'APPROVE', output: 'unused' }),
+    }),
+    (error) => error instanceof FactoryAgentError && error.code === 'GitWorktreeRequired',
+  );
+});
+
+test('an ambient GIT_DIR cannot redirect the factory to another repository', async () => {
+  // A hook exports GIT_DIR to its children (githooks(5)). Before #224 every factory Git call
+  // inherited it, so a valid linked worktree was read as the other repository and refused.
+  const { worktree } = fixture('ambient-worktree');
+  const other = join(scratch, 'ambient-other');
+  git(scratch, 'init', other);
+  git(other, '-c', 'user.name=Gaia Test', '-c', 'user.email=gaia@example.invalid',
+    'commit', '--allow-empty', '-m', 'another repository');
+  const head = git(worktree, 'rev-parse', 'HEAD');
+  const saved = process.env.GIT_DIR;
+  let receipt;
+  try {
+    process.env.GIT_DIR = join(other, '.git');
+    receipt = await executeAgentFactory({
+      worktree,
+      evidenceDir: evidenceDir('ambient'),
+      task: 'change candidate.txt',
+      runWorker: async ({ cwd }) => {
+        writeFileSync(join(cwd, 'candidate.txt'), 'after\n', 'utf8');
+        return { provider: 'fixture-worker', output: 'worker complete' };
+      },
+      runReviewer: async () => ({ provider: 'fixture-reviewer', verdict: 'APPROVE', output: 'ok' }),
+    });
+  } finally {
+    if (saved === undefined) delete process.env.GIT_DIR;
+    else process.env.GIT_DIR = saved;
+  }
+
+  assert.equal(receipt.status, 'completed');
+  assert.equal(receipt.base.head, head);
+  assert.deepEqual(receipt.changeSet.files.map(({ path, state }) => [path, state]), [
+    ['candidate.txt', 'present'],
+  ]);
+});
+
 test('binds a real worker change and independent approval into one receipt', async () => {
   const { worktree } = fixture('approved');
 
