@@ -144,8 +144,8 @@ unsettled set.
 
 One new command in `scripts/hosted-draft-pump.mjs`, added to `COMMANDS` and `COMMAND_FLAGS`
 (`COMMON_FLAGS` plus `issue`, `repository-node-id`, `owner`, `gate`, `check`, `eta-minutes`,
-`observation-out`, `run-id`, with `issue` optional). Control flow, composed entirely from existing
-runtime methods:
+`observation-out`, `run-id`, with `issue` optional). Control flow, composed from existing runtime
+methods and, since #235, the read-only `readIssueDependencies`:
 
 ```
 1. unsettled = listUnsettledDrafts(ports)
@@ -227,20 +227,35 @@ other's authority.
 
 ### Candidate listing
 
-One method, `listReadyIssues({ repository })`, added to the object returned by
-`createGhDraftCollectorApi`, reusing that module's existing call, failure, and positive-integer
-machinery over the open issues of the repository filtered by the `ready-for-agent` label. Three
-non-negotiable details:
+Two methods on the object returned by `createGhDraftCollectorApi`, both reusing that module's
+existing call, failure, and positive-integer machinery:
 
-1. It is **not** added to `REQUIRED_METHODS`. Doing so would break every existing collector fake;
+- `listReadyIssues({ repository })` reads the open issues of the repository filtered by the
+  `ready-for-agent` label and returns one `{ number, body, openBlockers, subIssues }` row per issue,
+  number ascending.
+- `readIssueDependencies({ repository, number })`, added by #235, reads one issue
+  (`repos/OWNER/NAME/issues/N`) and returns `{ number, state, body, openBlockers, subIssues }` with
+  `state` upper-cased. The intake calls it for a labeled lane's own issue and for each issue a
+  `Blocked-By` or `Depends-On` trailer names.
+
+Both take `openBlockers` from `issue_dependencies_summary.blocked_by` (open blockers only;
+`total_blocked_by` also counts closed ones), `subIssues` from `sub_issues_summary.total`, and a null
+body as empty. A response without either summary, without a state where one is read, or with a body
+that is neither text nor null refuses as `IssueObservationInvalid`; a provider failure is
+`GitHubRateLimited` or `GitHubObservationUnavailable`, as for every read of this adapter. A failed
+listing ends the tick. A failed `readIssueDependencies`, of a labeled lane's own issue or of a named
+blocker, skips only that candidate under its code, unless it is a rate limit, which ends the tick.
+Three non-negotiable details:
+
+1. Neither is added to `REQUIRED_METHODS`. Doing so would break every existing collector fake;
    extra methods on the port object are already tolerated.
-2. Pull requests are filtered out. The issues endpoint returns PRs as issues; omitting the filter
-   admits PR numbers as work items.
-3. It is a hint list only. Every value is re-derived and re-authorized by `collect()`: open state,
-   current `ready-for-agent` label, label-event actor holding `TRIAGE` or above, a unique evidence
-   branch with exact `Gaia-Issue` and `Gaia-Ready-Receipt` trailers, and two stable read-backs.
-   The dependency facts each row carries since #235 (open native blockers, sub-issues, the body)
-   only ever withhold a candidate from the frontier; they never authorize one.
+2. Pull requests are filtered out of the listing. The issues endpoint returns PRs as issues; omitting
+   the filter admits PR numbers as work items.
+3. Both are hints only. Every candidate number is re-derived and re-authorized by `collect()`: open
+   state, current `ready-for-agent` label, label-event actor holding `TRIAGE` or above, a unique
+   evidence branch with exact `Gaia-Issue` and `Gaia-Ready-Receipt` trailers, and two stable
+   read-backs. The dependency facts both return (open native blockers, sub-issues, the body, and a
+   named blocker's state) only ever withhold a candidate from the frontier; they never authorize one.
 
 ### Evidence head seeding
 
@@ -899,7 +914,8 @@ That list is the R0 intake's scope. Two operator paths designed later change
 `src/draft-operation-envelope.mjs` under their own decisions above: re-admission (#167) and
 settlement (#161). Settlement also adds two read-only reads to
 `src/gh-draft-operation-provider.mjs`, the marker search and the executor's run attempt. Neither
-touches anything else in the list.
+touches anything else in the list. The frontier (#235) touches none of it, and widens
+`src/hosted-draft-collector.mjs` beyond the R0 row below by one read, `readIssueDependencies`.
 
 ## Minimal implementation scope
 
