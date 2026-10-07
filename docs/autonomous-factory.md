@@ -421,9 +421,12 @@ drain. The operator undoes a push with
 `git push --force-with-lease=refs/heads/<head ref>:<commit> origin <previous head>:refs/heads/<head ref>`
 from the receipt, or closes the Draft; the spent budget unit is not refunded. Removing the
 `publication` composition from the CLI stops publication; a reader older than this change refuses
-a ledger holding the publications table rather than misreading its budget. Known interaction: the
-hosted Draft provider compares a Draft head with its generation head, so a re-run of hosted intake
-for a published issue reads `ProviderConflict`; the drain itself is unchanged.
+a ledger holding the publications table rather than misreading its budget. Known interaction,
+measured at the hosted intake seam: the published head lacks the `Gaia-Issue` and
+`Gaia-Ready-Receipt` trailers, so while the issue keeps `ready-for-agent` the hosted collector
+skips that issue with `HeadIdentityAmbiguous` before any ledger or provider read. The same tick
+still admits other ready issues; a tick that admits nothing reads blocker
+`EVIDENCE_HEAD_UNRESOLVED` instead of `NONE`. The drain itself is unchanged.
 
 ## Ownership and recovery
 
