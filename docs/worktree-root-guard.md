@@ -192,7 +192,7 @@ The direction of the comparison is unchanged.
 
 ## Known limits
 
-These were measured during #243's review. The guard does not close them.
+This was measured during #243's review. The guard does not close it.
 
 - **A write into the repository can still create a root.** Git calls a directory its worktree's top
   when it holds a gitfile, or when `core.worktree` in the repository's own `.git/config` names it.
@@ -201,11 +201,18 @@ These were measured during #243's review. The guard does not close them.
   Each entry point's index-bound cleanliness check still refuses the directory unless it mirrors
   every tracked file. The same key set through `GIT_CONFIG_*`, the global config or `HOME` is
   ignored by Git 2.45.1. A writer to the repository is outside what this guard defends.
-- **The neutral environment in `gitInput` has no observable effect today.** `gitInput` runs only
-  `git apply` without `--index`, which resolves every path against its working directory. A probe
-  ran the factory's three `apply` invocations from a worktree root under ten environments:
-  `GIT_DIR` naming a missing directory or another repository, `GIT_WORK_TREE` alone or with
-  `GIT_DIR`, `GIT_INDEX_FILE`, `GIT_PREFIX` and `GIT_CEILING_DIRECTORIES`. Each one patched the
-  working directory and nothing else. Removing the environment from `gitInput` (mutant M5) is
-  therefore equivalent, and no test can fail on it. The environment stays for any later
-  `gitInput` caller that reads the index.
+
+## The patch path
+
+`gitInput` runs only `git apply` without `--index`, for the Pi worker's patch. It resolves every
+*path* against its working directory. A probe ran the factory's three `apply` invocations from a
+worktree root under ten locator environments, and each one patched the working directory and
+nothing else. The repository Git opens still supplies the *configuration* that
+`--whitespace=error-all` obeys. An inherited `GIT_DIR` naming a repository whose
+`core.whitespace` drops `trailing-space` makes Git accept a trailing-space patch that the
+worktree's own repository refuses. #244's R0 Standards review found this after the author had
+called the environment in `gitInput` unobservable.
+
+So the neutral environment in `gitInput` binds the patch gate. `tests/factory-agent.test.mjs`
+pins it with "an ambient GIT_DIR cannot relax the whitespace gate on a Pi worker patch". Removing
+the environment from `gitInput` alone (mutant M5) fails that test.
