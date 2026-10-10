@@ -8,7 +8,7 @@ import {
   describeClaudeStreamEvent, launchStreamingProvider,
 } from '../src/factory-visible-claude.mjs';
 
-const context = { cwd: '.', task: 'Change fixture', baseHead: 'a'.repeat(40),
+const context = { requiredCapabilities: [], cwd: '.', task: 'Change fixture', baseHead: 'a'.repeat(40),
   env: { PATH: process.env.PATH, ANTHROPIC_API_KEY: 'never-forward' } };
 
 function completed(request, extra = {}) {
@@ -18,10 +18,19 @@ function completed(request, extra = {}) {
 
 const collect = () => { const lines = []; return { lines, write: (value) => lines.push(value) }; };
 
+// Deterministic observation fixture, not evidence of the installed Claude rules or a resume.
+const observePermissions = request => {
+  const now = Date.now();
+  return { schema: 'gaia-effective-permissions/1', source: 'effective-permissions', complete: true,
+    binding: request.binding, cwd: request.cwd, permissionMode: 'dontAsk',
+    observedAt: now, expiresAt: now + 30_000,
+    decisions: request.requiredCapabilities.map(value => ({ ...value, decision: 'allow' })) };
+};
+
 test('the autonomous streaming transport prints a rendered stream and never opens a trust-dialog TUI', async () => {
   const { lines, write } = collect();
   let launched;
-  const adapters = createStreamingClaudeAdapters({ isObservable: () => true, render: write, launch: (request) => {
+  const adapters = createStreamingClaudeAdapters({ observePermissions, isObservable: () => true, render: write, launch: (request) => {
     launched = request;
     assert.ok(request.args.includes('--print'), 'must stay noninteractive print mode');
     assert.equal(request.args[request.args.indexOf('--output-format') + 1], 'stream-json');
@@ -162,7 +171,7 @@ test('an unparsable or malformed event is reported, never trusted and never cras
 });
 
 test('the stream byte budget is separate from the small JSON result bound and both are enforced', async () => {
-  const adapters = createStreamingClaudeAdapters({ isObservable: () => true, render: () => {}, launch: (request) => {
+  const adapters = createStreamingClaudeAdapters({ observePermissions, isObservable: () => true, render: () => {}, launch: (request) => {
     assert.ok(request.maxStreamBytes >= 200_000);
     assert.equal(request.maxOutputBytes, 4096);
     completed(request);
