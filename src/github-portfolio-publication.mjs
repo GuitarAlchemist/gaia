@@ -202,7 +202,12 @@ function validatePullRequest(value, commitOid, expectedRepository) {
 async function invokeEffect(stage, action) {
   try {
     return await action();
-  } catch {
+  } catch (error) {
+    // Closed refusal codes carry policy/state facts, never raw provider diagnostics or authority.
+    if (stage === 'Commit' && ['IndexScopeRefused', 'CandidateChanged', 'CandidateStale',
+      'StagingVerificationFailed'].includes(error?.code)) {
+      fail(error.code, 'candidate publication refused at the commit boundary');
+    }
     fail(`${stage}Failed`, `${stage} effect failed without exposing provider diagnostics`);
   }
 }

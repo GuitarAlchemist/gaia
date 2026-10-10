@@ -130,6 +130,7 @@ test('publishes one authorized fresh candidate without merge authority', async (
 test('an effect failure is typed and redacted before later publication steps', async () => {
   const intent = publicationIntent();
   const calls = [];
+  let failureCode;
   const adapter = createGitHubCandidatePublicationAdapter({
     expectedRepository: intent.repository,
     authority: {
@@ -150,7 +151,8 @@ test('an effect failure is typed and redacted before later publication steps', a
       },
       async commit() {
         calls.push('commit');
-        throw new Error('secret provider diagnostic with credential material');
+        throw Object.assign(new Error('secret provider diagnostic with credential material'),
+          { code: failureCode });
       },
       async push() { calls.push('push'); },
       async openPullRequest() { calls.push('openPullRequest'); },
@@ -164,6 +166,10 @@ test('an effect failure is typed and redacted before later publication steps', a
       && !error.message.includes('secret provider diagnostic'),
   );
   assert.deepEqual(calls, ['commit']);
+  failureCode = 'IndexScopeRefused';
+  await assert.rejects(adapter.publish({ intent, grant: { opaque: 'operator-owned' } }),
+    error => error.code === 'IndexScopeRefused' && !error.message.includes('secret'));
+  assert.deepEqual(calls, ['commit', 'commit']);
 });
 
 test('a refused publication grant causes no mutation and leaks no authority diagnostic', async () => {
@@ -422,3 +428,191 @@ test('the Git/gh Adapter commits locally, leases the push, and reuses no arbitra
     rmSync(scratch, { recursive: true, force: true });
   }
   });
+
+function stagingFixture() {
+  const scratch = mkdtempSync(join(tmpdir(), 'gaia-bounded-staging-'));
+  const repo = join(scratch, 'repo');
+  mkdirSync(repo);
+  const git = (...args) => execFileSync('git', args, {
+    cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+  git('init', '--initial-branch=main');
+  git('config', 'user.name', 'Gaia Test');
+  git('config', 'user.email', 'gaia@example.invalid');
+  writeFileSync(join(repo, 'CONTEXT.md'), 'before\n');
+  writeFileSync(join(repo, 'third.txt'), 'third baseline\n');
+  git('add', '--', 'CONTEXT.md', 'third.txt');
+  git('commit', '-m', 'baseline');
+  git('remote', 'add', 'origin', 'https://github.com/GuitarAlchemist/gaia.git');
+  const head = git('rev-parse', 'HEAD');
+  mkdirSync(join(repo, 'docs', 'adr'), { recursive: true });
+  writeFileSync(join(repo, 'CONTEXT.md'), 'after\n');
+  writeFileSync(join(repo, 'docs', 'adr', '0005-loop.md'), 'bounded ADR\n');
+  writeFileSync(join(repo, '-option[1].txt'), 'literal pathspec fixture\n');
+  // A quoted old command is file data, never a command for this adapter to execute or parse.
+  writeFileSync(join(repo, 'fix4_adr5.sh'),
+    'old="git add CONTEXT.md docs/adr/"\nnew="git add CONTEXT.md docs/adr/0005-loop.md"\n');
+  const calls = [];
+  const realExec = promisify(execFile);
+  const effects = (beforeRun = () => {}) => createGitGhCandidatePublicationEffects({
+    expectedRepository: 'GuitarAlchemist/gaia', worktree: repo, baseBranch: 'main',
+    run: async (command, args, options) => {
+      calls.push([command, [...args]]);
+      beforeRun(command, args);
+      return realExec(command, args, options);
+    },
+  });
+  const request = () => ({
+    repository: 'GuitarAlchemist/gaia', branch: 'gaia/bounded-staging',
+    expectedHeadOid: head, changeSetIdentity: measureAgentFactoryChangeSet(repo, head).identity,
+    message: 'bounded fixture', idempotencyKey: SHA_A,
+  });
+  return { scratch, repo, git, head, calls, effects, request };
+}
+
+test('publication stages literal exact files, treating old broad command text only as data', async () => {
+  for (const interference of ['none', 'third', 'owned', 'headSwap']) {
+    const f = stagingFixture();
+    try {
+      let correctCommit;
+      const effects = f.effects((_command, args) => {
+        if (interference === 'headSwap' && args[0] === 'write-tree') {
+          correctCommit = f.git('commit-tree', f.git('write-tree'), '-p', f.head, '-m', 'correct alternate');
+        }
+        if (interference === 'headSwap' && args[0] === 'rev-parse' && args[1].endsWith('^')) {
+          // HEAD moves after the returned OID was read; only that OID's own parent/tree count.
+          f.git('update-ref', 'HEAD', correctCommit);
+        }
+        if (interference === 'none' || !args.includes('commit')) return;
+        if (interference === 'owned' || interference === 'headSwap') {
+          writeFileSync(join(f.repo, 'CONTEXT.md'), 'changed after the last reading\n');
+          return;
+        }
+        // Interference after the final reading must never be absorbed by the commit.
+        writeFileSync(join(f.repo, 'third.txt'), 'late third-party edit\n');
+        f.git('add', '--', 'third.txt');
+      });
+      const request = f.request();
+      if (interference === 'owned' || interference === 'headSwap') {
+        const intent = publicationIntent({ headOid: f.head, baseOid: f.head,
+          changeSetIdentity: request.changeSetIdentity });
+        let laterEffects = 0;
+        const adapter = createGitHubCandidatePublicationAdapter({
+          expectedRepository: intent.repository,
+          authority: { async consume() { return {
+            status: 'AUTHORIZED', grantId: 'owned-interference', intentRevision: intent.revision,
+          }; } },
+          effects: { ...effects,
+            async observe() { return { repository: intent.repository, headOid: f.head,
+              baseOid: f.head, changeSetIdentity: request.changeSetIdentity }; },
+            async push(value) { laterEffects += 1; return { headOid: value.commitOid }; },
+            async openPullRequest(value) { laterEffects += 1; return {
+              number: 17, url: 'https://github.com/GuitarAlchemist/gaia/pull/17', headOid: value.commitOid,
+            }; },
+          },
+        });
+        await assert.rejects(adapter.publish({ intent, grant: { fixture: true } }),
+          error => error.code === 'StagingVerificationFailed');
+        assert.equal(laterEffects, 0);
+        assert.equal(f.git('show', 'HEAD:third.txt'), 'third baseline');
+        continue;
+      }
+      const result = await effects.commit(request);
+      const add = f.calls.filter(([command, args]) => command === 'git' && args.includes('add'));
+      assert.deepEqual(add, [['git', ['--literal-pathspecs', 'add', '--',
+        '-option[1].txt', 'CONTEXT.md', 'docs/adr/0005-loop.md', 'fix4_adr5.sh']]]);
+      assert.equal(result.commitOid, f.git('rev-parse', 'HEAD'));
+      assert.deepEqual(f.git('diff-tree', '--no-commit-id', '--name-only', '-r', result.commitOid)
+        .split('\n'), ['-option[1].txt', 'CONTEXT.md', 'docs/adr/0005-loop.md', 'fix4_adr5.sh']);
+      if (interference === 'third') {
+        assert.equal(f.git('diff', '--cached', '--name-only'), 'third.txt');
+        assert.equal(f.git('show', ':third.txt'), 'late third-party edit');
+        assert.equal(f.git('show', 'HEAD:third.txt'), 'third baseline');
+      } else assert.equal(f.git('status', '--porcelain=v1'), '');
+    } finally { rmSync(f.scratch, { recursive: true, force: true }); }
+  }
+});
+
+test('publication refuses a pre-existing staged third-party file without changing index or bytes', async () => {
+  const f = stagingFixture();
+  try {
+    writeFileSync(join(f.repo, 'third.txt'), 'third-party edit\n');
+    f.git('add', '--', 'third.txt');
+    const index = f.git('write-tree');
+    const status = f.git('status', '--porcelain=v1');
+    await assert.rejects(f.effects().commit(f.request()),
+      error => error.code === 'IndexScopeRefused');
+    assert.equal(f.git('write-tree'), index);
+    assert.equal(f.git('status', '--porcelain=v1'), status);
+    assert.equal(f.git('show', ':third.txt'), 'third-party edit');
+    assert.equal(f.git('rev-parse', 'HEAD'), f.head);
+    assert.ok(!f.calls.some(([, args]) => args.includes('add') || args[0] === 'commit'));
+  } finally { rmSync(f.scratch, { recursive: true, force: true }); }
+});
+
+test('publication rereads after branch preparation and never stages changed or ambiguously owned state', async () => {
+  for (const stageThirdParty of [false, true]) {
+    const f = stagingFixture();
+    try {
+      const request = f.request();
+      let indexAfterInterference;
+      const effects = f.effects((_command, args) => {
+        if (args[0] !== 'switch') return;
+        writeFileSync(join(f.repo, 'third.txt'), 'concurrent third-party edit\n');
+        if (stageThirdParty) f.git('add', '--', 'third.txt');
+        indexAfterInterference = f.git('write-tree');
+      });
+      await assert.rejects(effects.commit(request), error => error.code === 'CandidateChanged'
+        || error.code === 'IndexScopeRefused');
+      assert.equal(f.git('write-tree'), indexAfterInterference);
+      assert.equal(f.git('rev-parse', 'HEAD'), f.head);
+      assert.ok(!f.calls.some(([, args]) => args.includes('add') || args[0] === 'commit'));
+      assert.match(f.git('diff', f.head, '--', 'third.txt'), /concurrent third-party edit/);
+    } finally { rmSync(f.scratch, { recursive: true, force: true }); }
+  }
+});
+
+test('expired publication responses and duplicate grants never repeat a first mutation', async () => {
+  for (const mode of ['expired', 'duplicate']) {
+    const scratch = mkdtempSync(join(tmpdir(), 'gaia-staging-grant-'));
+    try {
+      const ledgerDir = join(scratch, 'ledger'); mkdirSync(ledgerDir);
+      const intent = publicationIntent();
+      const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+      const payload = {
+        schema: 'gaia-github-portfolio-grant/1', grantId: 'bounded-first-action',
+        intentRevision: intent.revision, action: 'PUBLISH_CANDIDATE',
+        repository: intent.repository, itemKind: intent.item.kind, itemId: intent.item.id,
+        itemNumber: intent.item.number, snapshotRevision: intent.source.portfolioRevision,
+        expiresAt: '2026-10-10T12:00:01.000Z',
+      };
+      const grant = { ...payload,
+        signature: sign(null, portfolioGrantPreimage(payload), privateKey).toString('base64url') };
+      let now = new Date('2026-10-10T12:00:00.000Z');
+      const authority = createFileEd25519AuthorityAdapter({ publicKey, ledgerDir, now: () => now });
+      const mutations = [];
+      const adapter = createGitHubCandidatePublicationAdapter({
+        expectedRepository: intent.repository, authority,
+        effects: {
+          async observe() {
+            // A delayed observation is reread before authority consumption, not auto-approved.
+            if (mode === 'expired') now = new Date(payload.expiresAt);
+            return { repository: intent.repository, headOid: BASE_OID, baseOid: BASE_OID,
+              changeSetIdentity: intent.candidate.changeSetIdentity };
+          },
+          async commit() { mutations.push('commit'); return { commitOid: COMMIT_OID }; },
+          async push() { mutations.push('push'); return { headOid: COMMIT_OID }; },
+          async openPullRequest() { mutations.push('pr'); return {
+            number: 17, url: 'https://github.com/GuitarAlchemist/gaia/pull/17', headOid: COMMIT_OID,
+          }; },
+        },
+      });
+      if (mode === 'duplicate') {
+        const receipt = await adapter.publish({ intent, grant });
+        assert.equal(receipt.commitOid, COMMIT_OID);
+      }
+      await assert.rejects(adapter.publish({ intent, grant }), error => error.code === 'AuthorityRefused');
+      assert.deepEqual(mutations, mode === 'duplicate' ? ['commit', 'push', 'pr'] : []);
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
+  }
+});
