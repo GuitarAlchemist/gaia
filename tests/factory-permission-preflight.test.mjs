@@ -121,3 +121,11 @@ test('missing or invalid business requirements cannot be replaced by structural 
     assert.equal(f.launches(), 0);
   }
 });
+
+test('an unresponsive permission observer reaches WAITING_PERMISSION within the execution bound without launching', { timeout: 1000 }, async () => {
+  const f = fixture(() => new Promise(() => {}));
+  await assert.rejects(f.adapter.runWorker({ cwd: '.', task: 'No observation response',
+    requiredCapabilities: [] }, { timeoutMs: 20 }),
+  { code: 'WAITING_PERMISSION', reason: 'PermissionObservationUnknown' });
+  assert.equal(f.launches(), 0);
+});
