@@ -122,10 +122,22 @@ test('missing or invalid business requirements cannot be replaced by structural 
   }
 });
 
-test('an unresponsive permission observer reaches WAITING_PERMISSION within the execution bound without launching', { timeout: 1000 }, async () => {
-  const f = fixture(() => new Promise(() => {}));
-  await assert.rejects(f.adapter.runWorker({ cwd: '.', task: 'No observation response',
-    requiredCapabilities: [] }, { timeoutMs: 20 }),
-  { code: 'WAITING_PERMISSION', reason: 'PermissionObservationUnknown' });
-  assert.equal(f.launches(), 0);
+test('an unresponsive or late permission observer cannot outlive the execution bound or launch', { timeout: 1000 }, async () => {
+  for (const scenario of ['unresponsive', 'late']) {
+    let request;
+    let respond;
+    const f = fixture(value => {
+      request = value;
+      return new Promise(resolveObservation => { respond = resolveObservation; });
+    });
+    await assert.rejects(f.adapter.runWorker({ cwd: '.', task: 'No observation response',
+      requiredCapabilities: [] }, { timeoutMs: 20 }),
+    { code: 'WAITING_PERMISSION', reason: 'PermissionObservationUnknown' });
+    if (scenario === 'late') {
+      respond(effective(request, request.requiredCapabilities));
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    assert.equal(f.launches(), 0);
+  }
 });
