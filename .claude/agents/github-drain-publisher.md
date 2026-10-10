@@ -53,7 +53,7 @@ Stop at the first failure, perform nothing, and report the code.
 | Code | Check | Chart |
 | --- | --- | --- |
 | `ORDER_DIGEST_MISMATCH` | the order file cannot be read, or `sha256sum <orderPath>` does not print the digest the invocation names | `P_MERGEABLE`, `P_READY`, `P_MERGED` |
-| `ORDER_INCOMPLETE` | a required field is missing, `headSha` is not 40 lowercase hex, `actions` is empty or names an unknown action, `autoCloses` is neither `none` nor a list of issue numbers, or a conditional field is absent for its action or for `approvedSha`, or `approvedSha` is present and equals `headSha`, or `closeIssue` names an issue `autoCloses` names, or `actions` names both `enqueue` and `issue-close` (the queue merges after this invocation ends, so an issue close needs a merge that already happened) | `P_MERGEABLE`, `P_READY`, `P_MERGED` |
+| `ORDER_INCOMPLETE` | a required field is missing, `headSha` is not 40 lowercase hex, `actions` is empty or names an unknown action, `autoCloses` is neither `none` nor a list of issue numbers, or a conditional field is absent for its action or for `approvedSha`, or `approvedSha` is present and equals `headSha`, or `closeIssue` names an issue `autoCloses` names, or `actions` names both `enqueue` and `issue-close` (the queue merges after this invocation ends, so an issue close needs a merge that already happened), or `actions` names both `enqueue` and `body` (an edited description can add a closing keyword after `CLOSING_EFFECT_UNNAMED` read the old one, and the queued merge would close that issue: the body is one order, and the enqueue a later one whose checks read the edited description) | `P_MERGEABLE`, `P_READY`, `P_MERGED` |
 | `ARTIFACT_MISSING` | `specArtifact` or `standardsArtifact` cannot be read, or both name the same file | `D_SPEC_VERDICT_BOUND`, `D_STANDARDS_VERDICT_BOUND` |
 | `AXIS_MISSING` | the Spec artifact's title line does not name `Spec`, or the Standards artifact's title line does not name `Standards` | `D_SPEC_VERDICT_BOUND`, `D_STANDARDS_VERDICT_BOUND` |
 | `SHA_NOT_BOUND` | an artifact's `Subject:` line (with the header lines it opens, up to the first blank line) does not state `detached at <headSha>`, or `detached at <approvedSha>` when the order carries one; or its `# PR #N` title line does not name `pullRequest`. A SHA named anywhere else in the artifact, such as the entry it repaired, binds nothing | `D_SPEC_VERDICT_BOUND`, `D_STANDARDS_VERDICT_BOUND` |
@@ -62,6 +62,7 @@ Stop at the first failure, perform nothing, and report the code.
 | `RECONCILIATION_UNCLASSIFIED` | the order carries `approvedSha` and any of: walking `parents[0]` from `headSha` (`gh api repos/OWNER/NAME/commits/<sha>`, GET) does not reach `approvedSha` through exactly the commits `reconciliation` names; an entry's class is not `base-merge`, `readme-counter`, or `architecture-record`; a `base-merge` commit does not have two parents with the second on the base branch (`gh api repos/OWNER/NAME/compare/<parent2>...<baseRefName>`, GET, status `ahead` or `identical`); a `readme-counter` commit changes a file other than `README.md`; an `architecture-record` commit changes a file other than `package.json`; `compare/<approvedSha>...<headSha>` lists a file other than `README.md` or `package.json` that `compare/<approvedSha>...<parent2>` does not list; or `reconciliationResults` is absent | `D_RECONCILIATION_CLASSIFIED`, `D_RECONCILIATION_UNCLASSIFIED` |
 | `CLOSING_EFFECT_UNNAMED` | for `enqueue`: the issue numbers in `gh pr view N --repo OWNER/NAME --json closingIssuesReferences` are not exactly the issues `autoCloses` names (`none` names no issue): the queued merge would close an issue the order does not name, or the order names one it would not close | `D_ISSUE_RECONCILED` |
 | `PR_NOT_MERGED` | for `issue-close`: `gh pr view N --repo OWNER/NAME --json state,mergeCommit` is not `MERGED` with the merge commit `mergeCommit` names | `D_MERGE_CONFIRMED` |
+| `BODY_WHILE_QUEUED` | for `body`: a `gh api graphql` query of `pullRequest(number: N) { isInMergeQueue }` shows the pull request in the merge queue, read here and again immediately before the body command: the edited description would change what the queued merge closes after every check of it | `D_ISSUE_RECONCILED` |
 | `HEAD_MISMATCH` | `gh pr view N --repo OWNER/NAME --json headRefOid` is not `headSha` | `D_HEAD_ADVANCED` |
 | `NOT_MERGEABLE` | for `enqueue`: `mergeable` is not `MERGEABLE` or `mergeStateStatus` is not `CLEAN` (after `ready` has been applied, when both are ordered) | `D_MERGEABLE_CLEAN` |
 | `CHECKS_NOT_GREEN` | for `enqueue`: `gh pr checks N --repo OWNER/NAME` reports any check that is not passing (pending counts as not green) | `D_NOT_DRAFT` |
@@ -134,7 +135,10 @@ Rules on the commands:
   comment names that merge commit and the two review artifacts. An issue `autoCloses` names is
   closed by the merge itself: the order may not name it in `closeIssue` (`ORDER_INCOMPLETE`); the
   merged pull request is its record.
-- `body` writes only the bytes of `bodyFile`; you never compose a body.
+- `body` writes only the bytes of `bodyFile`; you never compose a body. A description's closing
+  keywords are an effect of the merge, so `body` never runs in an order that enqueues
+  (`ORDER_INCOMPLETE`) or on a pull request in the merge queue (`BODY_WHILE_QUEUED`): the next
+  enqueue order's `CLOSING_EFFECT_UNNAMED` reads the edited description.
 - After a confirmed queue entry, record it, then
   continue the remaining ordered actions for this PR. Stop after every ordered action has a verified result,
   or at the first failure with the completed actions recorded. You do not enqueue a second PR in the same invocation: each merge

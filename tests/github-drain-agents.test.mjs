@@ -227,6 +227,22 @@ test('the publisher refusal vocabulary and the doc agree code for code', () => {
   assert.match(readAgent('github-drain-publisher'), /sha256sum <orderPath>/, 'the publisher measures the order digest');
 });
 
+test('a body edit cannot change what a queued merge closes', () => {
+  // #231 review: a description's closing keywords link issues the merge closes. Edited after the
+  // enqueue, in the same order or a later one, it would widen a merge whose closing effect
+  // CLOSING_EFFECT_UNNAMED had already read.
+  const publisher = readAgent('github-drain-publisher');
+  const doc = readDoc();
+  const rowOf = (text, code) => text.split('\n').find((line) => line.startsWith(`| \`${code}\` |`)) ?? '';
+  for (const [name, text] of [['publisher', publisher], ['doc', doc]]) {
+    assert.match(rowOf(text, 'ORDER_INCOMPLETE'), /both `enqueue` and `body`/, `${name}: an order may not enqueue and edit the body`);
+    assert.match(rowOf(text, 'BODY_WHILE_QUEUED'), /merge queue/, `${name}: no body edit on a queued pull request`);
+  }
+  assert.match(rowOf(publisher, 'BODY_WHILE_QUEUED'), /isInMergeQueue/, 'the publisher reads the queue state');
+  assert.match(rowOf(publisher, 'BODY_WHILE_QUEUED'), /immediately before the body command/, 'and reads it again before the edit');
+  assert.doesNotMatch(doc, /body update after the\s+enqueue/, 'the drain sequence orders no body after an enqueue');
+});
+
 test('the reviewer binds to one full SHA on one detached clean clone, one of two verdicts, and a byte-identical tree', () => {
   const reviewer = readAgent('github-drain-reviewer');
   for (const code of ['SHA_NOT_FULL', 'SUBJECT_COMMIT_MISMATCH', 'SUBJECT_NOT_DETACHED', 'SUBJECT_DIRTY', 'AXIS_INVALID']) {

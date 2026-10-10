@@ -162,7 +162,7 @@ subject are in `docs/drain-grafcet.md`, Bindings.
 | Code | Meaning |
 | --- | --- |
 | `ORDER_DIGEST_MISMATCH` | the order file cannot be read, or its SHA-256 is not the digest the invocation names |
-| `ORDER_INCOMPLETE` | a required order field is missing, the SHA is not 40 lowercase hex, an action is unknown, or `closeIssue` names an issue the merge closes by itself (`autoCloses`) |
+| `ORDER_INCOMPLETE` | a required order field is missing, the SHA is not 40 lowercase hex, an action is unknown, `closeIssue` names an issue the merge closes by itself (`autoCloses`), or the actions name both `enqueue` and `issue-close`, or both `enqueue` and `body` |
 | `ARTIFACT_MISSING` | a named review artifact cannot be read, or both name one file |
 | `AXIS_MISSING` | the two artifacts do not cover Spec and Standards |
 | `SHA_NOT_BOUND` | an artifact's `Subject:` line does not state `detached at <headSha>` (`detached at <approvedSha>` under the reconciliation class), or its `# PR #N` title line does not name the ordered PR; a SHA named elsewhere in the text binds nothing |
@@ -171,6 +171,7 @@ subject are in `docs/drain-grafcet.md`, Bindings.
 | `RECONCILIATION_UNCLASSIFIED` | the order carries `approvedSha` and the commits between it and the head are not exactly the classified `base-merge`, `readme-counter`, and `architecture-record` commits, or the results at the head are absent |
 | `CLOSING_EFFECT_UNNAMED` | for an enqueue, the pull request's `closingIssuesReferences` are not exactly the issues the order's `autoCloses` names |
 | `PR_NOT_MERGED` | for an issue close, the pull request is not `MERGED` with the order's `mergeCommit` |
+| `BODY_WHILE_QUEUED` | for a body edit, the pull request is in the merge queue, whose merge would close what the new description names |
 | `HEAD_MISMATCH` | the published head is not the ordered SHA |
 | `NOT_MERGEABLE` | `mergeable` is not `MERGEABLE` or `mergeStateStatus` is not `CLEAN` |
 | `CHECKS_NOT_GREEN` | a check is failing or still pending |
@@ -214,7 +215,10 @@ order itself (`gaia-architect-r1-udp-bridge-design.md:441-453`, `gaia-architect-
 way and the coordinator reopened it by hand (`gaia-architect-r2-grafcet-drain-design.md:555-559`).
 The coordinator copies those issues into the proposal, the publisher refuses
 `CLOSING_EFFECT_UNNAMED` when the two differ and re-reads them with the head immediately before
-the enqueue command (`STATE_CHANGED`). The queue merges after the publisher's invocation ends, so
+the enqueue command (`STATE_CHANGED`). A body edit is ordered alone, never with an enqueue
+(`ORDER_INCOMPLETE`) and never on a queued pull request (`BODY_WHILE_QUEUED`), so the closing
+keywords the queue acts on are the ones the enqueue order read. The queue merges after the
+publisher's invocation ends, so
 the coordinator, not the publisher, reads each issue closed after the merge
 (`ISSUE_RECONCILIATION_PENDING`); nobody closes it again.
 
@@ -228,8 +232,8 @@ command under **Should an Ed25519 grant gate the publisher?** below.
 Review identity includes a digest of actual tracked working-tree bytes at entry and exit,
 plus a clean-status check at both points. An unchanged Git index alone cannot prove restoration.
 The reviewer definition supplies the executable measurement. Publisher completion means every
-ordered action for the single PR has a verified result, including an ordered body update after the
-enqueue, or an issue close after a merge that already landed; a failure records completed effects
+ordered action for the single PR has a verified result, including an ordered body update before the
+enqueue order, or an issue close after a merge that already landed; a failure records completed effects
 and stops the remaining actions.
 
 1. Every PR opens as a draft and stays one until both axes approve its exact head.

@@ -227,6 +227,7 @@ binding names that transition's receptivity.
 | `MARKER_MISSING` | publisher | `D_SPEC_VERDICT_BOUND`, `D_STANDARDS_VERDICT_BOUND` | the artifact path | a bound artifact ends with its marker |
 | `CLOSING_EFFECT_UNNAMED` | publisher | `D_ISSUE_RECONCILED` | the first issue one list names and the other does not | the queued merge moves every issue in `closingIssuesReferences` toward `T_ISSUE_RECONCILED`; the order names them all |
 | `PR_NOT_MERGED` | publisher | `D_MERGE_CONFIRMED` | `#N` | an issue close starts from `P_MERGED`, which only `D_MERGE_CONFIRMED` reaches |
+| `BODY_WHILE_QUEUED` | publisher | `D_ISSUE_RECONCILED` | `#N` | a description edited while the pull request waits in the queue changes the issues the queued merge moves toward `T_ISSUE_RECONCILED`, after `CLOSING_EFFECT_UNNAMED` read them |
 | `HEAD_MISMATCH` | publisher | `D_HEAD_ADVANCED` | `#N` | a moved head preempts merge progress (the three `T_*_HEAD_ADVANCED`, priority 2) |
 | `NOT_MERGEABLE` | coordinator, publisher | `D_MERGEABLE_CLEAN` | `#N` | the chart's refusal for `T_MERGEABLE`; the coordinator waits on it, the publisher refuses on it (see Divergences) |
 | `CHECKS_NOT_GREEN` | coordinator, publisher | `D_NOT_DRAFT` | `#N` | the collector holds `D_NOT_DRAFT` only when checks read `ALL_PASS` |
@@ -366,13 +367,17 @@ order named. It is now named:
 - the publisher refuses `CLOSING_EFFECT_UNNAMED` before any GitHub head fact when
   `closingIssuesReferences` is not exactly `autoCloses`, and re-reads both immediately before the
   enqueue command (`STATE_CHANGED`);
+- an order may not combine `body` with `enqueue` (`ORDER_INCOMPLETE`), and the publisher edits no
+  description of a pull request in the merge queue (`BODY_WHILE_QUEUED`), so the next enqueue
+  order reads the edited description;
 - `closeIssue` may not name an `autoCloses` issue (`ORDER_INCOMPLETE`). The queue merges after
   the publisher's invocation ends (#228), so the coordinator reads each `autoCloses` issue closed
   (`ISSUE_RECONCILIATION_PENDING`), and the merged pull request is its record.
 
 What remains open is the window between that last re-read and the queue's merge. `expectedHeadOid`
-binds the head at the enqueue command; nothing binds the body, which can still change while the pull
-request waits in the queue.
+binds the head at the enqueue command; nothing binds the body against another writer, who can still
+change it while the pull request waits in the queue. The publisher is not that writer
+(`BODY_WHILE_QUEUED`).
 
 An issue close names the merge in `mergeCommit`, and the publisher reads the pull request
 `MERGED` with that commit first (`PR_NOT_MERGED`,
