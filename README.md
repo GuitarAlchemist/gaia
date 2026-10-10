@@ -304,11 +304,15 @@ See [`docs/github-portfolio-operator.md`](docs/github-portfolio-operator.md).
 
 The separate `npm run portfolio:autonomous -- --help` command consumes hosted intake
 receipts under an explicitly provisioned, revocable local policy. It reuses exact
-Draft admission and the candidate factory without per-run terminal prompts. One local
+Draft admission and, when execution is configured, the candidate factory without per-run terminal prompts. One local
 registry serializes starts, enforces a finite budget and preserves uncertain jobs for
 reconciliation. Read [the authority contract](docs/autonomous-factory.md) before
 provisioning; a candidate is not publication or merge. The manual operator remains
 interactive. No background service is installed or activated by this change.
+
+New autonomous execution now requires the SDK transport and complete role manifests described in
+[the SDK scope contract](docs/mission-permission-preflight.md). These are not configured in the
+CLI yet: it refuses before consuming a run. Adapter CI is not evidence of restored autonomy.
 
 `npm run draft:seed-evidence -- --issue N [--apply]` opens the evidence branch that hosted intake
 requires for a labelled issue: one empty commit carrying the exact `Gaia-Issue` and

@@ -249,12 +249,16 @@ existing human-mediated grant and creates no new authority. It does not close th
 between readback and process start or prove cross-process execution exclusion. A safe live
 worker profile is selectable with `--execution-profile claude-visible-restricted`.
 The provider adapter in `src/factory-visible-claude.mjs` implements the existing worker,
-reviewer and repair ports through three transports over one contract: an inherited interactive
-terminal, a noninteractive print transport that discards provider output, and a noninteractive
-print transport that renders bounded, closed-vocabulary provider events to the inherited terminal.
-The last is what the autonomous host uses, so a prompt-free run is still an observed run; the CLI
-requires a writable terminal before opening authority, and an environment that cannot render
-refuses instead of running an unobserved worker. It restricts Claude
+reviewer and repair ports. The three legacy transports retain their public behavior: an inherited
+interactive terminal, a print transport that discards output, and a print transport that renders
+bounded closed-vocabulary events. An explicit injected SDK mode uses the same adapter and result
+contract; it checks exact Read/Edit/Write requests in programmatic hooks without granting native
+permission. It accepts result bytes only after a correlated successful Write, terminal result with
+no permission denials, terminated stream and closed query.
+The autonomous CLI requires this SDK mode and a writable terminal. Its transport and complete
+role manifests are not supplied yet, so new execution refuses before consuming a run; real
+autonomy is not established. See [SDK scope contract](docs/mission-permission-preflight.md).
+It restricts Claude
 to file tools and working directories, removes API-key fallback through the existing
 subscription environment, and binds bounded provider results to fresh attempt identities.
 The owned process must stop before output acceptance; timeout, mismatch and cleanup
@@ -423,7 +427,11 @@ The separate local autonomous composition consumes an operator-provisioned stand
 policy for one repository and a finite run budget. A local SQLite transaction commits
 STARTED once per issue/Draft and serializes revocation and the single active host slot.
 The application repeats existing portfolio and exact Draft admission before consuming
-that authority. A restricted noninteractive subscription adapter then produces only a candidate,
+that authority. When its execution composition supplies a readiness port, readiness is bounded
+before STARTED: refusal, unknown or timeout consumes no run. Readiness proves availability and
+manifest shape, never native permission or effect authority. Started failures retain the operation
+for reconciliation without automatic refunds. The CLI explicitly supplies this port and remains
+unconfigured for SDK execution. A configured restricted subscription adapter produces only a candidate,
 rendering bounded provider events to the terminal running the host rather than discarding them.
 Original execution keys and bound receipts reconcile crashes; missing or corrupt evidence
 retains the slot without relaunch. This is one trusted OS-user/local-disk domain, not
