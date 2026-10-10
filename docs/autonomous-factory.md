@@ -53,6 +53,14 @@ Artifacts remain untrusted input. The existing reader validates shape and identi
 Draft admission checks the exact OPEN Draft on GitHub. Portfolio selection checks
 readiness and freshness on both preview and authorized advance. A green no-op is not work.
 
+Streaming roles now require a complete declared file-capability manifest and a fresh
+effective-permission observation, including the protocol's result Write. The CLI does
+not yet supply these, so its adapter refuses with WAITING_PERMISSION before launching
+Claude. The existing host catches the refusal as RECONCILIATION_REQUIRED and retains
+its consumed slot/budget; the CLI publishes that reconciliation result. This does not
+prove a real lane resume.
+See [mission permission preflight](mission-permission-preflight.md) for the first #103 slice.
+
 After authority commits, the host prepares a detached worktree at the exact source
 head. `createStreamingClaudeAdapters` uses the same restricted file tools, `dontAsk`,
 print mode and bounded output as `createHeadlessClaudeAdapters`, and additionally

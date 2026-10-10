@@ -248,6 +248,15 @@ existing compositions; the operator CLI has no admission opt-out. This narrows t
 existing human-mediated grant and creates no new authority. It does not close the interval
 between readback and process start or prove cross-process execution exclusion. A safe live
 worker profile is selectable with `--execution-profile claude-visible-restricted`.
+The streaming role ports now compare declared mission file capabilities, including the
+protocol's mandatory result Write, with a complete, fresh observation bound to the exact
+invocation and verified cwd immediately before launch. Unknown observations refuse as
+WAITING_PERMISSION with exact unproven capabilities and no provider launch. The observation
+port defaults to unknown; the CLI has no live observer/complete manifest yet, so it cannot
+resume streaming work. Structural lane grants remain separate. This first slice does not
+persist a waiting lifecycle or return already-consumed host budget.
+See [mission permission preflight](docs/mission-permission-preflight.md) for the contract.
+
 The provider adapter in `src/factory-visible-claude.mjs` implements the existing worker,
 reviewer and repair ports through three transports over one contract: an inherited interactive
 terminal, a noninteractive print transport that discards provider output, and a noninteractive

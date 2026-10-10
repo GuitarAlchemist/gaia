@@ -5,7 +5,7 @@ import {
   readSync, realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { setTimeout as delay } from 'node:timers/promises';
 import { buildClaudeWorkerInvocation, FactoryAgentError } from './factory-agent.mjs';
@@ -275,6 +275,57 @@ async function boundedStop(child) {
   } finally { clearTimeout(timer); }
 }
 
+
+/**
+ * Exact file capabilities, separate from lane topology authority. Resolution uses the same
+ * verified cwd for declarations and observations; provider rule/glob parsing belongs to the
+ * trusted effective-permission observer, never to this adapter or to prompt text.
+ */
+function fileCapabilities(values, cwd) {
+  if (!Array.isArray(values) || values.length > 256) return null;
+  const capabilities = [];
+  for (const value of values) {
+    if (!value || !TOOL_NAMES.has(value.tool) || typeof value.path !== 'string'
+        || !value.path.trim() || value.path.includes('\0')) return null;
+    const capability = Object.freeze({ tool: value.tool, path: resolve(cwd, value.path) });
+    if (!capabilities.some(item => item.tool === capability.tool && item.path === capability.path)) {
+      capabilities.push(capability);
+    }
+  }
+  return capabilities;
+}
+
+/** Pure, fail-closed comparison; a configured --allowedTools list is not an observation. */
+function permissionPreflight(request, observation, now, requirementsKnown) {
+  const required = request.requiredCapabilities;
+  const current = observation?.schema === 'gaia-effective-permissions/1'
+    && observation.source === 'effective-permissions' && observation.complete === true
+    && observation.binding === request.binding && observation.cwd === request.cwd
+    && observation.permissionMode === 'dontAsk'
+    && Number.isSafeInteger(observation.observedAt) && Number.isSafeInteger(observation.expiresAt)
+    && observation.observedAt <= now && now < observation.expiresAt
+    && observation.expiresAt - observation.observedAt <= 30_000
+    && Array.isArray(observation.decisions) && observation.decisions.length <= 512;
+  const decisions = current ? observation.decisions : [];
+  const normalized = decisions.map(value => {
+    const targets = fileCapabilities([value], request.cwd);
+    return targets ? { ...targets[0], decision: value.decision } : null;
+  });
+  const valid = current && normalized.every(Boolean);
+  const missingCapabilities = required.filter(capability => {
+    const matching = valid ? normalized.filter(value =>
+      value.tool === capability.tool && value.path === capability.path) : [];
+    return matching.length === 0 || matching.some(value => value.decision !== 'allow');
+  });
+  if (requirementsKnown && valid && missingCapabilities.length === 0) return null;
+  return Object.freeze({
+    status: 'WAITING_PERMISSION',
+    reason: !requirementsKnown ? 'MissionRequirementsUnknown'
+      : !valid ? 'PermissionObservationUnknown' : 'MissingCapabilities',
+    missingCapabilities: Object.freeze(missingCapabilities),
+  });
+}
+
 /** Factory-compatible provider adapter; launch is the external process test seam. */
 export function createVisibleClaudeAdapters({
   isInteractive = () => Boolean(process.stdin.isTTY && process.stdout.isTTY),
@@ -307,11 +358,12 @@ export function createStreamingClaudeAdapters({
   launch = launchStreamingProvider,
   render = (line) => process.stdout.write(line),
   isObservable = () => canRenderProviderActivity(process.stdout),
+  observePermissions = async () => undefined,
 } = {}) {
-  return createClaudeAdapters({ launch, render, isObservable, mode: 'streaming' });
+  return createClaudeAdapters({ launch, render, isObservable, observePermissions, mode: 'streaming' });
 }
 
-function createClaudeAdapters({ isInteractive, isObservable, launch, render, mode }) {
+function createClaudeAdapters({ isInteractive, isObservable, launch, render, observePermissions, mode }) {
   async function run(role, context, {
     timeoutMs = 600_000, maxOutputBytes = 65_536, maxStreamBytes = 4_194_304,
   } = {}) {
@@ -359,15 +411,42 @@ function createClaudeAdapters({ isInteractive, isObservable, launch, render, mod
       '--allowedTools', 'Read,Write,Edit,Glob,Grep', '--add-dir', resultDir,
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--disable-slash-commands',
       '--name', `Gaia ${role} ${sessionId.slice(0, 8)}`, '--', prompt];
-    const child = launch({ cwd, args, env: buildClaudeWorkerInvocation(context).env, resultPath, binding,
-      maxOutputBytes, maxStreamBytes, render, label: `[gaia ${role} ${sessionId.slice(0, 8)}]` });
+    const declared = mode === 'streaming'
+      ? (context.requiredCapabilities?.length >= 256 ? null : fileCapabilities(context.requiredCapabilities, cwd)) : [];
+    const requiredCapabilities = Object.freeze(fileCapabilities([
+      ...(declared ?? []), { tool: 'Write', path: resultPath },
+    ], cwd));
+    const request = Object.freeze({ cwd, args: Object.freeze(args),
+      env: Object.freeze(buildClaudeWorkerInvocation(context).env), resultPath, binding,
+      requiredCapabilities, maxOutputBytes, maxStreamBytes, render,
+      label: `[gaia ${role} ${sessionId.slice(0, 8)}]` });
+    const deadline = performance.now() + timeoutMs;
+    if (mode === 'streaming') {
+      let observation;
+      let observationTimer;
+      try {
+        observation = await Promise.race([
+          observePermissions(request),
+          new Promise(resolveUnknown => {
+            observationTimer = setTimeout(resolveUnknown, Math.min(timeoutMs, 5_000));
+          }),
+        ]);
+      } catch { /* Unknown is a refusal. */ }
+      finally { clearTimeout(observationTimer); }
+      if (performance.now() >= deadline) observation = undefined;
+      const refusal = permissionPreflight(request, observation, Date.now(), declared !== null);
+      if (refusal) {
+        throw Object.assign(error('WAITING_PERMISSION', 'Effective mission permissions are not proven'), refusal);
+      }
+    }
+    // No await, retry, alternate profile or permission widening between comparison and launch.
+    const child = launch(request);
     let closed = false;
     let exitResult;
     let launchError;
     child.closed.then((result) => { closed = true; exitResult = result; }, (cause) => { closed = true; launchError = cause; });
     // Observe an already-settled launch/exit before reading a possibly prewritten result.
     await Promise.resolve();
-    const deadline = performance.now() + timeoutMs;
     let output;
     try {
       while (performance.now() < deadline) {
