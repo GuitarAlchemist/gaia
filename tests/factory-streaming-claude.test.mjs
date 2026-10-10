@@ -235,3 +235,113 @@ test('the autonomous factory CLI is wired to the visible streaming transport', (
   assert.doesNotMatch(source, /createHeadlessClaudeAdapters/u,
     'the pump must not fall back to an invisible headless worker');
 });
+
+function sdkFixture(scenario = 'success') {
+  let queries = 0;
+  let stopped = 0;
+  let observedOptions;
+  const writeResult = request => writeFileSync(request.resultPath, JSON.stringify({
+    schema: 'gaia-visible-agent-result/1', binding: request.binding,
+    status: 'completed', summary: 'SDK adapter fixture; no real Claude execution.',
+  }));
+  const adapters = createStreamingClaudeAdapters({
+    isObservable: () => true, render: () => {},
+    // Old mechanism witness: completion file is not evidence of a successful SDK terminal.
+    launch: request => {
+      writeResult(request);
+      let close;
+      return { closed: new Promise(resolve => { close = resolve; }),
+        stop: async () => { stopped++; close({ code: 0 }); } };
+    },
+    sdkTransport: {
+      runtime: { sdkVersion: '0.3.296', cliVersion: '2.1.296', protectionsVerified: true },
+      query: ({ prompt, options }) => {
+        queries++;
+        observedOptions = options;
+        const request = { resultPath: join(options.additionalDirectories[0], 'result.json'),
+          binding: JSON.parse(prompt.split('\n').find(line => line.startsWith('{"schema":'))).binding };
+        const input = (tool, path) => ({ hook_event_name: 'PreToolUse', cwd: options.cwd,
+          session_id: options.extraArgs['session-id'], tool_name: tool, tool_input: { file_path: path } });
+        const run = async function* () {
+          const pre = options.hooks.PreToolUse[0].hooks[0];
+          const post = options.hooks.PostToolUse[0].hooks[0];
+          assert.deepEqual(await pre(input('Edit', join(options.cwd, 'owned.txt')), 'edit-1', {}), {});
+          const denied = await pre(input('Edit', join(options.cwd, 'outside.txt')), 'outside-1', {});
+          assert.equal(denied.hookSpecificOutput.permissionDecision, 'deny');
+          if (scenario === 'scope-deny') {
+            yield { type: 'result', session_id: options.extraArgs['session-id'],
+              subtype: 'success', is_error: false, permission_denials: [] };
+            return;
+          }
+          // A separate attempt proves the negative hook above cannot be erased by a later success.
+          if (scenario === 'success') return;
+        };
+        const iterator = (async function* () {
+          const pre = options.hooks.PreToolUse[0].hooks[0];
+          const post = options.hooks.PostToolUse[0].hooks[0];
+          if (scenario === 'scope-deny') { yield* run(); return; }
+          assert.deepEqual(await pre(input('Edit', join(options.cwd, 'owned.txt')), 'edit-1', {}), {});
+          assert.equal(options.permissionMode, 'dontAsk');
+          assert.equal(Object.hasOwn(options, 'allowedTools'), false);
+          assert.equal(Object.hasOwn(options, 'canUseTool'), false);
+          assert.equal(Object.hasOwn(options, 'settingSources'), false);
+          assert.equal(options.strictMcpConfig, true);
+          assert.deepEqual(options.mcpServers, {});
+          assert.equal(options.extraArgs.restricted, null);
+          const completion = input('Write', request.resultPath);
+          assert.deepEqual(await pre(completion, 'write-1', {}), {});
+          writeResult(request);
+          if (scenario !== 'missing-write') await post({ ...completion, hook_event_name: 'PostToolUse', tool_response: {} }, 'write-1', {});
+          if (scenario === 'timeout') {
+            await new Promise(resolve => options.abortController.signal.addEventListener('abort', resolve, { once: true }));
+            return;
+          }
+          await new Promise(resolve => setTimeout(resolve, 30));
+          yield { type: 'result', session_id: options.extraArgs['session-id'],
+            subtype: scenario === 'terminal-error' ? 'error_during_execution' : 'success',
+            is_error: scenario === 'terminal-error',
+            permission_denials: scenario === 'late-denial' ? [{ tool_name: 'Edit', tool_use_id: 'later' }] : [] };
+        })();
+        iterator.close = () => { stopped++; options.abortController.abort(); };
+        return iterator;
+      },
+    },
+  });
+  return { adapters, counts: () => ({ queries, stopped }), options: () => observedOptions };
+}
+
+test('SDK scope hook passes exact file input without granting native permissions and completes once', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gaia-sdk-test-'));
+  writeFileSync(join(dir, 'owned.txt'), 'owned');
+  const f = sdkFixture();
+  try {
+    const output = await f.adapters.runWorker({ cwd: dir, task: 'fixture', baseHead: 'a'.repeat(40),
+      requiredCapabilities: [{ tool: 'Edit', path: 'owned.txt' }] });
+    assert.equal(JSON.parse(output.output).status, 'completed');
+    assert.equal(f.counts().queries, 1);
+    assert.equal(f.counts().stopped, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('SDK result file alone cannot hide denial, missing Write, scope refusal, timeout or terminal error', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gaia-sdk-refuse-'));
+  writeFileSync(join(dir, 'owned.txt'), 'owned');
+  try {
+    for (const scenario of ['late-denial', 'missing-write', 'scope-deny', 'timeout', 'terminal-error']) {
+      const f = sdkFixture(scenario);
+      await assert.rejects(f.adapters.runWorker({ cwd: dir, task: 'fixture',
+        requiredCapabilities: [{ tool: 'Edit', path: 'owned.txt' }] }, { timeoutMs: scenario === 'timeout' ? 80 : 1000 }),
+        error => ['AgentPermissionDenied', 'AgentProtocol', 'AgentScopeDenied', 'AgentTimeout', 'AgentFailed'].includes(error.code),
+        scenario);
+      assert.equal(f.counts().queries, 1, scenario);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('SDK readiness requires the trusted transport and exact host manifest before launch', async () => {
+  const f = sdkFixture();
+  await assert.rejects(f.adapters.runWorker({ cwd: '.', task: 'no manifest' }), { code: 'MissionManifestRequired' });
+  assert.equal(f.counts().queries, 0);
+  const unavailable = createStreamingClaudeAdapters({ sdkTransport: null, isObservable: () => true });
+  await assert.rejects(unavailable.checkReadiness({ requiredCapabilities: [] }), { code: 'TransportNotReady' });
+});

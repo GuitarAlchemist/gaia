@@ -292,3 +292,30 @@ test('CLI rejects state inside a clone even when its child name starts with two 
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+
+test('execution readiness refusal and timeout precede store.start and cannot spend a run', async () => {
+  for (const scenario of ['refusal', 'exception', 'timeout']) {
+    const f = fixture();
+    f.args.readinessTimeoutMs = 10;
+    f.args.execution.checkReadiness = async () => {
+      if (scenario === 'exception') throw Object.assign(new Error('unavailable'), { code: 'TransportNotReady' });
+      if (scenario === 'timeout') return new Promise(() => {});
+      return { status: 'REFUSED', code: 'MissionManifestRequired' };
+    };
+    const result = await runAutonomousFactory(f.args);
+    assert.equal(result.status, 'REFUSED', scenario);
+    assert.equal(f.jobs.size, 0, scenario);
+    assert.equal(f.counts().launches, 0, scenario);
+  }
+});
+
+test('a denial after execution starts retains its occupied operation without a refund or replay', async () => {
+  const f = fixture();
+  f.args.execution.checkReadiness = async () => ({ status: 'READY' });
+  f.args.execution.execute = async () => { throw Object.assign(new Error('native denial'), { code: 'AgentPermissionDenied' }); };
+  const result = await runAutonomousFactory(f.args);
+  assert.equal(result.status, 'RECONCILIATION_REQUIRED');
+  assert.equal(f.jobs.get(result.jobKey).state, 'STARTED');
+  assert.equal((await runAutonomousFactory(f.args)).status, 'RECONCILIATION_REQUIRED');
+});
