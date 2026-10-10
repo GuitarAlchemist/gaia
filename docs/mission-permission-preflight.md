@@ -168,8 +168,8 @@ These are pinned official upstream sources, not the installed runtime:
   version 0.2.136 introduced alpha resolveSettings for merged settings, including
   managed OS sources. getSettings also exists. Neither entry establishes a
   side-effect-free allow/deny verdict for an exact tool input including runtime
-  hooks and safety checks. The public repository has no TypeScript implementation
-  or API declaration source in the inspected tree; its linked external reference
+  hooks and safety checks. The inspected public tree has no implementation or API declarations of the SDK's
+  permission/settings APIs; its linked external reference
   was not fetched under this task's GitHub-only boundary.
 - Python SDK commit `b6e9d12fe1cc98dde988ab7b7713c1feeee50c6c`,
   [types.py:2508](https://github.com/anthropics/claude-agent-sdk-python/blob/b6e9d12fe1cc98dde988ab7b7713c1feeee50c6c/src/claude_agent_sdk/types.py#L2508):
