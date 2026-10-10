@@ -123,3 +123,98 @@ Claude resumption, cancellation of a real mission, or runner recovery. Local com
 are unavailable and prohibited in this task. The existing CI runs node --test and
 the architecture gate; standalone focused commands, npm run verify and the full
 detached-clone reviewer protocol are unexecuted unless separately evidenced.
+
+## Integration investigation — 2026-10-10
+
+Outcome: **BLOCKED — effective action permissions are not observable through the
+verified current composition.** This is insufficient runtime evidence, not a
+claim that every Claude version lacks an inspection API. The user requested the
+next #103 slice: connect a reliable effective observer and complete business
+manifest to the CLI, then execute one admissible real mission once and obtain
+its real receipt. That acceptance is **not met**.
+
+Producer: Codex, GitHub-connector source inspection only. Gaia code revision:
+`0fb646859159ec7e83eea38a3832e622a6057f50`; main still `3b2adc200ec19a3c4f3680773adb7152f3350a95`.
+Environment: GitHub and existing GitHub CI only; Windows shell/local execution
+prohibited. No credentials, user/managed settings, registry, or local files read.
+No provider process or real mission was started during this investigation.
+
+### Observed composition versus the required evidence
+
+- [CLI composition at line 169](https://github.com/GuitarAlchemist/gaia/blob/0fb646859159ec7e83eea38a3832e622a6057f50/scripts/github-portfolio-autonomous.mjs#L169)
+  passes only isObservable to the streaming adapter. It has no observer or
+  manifest option. Worker/reviewer/repair wrappers pass their existing contexts.
+- [Factory worker context at line 1031](https://github.com/GuitarAlchemist/gaia/blob/0fb646859159ec7e83eea38a3832e622a6057f50/src/factory-agent.mjs#L1031)
+  contains cwd, task and baseHead, without requiredCapabilities; review and repair
+  contexts also omit it. Pi's separate allowedPaths contract is not a complete
+  Claude Read/Edit/Write/Glob/Grep manifest and is not passed through this CLI.
+- The checked tree contains no .claude/settings.json or settings.local.json.
+  That does not prove absence of host, managed or remote settings. package.json
+  includes no Claude Agent SDK dependency; the Claude executable/version is not
+  pinned or observed. Gaia structural policy JSON does not grant file-tool authority.
+- The available stream renderer observes tool names/events after provider launch.
+  It cannot establish exact permitted paths before the mission.
+- Thus every new tick/watch execution reaching this streaming factory is blocked
+  on this draft. The first refusal is caught by the host as RECONCILIATION_REQUIRED,
+  retaining slot/budget and stopping watch. Administrative enable/status/revoke
+  are not streaming invocations. **Do not merge this as restored autonomy.**
+
+### Official contracts inspected
+
+These are pinned official upstream sources, not the installed runtime:
+
+- TypeScript SDK commit `85d8f8e0772199ec7965a0c2e874ac88343f2a01`,
+  [CHANGELOG.md](https://github.com/anthropics/claude-agent-sdk-typescript/blob/85d8f8e0772199ec7965a0c2e874ac88343f2a01/CHANGELOG.md):
+  version 0.2.136 introduced alpha resolveSettings for merged settings, including
+  managed OS sources. getSettings also exists. Neither entry establishes a
+  side-effect-free allow/deny verdict for an exact tool input including runtime
+  hooks and safety checks. The public repository has no TypeScript implementation
+  or API declaration source in the inspected tree; its linked external reference
+  was not fetched under this task's GitHub-only boundary.
+- Python SDK commit `b6e9d12fe1cc98dde988ab7b7713c1feeee50c6c`,
+  [types.py:2508](https://github.com/anthropics/claude-agent-sdk-python/blob/b6e9d12fe1cc98dde988ab7b7713c1feeee50c6c/src/claude_agent_sdk/types.py#L2508):
+  can_use_tool replaces permission prompts; it does not observe already allowed
+  calls and allow rules can shadow it. PreToolUse observes/gates actual calls
+  during execution; returning allow can also bypass the permission callback.
+  Neither is a verified pre-mission observer. get_server_info and SystemInitData
+  provide session/tool/mode metadata, not exact action permission verdicts.
+  The inspected control protocol and query methods expose no exact-action
+  preflight evaluator. This is coverage of those contracts, not universal absence.
+- Claude Code commit `2301018b1f61073c501a8e7a4813ef48c239163b`,
+  [CHANGELOG.md](https://github.com/anthropics/claude-code/blob/2301018b1f61073c501a8e7a4813ef48c239163b/CHANGELOG.md):
+  records runtime hooks, safety checks and corrected path-scoped denial behavior.
+  Reading settings or --allowedTools cannot reproduce these decisions reliably.
+  Its settings-example README explicitly labels the snippets community-maintained;
+  they are not evidence of the host's actual effective profile.
+
+Attempts: read the above files and complete relevant source/type sections via
+GitHub, inspect repository trees and CLI/factory composition, and search the
+official SDK repositories for getSettings and permission preflight. The latter
+returned no matches; search absence is not proof of API absence. No local command,
+SDK query, runtime settings inspection, permission probe or mission was executed.
+No new RED/GREEN claim is made for runtime integration. Existing PR246 regression
+and CI receipts remain historical evidence of the preflight mechanism only.
+
+### Minimal next solution, proposed and not implemented
+
+1. At the existing admission boundary, check observer/manifest availability before
+   store.start. Return a named unavailable/unknown refusal without consuming the
+   execution slot or run budget. Do not refund an already-started job automatically.
+   This prevents collateral pump blockage; it does not authorize a mission.
+2. Carry an explicit host-owned complete tool/target manifest through the existing
+   execution/factory contexts for each role, bound to the immutable job intent and
+   source revision. Never derive completeness or authority from prose, labels,
+   enabled-tool names or structural capabilities.
+3. Supply a documented, verified runtime observation contract that evaluates those
+   exact actions against the same cwd/invocation and all effective policy sources,
+   hooks and safety checks before releasing mission work. resolveSettings may be
+   an input, but must not be relabeled as this proof. Until that contract and the
+   installed runtime are actually observed, leave the production integration blocked.
+4. Once those prerequisites are proved, run one authorized real mission once and
+   bind its stopped-provider/result receipt to the invocation. Fixtures and a
+   settings-only probe cannot close that acceptance criterion.
+
+No production wiring, permission mutation, dependency installation or fallback
+was introduced by this investigation. The draft and its original failure oracles
+are retained. This report is supporting evidence, not runtime authority or an
+activation receipt.
