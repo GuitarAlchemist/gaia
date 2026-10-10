@@ -60,7 +60,7 @@ export async function retireClosedAutonomousJob({ store, jobKey, expectedIntentR
 
 /** Separate standing-authority composition; the interactive operator is unchanged. */
 export async function runAutonomousFactory({
-  store, githubRead, draftAdmission, execution, repository, policyRevision,
+  store, githubRead, draftAdmission, execution, repository, policyRevision, readinessTimeoutMs = 5_000,
 }) {
   if (typeof draftAdmission?.target !== 'function' || typeof draftAdmission?.read !== 'function') {
     return refuse('DraftAdmissionRequired');
@@ -72,6 +72,25 @@ export async function runAutonomousFactory({
       authority: { consume: async ({ grant, intent }) => {
         if (grant.grantId !== jobKey || intent.intentRevision !== preview.intent.intentRevision) {
           throw Object.assign(new Error('Fresh intent changed'), { code: 'IntentChanged' });
+        }
+        if (typeof execution?.checkReadiness === 'function') {
+          if (!Number.isSafeInteger(readinessTimeoutMs) || readinessTimeoutMs < 1 || readinessTimeoutMs > 5_000) {
+            throw Object.assign(new Error('Invalid readiness bound'), { code: 'ReadinessBounds' });
+          }
+          let timer;
+          try {
+            const readiness = await Promise.race([
+              execution.checkReadiness({ intent }),
+              new Promise((_, reject) => {
+                timer = setTimeout(() => reject(Object.assign(new Error('Readiness expired'),
+                  { code: 'ReadinessTimeout' })), readinessTimeoutMs);
+              }),
+            ]);
+            if (readiness?.status !== 'READY') {
+              throw Object.assign(new Error('Execution is unavailable'),
+                { code: diagnosticCode(readiness, 'TransportNotReady') });
+            }
+          } finally { clearTimeout(timer); }
         }
         const authorization = store.start({ jobKey, intent,
           idempotencyKey: digest({ grantId: jobKey, intentRevision: intent.intentRevision }) });

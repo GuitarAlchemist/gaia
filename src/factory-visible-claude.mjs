@@ -5,7 +5,7 @@ import {
   readSync, realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { setTimeout as delay } from 'node:timers/promises';
 import { buildClaudeWorkerInvocation, FactoryAgentError } from './factory-agent.mjs';
@@ -275,6 +275,134 @@ async function boundedStop(child) {
   } finally { clearTimeout(timer); }
 }
 
+
+/** Availability is not permission authority. This port remains unconfigured in the CLI. */
+function assertSdkReady(transport, context) {
+  if (typeof transport?.query !== 'function'
+      || transport.runtime?.sdkVersion !== '0.3.296'
+      || transport.runtime?.cliVersion !== '2.1.296'
+      || transport.runtime?.protectionsVerified !== true) {
+    throw error('TransportNotReady', 'A verified SDK transport is required');
+  }
+  if (!Array.isArray(context.requiredCapabilities) || context.requiredCapabilities.length > 255
+      || context.requiredCapabilities.some(value => !value || !['Read', 'Write', 'Edit'].includes(value.tool)
+        || typeof value.path !== 'string' || !value.path.trim() || value.path.includes('\0'))) {
+    throw error('MissionManifestRequired', 'A complete exact host file manifest is required');
+  }
+  return { status: 'READY' };
+}
+
+function sdkTargets(values, cwd) {
+  return Object.freeze(values.map(value => Object.freeze({ tool: value.tool, path: resolve(cwd, value.path) })));
+}
+
+// Conservative lexical/physical check; no pattern, directory or symlink authority is inferred.
+function exactSdkTarget(path, request, tool) {
+  if (typeof path !== 'string' || !path.trim() || path.includes('\0')) return null;
+  const target = resolve(request.cwd, path);
+  if (!request.requiredCapabilities.some(value => value.tool === tool && value.path === target)) return null;
+  const root = target === request.resultPath ? dirname(request.resultPath) : request.cwd;
+  const local = relative(root, target);
+  if (!local || isAbsolute(local) || local === '..' || local.startsWith('..' + sep)
+      || (process.platform === 'win32' && local.includes(':'))) return null;
+  let cursor = target;
+  while (cursor !== root) {
+    let stat;
+    try { stat = lstatSync(cursor); }
+    catch (cause) {
+      if (cause.code !== 'ENOENT' || cursor !== target || tool !== 'Write') return null;
+    }
+    if (stat && (stat.isSymbolicLink() || (cursor === target ? !stat.isFile() : !stat.isDirectory()))) return null;
+    cursor = dirname(cursor);
+  }
+  return target;
+}
+
+function launchSdkProvider(request, transport) {
+  const abortController = new AbortController();
+  const calls = new Map();
+  const seen = new Set();
+  let closing;
+  const closeQuery = () => closing ??= Promise.resolve().then(() => query?.close());
+  let fault;
+  let resultWrite = false;
+  let terminal;
+  let query;
+  let streamBytes = 0;
+  const renderer = createClaudeStreamRenderer({ write: request.render, label: request.label });
+  const deny = () => {
+    fault ??= 'AgentScopeDenied';
+    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny',
+      permissionDecisionReason: 'Request is outside the exact mission file scope' } };
+  };
+  const target = input => input?.cwd === request.cwd && input?.session_id === request.sessionId
+    ? exactSdkTarget(input.tool_input?.file_path, request, input.tool_name) : null;
+  const pre = async (input, id, { signal } = {}) => {
+    if (abortController.signal.aborted || signal?.aborted || input?.hook_event_name !== 'PreToolUse'
+        || fault || resultWrite || typeof id !== 'string' || !id || id.length > 512
+        || seen.has(id) || seen.size >= 512) return deny();
+    const path = target(input);
+    if (!path) return deny();
+    seen.add(id);
+    calls.set(id, { tool: input.tool_name, path });
+    return {}; // Deliberately no permissionDecision: native settings/hooks/dontAsk decide.
+  };
+  const post = async (input, id) => {
+    const call = calls.get(id);
+    if (input?.hook_event_name !== 'PostToolUse' || !call
+        || call.tool !== input.tool_name || call.path !== target(input)) {
+      fault ??= 'AgentProtocol';
+      return {};
+    }
+    calls.delete(id);
+    if (call.tool === 'Write' && call.path === request.resultPath) resultWrite = true;
+    return {};
+  };
+  const closed = (async () => {
+    try {
+      query = transport.query({ prompt: request.prompt, options: {
+        cwd: request.cwd, permissionMode: 'dontAsk', tools: [...TOOL_NAMES],
+        strictMcpConfig: true, mcpServers: {}, additionalDirectories: [dirname(request.resultPath)],
+        env: { ...Object.fromEntries(Object.keys(process.env).map(key => [key, undefined])), ...request.env },
+        abortController,
+        extraArgs: { restricted: null, 'permission-prompts': 'none', 'no-session-persistence': null,
+          'disable-slash-commands': null, 'session-id': request.sessionId },
+        hooks: { PreToolUse: [{ hooks: [pre] }], PostToolUse: [{ hooks: [post] }],
+          PostToolUseFailure: [{ hooks: [async () => { fault ??= 'AgentFailed'; return {}; }] }] },
+      } });
+      if (!query || typeof query[Symbol.asyncIterator] !== 'function' || typeof query.close !== 'function') {
+        throw error('AgentProtocol', 'SDK query must be a closeable message stream');
+      }
+      for await (const event of query) {
+        const bytes = Buffer.from(JSON.stringify(event));
+        streamBytes += bytes.length;
+        if (bytes.length > STREAM_LINE_LIMIT || streamBytes > request.maxStreamBytes) {
+          throw error('AgentStreamLimit', 'SDK stream exceeds its observation bound');
+        }
+        renderer.stdout(Buffer.concat([bytes, Buffer.from('\n')]));
+        if (event.type === 'result') {
+          if (terminal || event.session_id !== request.sessionId) fault ??= 'AgentProtocol';
+          terminal = event;
+          if (!Array.isArray(event.permission_denials)) fault ??= 'AgentProtocol';
+          else if (event.permission_denials.length) fault ??= 'AgentPermissionDenied';
+          if (event.subtype !== 'success' || event.is_error !== false) fault ??= 'AgentFailed';
+        } else if (terminal) fault ??= 'AgentProtocol';
+      }
+      if (!terminal || !resultWrite || calls.size !== 0) fault ??= 'AgentProtocol';
+      return { code: 0, fault };
+    } finally {
+      // A stream result does not close the owned SDK query. Close before accepting bytes.
+      if (query && typeof query.close === 'function') await closeQuery();
+      renderer.finish();
+    }
+  })();
+  return { closed, stop: async () => {
+    abortController.abort();
+    if (query && typeof query.close === 'function') await closeQuery();
+    await closed;
+  } };
+}
+
 /** Factory-compatible provider adapter; launch is the external process test seam. */
 export function createVisibleClaudeAdapters({
   isInteractive = () => Boolean(process.stdin.isTTY && process.stdout.isTTY),
@@ -307,16 +435,19 @@ export function createStreamingClaudeAdapters({
   launch = launchStreamingProvider,
   render = (line) => process.stdout.write(line),
   isObservable = () => canRenderProviderActivity(process.stdout),
+  sdkTransport,
 } = {}) {
-  return createClaudeAdapters({ launch, render, isObservable, mode: 'streaming' });
+  // Undefined retains the legacy public transport; the autonomous CLI explicitly requests SDK.
+  return createClaudeAdapters({ launch, render, isObservable, sdkTransport,
+    mode: sdkTransport === undefined ? 'streaming' : 'sdk' });
 }
 
-function createClaudeAdapters({ isInteractive, isObservable, launch, render, mode }) {
+function createClaudeAdapters({ isInteractive, isObservable, launch, render, sdkTransport, mode }) {
   async function run(role, context, {
     timeoutMs = 600_000, maxOutputBytes = 65_536, maxStreamBytes = 4_194_304,
   } = {}) {
     if (mode === 'visible' && !isInteractive()) throw error('InteractiveRequired', 'Visible execution requires an operator terminal');
-    if (mode === 'streaming' && !isObservable()) {
+    if (['streaming', 'sdk'].includes(mode) && !isObservable()) {
       throw error('ObservabilityRequired', 'Streaming execution requires a terminal that can render provider activity');
     }
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 1_800_000
@@ -324,6 +455,7 @@ function createClaudeAdapters({ isInteractive, isObservable, launch, render, mod
         || !Number.isSafeInteger(maxStreamBytes) || maxStreamBytes < 1 || maxStreamBytes > 67_108_864) {
       throw error('AgentBounds', 'Invalid visible provider bounds');
     }
+    if (mode === 'sdk') assertSdkReady(sdkTransport, context);
     const cwd = realpathSync(context.cwd);
     const sessionId = randomUUID();
     const binding = digest(JSON.stringify({ sessionId, role, cwd, task: context.task,
@@ -359,8 +491,12 @@ function createClaudeAdapters({ isInteractive, isObservable, launch, render, mod
       '--allowedTools', 'Read,Write,Edit,Glob,Grep', '--add-dir', resultDir,
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--disable-slash-commands',
       '--name', `Gaia ${role} ${sessionId.slice(0, 8)}`, '--', prompt];
-    const child = launch({ cwd, args, env: buildClaudeWorkerInvocation(context).env, resultPath, binding,
+    const request = Object.freeze({ cwd, args: Object.freeze(args), prompt, sessionId,
+      env: Object.freeze(buildClaudeWorkerInvocation(context).env), resultPath, binding,
+      requiredCapabilities: mode === 'sdk'
+        ? sdkTargets([...context.requiredCapabilities, { tool: 'Write', path: resultPath }], cwd) : undefined,
       maxOutputBytes, maxStreamBytes, render, label: `[gaia ${role} ${sessionId.slice(0, 8)}]` });
+    const child = mode === 'sdk' ? launchSdkProvider(request, sdkTransport) : launch(request);
     let closed = false;
     let exitResult;
     let launchError;
@@ -372,6 +508,11 @@ function createClaudeAdapters({ isInteractive, isObservable, launch, render, mod
     try {
       while (performance.now() < deadline) {
         if (launchError) throw launchError;
+        if (closed && exitResult?.fault) throw error(exitResult.fault, 'SDK execution did not satisfy its terminal contract');
+        if (mode === 'sdk' && !closed) {
+          await delay(Math.min(100, Math.max(1, deadline - performance.now())));
+          continue;
+        }
         if (closed && exitResult?.code !== 0) throw error('AgentFailed', 'Visible provider exited unsuccessfully');
         const text = readResult(resultPath, maxOutputBytes);
         if (text !== null) {
@@ -410,6 +551,10 @@ function createClaudeAdapters({ isInteractive, isObservable, launch, render, mod
       ...(role === 'reviewer' ? { verdict: output.result.verdict } : {}) };
   }
   return Object.freeze({
+    ...(mode === 'sdk' ? { checkReadiness: async context => {
+      if (!isObservable()) throw error('ObservabilityRequired', 'Provider activity cannot be rendered');
+      return assertSdkReady(sdkTransport, context);
+    } } : {}),
     runWorker: (context, options) => run('worker', context, options),
     runReviewer: (context, options) => run('reviewer', context, options),
     runRepair: (context, options) => run('repair', context, options),

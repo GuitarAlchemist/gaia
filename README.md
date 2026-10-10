@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 2399 gates
+node --test                                   # 2407 gates
 ```
 
 Use the single Node.js version in `.node-version` (26.8.1, the latest Current release
@@ -304,11 +304,15 @@ See [`docs/github-portfolio-operator.md`](docs/github-portfolio-operator.md).
 
 The separate `npm run portfolio:autonomous -- --help` command consumes hosted intake
 receipts under an explicitly provisioned, revocable local policy. It reuses exact
-Draft admission and the candidate factory without per-run terminal prompts. One local
+Draft admission and, when execution is configured, the candidate factory without per-run terminal prompts. One local
 registry serializes starts, enforces a finite budget and preserves uncertain jobs for
 reconciliation. Read [the authority contract](docs/autonomous-factory.md) before
 provisioning; a candidate is not publication or merge. The manual operator remains
 interactive. No background service is installed or activated by this change.
+
+New autonomous execution now requires the SDK transport and complete role manifests described in
+[the SDK scope contract](docs/mission-permission-preflight.md). These are not configured in the
+CLI yet: it refuses before consuming a run. Adapter CI is not evidence of restored autonomy.
 
 `npm run draft:seed-evidence -- --issue N [--apply]` opens the evidence branch that hosted intake
 requires for a labelled issue: one empty commit carrying the exact `Gaia-Issue` and
@@ -722,7 +726,7 @@ authoritative for their named contracts.
 | `src/draft-ambiguity-settlement.mjs` | Pure settlement decision for one `EFFECT_AMBIGUOUS` Draft operation, its identity recomputed from its envelope, from a saved marker lookup bound to its ambiguous revision: `SETTLE_REUSED`, `SETTLE_ABANDONED` only on a complete search that finds no pull request on the head, else `STAY_UNSETTLED`. No network, clock or ledger; `authority: NONE`. Every ledger read of an `ABANDONED` record re-checks its evidence here (`validateAbandonmentEvidence`). |
 | `scripts/draft-ambiguity-settlement.mjs` | Dry run of that decision over two files (`npm run draft:settle-ambiguous`). No `--apply`: the write is `hosted-draft-pump.mjs settle`, an operator dispatch of the intake workflow that runs its own marker search and writes `ABANDONED` only when that search is empty and began at least 65 minutes after the run that started the effect completed, once that run's token has expired (#161). Exit `0` decided / `1` refused / `2` usage / `3` fail-closed. |
 | `src/repair-round-breaker.mjs` | Repair-round circuit breaker on the delivery-round `BUDGET_EXHAUSTED` boundary: one compare-and-set record per work identity scope, tripped before the effect runs. While the store keeps the record, only a reset receipt bound to that trip arms it again. Receipts are checked for binding, not authenticity, and the store is in memory, so a restart arms every scope again and the breaker is not wired into the live pump yet (#54). See [`docs/repair-round-breaker.md`](docs/repair-round-breaker.md). |
-| `tests/` | 2399 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 2407 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).
