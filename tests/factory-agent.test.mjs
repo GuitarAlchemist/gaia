@@ -496,6 +496,59 @@ test('Pi worker proves OAuth readiness and applies one exact allowed patch propo
   ]);
 });
 
+test('an ambient GIT_DIR cannot relax the whitespace gate on a Pi worker patch', async () => {
+  // gitInput runs `git apply --whitespace=error-all`. The repository GIT_DIR names supplies the
+  // configuration that gate obeys, so an inherited GIT_DIR whose config relaxes core.whitespace
+  // would let a trailing-space patch through (#244 R0 Standards; mutant M5).
+  const { worktree } = fixture('pi-worker-ambient-whitespace');
+  const head = git(worktree, 'rev-parse', 'HEAD');
+  const other = join(scratch, 'pi-worker-ambient-whitespace-other');
+  git(scratch, 'init', other);
+  git(other, 'config', 'core.whitespace', '-trailing-space,-blank-at-eof');
+  const patch = [
+    'diff --git a/candidate.txt b/candidate.txt',
+    '--- a/candidate.txt',
+    '+++ b/candidate.txt',
+    '@@ -1 +1 @@',
+    '-before',
+    '+after ',
+    '',
+  ].join('\n');
+  // Non-vacuity: with that GIT_DIR, Git itself accepts the patch.
+  execFileSync('git', ['apply', '--check', '--whitespace=error-all', '-'], {
+    cwd: worktree, input: patch, env: { ...process.env, GIT_DIR: join(other, '.git') },
+  });
+
+  const saved = process.env.GIT_DIR;
+  try {
+    process.env.GIT_DIR = join(other, '.git');
+    await assert.rejects(runPiWorker({
+      cwd: worktree,
+      task: 'change candidate.txt',
+      allowedPaths: ['candidate.txt'],
+      baseline: { head },
+      env: { PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture' },
+    }, {
+      runInvocation: async (invocation) => (invocation.args[0] === 'auth'
+        ? {
+          code: 0, signal: null, stderr: '',
+          stdout: '{"status":"ready","provider":"openai-codex","authType":"oauth"}\n',
+        }
+        : {
+          code: 0, signal: null, stderr: '',
+          stdout: `${JSON.stringify({ schema: 'gaia-pi-patch/1', patch })}\n`,
+        }),
+    }), (error) => error instanceof FactoryAgentError && error.code === 'WorkerPatchRejected');
+  } finally {
+    if (saved === undefined) delete process.env.GIT_DIR;
+    else process.env.GIT_DIR = saved;
+  }
+  assert.equal(
+    readFileSync(join(worktree, 'candidate.txt'), 'utf8').replaceAll('\r\n', '\n'),
+    'before\n',
+  );
+});
+
 test('Pi worker refuses an NTFS alternate-data-stream path before authentication', async () => {
   const { worktree } = fixture('pi-worker-ads-refusal');
   const head = git(worktree, 'rev-parse', 'HEAD');

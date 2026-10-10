@@ -133,9 +133,10 @@ openWorktree(path) -> { root, git(args) -> stdout }   // refuses like D1
 
 - **Gain:** the handle binds the working directory and the locator-free environment to every later
   read. A caller cannot run Git against the path any other way.
-- **Cost:** about 30 `git(worktree, …)` call sites in `src/factory-agent.mjs` change. The two
-  modules' Git failures map differently: a raw throw in the factory, closed details in the resume
-  adapter. The handle would then need a mapping hook or two variants.
+- **Cost:** 20 Git call sites change: the 16 call sites of the factory's two helpers (13 `git`,
+  3 `gitInput`) and the 4 call sites of the resume adapter's helper. The 3 entry points change
+  too. The two modules' Git failures map differently: a raw throw in the factory, closed details
+  in the resume adapter. The handle would then need a mapping hook or two variants.
 - **Failure modes:** the diff is large in a 1,000-line module with several authority checks. The
   review surface grows without new protection, since invariant 1 is reachable with one
   environment function.
@@ -145,7 +146,7 @@ openWorktree(path) -> { root, git(args) -> stdout }   // refuses like D1
 | | D1 | D2 | D3 |
 |---|---|---|---|
 | module depth | deep: one call hides the Git invocation, the environment and the realpath comparison | shallow: the decision stays at callers | deepest |
-| locality of change | 3 call sites, 2 helpers | 3 call sites | ~35 call sites |
+| locality of change | 3 entry points, 3 helpers | 3 entry points | 3 entry points, 20 Git call sites |
 | seam placement | at the decision | below the decision | at every Git read |
 | reversibility | freely reversible | freely reversible | freely reversible, costly |
 | operational risk | low | repeats #218 R0 | diff-size risk |
@@ -159,7 +160,8 @@ openWorktree(path) -> { root, git(args) -> stdout }   // refuses like D1
   gives D3's binding of later reads without D3's rewrite.
 - **Alternatives rejected:**
   - D2 leaves the refusal at each caller, which is the failure #224 exists to remove.
-  - D3 buys no protection beyond D1 plus the shared environment, at about ten times the diff.
+  - D3 buys no protection beyond D1 plus the shared environment, at about four times as many
+    changed sites (23 against 6).
 - **Refusal mapping:**
 
   | entry point | `NOT_A_WORKTREE` | `NOT_WORKTREE_ROOT` |
@@ -183,3 +185,34 @@ openWorktree(path) -> { root, git(args) -> stdout }   // refuses like D1
 
 This receipt selects an implementation candidate. It is not independent review, and it grants no
 publication or merge authority.
+
+The D3 cost was first given as "about 30" and "~35" call sites, with "about ten times the diff". #243's
+R1 Standards review counted 16 factory call sites, and this record now gives the measured figures.
+The direction of the comparison is unchanged.
+
+## Known limits
+
+This was measured during #243's review. The guard does not close it.
+
+- **A write into the repository can still create a root.** Git calls a directory its worktree's top
+  when it holds a gitfile, or when `core.worktree` in the repository's own `.git/config` names it.
+  So a planted copy of a worktree's `.git` file, or that config key, makes a directory below the
+  worktree a root. The guard follows Git's definition and does not consult `git worktree list`.
+  Each entry point's index-bound cleanliness check still refuses the directory unless it mirrors
+  every tracked file. The same key set through `GIT_CONFIG_*`, the global config or `HOME` is
+  ignored by Git 2.45.1. A writer to the repository is outside what this guard defends.
+
+## The patch path
+
+`gitInput` runs only `git apply` without `--index`, for the Pi worker's patch. It resolves every
+*path* against its working directory. A probe ran the factory's three `apply` invocations from a
+worktree root under ten locator environments, and each one patched the working directory and
+nothing else. The repository Git opens still supplies the *configuration* that
+`--whitespace=error-all` obeys. An inherited `GIT_DIR` naming a repository whose
+`core.whitespace` drops `trailing-space` makes Git accept a trailing-space patch that the
+worktree's own repository refuses. #244's R0 Standards review found this after the author had
+called the environment in `gitInput` unobservable.
+
+So the neutral environment in `gitInput` binds the patch gate. `tests/factory-agent.test.mjs`
+pins it with "an ambient GIT_DIR cannot relax the whitespace gate on a Pi worker patch". Removing
+the environment from `gitInput` alone (mutant M5) fails that test.
