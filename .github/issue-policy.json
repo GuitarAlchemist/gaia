@@ -26,7 +26,18 @@
     ["ready-for-agent", "validation-failed"]
   ],
   "typeLabels": { "feat": "enhancement", "fix": "bug" },
-  "freeLabels": ["retrospective", "documentation", "question"],
+  "freeLabels": [
+    "retrospective",
+    "documentation",
+    "question",
+    "needs-info",
+    "wontfix",
+    "wayfinder:map",
+    "wayfinder:research",
+    "wayfinder:prototype",
+    "wayfinder:grilling",
+    "wayfinder:task"
+  ],
   "completionHeading": "Done when",
   "completionAliases": [
     "Acceptance criteria",

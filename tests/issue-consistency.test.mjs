@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   ISSUE_CONSISTENCY_SCHEMA,
@@ -10,6 +13,7 @@ import {
   planRepairs,
   splitGrooming,
 } from '../src/issue-consistency.mjs';
+import { declaredRelationships } from '../src/issue-relationships.mjs';
 
 const REPO = 'GuitarAlchemist/gaia';
 
@@ -408,4 +412,37 @@ test('NONE beside a concrete reference is reported as malformed', () => {
   const body = `## Why\n\nx\n\nDepends-On: NONE\nDepends-On: ${REPO}#2\n\n## Done when\n\ny\n`;
   const report = audit([issue({ body })]);
   assert.match(only(report, 'malformed-relationship')[0].summary, /cannot be combined/u);
+});
+
+test('the issue-tracker skill docs close nothing themselves and write what this audit reads', () => {
+  // #233 review: /wayfinder resolved a ticket with `gh issue close`, past the drain publisher; its
+  // fallback blocker line did not parse; its labels were outside the policy; its lists stopped at 30.
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const tracker = readFileSync(join(root, 'docs', 'agents', 'issue-tracker.md'), 'utf8');
+  const triage = readFileSync(join(root, 'docs', 'agents', 'triage-labels.md'), 'utf8');
+  const policy = JSON.parse(readFileSync(join(root, '.github', 'issue-policy.json'), 'utf8'));
+
+  for (const line of tracker.split('\n').filter((text) => text.includes('gh issue close'))) {
+    assert.match(line, /drain publisher/u, `a close is the drain publisher's: ${line}`);
+  }
+  for (const line of tracker.split('\n').filter((text) => text.includes('gh issue list'))) {
+    assert.match(line, /--limit \d+/u, `a list names its limit: ${line.slice(0, 60)}`);
+  }
+
+  const [, trailer] = /fall back to one `(Blocked-By: #<n>)` line per blocker/u.exec(tracker) ?? [];
+  assert.ok(trailer, 'the fallback names the canonical trailer');
+  const body = [7, 8].map((n) => trailer.replace('<n>', String(n))).join('\n');
+  assert.deepEqual(declaredRelationships(body, REPO).dependencies, [`${REPO}#7`, `${REPO}#8`]);
+
+  const types = /`wayfinder:<type>` \(([^)]*)\)/u.exec(tracker)[1].match(/[a-z]+/gu);
+  const labels = [
+    ...[...triage.matchAll(/^\| `[^`]+`\s*\| `([^`]+)`/gmu)].map((match) => match[1]),
+    ...[...tracker.matchAll(/`(wayfinder:[a-z]+)`/gu)].map((match) => match[1]),
+    ...types.map((type) => `wayfinder:${type}`),
+  ];
+  assert.ok(labels.length >= 10, `labels read: ${labels.join(', ')}`);
+  for (const label of new Set(labels)) {
+    const report = audit([issue({ labels: [{ name: label }] })], { policy });
+    assert.deepEqual(only(report, 'unknown-label'), [], `${label} is in .github/issue-policy.json`);
+  }
 });
