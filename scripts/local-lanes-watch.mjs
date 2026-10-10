@@ -16,13 +16,17 @@
  * So the concern constrains the script instead:
  *
  *   - **No mechanism of its own.** One tick calls `runLocalLaneSensorCli` and then
- *     `runFactoryDashboardCli`, in this process. The only subprocess anywhere is the single
- *     `wmux agent list` the sensor already makes.
+ *     `runFactoryDashboardCli`, in this process. The only subprocesses anywhere are the wmux
+ *     reads the sensor already makes: `wmux agent list`, and `wmux agent-state` under `--activity`.
  *   - **Non-overlapping.** The next tick is scheduled after the current one settles, so a slow
  *     tick delays the next rather than racing it.
  *   - **No retry.** A failed tick prints its typed error, leaves the previous artifacts exactly
- *     where they are, and waits for the next interval. A retry loop around a subprocess is the
- *     thing this product rules out elsewhere by name.
+ *     where they are, and waits for the next interval. That includes an input the control room
+ *     cannot read yet, absent or half-written, which it reports as its UsageError. An argument
+ *     error is the same on every tick, so the watcher's, the sensor's and the control room's
+ *     arguments are parsed once before the first tick, and an error there stops the watcher with
+ *     exit 2. A retry loop around a subprocess is the thing this product rules out elsewhere by
+ *     name.
  *   - **Bounded and stoppable.** The interval is explicit, capped at half the observation
  *     freshness window so no legal configuration can render permanently stale, and SIGINT or
  *     SIGTERM ends it.
@@ -36,8 +40,8 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { LOCAL_LANE_OBSERVATION_FRESH_MS } from '../src/local-lane-observation.mjs';
-import { runFactoryDashboardCli } from './factory-dashboard.mjs';
-import { runLocalLaneSensorCli } from './local-lane-sensor.mjs';
+import { parseArgs as parseDashboardArgs, runFactoryDashboardCli } from './factory-dashboard.mjs';
+import { parseArgs as parseSensorArgs, runLocalLaneSensorCli } from './local-lane-sensor.mjs';
 
 /**
  * At most half the window the control room ages the observation against.
@@ -64,7 +68,7 @@ export const DEFAULT_WATCH_INTERVAL_MS = 5_000;
  */
 const OWN_FLAGS = new Set(['lanes-out', 'interval-ms', 'wmux', 'bindings', 'activity']);
 
-export class UsageError extends Error {}
+export class UsageError extends Error { name = 'UsageError'; }
 
 export function parseArgs(argv) {
   const own = {};
@@ -95,20 +99,34 @@ export function parseArgs(argv) {
   return { own, forwarded, interval };
 }
 
-/** One tick: refresh the observation, then republish the control room over it. */
-export function runLocalLanesTick(argv, options = {}) {
-  const { own, forwarded } = parseArgs(argv);
+/** The argv a tick hands the sensor and the control room. */
+function stepArgv({ own, forwarded }) {
   const lanesOut = resolve(own['lanes-out']);
-  const observation = runLocalLaneSensorCli(
-    [
+  return {
+    sensor: [
       '--out', lanesOut,
       ...(own.bindings ? ['--bindings', own.bindings] : []),
       ...(own.activity ? ['--activity', own.activity] : []),
       ...(own.wmux ? ['--wmux', own.wmux] : []),
     ],
-    options,
-  );
-  const snapshot = runFactoryDashboardCli([...forwarded, '--local-lanes', lanesOut], options);
+    dashboard: [...forwarded, '--local-lanes', lanesOut],
+  };
+}
+
+/** The watcher's, the sensor's and the control room's argument errors, all raised here, before a tick. */
+function parseAllArgs(argv) {
+  const parsed = parseArgs(argv);
+  const { sensor, dashboard } = stepArgv(parsed);
+  parseSensorArgs(sensor);
+  parseDashboardArgs(dashboard);
+  return parsed;
+}
+
+/** One tick: refresh the observation, then republish the control room over it. */
+export function runLocalLanesTick(argv, options = {}) {
+  const { sensor, dashboard } = stepArgv(parseArgs(argv));
+  const observation = runLocalLaneSensorCli(sensor, options);
+  const snapshot = runFactoryDashboardCli(dashboard, options);
   return { observation, snapshot };
 }
 
@@ -119,7 +137,7 @@ if (directExecution) {
   const argv = process.argv.slice(2);
   let interval;
   try {
-    ({ interval } = parseArgs(argv));
+    ({ interval } = parseAllArgs(argv));
   } catch (error) {
     process.stderr.write(`${error.name}: ${error.message}\n`);
     process.exit(2);
@@ -135,14 +153,14 @@ if (directExecution) {
   process.once('SIGTERM', stop);
 
   // Scheduled after the tick settles, never on a fixed interval, so a slow tick delays the next
-  // one instead of overlapping it. A failure is reported and waited out; it is never retried.
+  // one instead of overlapping it. The arguments passed above, so a failure here comes from an
+  // input that can change by the next tick: it is reported and waited out, never run again early.
   const tick = () => {
     try {
       runLocalLanesTick(argv);
     } catch (error) {
       process.stderr.write(`${error.name}: ${error.message}\n`);
-      process.exitCode = error instanceof UsageError ? 2 : 1;
-      if (error instanceof UsageError) { stop(); return; }
+      process.exitCode = 1;
     }
     if (!stopped) timer = setTimeout(tick, interval);
   };

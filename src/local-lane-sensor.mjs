@@ -3,7 +3,8 @@
  *
  * This is the whole sensor, and it is a pure function. It holds no clock, opens no file, spawns
  * no process, calls no provider and mutates nothing; the process boundary that actually invokes
- * `wmux agent list` lives in `scripts/local-lane-sensor.mjs` and hands its parsed output here.
+ * `wmux agent list` (and, under `--activity`, `wmux agent-state`) lives in
+ * `scripts/local-lane-sensor.mjs` and hands its parsed output here.
  *
  * WHAT IT READS, AND WHY A SEVENTH FIELD IS UNREACHABLE
  * ----------------------------------------------------
