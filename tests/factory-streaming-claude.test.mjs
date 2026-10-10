@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   canRenderProviderActivity, createClaudeStreamRenderer, createStreamingClaudeAdapters,
   describeClaudeStreamEvent, launchStreamingProvider,
@@ -346,4 +348,110 @@ test('SDK readiness requires the trusted transport and exact host manifest befor
   assert.equal(f.counts().queries, 0);
   const unavailable = createStreamingClaudeAdapters({ sdkTransport: null, isObservable: () => true });
   await assert.rejects(unavailable.checkReadiness({ requiredCapabilities: [] }), { code: 'TransportNotReady' });
+});
+
+function sdkLifecycleFixture(sequence, onClose = async () => {}) {
+  let hooks;
+  let closes = 0;
+  const decisions = [];
+  const adapters = createStreamingClaudeAdapters({
+    isObservable: () => true, render: () => {},
+    sdkTransport: {
+      runtime: { sdkVersion: '0.3.296', cliVersion: '2.1.296', protectionsVerified: true },
+      query: ({ prompt, options }) => {
+        const request = { resultPath: join(options.additionalDirectories[0], 'result.json'),
+          binding: JSON.parse(prompt.split('\n').find(line => line.startsWith('{"schema":'))).binding };
+        hooks = {
+          input: (tool, path) => ({ hook_event_name: 'PreToolUse', cwd: options.cwd,
+            session_id: options.extraArgs['session-id'], tool_name: tool, tool_input: { file_path: path } }),
+          pre: async (input, id) => {
+            const decision = await options.hooks.PreToolUse[0].hooks[0](input, id, {});
+            decisions.push(decision);
+            return decision;
+          },
+          post: (input, id) => options.hooks.PostToolUse[0].hooks[0](
+            { ...input, hook_event_name: 'PostToolUse', tool_response: {} }, id, {}),
+          failure: () => options.hooks.PostToolUseFailure[0].hooks[0]({}, 'close-failure', {}),
+          edit: join(options.cwd, 'owned.txt'), result: request.resultPath,
+          writeResult: () => completed(request),
+          terminal: { type: 'result', session_id: options.extraArgs['session-id'],
+            subtype: 'success', is_error: false, permission_denials: [] },
+        };
+        const iterator = sequence(hooks);
+        iterator.close = async () => { closes++; await onClose(hooks); };
+        return iterator;
+      },
+    },
+  });
+  return { adapters, decisions, closes: () => closes };
+}
+
+test('SDK result Write admission fences overlapping calls in either admission and completion order', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'gaia-sdk-overlap-'));
+  writeFileSync(join(dir, 'owned.txt'), 'owned');
+  try {
+    for (const admission of ['edit-first', 'result-first']) {
+      for (const completion of ['edit-first', 'result-first']) {
+        await t.test(`${admission} admission, ${completion} completion`, async () => {
+          const f = sdkLifecycleFixture(async function* (h) {
+            const edit = h.input('Edit', h.edit);
+            const result = h.input('Write', h.result);
+            const first = admission === 'edit-first' ? edit : result;
+            const second = admission === 'edit-first' ? result : edit;
+            assert.deepEqual(await h.pre(first, 'first'), {});
+            const decision = await h.pre(second, 'second');
+            if (decision.hookSpecificOutput?.permissionDecision !== 'deny') {
+              // The old mechanism admits both calls, then falsely accepts either completion order.
+              h.writeResult();
+              const firstPost = completion === admission ? first : second;
+              await h.post(firstPost, firstPost === first ? 'first' : 'second');
+              const lastPost = firstPost === first ? second : first;
+              await h.post(lastPost, lastPost === first ? 'first' : 'second');
+            } else {
+              if (first === result) h.writeResult();
+              await h.post(first, 'first');
+            }
+            yield h.terminal;
+          });
+          await assert.rejects(f.adapters.runWorker({ cwd: dir, task: 'fixture',
+            requiredCapabilities: [{ tool: 'Edit', path: 'owned.txt' }] }), { code: 'AgentScopeDenied' });
+          assert.equal(f.decisions[1].hookSpecificOutput?.permissionDecision, 'deny');
+          assert.equal(f.closes(), 1);
+        });
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('SDK close-time failure cannot disappear behind a successful terminal snapshot', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gaia-sdk-close-'));
+  try {
+    const f = sdkLifecycleFixture(async function* (h) {
+      const result = h.input('Write', h.result);
+      assert.deepEqual(await h.pre(result, 'result'), {});
+      h.writeResult();
+      await h.post(result, 'result');
+      yield h.terminal;
+    }, async h => {
+      await new Promise(resolve => setImmediate(resolve));
+      await h.failure();
+    });
+    await assert.rejects(f.adapters.runWorker({ cwd: dir, task: 'fixture', requiredCapabilities: [] }),
+      { code: 'AgentFailed' });
+    assert.equal(f.closes(), 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('SDK Windows exact targets terminate for case-varied roots and drives', { skip: process.platform !== 'win32' }, async (t) => {
+  for (const variant of ['same', 'drive', 'directory']) {
+    for (const tool of ['Edit', 'Write']) {
+      await t.test(`${variant} root, ${tool}`, () => {
+        // The old synchronous ancestor loop blocks all in-process timeouts. Own a bounded child.
+        const run = spawnSync(process.execPath, [fileURLToPath(new URL('./fixtures/sdk-case-target.mjs', import.meta.url)), variant, tool],
+          { encoding: 'utf8', timeout: 5_000, windowsHide: true });
+        assert.equal(run.error, undefined, `path walk must terminate: ${run.error?.code}`);
+        assert.equal(run.status, 0, run.stderr || run.stdout);
+      });
+    }
+  }
 });
