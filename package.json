@@ -9,7 +9,7 @@
   },
   "gaiaArchitectureVerification": {
     "schema": "gaia-architecture-verification/1",
-    "commit": "5f88b3d1a4918233db9ed84048149dff187329d4",
+    "commit": "04c06f37a47f3b3f1b83898345e28d3a05a9947b",
     "date": "2026-10-10",
     "contentRevision": "sha256:02bff4ce4a3727010796974845694f073606924d79f958a7a2765fda535cf1b4"
   },
