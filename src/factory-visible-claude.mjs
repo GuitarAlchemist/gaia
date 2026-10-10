@@ -420,9 +420,20 @@ function createClaudeAdapters({ isInteractive, isObservable, launch, render, obs
       env: Object.freeze(buildClaudeWorkerInvocation(context).env), resultPath, binding,
       requiredCapabilities, maxOutputBytes, maxStreamBytes, render,
       label: `[gaia ${role} ${sessionId.slice(0, 8)}]` });
+    const deadline = performance.now() + timeoutMs;
     if (mode === 'streaming') {
       let observation;
-      try { observation = await observePermissions(request); } catch { /* Unknown is a refusal. */ }
+      let observationTimer;
+      try {
+        observation = await Promise.race([
+          observePermissions(request),
+          new Promise(resolveUnknown => {
+            observationTimer = setTimeout(resolveUnknown, Math.min(timeoutMs, 5_000));
+          }),
+        ]);
+      } catch { /* Unknown is a refusal. */ }
+      finally { clearTimeout(observationTimer); }
+      if (performance.now() >= deadline) observation = undefined;
       const refusal = permissionPreflight(request, observation, Date.now(), declared !== null);
       if (refusal) {
         throw Object.assign(error('WAITING_PERMISSION', 'Effective mission permissions are not proven'), refusal);
@@ -436,7 +447,6 @@ function createClaudeAdapters({ isInteractive, isObservable, launch, render, obs
     child.closed.then((result) => { closed = true; exitResult = result; }, (cause) => { closed = true; launchError = cause; });
     // Observe an already-settled launch/exit before reading a possibly prewritten result.
     await Promise.resolve();
-    const deadline = performance.now() + timeoutMs;
     let output;
     try {
       while (performance.now() < deadline) {

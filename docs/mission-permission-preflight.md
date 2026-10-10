@@ -76,6 +76,11 @@ the exact invocation, and answer unknown when it cannot. The source tag is a
 contract discriminator, not cryptographic authentication. `--allowedTools` alone
 and the list of enabled tools do not meet this contract.
 
+Observation is bounded to the smaller of timeoutMs and 5 seconds, sharing the
+streaming attempt deadline with provider execution. An exception or
+missing response becomes unknown; a late response cannot resume this attempt or
+launch a provider. The port owns cancellation of its external collection resources.
+
 Immediately after observation, the pure comparator checks the exact binding, cwd,
 mode, completeness and freshness at wall-clock now. Decisions are bounded to 512.
 No await occurs between this comparison and launch. For each required action all
@@ -90,7 +95,9 @@ makes every required action unproven. The refusal is a FactoryAgentError with
 Only the streaming adapter is gated in this first slice; visible and headless
 profiles retain their public behavior. The default observation port returns unknown.
 The autonomous CLI has neither a live effective-permission collector nor a complete
-mission manifest today, so its streaming invocation now refuses. This is an honest
+mission manifest today, so its streaming adapter invocation now refuses. The existing host catches that
+refusal and publishes RECONCILIATION_REQUIRED, retaining the original slot/budget;
+the CLI does not expose a durable WAITING_PERMISSION state. This is an honest
 blocker, not evidence of a resumed lane. Host authority/budget consumption still
 precedes the factory invocation; this patch does not introduce a durable waiting
 state, release its job slot, or retry the job. A follow-up must bind real observation
