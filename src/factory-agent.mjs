@@ -8,6 +8,8 @@ import {
   basename, dirname, isAbsolute, join, relative, resolve,
 } from 'node:path';
 
+import { WorktreeRootError, repositoryNeutralEnvironment, requireWorktreeRoot } from './worktree-root.mjs';
+
 export const FACTORY_AGENT_RECEIPT_SCHEMA = 'gaia-agent-factory-receipt/1';
 
 export class FactoryAgentError extends Error {
@@ -519,12 +521,15 @@ export async function runPiWorker(context, {
   };
 }
 
+// Every factory Git call runs without the repository locators, as the root guard does: the
+// worktree path names the repository, never a GIT_DIR a hook left in the environment (#224).
 function git(cwd, args, encoding = 'utf8') {
   return execFileSync('git', args, {
     cwd,
     encoding,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: repositoryNeutralEnvironment(),
   });
 }
 
@@ -535,6 +540,7 @@ function gitInput(cwd, args, input, encoding = 'utf8') {
     input,
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
+    env: repositoryNeutralEnvironment(),
   });
 }
 
@@ -635,6 +641,19 @@ export function assertPhysicalOutsideWorktree(worktree, candidate, label = 'path
   }
 }
 
+// The root decision belongs to src/worktree-root.mjs (#224); this maps its two refusals.
+function requireRoot(worktree) {
+  try {
+    return requireWorktreeRoot(worktree);
+  } catch (error) {
+    if (!(error instanceof WorktreeRootError)) throw error;
+    if (error.code === 'NOT_WORKTREE_ROOT') {
+      throw new FactoryAgentError('WorktreeRootRequired', 'the supplied path must be the root of its Git worktree');
+    }
+    throw new FactoryAgentError('GitWorktreeRequired', 'the supplied path is not a Git worktree');
+  }
+}
+
 function assertLinkedCleanWorktree(worktree) {
   const gitMarker = join(worktree, '.git');
   if (!existsSync(gitMarker) || !statSync(gitMarker).isFile()) {
@@ -643,9 +662,7 @@ function assertLinkedCleanWorktree(worktree) {
       'factory agents may run only in a clean linked Git worktree; primary checkouts are refused',
     );
   }
-  if (git(worktree, ['rev-parse', '--is-inside-work-tree']).trim() !== 'true') {
-    throw new FactoryAgentError('GitWorktreeRequired', 'the supplied path is not a Git worktree');
-  }
+  requireRoot(worktree);
   const gitDir = resolve(git(worktree, ['rev-parse', '--path-format=absolute', '--git-dir']).trim());
   const commonDir = resolve(git(
     worktree, ['rev-parse', '--path-format=absolute', '--git-common-dir'],
@@ -953,19 +970,9 @@ export async function verifyCommittedHead({
   if (typeof runVerification !== 'function') {
     throw new FactoryAgentError('AdapterRequired', 'the verification adapter must be a function');
   }
-  let insideWorktree = false;
-  try {
-    insideWorktree = git(worktree, ['rev-parse', '--is-inside-work-tree']).trim() === 'true';
-  } catch {
-    insideWorktree = false;
-  }
-  if (!insideWorktree) throw new FactoryAgentError('GitWorktreeRequired', 'the supplied path is not a Git worktree');
   // A subdirectory is inside the work tree too, but the pin, the change-set paths and the
   // test discovery are all rooted at the top: from below, the pin reads as absent.
-  const top = git(worktree, ['rev-parse', '--show-toplevel']).trim();
-  if (realpathSync.native(top) !== realpathSync.native(worktree)) {
-    throw new FactoryAgentError('WorktreeRootRequired', 'the supplied path must be the root of its Git worktree');
-  }
+  requireRoot(worktree);
   if (git(worktree, ['status', '--porcelain=v1', '-z'], null).length !== 0) {
     throw new FactoryAgentError('CleanWorktreeRequired', 'a committed head is verified only from a clean worktree');
   }
