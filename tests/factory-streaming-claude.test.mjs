@@ -266,6 +266,7 @@ function sdkFixture(scenario = 'success') {
           const pre = options.hooks.PreToolUse[0].hooks[0];
           const post = options.hooks.PostToolUse[0].hooks[0];
           assert.deepEqual(await pre(input('Edit', join(options.cwd, 'owned.txt')), 'edit-1', {}), {});
+          await post({ ...input('Edit', join(options.cwd, 'owned.txt')), hook_event_name: 'PostToolUse', tool_response: {} }, 'edit-1', {});
           const denied = await pre(input('Edit', join(options.cwd, 'outside.txt')), 'outside-1', {});
           assert.equal(denied.hookSpecificOutput.permissionDecision, 'deny');
           if (scenario === 'scope-deny') {
@@ -281,6 +282,7 @@ function sdkFixture(scenario = 'success') {
           const post = options.hooks.PostToolUse[0].hooks[0];
           if (scenario === 'scope-deny') { yield* run(); return; }
           assert.deepEqual(await pre(input('Edit', join(options.cwd, 'owned.txt')), 'edit-1', {}), {});
+          await post({ ...input('Edit', join(options.cwd, 'owned.txt')), hook_event_name: 'PostToolUse', tool_response: {} }, 'edit-1', {});
           assert.equal(options.permissionMode, 'dontAsk');
           assert.equal(Object.hasOwn(options, 'allowedTools'), false);
           assert.equal(Object.hasOwn(options, 'canUseTool'), false);

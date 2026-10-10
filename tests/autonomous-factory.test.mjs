@@ -300,14 +300,29 @@ test('execution readiness refusal and timeout precede store.start and cannot spe
     f.args.readinessTimeoutMs = 10;
     f.args.execution.checkReadiness = async () => {
       if (scenario === 'exception') throw Object.assign(new Error('unavailable'), { code: 'TransportNotReady' });
-      if (scenario === 'timeout') return new Promise(() => {});
+      if (scenario === 'timeout') return new Promise(resolve => setTimeout(() => resolve({ status: 'READY' }), 30));
       return { status: 'REFUSED', code: 'MissionManifestRequired' };
     };
     const result = await runAutonomousFactory(f.args);
     assert.equal(result.status, 'REFUSED', scenario);
     assert.equal(f.jobs.size, 0, scenario);
     assert.equal(f.counts().launches, 0, scenario);
+    if (scenario === 'timeout') {
+      await new Promise(resolve => setTimeout(resolve, 40));
+      assert.equal(f.jobs.size, 0);
+      assert.equal(f.counts().launches, 0);
+    }
   }
+  const root = mkdtempSync(join(tmpdir(), 'gaia-sdk-readiness-budget-'));
+  const store = openAutonomousFactoryStore({ path: join(root, 'policy.sqlite') });
+  try {
+    store.configure({ repository: 'Example/app', maxRuns: 1 });
+    const f = fixture(); f.args.store = store;
+    f.args.execution.checkReadiness = async () => ({ status: 'REFUSED', code: 'TransportNotReady' });
+    assert.equal((await runAutonomousFactory(f.args)).code, 'TransportNotReady');
+    assert.equal(store.status().usedRuns, 0);
+    assert.equal(f.counts().launches, 0);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test('a denial after execution starts retains its occupied operation without a refund or replay', async () => {
