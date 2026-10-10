@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import { measureAgentFactoryChangeSet } from './factory-agent.mjs';
+import { repositoryNeutralEnvironment, requireWorktreeRoot } from './worktree-root.mjs';
 
 const execFileAsync = promisify(execFile);
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u;
@@ -115,6 +116,7 @@ export function createGitGhCandidatePublicationEffects({
 }) {
   const expected = repository(expectedRepository, 'expectedRepository');
   const physicalWorktree = physicalDirectory(worktree);
+  requireWorktreeRoot(physicalWorktree);
   const base = branch(baseBranch, 'baseBranch');
   if (typeof run !== 'function') fail('InvalidAdapter', 'run must be a function');
   const invoke = async (command, args) => run(command, args, {
@@ -122,6 +124,7 @@ export function createGitGhCandidatePublicationEffects({
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
     windowsHide: true,
+    env: repositoryNeutralEnvironment(),
   });
   const git = async (...args) => String((await invoke('git', args)).stdout ?? '').trim();
   const gh = async (...args) => String((await invoke('gh', args)).stdout ?? '').trim();
@@ -162,17 +165,45 @@ export function createGitGhCandidatePublicationEffects({
       const expectedChangeSet = sha(request.changeSetIdentity, 'changeSetIdentity');
       text(request.message, 'message');
       sha(request.idempotencyKey, 'idempotencyKey');
-      if (oid(await git('rev-parse', 'HEAD'), 'HEAD') !== expectedHeadOid) {
-        fail('CandidateStale', 'local HEAD moved before commit');
-      }
-      if (measureAgentFactoryChangeSet(physicalWorktree, expectedHeadOid).identity
-          !== expectedChangeSet) {
-        fail('CandidateChanged', 'candidate bytes moved before commit');
-      }
+      const assertCandidate = async () => {
+        if (oid(await git('rev-parse', 'HEAD'), 'HEAD') !== expectedHeadOid) {
+          fail('CandidateStale', 'local HEAD moved before commit');
+        }
+        // An existing staged edit has no separate ownership proof in this adapter.
+        if (await git('diff', '--cached', '--name-only', '-z', '--') !== '') {
+          fail('IndexScopeRefused', 'publication requires an empty index; preserve staged work');
+        }
+        const measured = measureAgentFactoryChangeSet(physicalWorktree, expectedHeadOid);
+        if (measured.identity !== expectedChangeSet) {
+          fail('CandidateChanged', 'candidate bytes moved before staging');
+        }
+        return measured;
+      };
+      const measured = await assertCandidate();
+      const paths = measured.files.map(file => file.path);
+      if (paths.length === 0) fail('IndexScopeRefused', 'publication requires exact changed files');
       await git('switch', '--create', publicationBranch);
-      await git('add', '--all');
-      await git('commit', '--message', request.message);
-      return { commitOid: oid(await git('rev-parse', 'HEAD'), 'commitOid') };
+      // Preparation is an awaited effect: its earlier reading cannot admit later state.
+      await assertCandidate();
+      await git('--literal-pathspecs', 'add', '--', ...paths);
+      const stagedPaths = (await git('diff', '--cached', '--name-only', '-z', '--'))
+        .split('\0').filter(Boolean).sort();
+      const afterStage = measureAgentFactoryChangeSet(physicalWorktree, expectedHeadOid);
+      if (JSON.stringify(stagedPaths) !== JSON.stringify(paths)
+          || JSON.stringify(afterStage.files) !== JSON.stringify(measured.files)
+          || await git('--literal-pathspecs', 'diff', '--name-only', '-z', '--', ...paths) !== ''
+          || oid(await git('rev-parse', 'HEAD'), 'HEAD') !== expectedHeadOid) {
+        fail('StagingVerificationFailed', 'staging did not preserve the exact admitted candidate');
+      }
+      const stagedTree = oid(await git('write-tree'), 'stagedTree');
+      // --only also excludes a third-party index entry appearing after our final reading.
+      await git('--literal-pathspecs', 'commit', '--only', '--message', request.message, '--', ...paths);
+      const commitOid = oid(await git('rev-parse', 'HEAD'), 'commitOid');
+      if (oid(await git('rev-parse', `${commitOid}^`), 'parentOid') !== expectedHeadOid
+          || oid(await git('rev-parse', `${commitOid}^{tree}`), 'treeOid') !== stagedTree) {
+        fail('StagingVerificationFailed', 'commit does not match the verified staged tree');
+      }
+      return { commitOid };
     },
 
     async push(request) {
