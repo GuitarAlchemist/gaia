@@ -11,10 +11,10 @@
  */
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -859,4 +859,43 @@ test('the watcher process names its own usage error by its class', () => {
   const run = runProcess(WATCH_CLI, [], { timeout: 10_000 });
 
   assert.equal(run.stderr, 'UsageError: missing --lanes-out\n');
+});
+
+/** Resolves once `ready()` holds; rejects if the process exits first or 10 s pass. */
+function until(child, ready) {
+  return new Promise((resolve, reject) => {
+    const poll = setInterval(() => {
+      if (!ready()) return;
+      settle();
+      resolve();
+    }, 50);
+    const limit = setTimeout(() => { settle(); reject(new Error('timed out')); }, 10_000);
+    const exited = (code) => { settle(); reject(new Error(`the watcher exited with ${code}`)); };
+    const settle = () => { clearInterval(poll); clearTimeout(limit); child.off('exit', exited); };
+    child.once('exit', exited);
+  });
+}
+
+test('the watcher waits out a control-room input that is not readable yet, then renders it', async () => {
+  // #229 review: the control room reports an unreadable input file as its UsageError, but a file
+  // absent or half-written at one tick can be whole at the next, so only arguments stop the watcher.
+  const space = workspace([agent(1)]);
+  const projection = space.path('projection-later.json');
+  const snapshotOut = space.path('control-room.json');
+  const child = spawn(process.execPath, [
+    WATCH_CLI, '--lanes-out', space.path('lanes.json'), '--wmux', FAKE_WMUX, '--interval-ms', '1000',
+    '--projection', projection, '--html-out', space.path('control-room.html'), '--snapshot-out', snapshotOut,
+  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+
+  try {
+    await until(child, () => stderr.includes('projection must be readable JSON'));
+    assert.equal(existsSync(snapshotOut), false, 'the failed tick rendered nothing');
+    projectionFile(space.dir, 'projection-later.json');
+    await until(child, () => existsSync(snapshotOut));
+  } finally {
+    child.kill();
+  }
+  assert.equal(stderr, 'UsageError: projection must be readable JSON\n');
 });
