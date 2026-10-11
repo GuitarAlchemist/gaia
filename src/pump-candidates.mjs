@@ -10,7 +10,8 @@ import { declaredRelationships } from './issue-relationships.mjs';
 export const PUMP_CANDIDATES_SCHEMA = 'GaiaPumpCandidatesV0';
 
 export const DEFAULT_EXCLUDED_LABELS = Object.freeze([
-  'needs-triage', 'blocked', 'ready-for-agent', 'retrospective', 'wontfix', 'duplicate',
+  'needs-triage', 'needs-info', 'ready-for-human', 'blocked', 'ready-for-agent',
+  'retrospective', 'wontfix', 'duplicate',
 ]);
 
 const COMPLETION_HEADING = /^#{1,4}\s*(?:[\w-]+\s+)*(?:done when|acceptance(?: criteria)?|completion criteria|definition of done|exit criteria)\b/imu;
@@ -59,6 +60,14 @@ export function assessIssue(issue, { repository, excludeLabels, parents, drafted
     if (excludeLabels.includes(label) || String(label).startsWith('blocker:')) {
       reasons.push(`excluded-label:${label}`);
     }
+  }
+  // The REST issue collection supplies this observation. Missing evidence is not zero:
+  // a body with no trailer can still have an open native GitHub dependency.
+  const nativeBlockers = issue.issue_dependencies_summary?.blocked_by;
+  if (!Number.isSafeInteger(nativeBlockers) || nativeBlockers < 0) {
+    reasons.push('native-dependencies-unreadable');
+  } else if (nativeBlockers > 0) {
+    reasons.push('native-dependency');
   }
   try {
     const relationships = declaredRelationships(issue.body ?? '', repository);

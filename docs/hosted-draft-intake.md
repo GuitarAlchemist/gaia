@@ -275,12 +275,20 @@ npm run pump:candidates                       # top 3, with a tally of refusal r
 npm run pump:candidates -- --format json      # every issue and every reason
 ```
 
-An open issue is a candidate when it carries none of `needs-triage`, `blocked`, `ready-for-agent`,
-`retrospective`, `wontfix`, `duplicate` or `blocker:*` (plus any `--exclude-label`); declares no
+An open issue is a candidate when it carries none of `needs-triage`, `needs-info`, `ready-for-human`,
+`blocked`, `ready-for-agent`, `retrospective`, `wontfix`, `duplicate` or `blocker:*` (plus any
+`--exclude-label`); has a readable native GitHub dependency summary with zero open blockers; declares no
 `Depends-On`/`Blocked-By` or `Duplicate-Of` (asserted `NONE` is fine; a malformed block refuses);
 is not named as a parent by another open issue; has a completion section (`Done when`,
 `Acceptance criteria`, and their variants); and has neither a `deliver issue #N` Draft nor a
 `gaia/issue-N-*` branch. Candidates are listed lowest number first. The module exports no effect.
+
+The CLI reads the paginated REST issue collection, including `issue_dependencies_summary.blocked_by`;
+the selected fields of `gh issue list` do not carry that observation. A positive count refuses as
+`native-dependency`; an absent, malformed or negative count refuses as `native-dependencies-unreadable`,
+never as zero. Closed native blockers do not block through that count. Body trailers are still checked
+independently, and the issue audit and hosted admission still require their existing body metadata.
+This additional observation changes recommendations only; it neither labels an issue nor authorizes intake.
 
 ### No new configuration
 

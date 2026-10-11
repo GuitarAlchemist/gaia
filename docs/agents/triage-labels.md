@@ -12,4 +12,8 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
 
+The read-only `pump:candidates` command excludes both `needs-info` and `ready-for-human`:
+waiting for information or requiring a human is not a recommendation for an AFK agent.
+Candidate recommendations do not apply `ready-for-agent` or grant admission authority.
+
 Edit the right-hand column to match whatever vocabulary you actually use.

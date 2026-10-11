@@ -8,7 +8,10 @@ const REPOSITORY = 'GuitarAlchemist/gaia';
 const DONE = '## Why\nbecause\n\n## Done when\n- it works\n';
 
 function issue(number, { labels = [], body = DONE, title = `issue ${number}` } = {}) {
-  return { number, title, body, labels: labels.map((name) => ({ name })) };
+  return {
+    number, title, body, labels: labels.map((name) => ({ name })),
+    issue_dependencies_summary: { blocked_by: 0 },
+  };
 }
 
 test('a groomed issue with completion criteria is a candidate, lowest number first', () => {
@@ -28,6 +31,8 @@ test('triage, blocked, in-flight and blocker labels refuse with the label named'
       issue(3, { labels: ['ready-for-agent'] }),
       issue(4, { labels: ['blocker:capacity'] }),
       issue(5, { labels: ['team-only'] }),
+      issue(6, { labels: ['needs-info'] }),
+      issue(7, { labels: ['ready-for-human'] }),
     ],
     excludeLabels: ['team-only'],
   });
@@ -35,7 +40,35 @@ test('triage, blocked, in-flight and blocker labels refuse with the label named'
   assert.deepEqual(result.refused.map((row) => row.reasons[0]), [
     'excluded-label:needs-triage', 'excluded-label:blocked', 'excluded-label:ready-for-agent',
     'excluded-label:blocker:capacity', 'excluded-label:team-only',
+    'excluded-label:needs-info', 'excluded-label:ready-for-human',
   ]);
+});
+
+test('native blockers refuse without a body trailer; closed native blockers do not', () => {
+  const result = rankCandidates({
+    repository: REPOSITORY,
+    issues: [
+      { ...issue(1), issue_dependencies_summary: { blocked_by: 1, total_blocked_by: 1 } },
+      { ...issue(2), issue_dependencies_summary: { blocked_by: 0, total_blocked_by: 1 } },
+      issue(3, { body: `${DONE}\nBlocked-By: #9\n` }),
+    ],
+  });
+  assert.deepEqual(result.candidates.map((row) => row.issue), [2]);
+  assert.deepEqual(result.refused.map(({ issue: number, reasons }) => [number, reasons]), [
+    [1, ['native-dependency']], [3, ['declares-dependency']],
+  ]);
+});
+
+test('unobserved or malformed native dependencies never mean zero blockers', () => {
+  for (const summary of [undefined, null, {}, [], { blocked_by: '0' }, { blocked_by: -1 },
+    { blocked_by: 0.5 }, { blocked_by: Number.MAX_SAFE_INTEGER + 1 }]) {
+    const result = rankCandidates({
+      repository: REPOSITORY,
+      issues: [{ ...issue(1), issue_dependencies_summary: summary }],
+    });
+    assert.equal(result.eligibleCount, 0, String(JSON.stringify(summary)));
+    assert.deepEqual(result.refused[0].reasons, ['native-dependencies-unreadable']);
+  }
 });
 
 test('a declared dependency or duplicate refuses; asserted NONE does not', () => {
