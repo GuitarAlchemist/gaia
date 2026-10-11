@@ -90,15 +90,15 @@ export function assessIssue(issue, { repository, excludeLabels, parents, drafted
 export function rankCandidates({
   repository, issues, pullRequests = [], branchNames = [], excludeLabels = [], limit = 3,
 }) {
+  const issueRows = issues.filter((issue) => !issue.pull_request && !issue.isPullRequest);
   const context = {
     repository,
     excludeLabels: [...new Set([...DEFAULT_EXCLUDED_LABELS, ...excludeLabels])],
-    parents: parentNumbers(issues),
+    parents: parentNumbers(issueRows),
     drafted: draftedNumbers(pullRequests),
     seeded: seededNumbers(branchNames),
   };
-  const assessed = issues
-    .filter((issue) => !issue.pull_request && !issue.isPullRequest)
+  const assessed = issueRows
     .map((issue) => ({ issue: issue.number, title: issue.title ?? '', reasons: assessIssue(issue, context) }))
     .sort((left, right) => left.issue - right.issue);
   const eligible = assessed.filter((row) => row.reasons.length === 0);

@@ -21,7 +21,7 @@ test('candidate CLI carries native dependency evidence from every REST issue pag
   const read = async (args) => {
     calls.push(args);
     if (args[0] === 'api' && args[1].includes('/issues?')) {
-      return [[issue(1, 1)], [issue(2), { ...issue(3), pull_request: {} }]];
+      return [[issue(1, 1)], [issue(2), { ...issue(3), body: `${body}\nParent: #2\n`, pull_request: {} }]];
     }
     if (args[0] === 'pr') return [];
     if (args[0] === 'api' && args[1].includes('/git/')) return [[]];

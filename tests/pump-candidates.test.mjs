@@ -126,11 +126,14 @@ test('an issue already drafted or seeded is not proposed again', () => {
 });
 
 test('pull requests in the issue list are ignored', () => {
-  const result = rankCandidates({
-    repository: REPOSITORY, issues: [{ ...issue(3), pull_request: {} }, issue(4)],
-  });
-  assert.deepEqual(result.candidates.map((row) => row.issue), [4]);
-  assert.equal(result.refused.length, 0);
+  for (const marker of [{ pull_request: {} }, { isPullRequest: true }]) {
+    const result = rankCandidates({
+      repository: REPOSITORY,
+      issues: [{ ...issue(3, { body: `${DONE}\nParent: #4\n` }), ...marker }, issue(4)],
+    });
+    assert.deepEqual(result.candidates.map((row) => row.issue), [4]);
+    assert.equal(result.refused.length, 0);
+  }
 });
 
 test('the ranker only proposes: its module exports no effect', () => {
