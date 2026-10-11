@@ -20,13 +20,14 @@
  *     reads the sensor already makes: `wmux agent list`, and `wmux agent-state` under `--activity`.
  *   - **Non-overlapping.** The next tick is scheduled after the current one settles, so a slow
  *     tick delays the next rather than racing it.
- *   - **No retry.** A failed tick prints its typed error, leaves the previous artifacts exactly
- *     where they are, and waits for the next interval. That includes an input the control room
- *     cannot read yet, absent or half-written, which it reports as its UsageError. An argument
- *     error is the same on every tick, so the watcher's, the sensor's and the control room's
- *     arguments are parsed once before the first tick, and an error there stops the watcher with
- *     exit 2. A retry loop around a subprocess is the thing this product rules out elsewhere by
- *     name.
+ *   - **No retry.** A failed tick prints its typed error and waits for the next interval.
+ *     A sensor read refusal preserves the previous observation. An unavailable control-room input,
+ *     absent or half-written, is reported as its UsageError and preserves the dashboard outputs,
+ *     although the sensor may already have refreshed the observation. These input-read guarantees
+ *     do not imply atomicity for output-write failures. An argument error is the same on every
+ *     tick, so the watcher's, the sensor's and the control room's arguments are parsed once before
+ *     the first tick, and an error there stops the watcher with exit 2. A retry loop around a
+ *     subprocess is the thing this product rules out elsewhere by name.
  *   - **Bounded and stoppable.** The interval is explicit, capped at half the observation
  *     freshness window so no legal configuration can render permanently stale, and SIGINT or
  *     SIGTERM ends it.
