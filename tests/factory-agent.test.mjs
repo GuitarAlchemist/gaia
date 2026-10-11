@@ -496,15 +496,44 @@ test('Pi worker proves OAuth readiness and applies one exact allowed patch propo
   ]);
 });
 
-test('an ambient GIT_DIR cannot relax the whitespace gate on a Pi worker patch', async () => {
-  // gitInput runs `git apply --whitespace=error-all`. The repository GIT_DIR names supplies the
-  // configuration that gate obeys, so an inherited GIT_DIR whose config relaxes core.whitespace
-  // would let a trailing-space patch through (#244 R0 Standards; mutant M5).
+test('ambient Git configuration cannot relax the whitespace gate on a Pi worker patch', async () => {
+  // gitInput runs `git apply --whitespace=error-all`, and core.whitespace decides which whitespace
+  // is an error. A repository named by an inherited locator (#244) or a configuration source the
+  // process inherits (#248) could drop trailing-space and let this patch through.
   const { worktree } = fixture('pi-worker-ambient-whitespace');
   const head = git(worktree, 'rev-parse', 'HEAD');
+  const relaxed = '-trailing-space,-blank-at-eof';
   const other = join(scratch, 'pi-worker-ambient-whitespace-other');
   git(scratch, 'init', other);
-  git(other, 'config', 'core.whitespace', '-trailing-space,-blank-at-eof');
+  git(other, 'config', 'core.whitespace', relaxed);
+  // A repository's own attributes outrank every command-line pin, so only the neutral
+  // environment keeps another repository's out of the gate.
+  writeFileSync(join(other, '.git', 'info', 'attributes'), `* whitespace=${relaxed}\n`, 'utf8');
+  const globalConfig = join(scratch, 'pi-worker-ambient-whitespace.gitconfig');
+  writeFileSync(globalConfig, `[core]\n\twhitespace = ${relaxed}\n`, 'utf8');
+  const home = join(scratch, 'pi-worker-ambient-whitespace-home');
+  mkdirSync(home);
+  writeFileSync(join(home, '.gitconfig'), `[core]\n\twhitespace = ${relaxed}\n`, 'utf8');
+  // A global attributes file overrides core.whitespace per path.
+  const attributesHome = join(scratch, 'pi-worker-ambient-whitespace-attributes-home');
+  mkdirSync(join(attributesHome, '.config', 'git'), { recursive: true });
+  writeFileSync(
+    join(attributesHome, '.config', 'git', 'attributes'), `* whitespace=${relaxed}\n`, 'utf8',
+  );
+  const rows = {
+    clean: {},
+    GIT_DIR: { GIT_DIR: join(other, '.git') },
+    GIT_COMMON_DIR: { GIT_COMMON_DIR: join(other, '.git') },
+    GIT_CONFIG_COUNT: {
+      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.whitespace', GIT_CONFIG_VALUE_0: relaxed,
+    },
+    GIT_CONFIG_PARAMETERS: { GIT_CONFIG_PARAMETERS: `'core.whitespace=${relaxed}'` },
+    GIT_CONFIG_GLOBAL: { GIT_CONFIG_GLOBAL: globalConfig },
+    HOME: { HOME: home, USERPROFILE: undefined, HOMEDRIVE: undefined, HOMEPATH: undefined },
+    attributes: {
+      HOME: attributesHome, USERPROFILE: undefined, HOMEDRIVE: undefined, HOMEPATH: undefined,
+    },
+  };
   const patch = [
     'diff --git a/candidate.txt b/candidate.txt',
     '--- a/candidate.txt',
@@ -514,39 +543,63 @@ test('an ambient GIT_DIR cannot relax the whitespace gate on a Pi worker patch',
     '+after ',
     '',
   ].join('\n');
-  // Non-vacuity: with that GIT_DIR, Git itself accepts the patch.
-  execFileSync('git', ['apply', '--check', '--whitespace=error-all', '-'], {
-    cwd: worktree, input: patch, env: { ...process.env, GIT_DIR: join(other, '.git') },
-  });
 
-  const saved = process.env.GIT_DIR;
-  try {
-    process.env.GIT_DIR = join(other, '.git');
-    await assert.rejects(runPiWorker({
-      cwd: worktree,
-      task: 'change candidate.txt',
-      allowedPaths: ['candidate.txt'],
-      baseline: { head },
-      env: { PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture' },
-    }, {
-      runInvocation: async (invocation) => (invocation.args[0] === 'auth'
-        ? {
-          code: 0, signal: null, stderr: '',
-          stdout: '{"status":"ready","provider":"openai-codex","authType":"oauth"}\n',
-        }
-        : {
-          code: 0, signal: null, stderr: '',
-          stdout: `${JSON.stringify({ schema: 'gaia-pi-patch/1', patch })}\n`,
-        }),
-    }), (error) => error instanceof FactoryAgentError && error.code === 'WorkerPatchRejected');
-  } finally {
-    if (saved === undefined) delete process.env.GIT_DIR;
-    else process.env.GIT_DIR = saved;
+  const rawGit = {};
+  const outcome = {};
+  const bytes = {};
+  for (const [row, overrides] of Object.entries(rows)) {
+    const saved = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
+    try {
+      for (const [key, value] of Object.entries(overrides)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      try {
+        execFileSync('git', ['apply', '--check', '--whitespace=error-all', '-'], {
+          cwd: worktree, input: patch, stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        rawGit[row] = 'accepted';
+      } catch {
+        rawGit[row] = 'refused';
+      }
+      outcome[row] = await runPiWorker({
+        cwd: worktree,
+        task: 'change candidate.txt',
+        allowedPaths: ['candidate.txt'],
+        baseline: { head },
+        env: { PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture' },
+      }, {
+        runInvocation: async (invocation) => (invocation.args[0] === 'auth'
+          ? {
+            code: 0, signal: null, stderr: '',
+            stdout: '{"status":"ready","provider":"openai-codex","authType":"oauth"}\n',
+          }
+          : {
+            code: 0, signal: null, stderr: '',
+            stdout: `${JSON.stringify({ schema: 'gaia-pi-patch/1', patch })}\n`,
+          }),
+      }).then(
+        () => 'accepted',
+        (error) => (error instanceof FactoryAgentError ? error.code : String(error)),
+      );
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+    bytes[row] = readFileSync(join(worktree, 'candidate.txt'), 'utf8').replaceAll('\r\n', '\n');
+    git(worktree, 'checkout', '--', 'candidate.txt');
   }
-  assert.equal(
-    readFileSync(join(worktree, 'candidate.txt'), 'utf8').replaceAll('\r\n', '\n'),
-    'before\n',
-  );
+
+  // Non-vacuity: every row but the control makes Git itself accept the patch.
+  assert.deepEqual(rawGit, Object.fromEntries(Object.keys(rows).map((row) => [
+    row, row === 'clean' ? 'refused' : 'accepted',
+  ])));
+  assert.deepEqual(outcome, Object.fromEntries(Object.keys(rows).map((row) => [
+    row, 'WorkerPatchRejected',
+  ])));
+  assert.deepEqual(bytes, Object.fromEntries(Object.keys(rows).map((row) => [row, 'before\n'])));
 });
 
 test('Pi worker refuses an NTFS alternate-data-stream path before authentication', async () => {

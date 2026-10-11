@@ -4,6 +4,7 @@ import {
   existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync,
   realpathSync, statSync, writeFileSync,
 } from 'node:fs';
+import { devNull } from 'node:os';
 import {
   basename, dirname, isAbsolute, join, relative, resolve,
 } from 'node:path';
@@ -544,6 +545,14 @@ function gitInput(cwd, args, input, encoding = 'utf8') {
   });
 }
 
+// The whitespace gate is the factory's rule, not the operator's. Git reads core.whitespace from
+// every configuration source the process inherits, and a global attributes file overrides it per
+// path. Both are pinned on the command line, which outranks every other source (#248).
+const WHITESPACE_GATE = Object.freeze([
+  '-c', 'core.whitespace=blank-at-eol,blank-at-eof,space-before-tab',
+  '-c', `core.attributesFile=${devNull}`,
+]);
+
 function applyValidatedPiPatch(worktree, patch, allowedPaths) {
   const bytes = Buffer.byteLength(patch);
   if (bytes === 0 || bytes > 1_048_576 || patch.includes('\0')) {
@@ -576,8 +585,8 @@ function applyValidatedPiPatch(worktree, patch, allowedPaths) {
     );
   }
   try {
-    gitInput(worktree, ['apply', '--check', '--whitespace=error-all', '-'], patch);
-    gitInput(worktree, ['apply', '--whitespace=error-all', '-'], patch);
+    gitInput(worktree, [...WHITESPACE_GATE, 'apply', '--check', '--whitespace=error-all', '-'], patch);
+    gitInput(worktree, [...WHITESPACE_GATE, 'apply', '--whitespace=error-all', '-'], patch);
   } catch {
     throw new FactoryAgentError('WorkerPatchRejected', 'Git refused the Pi worker patch');
   }
