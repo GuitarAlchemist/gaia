@@ -828,11 +828,18 @@ test('the sensor process names a refusal by its class and exits 1', () => {
 });
 
 test('the watcher process stops with exit 2 when the sensor refuses its usage', () => {
+  const space = workspace([agent(1)]);
   const run = runProcess(WATCH_CLI, [
-    '--lanes-out', join(SCRATCH, 'watch-lanes.json'), '--activity', 'everything', '--interval-ms', '1000',
+    '--lanes-out', space.path('lanes.json'), '--wmux', FAKE_WMUX,
+    '--activity', 'everything', '--interval-ms', '1000',
+    // Keep the dashboard valid: its own usage error must not mask a missing sensor preflight.
+    '--projection', projectionFile(space.dir),
+    '--html-out', space.path('control-room.html'), '--snapshot-out', space.path('control-room.json'),
   ], { timeout: 10_000 });
 
   assert.equal(run.status, 2);
+  assert.equal(run.stderr, 'UsageError: --activity takes exactly "agent-state"\n');
+  assert.deepEqual(space.argv(), [], 'argument refusal happens before any wmux read');
 });
 
 test('the watcher process stops with exit 2 when the control room refuses its usage', () => {
