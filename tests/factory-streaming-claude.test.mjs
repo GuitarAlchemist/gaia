@@ -3,8 +3,9 @@ import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import {
   canRenderProviderActivity, createClaudeStreamRenderer, createStreamingClaudeAdapters,
   describeClaudeStreamEvent, launchStreamingProvider,
@@ -402,11 +403,15 @@ test('SDK result Write admission fences overlapping calls in either admission an
             const decision = await h.pre(second, 'second');
             if (decision.hookSpecificOutput?.permissionDecision !== 'deny') {
               // The old mechanism admits both calls, then falsely accepts either completion order.
-              h.writeResult();
+              const finish = async (input, id) => {
+                if (input === edit) writeFileSync(h.edit, 'changed during overlapping result Write');
+                else h.writeResult();
+                await h.post(input, id);
+              };
               const firstPost = completion === admission ? first : second;
-              await h.post(firstPost, firstPost === first ? 'first' : 'second');
+              await finish(firstPost, firstPost === first ? 'first' : 'second');
               const lastPost = firstPost === first ? second : first;
-              await h.post(lastPost, lastPost === first ? 'first' : 'second');
+              await finish(lastPost, lastPost === first ? 'first' : 'second');
             } else {
               if (first === result) h.writeResult();
               await h.post(first, 'first');
@@ -454,4 +459,51 @@ test('SDK Windows exact targets terminate for case-varied roots and drives', { s
       });
     }
   }
+});
+
+test('SDK Windows path checks inspect actual spelling and require a usable physical root identity', () => {
+  // Inject Windows path semantics and filesystem observations into the shipped private helper.
+  // This models case-sensitive NTFS without changing host filesystem/security settings.
+  const source = readFileSync(new URL('../src/factory-visible-claude.mjs', import.meta.url), 'utf8');
+  const start = source.indexOf('function exactSdkTarget(');
+  const end = source.indexOf('\nfunction launchSdkProvider(', start);
+  assert.ok(start >= 0 && end > start);
+  const root = 'C:\\repo\\Workspace';
+  const alias = 'c:\\repo\\workspace';
+  const file = win32.join(alias, 'nested', 'owned.txt');
+  const stat = (kind, ino = 10n, dev = 1n) => ({ ino, dev,
+    isFile: () => kind === 'file', isDirectory: () => kind === 'directory',
+    isSymbolicLink: () => kind === 'symlink' });
+  const check = ({ boundary = stat('directory'), trusted = stat('directory'),
+    parent = stat('directory'), missingLeaf = false, tool = 'Edit' } = {}) => {
+    const observations = [];
+    const exact = runInNewContext(`(${source.slice(start, end)})`, {
+      ...win32, process: { platform: 'win32' },
+      lstatSync: path => {
+        observations.push(path);
+        assert.ok(observations.length <= 8, 'ancestor walk must have a finite bound');
+        if (path === root) return trusted;
+        if (path === alias) return boundary;
+        if (path === win32.dirname(file) && parent) return parent;
+        if (path === file && !missingLeaf) return stat('file');
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      },
+    });
+    const result = exact(file, { cwd: root, resultPath: 'C:\\result\\result.json',
+      requiredCapabilities: [{ tool, path: file }] }, tool);
+    return { result, observations };
+  };
+  assert.equal(check().result, file, 'same physical directory with different casing is supported');
+  assert.equal(check({ missingLeaf: true, tool: 'Write' }).result, file, 'new leaf Write is supported');
+  for (const boundary of [stat('directory', 20n), stat('directory', 10n, 2n), stat('symlink')]) {
+    assert.equal(check({ boundary }).result, null, 'aliases need the exact usable physical root identity');
+  }
+  for (const ino of [0n, 0xffffffffffffffffn]) {
+    assert.equal(check({ boundary: stat('directory', ino), trusted: stat('directory', ino) }).result,
+      null, 'matching unusable identities must not establish the same directory');
+  }
+  assert.equal(check({ parent: stat('symlink') }).result, null);
+  assert.equal(check({ parent: null, missingLeaf: true, tool: 'Write' }).result, null);
+  assert.equal(check({ missingLeaf: true }).result, null);
+  assert.ok(check().observations.includes(alias), 'the actual boundary spelling must be inspected');
 });

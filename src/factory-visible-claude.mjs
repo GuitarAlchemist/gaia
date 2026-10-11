@@ -305,16 +305,31 @@ function exactSdkTarget(path, request, tool) {
   const local = relative(root, target);
   if (!local || isAbsolute(local) || local === '..' || local.startsWith('..' + sep)
       || (process.platform === 'win32' && local.includes(':'))) return null;
+  // Walk the actual spelling, with a finite component bound. Re-spelling from root
+  // could inspect another object in a case-sensitive Windows directory.
   let cursor = target;
-  while (cursor !== root) {
+  for (let remaining = local.split(sep).length; remaining > 0; remaining--) {
+    const leaf = cursor === target;
     let stat;
     try { stat = lstatSync(cursor); }
     catch (cause) {
-      if (cause.code !== 'ENOENT' || cursor !== target || tool !== 'Write') return null;
+      if (cause.code !== 'ENOENT' || !leaf || tool !== 'Write') return null;
     }
-    if (stat && (stat.isSymbolicLink() || (cursor === target ? !stat.isFile() : !stat.isDirectory()))) return null;
-    cursor = dirname(cursor);
+    if (stat && (stat.isSymbolicLink() || (leaf ? !stat.isFile() : !stat.isDirectory()))) return null;
+    const parent = dirname(cursor);
+    if (parent === cursor) return null;
+    cursor = parent;
   }
+  // Path equality on Windows is case-insensitive; physical directory identity is not.
+  // Check the boundary itself so an alternate-case sibling or symlink cannot inherit scope.
+  if (relative(root, cursor) !== '') return null;
+  try {
+    const actual = lstatSync(cursor, { bigint: true });
+    const trusted = lstatSync(root, { bigint: true });
+    if (!actual.isDirectory() || actual.isSymbolicLink()
+        || actual.ino === 0n || actual.ino === 0xffffffffffffffffn
+        || actual.dev !== trusted.dev || actual.ino !== trusted.ino) return null;
+  } catch { return null; }
   return target;
 }
 
@@ -325,6 +340,7 @@ function launchSdkProvider(request, transport) {
   let closing;
   const closeQuery = () => closing ??= Promise.resolve().then(() => query?.close());
   let fault;
+  let resultStarted = false;
   let resultWrite = false;
   let terminal;
   let query;
@@ -339,10 +355,15 @@ function launchSdkProvider(request, transport) {
     ? exactSdkTarget(input.tool_input?.file_path, request, input.tool_name) : null;
   const pre = async (input, id, { signal } = {}) => {
     if (abortController.signal.aborted || signal?.aborted || input?.hook_event_name !== 'PreToolUse'
-        || fault || resultWrite || typeof id !== 'string' || !id || id.length > 512
+        || fault || resultStarted || typeof id !== 'string' || !id || id.length > 512
         || seen.has(id) || seen.size >= 512) return deny();
     const path = target(input);
     if (!path) return deny();
+    if (input.tool_name === 'Write' && path === request.resultPath) {
+      if (calls.size !== 0) return deny();
+      // Admission is the last-call fence; PostToolUse remains separate success evidence.
+      resultStarted = true;
+    }
     seen.add(id);
     calls.set(id, { tool: input.tool_name, path });
     return {}; // Deliberately no permissionDecision: native settings/hooks/dontAsk decide.
@@ -389,12 +410,13 @@ function launchSdkProvider(request, transport) {
         } else if (terminal) fault ??= 'AgentProtocol';
       }
       if (!terminal || !resultWrite || calls.size !== 0) fault ??= 'AgentProtocol';
-      return { code: 0, fault };
     } finally {
       // A stream result does not close the owned SDK query. Close before accepting bytes.
       if (query && typeof query.close === 'function') await closeQuery();
       renderer.finish();
     }
+    // Closing can deliver final hook callbacks. Snapshot only after they have settled.
+    return { code: 0, fault };
   })();
   return { closed, stop: async () => {
     abortController.abort();

@@ -253,8 +253,11 @@ reviewer and repair ports. The three legacy transports retain their public behav
 interactive terminal, a print transport that discards output, and a print transport that renders
 bounded closed-vocabulary events. An explicit injected SDK mode uses the same adapter and result
 contract; it checks exact Read/Edit/Write requests in programmatic hooks without granting native
-permission. It accepts result bytes only after a correlated successful Write, terminal result with
-no permission denials, terminated stream and closed query.
+permission. Physical target checks use a bounded ancestor walk of the actual target spelling and
+compare boundary directory identity, including Windows case-varied root spellings. Result Write admission requires no outstanding calls
+and fences every subsequent call; its correlated successful PostToolUse is separate evidence.
+It accepts result bytes only after that Write, terminal result with no permission denials,
+terminated stream and closed query, including any faults observed during query closure.
 The autonomous CLI requires this SDK mode and a writable terminal. Its transport and complete
 role manifests are not supplied yet, so new execution refuses before consuming a run; real
 autonomy is not established. See [SDK scope contract](docs/mission-permission-preflight.md).
