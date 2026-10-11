@@ -346,11 +346,12 @@ prompt exactly would still disagree with the chart.
    head; `D_HEAD_ADVANCED` holds on any head change. The agents are stricter.
 7. **Readiness.** The collector holds `D_NOT_DRAFT` only at the approved head with checks
    `ALL_PASS` (`src/drain-petri-net-facts.mjs:271-275`). The publisher's `STILL_DRAFT` reads
-   `isDraft`, and it reads the checks (`CHECKS_NOT_GREEN`) only for a merge, so a `ready`-only
+   `isDraft`, and it reads the checks (`CHECKS_NOT_GREEN`) only for an enqueue, so a `ready`-only
    order completes while the chart may still refuse `T_READY`.
 8. **One issue per observation.** The collector's observation grammar takes one `issue=` value
    (`src/drain-petri-net-facts.mjs:57`), so an order whose `autoCloses` names several issues has
-   no single observation for `D_ISSUE_RECONCILED`. The publisher confirms each issue.
+   no single observation for `D_ISSUE_RECONCILED`. The coordinator confirms each `autoCloses`
+   issue closed from later observations after the queue merges the pull request.
 9. **The closing effect is not observed.** No receptivity reads `closingIssuesReferences`.
    `CLOSING_EFFECT_UNNAMED` and the re-read in `STATE_CHANGED` bind to `D_ISSUE_RECONCILED`, the
    receptivity the effect lands in, not to a fact the chart measures.
