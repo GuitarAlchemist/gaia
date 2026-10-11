@@ -15,7 +15,7 @@ import {
 } from '../src/factory-telemetry-log.mjs';
 import { reconcilePortfolioDrain } from '../src/portfolio-drain.mjs';
 
-class UsageError extends Error {}
+export class UsageError extends Error { name = 'UsageError'; }
 
 /**
  * Every argv name this adapter reads. A name absent from this set is refused.
@@ -38,7 +38,8 @@ const DECLARED_OPTIONS = new Set([
   'capacity', 'language', 'refresh-seconds', 'watch-ms',
 ]);
 
-function parseArgs(argv) {
+/** The flags, or a UsageError. Reads no file, so the same argv gives the same answer every time. */
+export function parseArgs(argv) {
   const flags = {};
   for (let index = 0; index < argv.length; index += 2) {
     const name = argv[index];
