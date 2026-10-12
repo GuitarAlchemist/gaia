@@ -278,7 +278,10 @@ npm run pump:candidates -- --format json      # every issue and every reason
 An open issue is a candidate when it carries none of `needs-triage`, `needs-info`, `ready-for-human`,
 `blocked`, `ready-for-agent`, `retrospective`, `wontfix`, `duplicate` or `blocker:*` (plus any
 `--exclude-label`); has a readable native GitHub dependency summary with zero open blockers; declares no
-`Depends-On`/`Blocked-By` or `Duplicate-Of` (asserted `NONE` is fine; a malformed block refuses);
+recognized `Depends-On`/`Blocked-By` or `Duplicate-Of` references (`Depends-On: NONE` and
+`Duplicate-Of: NONE` are fine; `Blocked-By: NONE` and recognized `NONE` conflicts refuse).
+The shared parser ignores relationship lines outside its single-reference/`NONE` grammar;
+those lines do not establish absence of blockers. A candidate also
 is not named as a parent by another open issue; has a completion section (`Done when`,
 `Acceptance criteria`, and their variants); and has neither a `deliver issue #N` Draft nor a
 `gaia/issue-N-*` branch. Candidates are listed lowest number first. The module exports no effect.
