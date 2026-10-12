@@ -35,3 +35,17 @@ tool output; a review of an older PR head does not approve the current one.
 For a recurring delivery failure, follow the incident loop and adoption boundaries
 in [the SDLC adaptation](docs/ai-native-sdlc.md). Add the regression at the failed
 seam and update the smallest relevant instruction; retain one source of truth.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `GuitarAlchemist/gaia`, through `gh`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default labels; `ready-for-agent` is also the label the pump admits. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repository root. See `docs/agents/domain.md`.
