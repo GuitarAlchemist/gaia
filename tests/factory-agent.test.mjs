@@ -514,12 +514,11 @@ test('ambient Git configuration cannot relax the whitespace gate on a Pi worker 
   const home = join(scratch, 'pi-worker-ambient-whitespace-home');
   mkdirSync(home);
   writeFileSync(join(home, '.gitconfig'), `[core]\n\twhitespace = ${relaxed}\n`, 'utf8');
-  // A global attributes file overrides core.whitespace per path.
-  const attributesHome = join(scratch, 'pi-worker-ambient-whitespace-attributes-home');
-  mkdirSync(join(attributesHome, '.config', 'git'), { recursive: true });
-  writeFileSync(
-    join(attributesHome, '.config', 'git', 'attributes'), `* whitespace=${relaxed}\n`, 'utf8',
-  );
+  // A global attributes file overrides core.whitespace per path. The row names it through
+  // XDG_CONFIG_HOME, which Git prefers over $HOME/.config and which a Linux runner already sets.
+  const xdgConfig = join(scratch, 'pi-worker-ambient-whitespace-xdg');
+  mkdirSync(join(xdgConfig, 'git'), { recursive: true });
+  writeFileSync(join(xdgConfig, 'git', 'attributes'), `* whitespace=${relaxed}\n`, 'utf8');
   const rows = {
     clean: {},
     GIT_DIR: { GIT_DIR: join(other, '.git') },
@@ -530,9 +529,7 @@ test('ambient Git configuration cannot relax the whitespace gate on a Pi worker 
     GIT_CONFIG_PARAMETERS: { GIT_CONFIG_PARAMETERS: `'core.whitespace=${relaxed}'` },
     GIT_CONFIG_GLOBAL: { GIT_CONFIG_GLOBAL: globalConfig },
     HOME: { HOME: home, USERPROFILE: undefined, HOMEDRIVE: undefined, HOMEPATH: undefined },
-    attributes: {
-      HOME: attributesHome, USERPROFILE: undefined, HOMEDRIVE: undefined, HOMEPATH: undefined,
-    },
+    attributes: { XDG_CONFIG_HOME: xdgConfig },
   };
   const patch = [
     'diff --git a/candidate.txt b/candidate.txt',

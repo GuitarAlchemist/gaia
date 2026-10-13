@@ -245,7 +245,7 @@ itself accepts the patch. Each mechanism-revert control was run on a throwaway c
 |---|---|---|---|
 | `GIT_DIR`, `GIT_COMMON_DIR` | another repository's config and `info/attributes` | the neutral environment in `gitInput` | fails both rows (M5) |
 | `GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_GLOBAL`, `HOME` | `core.whitespace` | the `core.whitespace` pin | fails these four rows |
-| `attributes`, a `HOME` holding `.config/git/attributes` | a `whitespace` attribute | the `core.attributesFile` pin | fails this row |
+| `attributes`, an `XDG_CONFIG_HOME` holding `git/attributes` | a `whitespace` attribute | the `core.attributesFile` pin | fails this row |
 
 Without the other repository's `info/attributes`, M5 passed the test: the `core.whitespace` pin
 alone outranks that repository's config.
