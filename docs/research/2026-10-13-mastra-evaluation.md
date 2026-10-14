@@ -29,10 +29,15 @@ The prototype also exposes a gap on Gaia's side. Its lane-attempt contract has n
 
 | System | Comparison revision | Notes |
 |---|---|---|
-| Gaia | `a48e7e18fcd63836a7e917d7b94d7ae1be91836e` (`origin/main`, 2026-10-12) | `src/lane-attempt.mjs` used unchanged |
+| Gaia | `0c53129b1154ef8cd311aa2a2d2743783bbef353` (`origin/main`, 2026-10-14) | `src/lane-attempt.mjs` used unchanged |
 | Mastra | [`@mastra/core@1.75.0`](https://github.com/mastra-ai/mastra/releases/tag/%40mastra%2Fcore%401.75.0), published to npm 2026-10-07 | Node `>=22.13.0`; peer `zod` `^3.25 \|\| ^4`, pinned here at `4.1.12`. 152 packages with `npm install --ignore-scripts`, none with an install script. Licenses: Apache-2.0 15, MIT 125, ISC 5, BSD-2/3 4, BlueOak 2, AFL-2.1/BSD-3 1. |
 
 Mastra's repository [`LICENSE.md`](https://github.com/mastra-ai/mastra/blob/main/LICENSE.md) is Apache-2.0, except for any directory named `ee/`, which has its own license. This evaluation imports no `ee/` path. The prototype ran on Gaia's pinned Node v26.8.1.
+
+On 2026-10-14, `npm audit` reports one moderate advisory in the installed tree: [GHSA-hp3w-g68c-fv3c](https://github.com/advisories/GHSA-hp3w-g68c-fv3c), a denial of service through unbounded precision specifiers in `sprintf-js` up to 1.1.3.
+- The installed `sprintf-js` 1.0.3 arrives through `@mastra/core` → `gray-matter` 4.0.3 → `js-yaml` 3 → `argparse` 1, and npm counts the five packages of that chain as affected.
+- `@mastra/core` 1.76.0 and 1.77.0 still require `gray-matter` `^4.0.3`, which is the latest `gray-matter`. npm's only offered fix is a downgrade to `@mastra/core` 1.0.4.
+- The prototype does not measure whether its code path reaches `gray-matter`. A Gaia adapter would carry the advisory until that chain moves.
 
 ## What Mastra offers
 
