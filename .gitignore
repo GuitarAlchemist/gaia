@@ -19,3 +19,7 @@ node_modules/
 events.jsonl
 !tests/fixtures/drain-petri-net/events.jsonl
 events.lock/
+
+# Claude Code's per-checkout permissions. Claude Code hides them through the operator's global
+# ignore file, which the factory no longer reads (#251), so the repository names them itself.
+**/.claude/settings.local.json
