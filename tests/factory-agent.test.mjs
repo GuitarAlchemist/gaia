@@ -59,6 +59,58 @@ test('refuses a primary checkout instead of risking the caller repository', asyn
   );
 });
 
+test('refuses a .git file that Git cannot read as GitWorktreeRequired, not a raw Git failure', async () => {
+  const path = join(scratch, 'unreadable-gitfile');
+  mkdirSync(path);
+  writeFileSync(join(path, '.git'), 'gitdir: nowhere\n', 'utf8');
+
+  await assert.rejects(
+    executeAgentFactory({
+      worktree: path,
+      evidenceDir: evidenceDir('unreadable-gitfile'),
+      task: 'change candidate.txt',
+      runWorker: async () => ({ output: 'unused' }),
+      runReviewer: async () => ({ verdict: 'APPROVE', output: 'unused' }),
+    }),
+    (error) => error instanceof FactoryAgentError && error.code === 'GitWorktreeRequired',
+  );
+});
+
+test('an ambient GIT_DIR cannot redirect the factory to another repository', async () => {
+  // A hook exports GIT_DIR to its children (githooks(5)). Before #224 every factory Git call
+  // inherited it, so a valid linked worktree was read as the other repository and refused.
+  const { worktree } = fixture('ambient-worktree');
+  const other = join(scratch, 'ambient-other');
+  git(scratch, 'init', other);
+  git(other, '-c', 'user.name=Gaia Test', '-c', 'user.email=gaia@example.invalid',
+    'commit', '--allow-empty', '-m', 'another repository');
+  const head = git(worktree, 'rev-parse', 'HEAD');
+  const saved = process.env.GIT_DIR;
+  let receipt;
+  try {
+    process.env.GIT_DIR = join(other, '.git');
+    receipt = await executeAgentFactory({
+      worktree,
+      evidenceDir: evidenceDir('ambient'),
+      task: 'change candidate.txt',
+      runWorker: async ({ cwd }) => {
+        writeFileSync(join(cwd, 'candidate.txt'), 'after\n', 'utf8');
+        return { provider: 'fixture-worker', output: 'worker complete' };
+      },
+      runReviewer: async () => ({ provider: 'fixture-reviewer', verdict: 'APPROVE', output: 'ok' }),
+    });
+  } finally {
+    if (saved === undefined) delete process.env.GIT_DIR;
+    else process.env.GIT_DIR = saved;
+  }
+
+  assert.equal(receipt.status, 'completed');
+  assert.equal(receipt.base.head, head);
+  assert.deepEqual(receipt.changeSet.files.map(({ path, state }) => [path, state]), [
+    ['candidate.txt', 'present'],
+  ]);
+});
+
 test('binds a real worker change and independent approval into one receipt', async () => {
   const { worktree } = fixture('approved');
 
@@ -442,6 +494,109 @@ test('Pi worker proves OAuth readiness and applies one exact allowed patch propo
   assert.deepEqual(invocations.map(({ options }) => options), [
     { timeoutMs: 4321 }, { timeoutMs: 4321 },
   ]);
+});
+
+test('ambient Git configuration cannot relax the whitespace gate on a Pi worker patch', async () => {
+  // gitInput runs `git apply --whitespace=error-all`, and core.whitespace decides which whitespace
+  // is an error. A repository named by an inherited locator (#244) or a configuration source the
+  // process inherits (#248) could drop trailing-space and let this patch through.
+  const { worktree } = fixture('pi-worker-ambient-whitespace');
+  const head = git(worktree, 'rev-parse', 'HEAD');
+  const relaxed = '-trailing-space,-blank-at-eof';
+  const other = join(scratch, 'pi-worker-ambient-whitespace-other');
+  git(scratch, 'init', other);
+  git(other, 'config', 'core.whitespace', relaxed);
+  // A repository's own attributes outrank every command-line pin, so only the neutral
+  // environment keeps another repository's out of the gate.
+  writeFileSync(join(other, '.git', 'info', 'attributes'), `* whitespace=${relaxed}\n`, 'utf8');
+  const globalConfig = join(scratch, 'pi-worker-ambient-whitespace.gitconfig');
+  writeFileSync(globalConfig, `[core]\n\twhitespace = ${relaxed}\n`, 'utf8');
+  const home = join(scratch, 'pi-worker-ambient-whitespace-home');
+  mkdirSync(home);
+  writeFileSync(join(home, '.gitconfig'), `[core]\n\twhitespace = ${relaxed}\n`, 'utf8');
+  // A global attributes file overrides core.whitespace per path. The row names it through
+  // XDG_CONFIG_HOME, which Git prefers over $HOME/.config and which a Linux runner already sets.
+  const xdgConfig = join(scratch, 'pi-worker-ambient-whitespace-xdg');
+  mkdirSync(join(xdgConfig, 'git'), { recursive: true });
+  writeFileSync(join(xdgConfig, 'git', 'attributes'), `* whitespace=${relaxed}\n`, 'utf8');
+  const rows = {
+    clean: {},
+    GIT_DIR: { GIT_DIR: join(other, '.git') },
+    GIT_COMMON_DIR: { GIT_COMMON_DIR: join(other, '.git') },
+    GIT_CONFIG_COUNT: {
+      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.whitespace', GIT_CONFIG_VALUE_0: relaxed,
+    },
+    GIT_CONFIG_PARAMETERS: { GIT_CONFIG_PARAMETERS: `'core.whitespace=${relaxed}'` },
+    GIT_CONFIG_GLOBAL: { GIT_CONFIG_GLOBAL: globalConfig },
+    HOME: { HOME: home, USERPROFILE: undefined, HOMEDRIVE: undefined, HOMEPATH: undefined },
+    attributes: { XDG_CONFIG_HOME: xdgConfig },
+  };
+  const patch = [
+    'diff --git a/candidate.txt b/candidate.txt',
+    '--- a/candidate.txt',
+    '+++ b/candidate.txt',
+    '@@ -1 +1 @@',
+    '-before',
+    '+after ',
+    '',
+  ].join('\n');
+
+  const rawGit = {};
+  const outcome = {};
+  const bytes = {};
+  for (const [row, overrides] of Object.entries(rows)) {
+    const saved = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
+    try {
+      for (const [key, value] of Object.entries(overrides)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      try {
+        execFileSync('git', ['apply', '--check', '--whitespace=error-all', '-'], {
+          cwd: worktree, input: patch, stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        rawGit[row] = 'accepted';
+      } catch {
+        rawGit[row] = 'refused';
+      }
+      outcome[row] = await runPiWorker({
+        cwd: worktree,
+        task: 'change candidate.txt',
+        allowedPaths: ['candidate.txt'],
+        baseline: { head },
+        env: { PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture' },
+      }, {
+        runInvocation: async (invocation) => (invocation.args[0] === 'auth'
+          ? {
+            code: 0, signal: null, stderr: '',
+            stdout: '{"status":"ready","provider":"openai-codex","authType":"oauth"}\n',
+          }
+          : {
+            code: 0, signal: null, stderr: '',
+            stdout: `${JSON.stringify({ schema: 'gaia-pi-patch/1', patch })}\n`,
+          }),
+      }).then(
+        () => 'accepted',
+        (error) => (error instanceof FactoryAgentError ? error.code : String(error)),
+      );
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+    bytes[row] = readFileSync(join(worktree, 'candidate.txt'), 'utf8').replaceAll('\r\n', '\n');
+    git(worktree, 'checkout', '--', 'candidate.txt');
+  }
+
+  // Non-vacuity: every row but the control makes Git itself accept the patch.
+  assert.deepEqual(rawGit, Object.fromEntries(Object.keys(rows).map((row) => [
+    row, row === 'clean' ? 'refused' : 'accepted',
+  ])));
+  assert.deepEqual(outcome, Object.fromEntries(Object.keys(rows).map((row) => [
+    row, 'WorkerPatchRejected',
+  ])));
+  assert.deepEqual(bytes, Object.fromEntries(Object.keys(rows).map((row) => [row, 'before\n'])));
 });
 
 test('Pi worker refuses an NTFS alternate-data-stream path before authentication', async () => {

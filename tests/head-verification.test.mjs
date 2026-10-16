@@ -158,6 +158,36 @@ test('a subdirectory of the worktree is refused before any test runs, from the f
   assert.equal(existsSync(out), false);
 });
 
+test('an ambient GIT_DIR cannot move the verified root or the bytes it binds', async () => {
+  // A hook exports GIT_DIR to its children (githooks(5)). Before #224 the verifier's Git calls
+  // inherited it, so the root check passed for any directory and the reads came from elsewhere.
+  const { repo, base, head } = fixture();
+  const { repo: other } = fixture({ testSource: FAILING });
+  const sub = join(repo, 'sub');
+  mkdirSync(sub);
+  let runs = 0;
+  const runVerification = async () => { runs += 1; return fixedRunner()(); };
+  const saved = process.env.GIT_DIR;
+  try {
+    process.env.GIT_DIR = join(repo, '.git');
+    await assert.rejects(
+      verifyCommittedHead({ worktree: sub, baseHead: base, evidenceDir: evidenceDir(), runVerification }),
+      refusedWith('WorktreeRootRequired'),
+    );
+    assert.equal(runs, 0);
+
+    process.env.GIT_DIR = join(other, '.git');
+    const result = await verifyCommittedHead({
+      worktree: repo, baseHead: base, evidenceDir: evidenceDir(), runVerification,
+    });
+    assert.equal(result.headSha, head);
+    assert.deepEqual(result.changeSet.files.map(file => file.path), ['.node-version', 'head.test.mjs']);
+  } finally {
+    if (saved === undefined) delete process.env.GIT_DIR;
+    else process.env.GIT_DIR = saved;
+  }
+});
+
 test('a verification run that writes into the worktree is the factory\'s VerificationMutation', async () => {
   const { repo, base } = fixture();
   const runVerification = async ({ cwd }) => {

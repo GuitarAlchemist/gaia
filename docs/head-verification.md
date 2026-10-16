@@ -21,7 +21,7 @@ the suite on Node v24.12.0 against the v26.8.1 pin, and nothing in the sentence 
 
 `npm run verify:head -- --base <40-hex> --evidence-dir <new dir> --out <new file> [--worktree <path>]`
 
-1. **Checks the subject before running anything.** The base must be a full lowercase 40-hex commit (`BaseHeadInvalid`). The path must be a Git worktree (`GitWorktreeRequired`) and its root, not a subdirectory, from which the pin would read as absent (`WorktreeRootRequired`). It must have an empty `git status --porcelain` (`CleanWorktreeRequired`). The base must be an ancestor of HEAD (`BaseNotAncestor`). An existing `--out` is refused (`ReceiptExists`).
+1. **Checks the subject before running anything.** The base must be a full lowercase 40-hex commit (`BaseHeadInvalid`). The path must be a Git worktree (`GitWorktreeRequired`) and its root, not a subdirectory, from which the pin would read as absent (`WorktreeRootRequired`). Both answers come from the shared root guard ([`src/worktree-root.mjs`](../src/worktree-root.mjs), #224), and every Git call runs without the repository-locator variables, so a `GIT_DIR` left by a hook cannot name another repository. It must have an empty `git status --porcelain` (`CleanWorktreeRequired`). The base must be an ancestor of HEAD (`BaseNotAncestor`). An existing `--out` is refused (`ReceiptExists`).
 2. **Runs the factory's own verification, unmodified.** `verifyCandidate` with `runNodeTestVerification` refuses a Node other than `.node-version` (`VerificationRuntimeMismatch`), then runs `node --test --test-reporter=spec` with the subscription allow-list environment, under bounded time and output. It keeps the output as content-addressed evidence in a newly reserved directory outside the worktree. It refuses a run that changed Git HEAD, the index or the worktree tree (`VerificationMutation`).
 3. **Binds the record to bytes.** The candidate identity is the base..HEAD change-set of the clean worktree, measured by `measureAgentFactoryChangeSet`, the recipe the publisher shares. Its status is empty by construction.
 4. **Seals and writes the receipt.** It writes the receipt with exclusive creation and prints one summary line.
@@ -87,7 +87,7 @@ This slice wires it into none of the following, and each would be a later, separ
 
 ## Falsifiers
 
-`tests/head-verification.test.mjs` holds 12 tests. Removing any of the following makes at least one of them fail:
+`tests/head-verification.test.mjs` holds 13 tests. Removing any of the following makes at least one of them fail:
 - the pin check;
 - the worktree-root check;
 - the clean-tree, base or ancestor checks;

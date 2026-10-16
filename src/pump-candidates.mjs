@@ -10,7 +10,8 @@ import { declaredRelationships } from './issue-relationships.mjs';
 export const PUMP_CANDIDATES_SCHEMA = 'GaiaPumpCandidatesV0';
 
 export const DEFAULT_EXCLUDED_LABELS = Object.freeze([
-  'needs-triage', 'blocked', 'ready-for-agent', 'retrospective', 'wontfix', 'duplicate',
+  'needs-triage', 'needs-info', 'ready-for-human', 'blocked', 'ready-for-agent',
+  'retrospective', 'wontfix', 'duplicate',
 ]);
 
 const COMPLETION_HEADING = /^#{1,4}\s*(?:[\w-]+\s+)*(?:done when|acceptance(?: criteria)?|completion criteria|definition of done|exit criteria)\b/imu;
@@ -60,6 +61,14 @@ export function assessIssue(issue, { repository, excludeLabels, parents, drafted
       reasons.push(`excluded-label:${label}`);
     }
   }
+  // The REST issue collection supplies this observation. Missing evidence is not zero:
+  // a body with no trailer can still have an open native GitHub dependency.
+  const nativeBlockers = issue.issue_dependencies_summary?.blocked_by;
+  if (!Number.isSafeInteger(nativeBlockers) || nativeBlockers < 0) {
+    reasons.push('native-dependencies-unreadable');
+  } else if (nativeBlockers > 0) {
+    reasons.push('native-dependency');
+  }
   try {
     const relationships = declaredRelationships(issue.body ?? '', repository);
     if (Array.isArray(relationships.dependencies) && relationships.dependencies.length > 0) {
@@ -81,15 +90,15 @@ export function assessIssue(issue, { repository, excludeLabels, parents, drafted
 export function rankCandidates({
   repository, issues, pullRequests = [], branchNames = [], excludeLabels = [], limit = 3,
 }) {
+  const issueRows = issues.filter((issue) => !issue.pull_request && !issue.isPullRequest);
   const context = {
     repository,
     excludeLabels: [...new Set([...DEFAULT_EXCLUDED_LABELS, ...excludeLabels])],
-    parents: parentNumbers(issues),
+    parents: parentNumbers(issueRows),
     drafted: draftedNumbers(pullRequests),
     seeded: seededNumbers(branchNames),
   };
-  const assessed = issues
-    .filter((issue) => !issue.pull_request && !issue.isPullRequest)
+  const assessed = issueRows
     .map((issue) => ({ issue: issue.number, title: issue.title ?? '', reasons: assessIssue(issue, context) }))
     .sort((left, right) => left.issue - right.issue);
   const eligible = assessed.filter((row) => row.reasons.length === 0);
