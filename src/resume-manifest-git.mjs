@@ -4,6 +4,7 @@ import { readFileSync, statSync } from 'node:fs';
 import {
   MAX_RESUME_PROMPT_CHARS, MAX_UPSTREAM_ARTIFACT_CHARS, ResumeManifestError, requireResumeManifest,
 } from './resume-manifest.mjs';
+import { WorktreeRootError, repositoryNeutralEnvironment, requireWorktreeRoot } from './worktree-root.mjs';
 
 /**
  * The resume check's observation adapter: reads one declared subject worktree with Git, resolves
@@ -21,22 +22,14 @@ import {
 
 const GIT_TIMEOUT_MS = 30_000;
 const GIT_OUTPUT_LIMIT = 16 * 1024 * 1024;
-// Variables that would point Git at a repository other than the one named by the subject path.
-const REPOSITORY_LOCATORS = new Set([
-  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY',
-  'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES',
-]);
 
 const unavailable = (detail) => {
   throw new ResumeManifestError('RESUME_OBSERVATION_UNAVAILABLE', detail);
 };
 
+// Without the variables that would point Git at a repository other than the subject path.
 function gitEnvironment() {
-  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' };
-  for (const key of Object.keys(env)) {
-    if (REPOSITORY_LOCATORS.has(key.toUpperCase())) delete env[key];
-  }
-  return env;
+  return { ...repositoryNeutralEnvironment(), GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' };
 }
 
 function git(cwd, args, detail) {
@@ -84,9 +77,11 @@ export function observeResumeWorld(manifest) {
   requireResumeManifest(manifest);
   const cwd = manifest.subject.path;
   if (!isDirectory(cwd)) unavailable('SUBJECT_UNREADABLE');
-  if (git(cwd, ['rev-parse', '--is-inside-work-tree'], 'SUBJECT_NOT_WORKTREE_ROOT').trim() !== 'true'
-      || git(cwd, ['rev-parse', '--show-prefix'], 'SUBJECT_NOT_WORKTREE_ROOT').trim() !== '') {
-    unavailable('SUBJECT_NOT_WORKTREE_ROOT');
+  try {
+    requireWorktreeRoot(cwd);
+  } catch (error) {
+    if (error instanceof WorktreeRootError) unavailable('SUBJECT_NOT_WORKTREE_ROOT');
+    throw error;
   }
   const head = git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}'], 'SUBJECT_UNREADABLE').trim();
   const status = git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all'],

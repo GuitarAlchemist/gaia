@@ -4,6 +4,8 @@
 //   node scripts/pump-candidates.mjs --repository OWNER/NAME [--limit 3] [--format text|json]
 
 import { execFile } from 'node:child_process';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 import { rankCandidates } from '../src/pump-candidates.mjs';
@@ -11,8 +13,9 @@ import { rankCandidates } from '../src/pump-candidates.mjs';
 const execFileAsync = promisify(execFile);
 const USAGE = `usage: pump-candidates.mjs --repository OWNER/NAME [--limit 3] [--format text|json] [--exclude-label L]
 
-Lists open issues the pump could take next: no excluded label (needs-triage, blocked, ...), no
-declared dependency or duplicate, not a parent of another issue, a "Done when" or acceptance
+Lists open issues the pump could take next: no excluded label (needs-triage, needs-info,
+ready-for-human, blocked, ...), a readable native blocker count of zero, no declared dependency
+or duplicate, not a parent of another issue, a "Done when" or acceptance
 section, and never drafted or seeded before. Nothing is written; labelling stays yours.
 
 exit codes: 0 ok · 2 usage · 3 could not read`;
@@ -71,11 +74,13 @@ function renderText(result) {
   return `${lines.join('\n')}\n`;
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+export async function main({
+  argv = process.argv.slice(2), read = gh, stdout = process.stdout, stderr = process.stderr,
+} = {}) {
+  const args = parseArgs(argv);
   if (args.help) {
-    process.stdout.write(`${USAGE}\n`);
-    return;
+    stdout.write(`${USAGE}\n`);
+    return 0;
   }
   const repository = args.repository;
   if (!repository || !/^[\w.-]+\/[\w.-]+$/u.test(repository)) {
@@ -90,29 +95,33 @@ async function main() {
   let branchRows;
   try {
     [issues, pullRequests, branchRows] = await Promise.all([
-      gh(['issue', 'list', '--repo', repository, '--state', 'open', '--limit', '1000',
-        '--json', 'number,title,body,labels']),
-      gh(['pr', 'list', '--repo', repository, '--state', 'all', '--limit', '1000',
+      // gh issue list's selected fields omit native dependencies. Keep the REST summary
+      // through every page so a missing body trailer cannot conceal an open blocker.
+      read(['api', `repos/${repository}/issues?state=open&per_page=100`, '--paginate', '--slurp']),
+      read(['pr', 'list', '--repo', repository, '--state', 'all', '--limit', '1000',
         '--search', 'deliver issue in:title', '--json', 'number,title']),
-      gh(['api', `repos/${repository}/git/matching-refs/heads/gaia/issue-`, '--paginate', '--slurp']),
+      read(['api', `repos/${repository}/git/matching-refs/heads/gaia/issue-`, '--paginate', '--slurp']),
     ]);
   } catch (error) {
-    process.stderr.write(`fail-closed: could not read ${repository}: ${String(error.stderr || error.message).trim()}\n`);
-    process.exitCode = 3;
-    return;
+    stderr.write(`fail-closed: could not read ${repository}: ${String(error.stderr || error.message).trim()}\n`);
+    return 3;
   }
   const result = rankCandidates({
     repository,
-    issues: issues ?? [],
+    issues: (issues ?? []).flat(),
     pullRequests: pullRequests ?? [],
     branchNames: (branchRows ?? []).flat().map((row) => String(row.ref).replace(/^refs\/heads\//u, '')),
     excludeLabels: args['exclude-label'],
     limit,
   });
-  process.stdout.write(args.format === 'json' ? `${JSON.stringify(result, null, 2)}\n` : renderText(result));
+  stdout.write(args.format === 'json' ? `${JSON.stringify(result, null, 2)}\n` : renderText(result));
+  return 0;
 }
 
-main().catch((error) => {
+const directExecution = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (directExecution) main().then((code) => { process.exitCode = code; }).catch((error) => {
   if (error instanceof UsageError) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 2;
