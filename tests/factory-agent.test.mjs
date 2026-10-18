@@ -16,10 +16,12 @@ import {
   buildPiReviewerInvocation,
   FactoryAgentError,
   executeAgentFactory,
+  measureAgentFactoryChangeSet,
   runBoundedInvocation,
   runPiWorker,
   runPiReviewer,
 } from '../src/factory-agent.mjs';
+import { rawStatus, untrackedHidingRows, withEnvironment } from './helpers/ambient-git.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-factory-agent-'));
 
@@ -597,6 +599,91 @@ test('ambient Git configuration cannot relax the whitespace gate on a Pi worker 
     row, 'WorkerPatchRejected',
   ])));
   assert.deepEqual(bytes, Object.fromEntries(Object.keys(rows).map((row) => [row, 'before\n'])));
+});
+
+test('ambient Git configuration cannot hide an untracked file from the Pi worker entry check', async () => {
+  // A worktree's own .gitattributes outranks the whitespace gate's pins (#250), so the entry
+  // check is what keeps an untracked one out. Its `git status` obeyed status.showUntrackedFiles
+  // and the excludes file from every configuration source the process inherits (#251).
+  const { worktree } = fixture('pi-worker-hidden-untracked');
+  const head = git(worktree, 'rev-parse', 'HEAD');
+  const rows = untrackedHidingRows(join(scratch, 'pi-worker-hidden-untracked-config'), '.gitattributes');
+  writeFileSync(join(worktree, '.gitattributes'), '* -whitespace\n', 'utf8');
+  const patch = [
+    'diff --git a/candidate.txt b/candidate.txt',
+    '--- a/candidate.txt',
+    '+++ b/candidate.txt',
+    '@@ -1 +1 @@',
+    '-before',
+    '+after ',
+    '',
+  ].join('\n');
+
+  const rawGit = {};
+  const outcome = {};
+  const bytes = {};
+  for (const [row, overrides] of Object.entries(rows)) {
+    await withEnvironment(overrides, async () => {
+      rawGit[row] = rawStatus(worktree);
+      outcome[row] = await runPiWorker({
+        cwd: worktree,
+        task: 'change candidate.txt',
+        allowedPaths: ['candidate.txt'],
+        baseline: { head },
+        env: { PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture' },
+      }, {
+        runInvocation: async (invocation) => (invocation.args[0] === 'auth'
+          ? {
+            code: 0, signal: null, stderr: '',
+            stdout: '{"status":"ready","provider":"openai-codex","authType":"oauth"}\n',
+          }
+          : {
+            code: 0, signal: null, stderr: '',
+            stdout: `${JSON.stringify({ schema: 'gaia-pi-patch/1', patch })}\n`,
+          }),
+      }).then(
+        () => 'accepted',
+        (error) => (error instanceof FactoryAgentError ? error.code : String(error)),
+      );
+    });
+    bytes[row] = readFileSync(join(worktree, 'candidate.txt'), 'utf8').replaceAll('\r\n', '\n');
+    git(worktree, 'checkout', '--', 'candidate.txt');
+  }
+
+  // Non-vacuity: every row but the control hides the file from Git itself.
+  assert.deepEqual(rawGit, Object.fromEntries(Object.keys(rows).map((row) => [
+    row, row === 'clean' ? 'shown' : 'hidden',
+  ])));
+  assert.deepEqual(outcome, Object.fromEntries(Object.keys(rows).map((row) => [
+    row, 'CleanWorktreeRequired',
+  ])));
+  assert.deepEqual(bytes, Object.fromEntries(Object.keys(rows).map((row) => [row, 'before\n'])));
+});
+
+test('ambient Git configuration cannot change what a change set measures', async () => {
+  // A change set records the status bytes and every untracked file, and the publisher binds the
+  // same measurement. `git status` and `git ls-files --exclude-standard` obeyed the ambient
+  // settings that hide a file from the entry check (#251).
+  const { worktree } = fixture('change-set-hidden-untracked');
+  const head = git(worktree, 'rev-parse', 'HEAD');
+  const rows = untrackedHidingRows(join(scratch, 'change-set-hidden-untracked-config'), 'stray.txt');
+  writeFileSync(join(worktree, 'stray.txt'), 'stray\n', 'utf8');
+
+  const rawGit = {};
+  const measured = {};
+  for (const [row, overrides] of Object.entries(rows)) {
+    await withEnvironment(overrides, () => {
+      rawGit[row] = rawStatus(worktree);
+      measured[row] = measureAgentFactoryChangeSet(worktree, head);
+    });
+  }
+
+  // Non-vacuity: every row but the control hides the file from Git itself.
+  assert.deepEqual(rawGit, Object.fromEntries(Object.keys(rows).map((row) => [
+    row, row === 'clean' ? 'shown' : 'hidden',
+  ])));
+  assert.deepEqual(measured.clean.files.map(({ path }) => path), ['stray.txt']);
+  assert.deepEqual(measured, Object.fromEntries(Object.keys(rows).map((row) => [row, measured.clean])));
 });
 
 test('Pi worker refuses an NTFS alternate-data-stream path before authentication', async () => {
