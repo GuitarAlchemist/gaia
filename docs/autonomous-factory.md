@@ -4,6 +4,10 @@ Parent intent: [INTENT.md](../INTENT.md). Source baseline:
 `a07d95f99a13bdc0ca2b484a1e725b8e042b743f`. This combines the design and
 implementation plan for this bounded slice; it is not an activation receipt.
 
+## SDK execution readiness (#103)
+
+The CLI now explicitly requires the injected SDK mode described in [SDK scope and terminal contract](mission-permission-preflight.md). No SDK transport or complete host-owned role manifest is configured, so new factory executions refuse before store.start and consume no run or slot. Existing STARTED operations still reconcile through their original receipts without relaunch. Enable/status/revoke remain separate administrative commands. Readiness is not an effective-permission verdict; per-request scope hooks do not grant permission, and a completion file alone cannot establish successful native execution. No installed runtime or real resumption is proved by the adapter tests.
+
 ## Decision
 
 The operator had to type a digest and unlock a key for each routine run. The hosted

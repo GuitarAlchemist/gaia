@@ -166,7 +166,7 @@ export async function runAutonomousCli(argv, { write = value => process.stdout.w
       && process.version !== `v${readFileSync(pinPath, 'utf8').trim().replace(/^v/u, '')}`) fail('VerificationRuntimeMismatch');
     // Visible by construction: provider activity is rendered to the terminal running the pump,
     // and an unrenderable run is refused rather than continued invisibly.
-    const providers = createStreamingClaudeAdapters({ isObservable: outputObservable });
+    const providers = createStreamingClaudeAdapters({ isObservable: outputObservable, sdkTransport: null });
     const adapters = new Map();
     function adapter(intent, prepare) {
       const key = autonomousJobKey(intent);
@@ -184,6 +184,8 @@ export async function runAutonomousCli(argv, { write = value => process.stdout.w
       return adapters.get(key);
     }
     const execution = {
+      // No installed SDK or complete role manifest has been verified in this composition.
+      checkReadiness: () => providers.checkReadiness({ requiredCapabilities: undefined }),
       execute: request => {
         const target = adapter(request.intent, true);
         const worktree = join(paths.worktrees, autonomousJobKey(request.intent));
