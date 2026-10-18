@@ -198,6 +198,45 @@ test('a refused publication grant causes no mutation and leaks no authority diag
   assert.deepEqual(mutations, []);
 });
 
+test('an authorization for a different intent revision cannot publish', async () => {
+  const intent = publicationIntent();
+  const mutations = [];
+  const adapter = createGitHubCandidatePublicationAdapter({
+    expectedRepository: intent.repository,
+    authority: {
+      async consume() {
+        return {
+          status: 'AUTHORIZED', grantId: 'grant-other-intent',
+          intentRevision: '0'.repeat(64),
+        };
+      },
+    },
+    effects: {
+      async observe() {
+        return {
+          repository: intent.repository,
+          headOid: BASE_OID,
+          baseOid: BASE_OID,
+          changeSetIdentity: intent.candidate.changeSetIdentity,
+        };
+      },
+      async commit() { mutations.push('commit'); },
+      async push() { mutations.push('push'); },
+      async openPullRequest() { mutations.push('openPullRequest'); },
+    },
+  });
+
+  let error;
+  try {
+    await adapter.publish({ intent, grant: { opaque: 'wrong-intent' } });
+  } catch (caught) {
+    error = caught;
+  }
+  assert.deepEqual(mutations, []);
+  assert.ok(error instanceof GitHubCandidatePublicationError);
+  assert.equal(error.code, 'AuthorityInvalid');
+});
+
 test('a pull-request follow-up never carries an issue-closing instruction', async () => {
   const issueIntent = publicationIntent();
   const body = {
