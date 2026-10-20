@@ -2,14 +2,15 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { openAutonomousFactoryStore } from '../src/autonomous-factory-store.mjs';
 import { createAutonomousDraftPublicationEffects } from '../src/autonomous-factory-host.mjs';
 import { measureAgentFactoryChangeSet } from '../src/factory-agent.mjs';
 import { runAutonomousTick } from '../scripts/github-portfolio-autonomous.mjs';
+import { withEnvironment } from './helpers/ambient-git.mjs';
 
 const HEAD = 'b'.repeat(40);
 const sha256 = value => createHash('sha256').update(value).digest('hex');
@@ -347,9 +348,13 @@ function draftRepository(t) {
   return { git, bare, clone, worktree, head, draftHead };
 }
 
+// The Git subcommand, after any leading `-c name=value` pins.
+const subcommand = args => { let at = 0; while (args[at] === '-c') at += 2; return args[at]; };
+
 // The host runner: real Git with "origin" routed to the local bare repository, and a fake `gh`
 // answering the one pull-request GET from that repository's state. Nothing reaches a network.
-function hostRunner(repo, { afterPush, beforePush } = {}) {
+// With `named`, origin is a real remote at that URL, which Git reports in its GitHub form.
+function hostRunner(repo, { afterPush, beforePush, named = null } = {}) {
   const commands = [];
   const run = (file, args, options = {}) => {
     commands.push([file, [...args]]);
@@ -358,12 +363,14 @@ function hostRunner(repo, { afterPush, beforePush } = {}) {
         head: { ref: 'codex/fix', sha: repo.draftHead(), repo: { full_name: 'Example/app' } },
         base: { repo: { full_name: 'Example/app' } } });
     }
-    if (args[0] === 'push') beforePush?.();
-    const routed = ['ls-remote', 'push'].includes(args[0]) ? args.map(arg => (arg === 'origin' ? repo.bare : arg)) : args;
+    const command = subcommand(args);
+    if (command === 'push') beforePush?.();
+    const routed = named === null && ['ls-remote', 'push'].includes(command)
+      ? args.map(arg => (arg === 'origin' ? repo.bare : arg)) : args;
     const output = execFileSync(file, routed, { encoding: 'utf8', windowsHide: true, maxBuffer: 4 * 1024 * 1024,
       stdio: ['pipe', 'pipe', 'pipe'], ...options });
-    if (args[0] === 'push') afterPush?.();
-    return output;
+    if (command === 'push') afterPush?.();
+    return named !== null && command === 'remote' ? output.replaceAll(named, 'https://github.com/Example/app.git') : output;
   };
   const publication = job => createAutonomousDraftPublicationEffects({ repository: job.intent.repository,
     worktree: repo.worktree, draft: job.intent.draft, run });
@@ -391,14 +398,17 @@ test('the real adapter fast-forwards the Draft branch to exactly the reviewed ch
   assert.equal(repo.git(repo.worktree, 'rev-parse', 'HEAD'), repo.head, 'local HEAD never moves');
   assert.equal(repo.git(repo.worktree, 'status', '--porcelain=v1'), statusBefore, 'the candidate stays in place');
 
-  const pushes = host.commands.filter(([file, args]) => file === 'git' && args[0] === 'push');
+  const pushes = host.commands.filter(([file, args]) => file === 'git' && subcommand(args) === 'push');
   assert.equal(pushes.length, 1);
   assert.ok(pushes[0][1].includes(`--force-with-lease=refs/heads/codex/fix:${repo.head}`));
   assert.ok(pushes[0][1].includes(`${published.commitOid}:refs/heads/codex/fix`));
   for (const [file, args] of host.commands) {
-    if (file === 'gh') assert.deepEqual(args, ['api', '--method', 'GET', 'repos/Example/app/pulls/2']);
-    else assert.ok(['remote', 'ls-remote', 'rev-parse', 'read-tree', 'add', 'write-tree', 'show', 'commit-tree',
-      'diff', 'cat-file', 'merge-base', 'push'].includes(args[0]), `unexpected git ${args[0]}`);
+    if (file === 'gh') {
+      assert.deepEqual(args, ['api', '--hostname', 'github.com', '--method', 'GET', 'repos/Example/app/pulls/2']);
+    } else {
+      assert.ok(['remote', 'ls-remote', 'rev-parse', 'read-tree', 'add', 'write-tree', 'show', 'commit-tree',
+        'diff', 'cat-file', 'merge-base', 'push'].includes(subcommand(args)), `unexpected git ${subcommand(args)}`);
+    }
   }
 });
 
@@ -416,7 +426,7 @@ test('the real adapter recomputes the same commit after a lost acknowledgement a
   const retry = await w.tick({ publication: host.publication });
   assert.equal(retry.publications[0].status, 'PUBLISHED');
   assert.equal(retry.publications[0].commitOid, landed);
-  assert.equal(host.commands.filter(([, args]) => args[0] === 'push').length, 1);
+  assert.equal(host.commands.filter(([, args]) => subcommand(args) === 'push').length, 1);
 });
 
 test('the real adapter refuses before pushing when a Git filter would publish other bytes', async t => {
@@ -429,7 +439,7 @@ test('the real adapter refuses before pushing when a Git filter would publish ot
   assert.deepEqual(result.publications.map(({ status, code }) => ({ status, code })),
     [{ status: 'RECONCILIATION_REQUIRED', code: 'PublishedTreeMismatch' }]);
   assert.equal(repo.draftHead(), repo.head, 'nothing reaches the Draft');
-  assert.equal(host.commands.filter(([, args]) => args[0] === 'push').length, 0);
+  assert.equal(host.commands.filter(([, args]) => subcommand(args) === 'push').length, 0);
 });
 
 test('the real adapter lease refuses a Draft head that moves between observation and push', async t => {
@@ -453,4 +463,81 @@ test('the real adapter lease refuses a Draft head that moves between observation
       [{ status: 'RECONCILIATION_REQUIRED', code: 'DraftHeadMoved' }], move);
     assert.equal(repo.draftHead(), concurrent);
   }
+});
+
+// One route outside the repository, set through the environment or a global Git file, beside the
+// repositories and hooks it would steer a push to. Hooks name the side they run on.
+function ambientRoute(repo, route) {
+  const fwd = path => path.replaceAll('\\', '/');
+  const root = dirname(repo.bare);
+  const elsewhere = join(root, 'elsewhere.git');
+  const third = join(root, 'third.git');
+  const other = join(root, 'other');
+  const hooks = join(root, 'hooks');
+  const markers = join(root, 'markers');
+  // A fork of the policy repository: its Draft branch is at the admitted head, so a lease holds there.
+  repo.git(root, 'init', '--bare', '--initial-branch=main', elsewhere);
+  repo.git(repo.clone, 'push', elsewhere, `${repo.head}:refs/heads/codex/fix`);
+  repo.git(root, 'init', '--bare', '--initial-branch=main', third);
+  mkdirSync(other);
+  repo.git(other, 'init', '--initial-branch=main');
+  repo.git(other, 'remote', 'add', 'origin', fwd(third));
+  mkdirSync(hooks);
+  mkdirSync(markers);
+  // The hooks a push runs. Not post-index-change: the factory's own `git status` may refresh the
+  // worktree's index and run it, outside the publication's calls and unpinned (#256).
+  for (const name of ['pre-push', 'reference-transaction']) {
+    writeFileSync(join(hooks, name), `#!/bin/sh\necho ran > "${fwd(markers)}/${name}@$(basename "$(pwd)")"\n`,
+      { mode: 0o755 });
+  }
+  repo.git(repo.clone, 'tag', '-a', 'follow-me', '-m', 'an annotated tag on the Draft head', repo.head);
+  const globalFile = text => { writeFileSync(join(root, 'global.gitconfig'), text); return join(root, 'global.gitconfig'); };
+  const overrides = {
+    'clean': () => ({}),
+    'GIT_DIR': () => ({ GIT_DIR: join(other, '.git') }),
+    'pushurl through GIT_CONFIG_COUNT': () => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'remote.origin.pushurl',
+      GIT_CONFIG_VALUE_0: fwd(elsewhere) }),
+    'pushurl through GIT_CONFIG_PARAMETERS': () => ({
+      GIT_CONFIG_PARAMETERS: `'remote.origin.pushurl'='${fwd(elsewhere)}'` }),
+    'a second pushurl': () => ({ GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'remote.origin.pushurl',
+      GIT_CONFIG_VALUE_0: fwd(repo.bare), GIT_CONFIG_KEY_1: 'remote.origin.pushurl', GIT_CONFIG_VALUE_1: fwd(elsewhere) }),
+    'pushInsteadOf': () => ({
+      GIT_CONFIG_GLOBAL: globalFile(`[url "${fwd(elsewhere)}"]\n\tpushInsteadOf = ${fwd(repo.bare)}\n`) }),
+    'hooksPath': () => ({ GIT_CONFIG_GLOBAL: globalFile(`[core]\n\thooksPath = ${fwd(hooks)}\n`) }),
+    'followTags': () => ({ GIT_CONFIG_GLOBAL: globalFile('[push]\n\tfollowTags = true\n') }),
+  }[route]();
+  return { overrides, elsewhere, third, markers };
+}
+
+test('the host Git environment can neither redirect nor widen the real adapter push', async t => {
+  const refused = new Set(['pushurl through GIT_CONFIG_COUNT', 'pushurl through GIT_CONFIG_PARAMETERS',
+    'a second pushurl', 'pushInsteadOf']);
+  const routes = ['clean', 'GIT_DIR', ...refused, 'hooksPath', 'followTags'];
+  const observed = {};
+  const expected = {};
+  for (const route of routes) {
+    const repo = draftRepository(t);
+    const bareUrl = repo.bare.replaceAll('\\', '/');
+    repo.git(repo.clone, 'remote', 'set-url', 'origin', bareUrl);
+    const ambient = ambientRoute(repo, route);
+    const host = hostRunner(repo, { named: bareUrl });
+    const w = world(t, { head: repo.head, factory: { changeSet: measureAgentFactoryChangeSet(repo.worktree, repo.head) } });
+    const result = await withEnvironment(ambient.overrides, () => w.tick({ publication: host.publication }));
+    const [published] = result.publications;
+    const at = oid => (oid === repo.head ? 'admitted head' : oid === published.commitOid ? 'published commit' : 'other');
+    const refs = dir => repo.git(dir, 'for-each-ref', '--format=%(refname) %(objectname)').split('\n').filter(Boolean)
+      .map(row => { const [name, oid] = row.split(' '); return `${name} ${at(oid)}`; });
+    observed[route] = {
+      status: published.status, code: published.code ?? null,
+      policyRefs: refs(repo.bare), elsewhereRefs: refs(ambient.elsewhere), thirdRefs: refs(ambient.third),
+      publishingHooks: readdirSync(ambient.markers).filter(marker => !marker.endsWith('@origin.git')),
+      pushes: host.commands.filter(([, args]) => subcommand(args) === 'push').length,
+    };
+    const untouched = { elsewhereRefs: ['refs/heads/codex/fix admitted head'], thirdRefs: [], publishingHooks: [] };
+    expected[route] = refused.has(route)
+      ? { status: 'REFUSED', code: 'RepositoryIdentityMismatch', policyRefs: ['refs/heads/codex/fix admitted head'],
+        ...untouched, pushes: 0 }
+      : { status: 'PUBLISHED', code: null, policyRefs: ['refs/heads/codex/fix published commit'], ...untouched, pushes: 1 };
+  }
+  assert.deepEqual(observed, expected);
 });

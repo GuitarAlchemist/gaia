@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { isAutonomousRepository } from './autonomous-factory-contract.mjs';
 import { measureAgentFactoryChangeSet } from './factory-agent.mjs';
 import { readDraftExpectation } from './github-draft-admission.mjs';
+import { repositoryNeutralEnvironment } from './worktree-root.mjs';
 
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 export function runHost(file, args, options = {}) {
@@ -109,12 +110,17 @@ const GITHUB_REMOTES = [/^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/u
 const PUBLICATION_IDENTITY = { GIT_AUTHOR_NAME: 'Gaia autonomous factory',
   GIT_AUTHOR_EMAIL: 'gaia-autonomous-factory@gaia.invalid', GIT_COMMITTER_NAME: 'Gaia autonomous factory',
   GIT_COMMITTER_EMAIL: 'gaia-autonomous-factory@gaia.invalid' };
+// No hook runs on the publishing side, so none acts with the push's credentials.
+const PUBLICATION_GIT = Object.freeze(['-c', 'core.hooksPath=']);
 
 /**
  * Git/`gh` effects for publishing one candidate to its own Draft (#236), bound at construction to
  * that Draft's number and head ref. Reads are one pull-request GET and `ls-remote`; the commit is
  * built on a temporary index so the worktree's HEAD and index never move; the only write is one
- * leased fast-forward push of the bound ref. There is no ready, merge, comment or close operation.
+ * leased fast-forward push of the bound ref. There is no ready, merge, enqueue, comment, label or
+ * close operation. The host's environment decides neither the repository nor where the push goes:
+ * Git runs without the repository locators, as the factory's calls do (#224), both views of origin
+ * must name the policy repository, and tags never follow the push.
  */
 export function createAutonomousDraftPublicationEffects({ repository, worktree, draft, run = runHost }) {
   if (!isAutonomousRepository(repository) || !Number.isSafeInteger(draft?.number) || draft.number < 1
@@ -123,7 +129,9 @@ export function createAutonomousDraftPublicationEffects({ repository, worktree, 
       || !/^[a-f0-9]{40}$/.test(draft.headRevision ?? '')) fail('InvalidDraft');
   const cwd = realDirectory(worktree);
   const ref = `refs/heads/${draft.headRef}`;
-  const git = (args, options = {}) => String(run('git', args, { cwd, ...options })).trim();
+  const environment = (extra = {}) => ({ ...repositoryNeutralEnvironment(), ...extra });
+  const git = (args, options = {}) => String(run('git', [...PUBLICATION_GIT, ...args],
+    { cwd, ...options, env: environment(options.env) })).trim();
   const remoteHead = () => {
     const rows = git(['ls-remote', 'origin', ref]).split(/\r?\n/u).map(row => row.split(/\s+/u))
       .filter(([, name]) => name === ref);
@@ -143,19 +151,26 @@ export function createAutonomousDraftPublicationEffects({ repository, worktree, 
       const status = published.get(file.path);
       if (file.state === 'deleted' ? status !== 'D' : !['A', 'M'].includes(status)) fail('PublishedTreeMismatch');
       if (file.state === 'present') {
-        const blob = run('git', ['cat-file', 'blob', `${commitOid}:${file.path}`],
-          { cwd, encoding: 'buffer', maxBuffer: 256 * 1024 * 1024 });
+        const blob = run('git', [...PUBLICATION_GIT, 'cat-file', 'blob', `${commitOid}:${file.path}`],
+          { cwd, encoding: 'buffer', maxBuffer: 256 * 1024 * 1024, env: environment() });
         if (createHash('sha256').update(blob).digest('hex') !== file.sha256) fail('PublishedTreeMismatch');
       }
     }
   };
   return Object.freeze({
     async observe() {
-      const origin = git(['remote', 'get-url', 'origin']);
-      if (!GITHUB_REMOTES.some(form => form.exec(origin)?.[1]?.toLowerCase() === repository.toLowerCase())) {
-        fail('RepositoryIdentityMismatch');
+      // The push reaches the push view, after any pushurl or pushInsteadOf; Git pushes to every
+      // URL listed, so each view must list one URL, the policy repository's.
+      for (const view of [['--all', 'origin'], ['--all', '--push', 'origin']]) {
+        const urls = git(['remote', 'get-url', ...view]).split(/\r?\n/u);
+        if (urls.length !== 1
+            || !GITHUB_REMOTES.some(form => form.exec(urls[0])?.[1]?.toLowerCase() === repository.toLowerCase())) {
+          fail('RepositoryIdentityMismatch');
+        }
       }
-      const pull = JSON.parse(run('gh', ['api', '--method', 'GET', `repos/${repository}/pulls/${draft.number}`]));
+      // The host is named, so GH_HOST cannot send the read to another server.
+      const pull = JSON.parse(run('gh', ['api', '--hostname', 'github.com', '--method', 'GET',
+        `repos/${repository}/pulls/${draft.number}`]));
       const headOid = git(['rev-parse', 'HEAD']);
       return {
         pullRequest: { number: pull?.number, isDraft: pull?.draft === true,
@@ -172,14 +187,14 @@ export function createAutonomousDraftPublicationEffects({ repository, worktree, 
       if (before.identity !== changeSetIdentity) fail('CandidateChanged');
       const scratch = mkdtempSync(join(tmpdir(), 'gaia-publication-index-'));
       try {
-        const env = { ...process.env, GIT_INDEX_FILE: join(scratch, 'index') };
+        const env = { GIT_INDEX_FILE: join(scratch, 'index') };
         git(['read-tree', parentOid], { env });
         git(['add', '--all', '--', '.'], { env });
         const tree = git(['write-tree'], { env });
         if (measured(parentOid).identity !== changeSetIdentity) fail('CandidateChanged');
         const date = `@${git(['show', '-s', '--format=%ct', parentOid])} +0000`;
         const commitOid = git(['commit-tree', '--no-gpg-sign', tree, '-p', parentOid, '-F', '-'], {
-          env: { ...process.env, ...PUBLICATION_IDENTITY, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
+          env: { ...PUBLICATION_IDENTITY, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
           input: message });
         if (!/^[a-f0-9]{40}$/.test(commitOid)) fail('CommitInvalid');
         assertPublishedTree(commitOid, before.files);
@@ -190,7 +205,7 @@ export function createAutonomousDraftPublicationEffects({ repository, worktree, 
       if (headRef !== draft.headRef) fail('DraftBranchMismatch');
       if (expectedOid !== draft.headRevision || !/^[a-f0-9]{40}$/.test(commitOid ?? '')) fail('InvalidRequest');
       try { git(['merge-base', '--is-ancestor', expectedOid, commitOid]); } catch { fail('NotFastForward'); }
-      git(['push', `--force-with-lease=${ref}:${expectedOid}`, 'origin', `${commitOid}:${ref}`]);
+      git(['push', '--no-follow-tags', `--force-with-lease=${ref}:${expectedOid}`, 'origin', `${commitOid}:${ref}`]);
       if (remoteHead() !== commitOid) fail('PushNotObserved');
       return { headOid: commitOid };
     },

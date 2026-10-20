@@ -16,11 +16,15 @@ skills point back here and at `docs/`, so there is one copy of each rule.
   `0` ok · `1` refused · `2` usage · `3` fail-closed, nothing written.
 - Nothing in this repository may self-authorize. A tool that could approve,
   merge, push, or widen its own scope is not built that way — privilege is
-  prevented by absence, not by a check. The one standing exception is the
-  operator's grant, not the tool's: the autonomous pump may push a reviewed and
-  verified candidate, fast-forward only, to the branch of its own Draft, under
-  the revocable, budgeted policy recorded in `INTENT.md`. Its adapter has no
-  ready, merge, enqueue, comment, label or close operation.
+  prevented by absence, not by a check. Two standing write grants exist, both
+  the operator's and neither the tool's: the hosted intake writes its ledger
+  refs and opens and edits its own Drafts under the App token
+  (`docs/hosted-draft-intake.md`), and the autonomous pump may push a reviewed
+  and verified candidate, fast-forward only, to the branch of its own Draft,
+  under the revocable, budgeted local policy whose limits `INTENT.md` records.
+  The pump's adapter has no ready, merge, enqueue, comment, label or close
+  operation, and no port the pump holds can enable a revoked policy, raise its
+  budget or alter a publication row.
 
 ## Auditing and repairing GitHub issues
 

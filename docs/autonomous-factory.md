@@ -375,6 +375,17 @@ Constraints and invariants, each refused before any effect:
   policy is enabled and that jobs plus publications stay below `--max-runs`, then records the
   operation before the first effect; a retry re-checks the policy, not the budget, before pushing.
 
+The host's Git environment decides neither the repository nor where the push goes. Every Git call
+of the adapter runs without the repository locators the root guard drops (#224) and with
+`-c core.hooksPath=`, so no hook runs on the publishing side with the push's credentials. Both
+views of origin, `git remote get-url --all origin` and its `--push` view, must list exactly one
+URL, the policy repository's, or the observation refuses `RepositoryIdentityMismatch` before any
+effect: a `pushurl` or `pushInsteadOf` set in the environment or a global Git file cannot send
+the commit elsewhere, and a second `pushurl` cannot add a target. The push passes
+`--no-follow-tags`, and the pull-request read names `--hostname github.com`, so `GH_HOST` cannot
+redirect it. The factory's own measurement keeps its pins (#255) and is not pinned against hooks
+or `core.fsmonitor` (#256).
+
 Usage sketch: after the unchanged scheduling pass, the tick visits every completed ready job
 without a completed publication: observe the Draft and the worktree, build the publication
 intent (pure), begin the publication, commit, push, finish.
