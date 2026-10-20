@@ -86,8 +86,13 @@ const REFUSAL_BLOCKERS = closedMap({
  */
 const BEFORE_PROVIDER_REFUSAL = /^BeforeProvider:[A-Za-z]{1,64}$/u;
 
-/** Probing forward past a settled work key is the designed behaviour, not an obstruction. */
-const BENIGN_SKIP_REASON = 'StaleRevision';
+/**
+ * The designed behaviour, not an obstruction: probing forward past a settled work key, and leaving
+ * an issue off the frontier (a spec, or a ticket whose blocker is still open) for a later tick.
+ */
+const BENIGN_SKIP_REASONS = new Set([
+  'StaleRevision', 'HasSubIssues', 'NativeBlockerOpen', 'DeclaredBlockerOpen',
+]);
 
 /**
  * The skips whose meaning is settled, each with the blocker it publishes, in precedence order: when
@@ -193,7 +198,7 @@ function emptyAdmissionBlocker(skipped) {
   for (const entry of skipped) {
     const skip = plainObject(entry, 'a receipt skip entry');
     if (typeof skip.reason !== 'string') invalid('a receipt skip entry must carry a reason');
-    if (skip.reason === BENIGN_SKIP_REASON) continue;
+    if (BENIGN_SKIP_REASONS.has(skip.reason)) continue;
     const explained = EXPLAINED_SKIP_BLOCKERS.findIndex(([reason]) => reason === skip.reason);
     if (explained === -1) {
       unobservable(

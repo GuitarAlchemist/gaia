@@ -387,6 +387,24 @@ test('a quarantined ambiguous effect or an unresolved evidence head reads BLOCKE
     'a contended admission is never published as a healthy empty queue');
 });
 
+// #235: a frontier skip is the intake working as designed, but a relationship block the shared
+// parser refuses, or a blocker GitHub could not be read for, is a defect or an outage. A tick that
+// admitted nothing over one of those may not read as a healthy empty queue.
+test('an empty admission over an invalid or unreadable declared blocker refuses, unlike a frontier skip', async () => {
+  const waiting = await produce({
+    receipt: expectedNoneReceipt({ skipped: [{ number: 236, reason: 'DeclaredBlockerOpen' }] }),
+  });
+  assert.equal(blockOf(waiting).state, 'EXPECTED_NONE', 'positive control: a frontier skip is benign');
+
+  for (const reason of ['DeclaredRelationshipInvalid', 'GitHubObservationUnavailable']) {
+    const refused = await refusalOf({
+      receipt: expectedNoneReceipt({ skipped: [{ number: 51, reason }] }),
+    });
+    assert.equal(refused.code, 'UnobservableHostedDraftPumpReceipt',
+      `${reason} is never published as a healthy empty queue`);
+  }
+});
+
 test('several explained skips publish one blocker by fixed precedence, whatever their order', async () => {
   const skips = [
     { number: 104, reason: 'HeadIdentityAmbiguous' },
@@ -567,7 +585,10 @@ function stubRuntime(reconciled) {
       };
     },
     async reconcile() { return reconciled; },
-    async listReadyIssues() { return [{ number: 70 }]; },
+    async listReadyIssues() { return [{ number: 70, body: '', openBlockers: 0, subIssues: 0 }]; },
+    async readIssueDependencies({ number }) {
+      return { number, state: 'OPEN', body: '', openBlockers: 0, subIssues: 0 };
+    },
   });
 }
 
