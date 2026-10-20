@@ -5,11 +5,13 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   AutonomousFactoryContractError as AutonomousFactoryStoreError,
   autonomousJobKey,
+  autonomousPublicationOperationId as publicationOperationId,
   canonicalAutonomousJson as encode,
   isAutonomousDigest as digest,
   isAutonomousRepository as repositoryName,
   validateAutonomousIntent as validateIntent,
   validateAutonomousJob as validateJob,
+  validateAutonomousPublication as validatePublication,
   validateAutonomousReceipt as validateReceipt,
 } from './autonomous-factory-contract.mjs';
 
@@ -98,14 +100,25 @@ export function openAutonomousFactoryStore({ path: inputPath }) {
         if (receipt !== null) validateReceipt(receipt, job);
         return { ...job, state: row.state, receipt };
       });
-      if (jobs.length > (policy?.max_runs ?? 0) || jobs.filter(job => job.state === 'STARTED').length > 1) fail('StoreCorrupt');
-      return { policy, jobs };
+      // A publication spends one unit of the same lifetime budget as a run (#236).
+      const publications = db.prepare('SELECT * FROM autonomous_publications ORDER BY rowid').all().map(row => {
+        const job = jobs.find(item => item.jobKey === row.job_key);
+        if (!job) fail('StoreCorrupt');
+        return validatePublication({ jobKey: row.job_key, operationId: row.operation_id,
+          intent: JSON.parse(row.intent_json), state: row.state,
+          receipt: row.receipt_json === null ? null : JSON.parse(row.receipt_json) }, job, 'StoreCorrupt');
+      });
+      if (jobs.length + publications.length > (policy?.max_runs ?? 0)
+        || jobs.filter(job => job.state === 'STARTED').length > 1) fail('StoreCorrupt');
+      return { policy, jobs, publications };
     } catch { fail('StoreCorrupt'); }
   }
-  function projection({ policy, jobs }) {
+  function projection({ policy, jobs, publications }) {
     return { configured: policy !== null, enabled: policy?.enabled === 1,
       repository: policy?.repository ?? null, maxRuns: policy?.max_runs ?? null,
-      usedRuns: jobs.length, activeJobKey: jobs.find(job => job.state === 'STARTED')?.jobKey ?? null, jobs };
+      usedRuns: jobs.length + publications.length,
+      activeJobKey: jobs.find(job => job.state === 'STARTED')?.jobKey ?? null, jobs,
+      publications: publications.map(({ jobKey, operationId, state, receipt }) => ({ jobKey, operationId, state, receipt })) };
   }
   try {
     db = new DatabaseSync(path);
@@ -125,7 +138,13 @@ export function openAutonomousFactoryStore({ path: inputPath }) {
           state TEXT NOT NULL CHECK(state IN ('STARTED','COMPLETED')), receipt_json TEXT,
           UNIQUE(repository,item_id,draft_number),
           CHECK((state='STARTED' AND receipt_json IS NULL) OR (state='COMPLETED' AND receipt_json IS NOT NULL))) STRICT;`);
-      } else if (tables.map(table => table.name).sort().join(',') !== 'autonomous_jobs,autonomous_policy') fail('StoreCorrupt');
+      } else if (!['autonomous_jobs,autonomous_policy', 'autonomous_jobs,autonomous_policy,autonomous_publications']
+        .includes(tables.map(table => table.name).sort().join(','))) fail('StoreCorrupt');
+      // Additive for ledgers created before #236; a reader older than #236 refuses this table.
+      db.exec(`CREATE TABLE IF NOT EXISTS autonomous_publications (
+        job_key TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE, intent_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('STARTED','COMPLETED')), receipt_json TEXT,
+        CHECK((state='STARTED' AND receipt_json IS NULL) OR (state='COMPLETED' AND receipt_json IS NOT NULL))) STRICT`);
       // Adds the provider-identity constraint to development databases without rewriting captured
       // repository spelling, job keys, idempotency keys, receipts, or external evidence paths.
       db.exec('CREATE UNIQUE INDEX IF NOT EXISTS autonomous_jobs_repository_item_draft_nocase '
@@ -157,12 +176,12 @@ export function openAutonomousFactoryStore({ path: inputPath }) {
     start(input) {
       const job = validateJob(input);
       return transaction(() => {
-        const { policy, jobs } = readState();
+        const { policy, jobs, publications } = readState();
         if (!policy || !policy.enabled) fail('PolicyDisabled');
         if (job.intent.repository.toLowerCase() !== policy.repository.toLowerCase()) fail('RepositoryMismatch');
         if (jobs.some(existing => matchesJobKey(existing, job.jobKey))) fail('JobExists');
         if (jobs.some(existing => existing.state === 'STARTED')) fail('HostBusy');
-        if (jobs.length >= policy.max_runs) fail('BudgetExhausted');
+        if (jobs.length + publications.length >= policy.max_runs) fail('BudgetExhausted');
         db.prepare("INSERT INTO autonomous_jobs VALUES (?,?,?,?,?,?,'STARTED',NULL)").run(
           job.jobKey, job.intent.repository, job.intent.itemId, job.intent.draft.number,
           encode(job.intent, 'InvalidIntent'), job.idempotencyKey);
@@ -181,6 +200,54 @@ export function openAutonomousFactoryStore({ path: inputPath }) {
         if (job.state === 'STARTED') db.prepare("UPDATE autonomous_jobs SET state='COMPLETED', receipt_json=? WHERE job_key=?")
           .run(serialized, job.jobKey);
         return { ...job, state: 'COMPLETED', receipt: JSON.parse(serialized) };
+      });
+    },
+    publication(jobKey) {
+      if (!digest(jobKey)) fail('InvalidJob');
+      return transaction(() => {
+        const { jobs, publications } = readState();
+        const job = jobs.find(item => matchesJobKey(item, jobKey));
+        return job ? publications.find(item => item.jobKey === job.jobKey) ?? null : null;
+      });
+    },
+    // The publication's authority point (#236): policy, budget and one operation per job are
+    // decided here, before any effect. A retry of the same operation re-checks the policy only.
+    beginPublication({ jobKey, intent }) {
+      if (!digest(jobKey)) fail('InvalidJob');
+      return transaction(() => {
+        const { policy, jobs, publications } = readState();
+        if (!policy || !policy.enabled) fail('PolicyDisabled');
+        const job = jobs.find(item => matchesJobKey(item, jobKey));
+        if (!job) fail('JobMissing');
+        if (job.state !== 'COMPLETED' || job.receipt?.status !== 'CANDIDATE_READY') fail('CandidateNotReady');
+        const row = validatePublication({ jobKey: job.jobKey, intent, state: 'STARTED', receipt: null,
+          operationId: publicationOperationId(job, intent?.revision) }, job);
+        const existing = publications.find(item => item.jobKey === job.jobKey);
+        if (existing) {
+          if (existing.operationId !== row.operationId) fail('PublicationConflict');
+          if (existing.state === 'COMPLETED') fail('PublicationCompleted');
+          return { status: 'AUTHORIZED', operationId: row.operationId };
+        }
+        if (jobs.length + publications.length >= policy.max_runs) fail('BudgetExhausted');
+        db.prepare("INSERT INTO autonomous_publications VALUES (?,?,?,'STARTED',NULL)").run(
+          job.jobKey, row.operationId, encode(row.intent, 'InvalidPublication'));
+        return { status: 'AUTHORIZED', operationId: row.operationId };
+      });
+    },
+    // Records an observed push; it spends nothing, so a revoked policy still records it.
+    finishPublication({ jobKey, receipt }) {
+      if (!digest(jobKey)) fail('InvalidJob');
+      return transaction(() => {
+        const { jobs, publications } = readState();
+        const job = jobs.find(item => matchesJobKey(item, jobKey));
+        const existing = job && publications.find(item => item.jobKey === job.jobKey);
+        if (!existing) fail('PublicationMissing');
+        const completed = validatePublication({ ...existing, state: 'COMPLETED', receipt }, job);
+        const serialized = encode(completed.receipt, 'InvalidPublication');
+        if (existing.state === 'COMPLETED' && encode(existing.receipt, 'StoreCorrupt') !== serialized) fail('ReceiptConflict');
+        if (existing.state === 'STARTED') db.prepare("UPDATE autonomous_publications SET state='COMPLETED', receipt_json=? WHERE job_key=?")
+          .run(serialized, job.jobKey);
+        return completed.receipt;
       });
     },
     // Explicit operator compensation, never called by normal watch/reconciliation.

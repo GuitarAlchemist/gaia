@@ -8,7 +8,10 @@ or add a seventh bus verb.
 
 `createGitHubCandidatePublicationAdapter` accepts only:
 
-- one exact `gaia-github-candidate-publish-intent/1` with `effect: NONE`;
+- one exact `gaia-github-candidate-publish-intent/1` with `effect: NONE` in its new-branch
+  form; a Draft-bound intent belongs to the
+  [autonomous Draft publication](autonomous-factory.md#decision-the-pump-publishes-its-candidate-to-its-own-draft-eng-02-236)
+  and is refused here;
 - a separately signed, single-use `PUBLISH_CANDIDATE` grant bound to that intent revision;
 - an effect adapter with the closed methods `observe`, `commit`, `push`, and
   `openPullRequest`.

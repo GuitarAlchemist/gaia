@@ -19,6 +19,9 @@ const REQUESTED_OPERATIONS = Object.freeze([
   'PUSH_CANDIDATE_BRANCH',
   'OPEN_PULL_REQUEST',
 ]);
+// A Draft-bound candidate already has its pull request: it fast-forwards that Draft's branch.
+const DRAFT_OPERATIONS = Object.freeze(['COMMIT_CANDIDATE', 'PUSH_DRAFT_BRANCH']);
+const DRAFT_HEAD_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 
 const canonicalJson = (value) => {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -345,15 +348,18 @@ function verifyTransition(supplied) {
     fail('TransitionRevisionMismatch', 'transition content does not match its revision');
   }
 
+  const draftBound = transition.intent !== null && typeof transition.intent === 'object'
+    && Object.hasOwn(transition.intent, 'draft');
   requireExactKeys(
     transition.intent,
     [
       'action', 'repository', 'itemKind', 'itemId', 'itemNumber', 'task', 'evidenceState',
-      'snapshotRevision', 'requiredAuthority', 'intentRevision',
+      'snapshotRevision', 'requiredAuthority', 'intentRevision', ...(draftBound ? ['draft'] : []),
     ],
     'transition.intent',
   );
   const intent = transition.intent;
+  const draft = draftBound ? verifyDraft(intent.draft) : null;
   if (intent.action !== 'RUN_FACTORY_AGENT' || intent.requiredAuthority !== 'FACTORY_RUN') {
     fail('IntentBindingMismatch', 'intent is not an exact factory-run intent');
   }
@@ -417,8 +423,28 @@ function verifyTransition(supplied) {
   if (changeSet.baseHead !== baseHead) {
     fail('IntentBindingMismatch', 'candidate change set does not bind the receipt base HEAD');
   }
+  if (draft !== null && draft.headRevision !== baseHead) {
+    fail('IntentBindingMismatch', 'candidate base does not bind the admitted Draft head');
+  }
   verifyReviewer(receipt, changeSet.identity);
-  return { transition, intent, receipt, baseHead, changeSetIdentity: changeSet.identity };
+  return { transition, intent, draft, receipt, baseHead, changeSetIdentity: changeSet.identity };
+}
+
+// The admitted Draft binding the autonomous pump signs into its intent.
+function verifyDraft(value) {
+  requireExactKeys(value, ['number', 'headRef', 'headRevision'], 'intent.draft');
+  if (!Number.isSafeInteger(value.number) || value.number < 1) {
+    fail('IntentBindingMismatch', 'intent.draft.number must be a positive integer');
+  }
+  const headRef = requireText(value.headRef, 'intent.draft.headRef');
+  if (!DRAFT_HEAD_REF.test(headRef) || headRef.includes('..') || headRef.endsWith('.lock')) {
+    fail('IntentBindingMismatch', 'intent.draft.headRef must be a conservative branch name');
+  }
+  return {
+    number: value.number,
+    headRef,
+    headRevision: requireOid(value.headRevision, 'intent.draft.headRevision'),
+  };
 }
 
 function ownGitObservation(value) {
@@ -488,7 +514,8 @@ export function buildGitHubCandidatePublishIntent(supplied) {
       changeSetIdentity: observed.changeSetIdentity,
       observation: 'CALLER_OBSERVED_READ_ONLY_DATA',
     },
-    requestedOperations: [...REQUESTED_OPERATIONS],
+    ...(verified.draft === null ? {} : { draft: verified.draft }),
+    requestedOperations: [...(verified.draft === null ? REQUESTED_OPERATIONS : DRAFT_OPERATIONS)],
   };
   return deepFreeze({ ...body, revision: sha256(body) });
 }
