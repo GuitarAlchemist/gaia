@@ -3,6 +3,7 @@ import {
   listUnsettledDrafts as listUnsettledDraftsCore,
   reconcileDraft as reconcileDraftCore,
 } from './draft-operation-envelope.mjs';
+import { declaredRelationships } from './issue-relationships.mjs';
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 
@@ -173,6 +174,71 @@ function skipReason(error) {
   return typeof code === 'string' && code.length > 0 ? code : 'OperationFailed';
 }
 
+function readyIssue(value) {
+  if (value === null || typeof value !== 'object' || typeof value.body !== 'string'
+      || !Number.isSafeInteger(value.openBlockers) || value.openBlockers < 0
+      || !Number.isSafeInteger(value.subIssues) || value.subIssues < 0) {
+    fail('InvalidHostedDraftPump');
+  }
+  return {
+    number: candidateNumber(value.number), body: value.body,
+    openBlockers: value.openBlockers, subIssues: value.subIssues,
+  };
+}
+
+/** One issue's dependency facts, read through the per-issue port and bound to the number asked. */
+async function readIssue(readIssueDependencies, repository, number) {
+  if (typeof readIssueDependencies !== 'function') fail('InvalidHostedDraftPump');
+  const issue = await readIssueDependencies({ repository, number });
+  if (issue === null || typeof issue !== 'object' || issue.number !== number) {
+    fail('InvalidHostedDraftPump');
+  }
+  return issue;
+}
+
+/**
+ * The issues the body declares as blocking, through the one declared-relationship contract the
+ * ranker, the issue audit and the read adapter share: its `Blocked-By` and `Depends-On` trailers.
+ * A body that declares none leaves the native facts alone to decide. A reference into another
+ * repository cannot be read through this repository's port, so it is `null`: not proven closed.
+ */
+function declaredBlockers(body, repository) {
+  const local = `${repository.owner}/${repository.name}`;
+  const { dependencies } = declaredRelationships(body, local);
+  if (!Array.isArray(dependencies)) return [];
+  return dependencies.map((reference) => {
+    const separator = reference.lastIndexOf('#');
+    return reference.slice(0, separator).toLowerCase() === local.toLowerCase()
+      ? Number(reference.slice(separator + 1))
+      : null;
+  });
+}
+
+/**
+ * Why a ready issue is not on the frontier, as a closed skip reason, or null when it is.
+ *
+ * Only a blocker read as `CLOSED` releases the issue: any other state, or a reference this port
+ * cannot read, keeps it waiting, because a blocker read as "no blocker" is the direction this
+ * selection must never fail in.
+ */
+async function outsideFrontier(issue, repository, readIssueDependencies) {
+  if (issue.subIssues > 0) return 'HasSubIssues';
+  if (issue.openBlockers > 0) return 'NativeBlockerOpen';
+  let blockers;
+  try {
+    blockers = declaredBlockers(issue.body, repository);
+  } catch {
+    // The shared parser refuses a block it cannot reconcile; the issue audit names that defect.
+    return 'DeclaredRelationshipInvalid';
+  }
+  for (const number of blockers) {
+    if (number === null) return 'DeclaredBlockerOpen';
+    const blocker = await readIssue(readIssueDependencies, repository, number);
+    if (blocker.state !== 'CLOSED') return 'DeclaredBlockerOpen';
+  }
+  return null;
+}
+
 async function boundPorts(create, argument) {
   const ports = await create(argument);
   if (ports === null || typeof ports !== 'object') fail('InvalidHostedDraftPump');
@@ -262,6 +328,7 @@ export async function runHostedDraftIntake({
   operationPortsFor,
   operationPortsForSelector,
   listReadyIssues = null,
+  readIssueDependencies = null,
   listUnsettledDrafts = listUnsettledDraftsCore,
   enqueueDraft = enqueueDraftCore,
   reconcileDraft = reconcileDraftCore,
@@ -322,17 +389,41 @@ export async function runHostedDraftIntake({
   }
 
   let numbers;
+  let readyIssues = null;
   if (candidates === null) {
     if (typeof listReadyIssues !== 'function') fail('InvalidHostedDraftPump');
     const rows = await listReadyIssues({ repository: canonicalRepository });
     if (!Array.isArray(rows)) fail('InvalidHostedDraftPump');
-    numbers = rows.map((row) => candidateNumber(row?.number));
+    readyIssues = new Map(rows.map(readyIssue).map((issue) => [issue.number, issue]));
+    numbers = [...readyIssues.keys()];
   } else {
     numbers = explicitNumbers;
   }
-  const ordered = [...new Set(numbers)].sort((left, right) => left - right).slice(0, limit);
+  const ordered = [...new Set(numbers)].sort((left, right) => left - right);
 
+  // The limit bounds Draft probes, so only frontier issues count against it: an issue waiting on
+  // a blocker or a spec costs no probe and cannot starve the frontier behind it.
+  let probes = 0;
   for (const number of ordered) {
+    if (probes === limit) break;
+    let frontierRefusal;
+    try {
+      // A labeled lane names its candidate without listing it, so it reads that issue's facts.
+      const issue = readyIssues === null
+        ? readyIssue(await readIssue(readIssueDependencies, canonicalRepository, number))
+        : readyIssues.get(number);
+      frontierRefusal = await outsideFrontier(issue, canonicalRepository, readIssueDependencies);
+    } catch (error) {
+      // An unreadable blocker keeps its own issue waiting, not every issue behind it.
+      if (error?.code === 'GitHubRateLimited') throw error;
+      skipped.push({ number, reason: skipReason(error) });
+      continue;
+    }
+    if (frontierRefusal !== null) {
+      skipped.push({ number, reason: frontierRefusal });
+      continue;
+    }
+    probes += 1;
     const canonicalSelector = selector({
       repository: canonicalRepository, workItem: { kind: 'ISSUE', number },
     });

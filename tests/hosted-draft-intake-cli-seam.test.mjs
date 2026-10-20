@@ -239,7 +239,12 @@ function stubRuntime(seen) {
           committedRevision: COMMITTED,
         };
       },
-      async listReadyIssues() { return [{ number: LABELLED_ISSUE }]; },
+      async listReadyIssues() {
+        return [{ number: LABELLED_ISSUE, body: '', openBlockers: 0, subIssues: 0 }];
+      },
+      async readIssueDependencies({ number }) {
+        return { number, state: 'OPEN', body: '', openBlockers: 0, subIssues: 0 };
+      },
     });
   };
 }
@@ -411,6 +416,10 @@ test('a targeted manual normal run acts on its own issue and never on a foreign 
         },
         async listReadyIssues() {
           return assert.fail('an explicitly selected run must not consult the ready funnel');
+        },
+        async readIssueDependencies({ number }) {
+          assert.equal(number, TARGETED_ISSUE, 'the frontier read names only the selected issue');
+          return { number, state: 'OPEN', body: '', openBlockers: 0, subIssues: 0 };
         },
         async enqueue(selector) {
           touched.push(['enqueue', selector.workItem.number]);
