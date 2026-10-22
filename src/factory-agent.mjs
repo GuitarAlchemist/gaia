@@ -4,6 +4,7 @@ import {
   existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync,
   realpathSync, statSync, writeFileSync,
 } from 'node:fs';
+import { devNull } from 'node:os';
 import {
   basename, dirname, isAbsolute, join, relative, resolve,
 } from 'node:path';
@@ -544,6 +545,14 @@ function gitInput(cwd, args, input, encoding = 'utf8') {
   });
 }
 
+// The whitespace gate is the factory's rule, not the operator's. Git reads core.whitespace from
+// every configuration source the process inherits, and a global attributes file overrides it per
+// path. Both are pinned on the command line, which outranks every other source (#248).
+const WHITESPACE_GATE = Object.freeze([
+  '-c', 'core.whitespace=blank-at-eol,blank-at-eof,space-before-tab',
+  '-c', `core.attributesFile=${devNull}`,
+]);
+
 function applyValidatedPiPatch(worktree, patch, allowedPaths) {
   const bytes = Buffer.byteLength(patch);
   if (bytes === 0 || bytes > 1_048_576 || patch.includes('\0')) {
@@ -576,8 +585,8 @@ function applyValidatedPiPatch(worktree, patch, allowedPaths) {
     );
   }
   try {
-    gitInput(worktree, ['apply', '--check', '--whitespace=error-all', '-'], patch);
-    gitInput(worktree, ['apply', '--whitespace=error-all', '-'], patch);
+    gitInput(worktree, [...WHITESPACE_GATE, 'apply', '--check', '--whitespace=error-all', '-'], patch);
+    gitInput(worktree, [...WHITESPACE_GATE, 'apply', '--whitespace=error-all', '-'], patch);
   } catch {
     throw new FactoryAgentError('WorkerPatchRejected', 'Git refused the Pi worker patch');
   }
@@ -654,6 +663,20 @@ function requireRoot(worktree) {
   }
 }
 
+// Which untracked files count is the repository's rule, not the operator's. Git reads
+// status.showUntrackedFiles and the excludes file from every configuration source the process
+// inherits. The command line outranks every other source, so it pins the first to Git's default
+// and points the second at the null device. The repository's own .gitignore and info/exclude
+// still apply (#251). The path is /dev/null, which Git also reads as empty on Windows, because
+// Git for Windows warns on every call that it cannot access os.devNull as an excludes file.
+const UNTRACKED_VIEW = Object.freeze(['-c', 'core.excludesFile=/dev/null']);
+
+function worktreeStatus(worktree) {
+  return git(
+    worktree, [...UNTRACKED_VIEW, 'status', '--porcelain=v1', '-z', '--untracked-files=normal'], null,
+  );
+}
+
 function assertLinkedCleanWorktree(worktree) {
   const gitMarker = join(worktree, '.git');
   if (!existsSync(gitMarker) || !statSync(gitMarker).isFile()) {
@@ -673,7 +696,7 @@ function assertLinkedCleanWorktree(worktree) {
       'the checkout is a primary or submodule worktree; an actual linked Git worktree is required',
     );
   }
-  const porcelain = git(worktree, ['status', '--porcelain=v1', '-z'], null);
+  const porcelain = worktreeStatus(worktree);
   if (porcelain.length !== 0) {
     throw new FactoryAgentError('CleanWorktreeRequired', 'the linked worktree must be clean at entry');
   }
@@ -707,13 +730,13 @@ function changedPaths(worktree, head) {
     worktree, ['diff', '--name-only', '-z', head, '--'], null,
   ));
   const untracked = nullSeparated(git(
-    worktree, ['ls-files', '--others', '--exclude-standard', '-z'], null,
+    worktree, [...UNTRACKED_VIEW, 'ls-files', '--others', '--exclude-standard', '-z'], null,
   ));
   return [...new Set([...tracked, ...untracked])].sort();
 }
 
 function changeSet(worktree, head) {
-  const statusBytes = git(worktree, ['status', '--porcelain=v1', '-z'], null);
+  const statusBytes = worktreeStatus(worktree);
   const patchBytes = git(worktree, ['diff', '--binary', head, '--'], null);
   const files = changedPaths(worktree, head).map((path) => {
     const absolute = resolve(worktree, ...path.split('/'));
@@ -973,7 +996,7 @@ export async function verifyCommittedHead({
   // A subdirectory is inside the work tree too, but the pin, the change-set paths and the
   // test discovery are all rooted at the top: from below, the pin reads as absent.
   requireRoot(worktree);
-  if (git(worktree, ['status', '--porcelain=v1', '-z'], null).length !== 0) {
+  if (worktreeStatus(worktree).length !== 0) {
     throw new FactoryAgentError('CleanWorktreeRequired', 'a committed head is verified only from a clean worktree');
   }
   try {

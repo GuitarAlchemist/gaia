@@ -13,6 +13,7 @@ import {
   HEAD_VERIFICATION_FIELDS, HEAD_VERIFICATION_SCHEMA, HeadVerificationError,
   headVerificationRevision, requireHeadVerification, sealHeadVerification,
 } from '../src/head-verification.mjs';
+import { rawStatus, untrackedHidingRows, withEnvironment } from './helpers/ambient-git.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-head-verification-'));
 test.after(() => rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
@@ -186,6 +187,35 @@ test('an ambient GIT_DIR cannot move the verified root or the bytes it binds', a
     if (saved === undefined) delete process.env.GIT_DIR;
     else process.env.GIT_DIR = saved;
   }
+});
+
+test('ambient Git configuration cannot hide an untracked test file from the head verification', async () => {
+  // A hidden untracked test runs under `node --test` while the receipt names only the committed
+  // head. The clean check's `git status` obeyed status.showUntrackedFiles and the excludes file
+  // from every configuration source the process inherits (#251).
+  const { repo, base } = fixture();
+  const rows = untrackedHidingRows(join(scratch, `hidden-config-${fixtures += 1}`), 'hidden.test.mjs');
+  writeFileSync(join(repo, 'hidden.test.mjs'), PASSING, 'utf8');
+  let runs = 0;
+  const runVerification = async () => { runs += 1; return fixedRunner()(); };
+
+  const rawGit = {};
+  const outcome = {};
+  for (const [row, overrides] of Object.entries(rows)) {
+    await withEnvironment(overrides, async () => {
+      rawGit[row] = rawStatus(repo);
+      outcome[row] = await verifyCommittedHead({
+        worktree: repo, baseHead: base, evidenceDir: evidenceDir(), runVerification,
+      }).then(() => 'verified', error => (error instanceof FactoryAgentError ? error.code : String(error)));
+    });
+  }
+
+  // Non-vacuity: every row but the control hides the file from Git itself.
+  assert.deepEqual(rawGit, Object.fromEntries(Object.keys(rows).map(row => [
+    row, row === 'clean' ? 'shown' : 'hidden',
+  ])));
+  assert.deepEqual(outcome, Object.fromEntries(Object.keys(rows).map(row => [row, 'CleanWorktreeRequired'])));
+  assert.equal(runs, 0);
 });
 
 test('a verification run that writes into the worktree is the factory\'s VerificationMutation', async () => {

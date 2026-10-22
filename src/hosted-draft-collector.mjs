@@ -144,6 +144,27 @@ function requireRawObject(value, code) {
   return value;
 }
 
+function nonNegativeInteger(value, code) {
+  if (!Number.isSafeInteger(value) || value < 0) fail(code, code);
+  return value;
+}
+
+/**
+ * What the intake reads to keep only the frontier: open native blockers, sub-issues, and the body
+ * whose declared relationships are the fallback. `blocked_by` counts open blockers; the total would
+ * also count closed ones. A row without its summaries cannot prove nothing blocks it, so it refuses.
+ */
+function dependencyFacts(raw) {
+  const code = 'IssueObservationInvalid';
+  if (raw.body !== null && typeof raw.body !== 'string') fail(code, code);
+  return {
+    number: positiveInteger(raw.number, code),
+    body: raw.body ?? '',
+    openBlockers: nonNegativeInteger(raw.issue_dependencies_summary?.blocked_by, code),
+    subIssues: nonNegativeInteger(raw.sub_issues_summary?.total, code),
+  };
+}
+
 function flattenPages(value, code) {
   if (!Array.isArray(value) || value.some((page) => !Array.isArray(page))) fail(code, code);
   return value.flat();
@@ -301,8 +322,19 @@ export function createGhDraftCollectorApi({ run = runGh } = {}) {
       return pages
         .filter((row) => row !== null && typeof row === 'object'
           && !Object.hasOwn(row, 'pull_request'))
-        .map((row) => ({ number: positiveInteger(row.number, 'IssueObservationInvalid') }))
+        .map(dependencyFacts)
         .sort((left, right) => left.number - right.number);
+    },
+
+    async readIssueDependencies({ repository, number }) {
+      const raw = requireRawObject(await call([
+        'api', `repos/${repositoryPath(repository)}/issues/`
+          + `${positiveInteger(number, 'IssueObservationInvalid')}`,
+      ]), 'IssueObservationInvalid');
+      return {
+        ...dependencyFacts(raw),
+        state: text(raw.state, 'IssueObservationInvalid').toUpperCase(),
+      };
     },
 
     async readPolicy({ repository, baseRevision }) {

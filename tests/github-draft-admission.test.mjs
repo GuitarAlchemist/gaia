@@ -165,7 +165,9 @@ test('scheduled intake receipts from the real producer remain admissible with di
       enqueue: (selector) => enqueueDraft(selector, 'NONE', ports),
       reconcile: ({ operationId, expectedRevision }) => reconcileDraft(operationId, expectedRevision, ports),
       listUnsettled: () => listUnsettledDrafts(ports),
-      listReadyIssues: async () => [{ number: WORK_ITEM.number }],
+      listReadyIssues: async () => [
+        { number: WORK_ITEM.number, body: '', openBlockers: 0, subIssues: 0 },
+      ],
     }),
   });
   assert.equal(code, 0, errors);

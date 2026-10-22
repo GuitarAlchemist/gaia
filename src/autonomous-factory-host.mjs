@@ -1,8 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isAutonomousRepository } from './autonomous-factory-contract.mjs';
+import { measureAgentFactoryChangeSet } from './factory-agent.mjs';
 import { readDraftExpectation } from './github-draft-admission.mjs';
+import { repositoryNeutralEnvironment } from './worktree-root.mjs';
 
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 export function runHost(file, args, options = {}) {
@@ -98,6 +102,114 @@ export function prepareAutonomousWorktree({
   // Detached, immutable source; no branch reuse and no automatic cleanup of candidate edits.
   git(['-c', 'core.hooksPath=', 'worktree', 'add', '--detach', worktree, headRevision]);
   return worktree;
+}
+
+const GITHUB_REMOTES = [/^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/u,
+  /^(?:ssh:\/\/)?git@github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/u];
+// Fixed so that one operation always yields one commit object, and a retry recognises its push.
+const PUBLICATION_IDENTITY = { GIT_AUTHOR_NAME: 'Gaia autonomous factory',
+  GIT_AUTHOR_EMAIL: 'gaia-autonomous-factory@gaia.invalid', GIT_COMMITTER_NAME: 'Gaia autonomous factory',
+  GIT_COMMITTER_EMAIL: 'gaia-autonomous-factory@gaia.invalid' };
+// No hook runs on the publishing side, so none acts with the push's credentials.
+const PUBLICATION_GIT = Object.freeze(['-c', 'core.hooksPath=']);
+
+/**
+ * Git/`gh` effects for publishing one candidate to its own Draft (#236), bound at construction to
+ * that Draft's number and head ref. Reads are one pull-request GET and `ls-remote`; the commit is
+ * built on a temporary index so the worktree's HEAD and index never move; the only write is one
+ * leased fast-forward push of the bound ref. There is no ready, merge, enqueue, comment, label or
+ * close operation. The host's environment decides neither the repository nor where the push goes:
+ * Git runs without the repository locators, as the factory's calls do (#224), both views of origin
+ * must name the policy repository, and tags never follow the push.
+ */
+export function createAutonomousDraftPublicationEffects({ repository, worktree, draft, run = runHost }) {
+  if (!isAutonomousRepository(repository) || !Number.isSafeInteger(draft?.number) || draft.number < 1
+      || typeof draft.headRef !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(draft.headRef)
+      || draft.headRef.includes('..') || draft.headRef.includes('//') || draft.headRef.endsWith('.lock')
+      || !/^[a-f0-9]{40}$/.test(draft.headRevision ?? '')) fail('InvalidDraft');
+  const cwd = realDirectory(worktree);
+  const ref = `refs/heads/${draft.headRef}`;
+  const environment = (extra = {}) => ({ ...repositoryNeutralEnvironment(), ...extra });
+  const git = (args, options = {}) => String(run('git', [...PUBLICATION_GIT, ...args],
+    { cwd, ...options, env: environment(options.env) })).trim();
+  const remoteHead = () => {
+    const rows = git(['ls-remote', 'origin', ref]).split(/\r?\n/u).map(row => row.split(/\s+/u))
+      .filter(([, name]) => name === ref);
+    if (rows.length !== 1 || !/^[a-f0-9]{40}$/.test(rows[0][0])) fail('DraftRefUnavailable');
+    return rows[0][0];
+  };
+  const measured = head => measureAgentFactoryChangeSet(cwd, head);
+  // The published tree must hold exactly the reviewed bytes: no path more or less, and every
+  // present file's blob equal to the measured file, whatever filters the clone configures.
+  const assertPublishedTree = (commitOid, files) => {
+    const fields = git(['diff', '--name-status', '-z', '--no-renames', draft.headRevision, commitOid])
+      .split('\0').filter(Boolean);
+    const published = new Map();
+    for (let index = 0; index + 1 < fields.length; index += 2) published.set(fields[index + 1], fields[index]);
+    if (published.size !== files.length) fail('PublishedTreeMismatch');
+    for (const file of files) {
+      const status = published.get(file.path);
+      if (file.state === 'deleted' ? status !== 'D' : !['A', 'M'].includes(status)) fail('PublishedTreeMismatch');
+      if (file.state === 'present') {
+        const blob = run('git', [...PUBLICATION_GIT, 'cat-file', 'blob', `${commitOid}:${file.path}`],
+          { cwd, encoding: 'buffer', maxBuffer: 256 * 1024 * 1024, env: environment() });
+        if (createHash('sha256').update(blob).digest('hex') !== file.sha256) fail('PublishedTreeMismatch');
+      }
+    }
+  };
+  return Object.freeze({
+    async observe() {
+      // The push reaches the push view, after any pushurl or pushInsteadOf; Git pushes to every
+      // URL listed, so each view must list one URL, the policy repository's.
+      for (const view of [['--all', 'origin'], ['--all', '--push', 'origin']]) {
+        const urls = git(['remote', 'get-url', ...view]).split(/\r?\n/u);
+        if (urls.length !== 1
+            || !GITHUB_REMOTES.some(form => form.exec(urls[0])?.[1]?.toLowerCase() === repository.toLowerCase())) {
+          fail('RepositoryIdentityMismatch');
+        }
+      }
+      // The host is named, so GH_HOST cannot send the read to another server.
+      const pull = JSON.parse(run('gh', ['api', '--hostname', 'github.com', '--method', 'GET',
+        `repos/${repository}/pulls/${draft.number}`]));
+      const headOid = git(['rev-parse', 'HEAD']);
+      return {
+        pullRequest: { number: pull?.number, isDraft: pull?.draft === true,
+          state: pull?.merged === true ? 'MERGED' : pull?.state === 'open' ? 'OPEN' : 'CLOSED',
+          headRef: pull?.head?.ref, headRepository: String(pull?.head?.repo?.full_name ?? '') },
+        git: { repository, headOid, baseOid: remoteHead(), changeSetIdentity: measured(headOid).identity },
+      };
+    },
+    async commit({ operationId, parentOid, changeSetIdentity, message }) {
+      if (!/^[a-f0-9]{64}$/.test(operationId ?? '') || parentOid !== draft.headRevision
+          || typeof message !== 'string' || !message.includes(operationId)) fail('InvalidRequest');
+      if (git(['rev-parse', 'HEAD']) !== parentOid) fail('CandidateStale');
+      const before = measured(parentOid);
+      if (before.identity !== changeSetIdentity) fail('CandidateChanged');
+      const scratch = mkdtempSync(join(tmpdir(), 'gaia-publication-index-'));
+      try {
+        const env = { GIT_INDEX_FILE: join(scratch, 'index') };
+        git(['read-tree', parentOid], { env });
+        git(['add', '--all', '--', '.'], { env });
+        const tree = git(['write-tree'], { env });
+        if (measured(parentOid).identity !== changeSetIdentity) fail('CandidateChanged');
+        const date = `@${git(['show', '-s', '--format=%ct', parentOid])} +0000`;
+        const commitOid = git(['commit-tree', '--no-gpg-sign', tree, '-p', parentOid, '-F', '-'], {
+          env: { ...PUBLICATION_IDENTITY, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
+          input: message });
+        if (!/^[a-f0-9]{40}$/.test(commitOid)) fail('CommitInvalid');
+        assertPublishedTree(commitOid, before.files);
+        return { commitOid };
+      } finally { rmSync(scratch, { recursive: true, force: true }); }
+    },
+    async push({ headRef, commitOid, expectedOid }) {
+      if (headRef !== draft.headRef) fail('DraftBranchMismatch');
+      if (expectedOid !== draft.headRevision || !/^[a-f0-9]{40}$/.test(commitOid ?? '')) fail('InvalidRequest');
+      try { git(['merge-base', '--is-ancestor', expectedOid, commitOid]); } catch { fail('NotFastForward'); }
+      git(['push', '--no-follow-tags', `--force-with-lease=${ref}:${expectedOid}`, 'origin', `${commitOid}:${ref}`]);
+      if (remoteHead() !== commitOid) fail('PushNotObserved');
+      return { headOid: commitOid };
+    },
+  });
 }
 
 export function ensureHostDirectories(root) {
