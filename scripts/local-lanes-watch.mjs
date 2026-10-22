@@ -25,9 +25,10 @@
  *     absent or half-written, is reported as its UsageError and preserves the dashboard outputs,
  *     although the sensor may already have refreshed the observation. These input-read guarantees
  *     do not imply atomicity for output-write failures. An argument error is the same on every
- *     tick, so the watcher's, the sensor's and the control room's arguments are parsed once before
- *     the first tick, and an error there stops the watcher with exit 2. A retry loop around a
- *     subprocess is the thing this product rules out elsewhere by name.
+ *     tick, so the watcher's, the sensor's and the control room's arguments are checked before
+ *     the first tick, the control room's including that its outputs are distinct files, and an
+ *     error there stops the watcher with exit 2. A retry loop around a subprocess is the thing
+ *     this product rules out elsewhere by name.
  *   - **Bounded and stoppable.** The interval is explicit, capped at half the observation
  *     freshness window so no legal configuration can render permanently stale, and SIGINT or
  *     SIGTERM ends it.
@@ -41,7 +42,9 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { LOCAL_LANE_OBSERVATION_FRESH_MS } from '../src/local-lane-observation.mjs';
-import { parseArgs as parseDashboardArgs, runFactoryDashboardCli } from './factory-dashboard.mjs';
+import {
+  resolveInvocation as resolveDashboardInvocation, runFactoryDashboardCli,
+} from './factory-dashboard.mjs';
 import { parseArgs as parseSensorArgs, runLocalLaneSensorCli } from './local-lane-sensor.mjs';
 
 /**
@@ -119,7 +122,9 @@ function parseAllArgs(argv) {
   const parsed = parseArgs(argv);
   const { sensor, dashboard } = stepArgv(parsed);
   parseSensorArgs(sensor);
-  parseDashboardArgs(dashboard);
+  // The control room's whole argument check, not only its flags: two outputs naming one file is
+  // refused after its flags parse, and the same argv collides on every tick.
+  resolveDashboardInvocation(dashboard);
   return parsed;
 }
 

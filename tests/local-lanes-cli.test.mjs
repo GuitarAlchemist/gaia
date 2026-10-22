@@ -868,6 +868,36 @@ test('the watcher process names its own usage error by its class', () => {
   assert.equal(run.stderr, 'UsageError: missing --lanes-out\n');
 });
 
+test('the watcher process stops with exit 2 when two control-room outputs name one file', () => {
+  // #229 R2 review (B1): the control room refuses colliding outputs after its flags parse, and the
+  // same argv collides on every tick, so the watcher must refuse it before the first one.
+  const space = workspace([agent(1)]);
+  const run = runProcess(WATCH_CLI, [
+    '--lanes-out', space.path('lanes.json'), '--wmux', FAKE_WMUX, '--interval-ms', '1000',
+    '--projection', projectionFile(space.dir),
+    '--html-out', space.path('control-room.html'), '--snapshot-out', space.path('control-room.html'),
+  ], { timeout: 10_000 });
+
+  assert.equal(run.status, 2);
+  assert.equal(run.stderr, 'UsageError: the HTML, snapshot and activity outputs must differ\n');
+  assert.deepEqual(space.argv(), [], 'the refusal happens before any wmux read');
+});
+
+test('the watcher process stops with exit 2 when a control-room output is its lanes file', () => {
+  const space = workspace([agent(1)]);
+  const lanesOut = space.path('lanes.json');
+  const run = runProcess(WATCH_CLI, [
+    '--lanes-out', lanesOut, '--wmux', FAKE_WMUX, '--interval-ms', '1000',
+    '--projection', projectionFile(space.dir),
+    '--html-out', lanesOut, '--snapshot-out', space.path('control-room.json'),
+  ], { timeout: 10_000 });
+
+  assert.equal(run.status, 2);
+  assert.equal(run.stderr, 'UsageError: an output path aliases an input evidence path\n');
+  assert.deepEqual(space.argv(), [], 'the refusal happens before any wmux read');
+  assert.equal(existsSync(lanesOut), false, 'and before the sensor writes the lanes file');
+});
+
 /** Resolves once `ready()` holds; rejects if the process exits first or 10 s pass. */
 function until(child, ready) {
   return new Promise((resolve, reject) => {

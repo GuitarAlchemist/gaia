@@ -266,11 +266,13 @@ const declaredBasis = (resolved, observedAt) => (typeof resolved !== 'string' ? 
   basis: resolved === observedAt ? 'UNOBSERVED' : 'MEASURED',
 });
 
-export function runFactoryDashboardCli(argv, {
-  now = () => new Date(),
-  resolveSourceChangedAt = fileFedSourceChangedAt,
-  writeStdout = (chunk) => process.stdout.write(chunk),
-} = {}) {
+/**
+ * Every refusal the arguments decide, before any input is read: the flags, then whether two
+ * outputs, or an output and an input, are one file. It stats where the named paths sit but reads
+ * no file, so the same argv over the same tree gets the same answer on every run, and a caller that
+ * repeats this adapter can check it once up front.
+ */
+export function resolveInvocation(argv) {
   const flags = parseArgs(argv);
   const projectionPath = flags.projection ? resolve(flags.projection) : null;
   const portfolioPath = flags.portfolio ? resolve(flags.portfolio) : null;
@@ -313,6 +315,23 @@ export function runFactoryDashboardCli(argv, {
       );
     },
   });
+  return {
+    flags, projectionPath, portfolioPath, receiptsPath, holdsPath, dependenciesPath, progressPath,
+    historyPath, telemetryPath, localLanesPath, engineeringFlowPath, mergeQueueCapabilityPath,
+    prReviewThreadGatePath, hostedDraftPumpPath, htmlPath, snapshotPath, activityPath,
+  };
+}
+
+export function runFactoryDashboardCli(argv, {
+  now = () => new Date(),
+  resolveSourceChangedAt = fileFedSourceChangedAt,
+  writeStdout = (chunk) => process.stdout.write(chunk),
+} = {}) {
+  const {
+    flags, projectionPath, portfolioPath, receiptsPath, holdsPath, dependenciesPath, progressPath,
+    historyPath, telemetryPath, localLanesPath, engineeringFlowPath, mergeQueueCapabilityPath,
+    prReviewThreadGatePath, hostedDraftPumpPath, htmlPath, snapshotPath, activityPath,
+  } = resolveInvocation(argv);
 
   const projection = projectionPath
     ? readJson(projectionPath, 'projection')

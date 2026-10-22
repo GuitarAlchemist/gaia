@@ -438,7 +438,8 @@ The pair's underlying concern is accepted in full and constrains the script inst
   preserves the dashboard outputs, although the sensor may already have refreshed the observation.
   These input-read guarantees do not imply atomicity for output-write failures. An argument error,
   the script's, the sensor's or the control room's, is the same on every tick, so all three are
-  parsed once before the first tick and stop the script with exit 2;
+  checked before the first tick and stop the script with exit 2. The control room's check includes
+  that its outputs are distinct files and that none of them is an input, the lanes file included;
 - the interval is explicit, bounded to 1000-15000 ms per Blocker 2, and stops on SIGINT/SIGTERM.
 
 ## S5 — the golden fixture and the digest-bound receipt
