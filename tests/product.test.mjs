@@ -224,10 +224,10 @@ test('LICENSE, NOTICE, and the engineering doctrine ship', () => {
 
 test('the architecture and domain language preserve the redesign lesson', () => {
   const architecturePath = join(ROOT, 'ARCHITECTURE.md');
-  const contextPath = join(ROOT, 'CONTEXT.md');
+  const glossaryPath = join(ROOT, 'GLOSSARY.md');
   const adrPath = join(ROOT, 'docs', 'adr', '0001-canonical-operation-envelope.md');
 
-  for (const path of [architecturePath, contextPath, adrPath]) {
+  for (const path of [architecturePath, glossaryPath, adrPath]) {
     assert.ok(existsSync(path), `${path} ships`);
   }
 
@@ -236,7 +236,7 @@ test('the architecture and domain language preserve the redesign lesson', () => 
   assert.ok(architecture.includes('docs/draft-operation-envelope.md'));
   assert.ok(architecture.includes('docs/engineering-and-research-principles.md'));
 
-  const context = readFileSync(contextPath, 'utf8');
+  const glossary = readFileSync(glossaryPath, 'utf8');
   for (const term of [
     '**Operation Envelope**:',
     '**Work Identity**:',
@@ -244,7 +244,7 @@ test('the architecture and domain language preserve the redesign lesson', () => 
     '**Redesign Circuit Breaker**:',
     '**Failure Evidence**:',
   ]) {
-    assert.ok(context.includes(term), `domain language retains ${term}`);
+    assert.ok(glossary.includes(term), `domain language retains ${term}`);
   }
 
   const doctrine = readFileSync(join(ROOT, 'docs', 'engineering-and-research-principles.md'), 'utf8');

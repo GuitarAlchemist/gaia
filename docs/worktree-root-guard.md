@@ -207,12 +207,97 @@ This was measured during #243's review. The guard does not close it.
 `gitInput` runs only `git apply` without `--index`, for the Pi worker's patch. It resolves every
 *path* against its working directory. A probe ran the factory's three `apply` invocations from a
 worktree root under ten locator environments, and each one patched the working directory and
-nothing else. The repository Git opens still supplies the *configuration* that
-`--whitespace=error-all` obeys. An inherited `GIT_DIR` naming a repository whose
-`core.whitespace` drops `trailing-space` makes Git accept a trailing-space patch that the
-worktree's own repository refuses. #244's R0 Standards review found this after the author had
-called the environment in `gitInput` unobservable.
+nothing else.
 
-So the neutral environment in `gitInput` binds the patch gate. `tests/factory-agent.test.mjs`
-pins it with "an ambient GIT_DIR cannot relax the whitespace gate on a Pi worker patch". Removing
-the environment from `gitInput` alone (mutant M5) fails that test.
+The *rule* that `--whitespace=error-all` enforces is configuration. `core.whitespace` sets it, and
+a `whitespace` attribute overrides it per path. Git reads both from every source the process
+inherits.
+
+- **Locators:** #244's R0 Standards review found that an inherited `GIT_DIR` naming a repository
+  whose `core.whitespace` drops `trailing-space` let a trailing-space patch through.
+- **Configuration sources:** #248 measured the same through the sources the neutral environment
+  does not strip: `GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_GLOBAL`, `HOME` and
+  `XDG_CONFIG_HOME`. A global attributes file did the same, whether found through `HOME` or
+  `XDG_CONFIG_HOME` or named by `core.attributesFile`.
+
+So the gate's two `apply` calls pin the rule on the command line, which outranks every other
+configuration source:
+
+- `core.whitespace=blank-at-eol,blank-at-eof,space-before-tab`, which is Git's default rule;
+- `core.attributesFile` set to the null device, which turns off the global attributes file and its
+  XDG default.
+
+#248 listed one alternative: strip `GIT_CONFIG_*` from the helpers and pin the global and system
+files. It was not chosen, because it changes every factory Git call, not just the gate. It also
+drops the system `core.autocrlf=true` of Git for Windows. Under a replaced `GIT_CONFIG_SYSTEM`, the
+probe's trailing-space patch failed on its context rather than its whitespace, as #244's R1 Spec
+review had also seen.
+
+The pin also overrides the worktree repository's own `core.whitespace`, because the gate is the
+factory's rule. Gaia sets none, so its gate is unchanged. A repository's own `info/attributes`
+outranks every pin, so only the neutral environment keeps another repository's attributes out.
+
+`tests/factory-agent.test.mjs` pins this with "ambient Git configuration cannot relax the
+whitespace gate on a Pi worker patch". Each row except the clean control first shows that Git
+itself accepts the patch. Each mechanism-revert control was run on a throwaway copy:
+
+| rows | relaxed through | refused by | removing that mechanism alone |
+|---|---|---|---|
+| `GIT_DIR`, `GIT_COMMON_DIR` | another repository's config and `info/attributes` | the neutral environment in `gitInput` | fails both rows (M5) |
+| `GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_GLOBAL`, `HOME` | `core.whitespace` | the `core.whitespace` pin | fails these four rows |
+| `attributes`, an `XDG_CONFIG_HOME` holding `git/attributes` | a `whitespace` attribute | the `core.attributesFile` pin | fails this row |
+
+Without the other repository's `info/attributes`, M5 passed the test: the `core.whitespace` pin
+alone outranks that repository's config.
+
+## The cleanliness check
+
+Three factory reads decide what a worktree holds besides its commit:
+
+- the entry check of `executeAgentFactory` and `runPiWorker`, which refuses with
+  `CleanWorktreeRequired`;
+- the clean check of `verifyCommittedHead`, which refuses the same way;
+- a change set, which records the `git status` bytes and lists every untracked file through
+  `git ls-files --others --exclude-standard`.
+
+Which untracked files Git reports is configuration. `status.showUntrackedFiles=no` drops them all
+from `git status`. An excludes file drops the files it names from both commands. That file is
+`core.excludesFile`, or by default `$XDG_CONFIG_HOME/git/ignore` or `$HOME/.config/git/ignore`.
+Git reads both settings from every source the process inherits. #251 measured each of them hiding
+an untracked file: `status.showUntrackedFiles` through `GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`,
+`GIT_CONFIG_GLOBAL`, `HOME` and `XDG_CONFIG_HOME`; the excludes file named through
+`GIT_CONFIG_COUNT` or `GIT_CONFIG_PARAMETERS`, or found at its default path. A hidden untracked
+`.gitattributes` holding `* -whitespace` then let a trailing-space patch through `runPiWorker`,
+because a worktree's own attributes outrank the whitespace gate's pins.
+
+So `worktreeStatus` runs the factory's one `git status`, and the change set's `ls-files` carries the
+same pin:
+
+- `--untracked-files=normal`, which is Git's default, so a change set's status bytes are unchanged
+  where nothing was set;
+- `core.excludesFile=/dev/null`, which turns off the operator's excludes file and its default path.
+  Git for Windows warns on every call that it cannot access `os.devNull` (`\\.\nul`) as an
+  excludes file, and then skips it. It reads `/dev/null` as empty without a warning, as Git does on
+  Linux; an empty value measured the same.
+
+The repository's own `.gitignore` and `info/exclude` still apply. Claude Code hides its
+`.claude/settings.local.json` through the operator's global ignore file, and 13 Gaia worktrees on
+the author's host held one. Under the pin, both clean checks would have refused them and a change
+set would have listed the file, so Gaia's `.gitignore` now names it.
+
+In #251's probe, `core.worktree` and `core.ignoreStat` set through `GIT_CONFIG_COUNT` hid nothing
+from `git status`. `core.fsmonitor`, `core.untrackedCache` and `diff.ignoreSubmodules` were not
+measured.
+
+Three tests pin this, one per read, over the same seven rows from `tests/helpers/ambient-git.mjs`:
+"ambient Git configuration cannot hide an untracked file from the Pi worker entry check", "... an
+untracked test file from the head verification", and "... change what a change set measures". Each
+row except the clean control first shows that an unpinned `git status` hides the file. Each
+mechanism-revert control was run on a throwaway copy:
+
+| removed | fails |
+|---|---|
+| `--untracked-files=normal` | the four `status.showUntrackedFiles` rows, in all three tests |
+| `core.excludesFile` on `git status` | the two excludes rows, in all three tests |
+| `core.excludesFile` on `ls-files` | the two excludes rows, in the change-set test only |
+| `worktreeStatus` at one read, back to the unpinned call | every hidden row, in that read's test only |

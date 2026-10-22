@@ -5,6 +5,10 @@ import {
   buildGitHubCandidatePublishIntent,
   GitHubCandidatePublishError,
 } from '../src/github-portfolio-publish.mjs';
+import {
+  createGitHubCandidatePublicationAdapter,
+  GitHubCandidatePublicationError,
+} from '../src/github-portfolio-publication.mjs';
 
 const SHA_A = 'a'.repeat(64);
 const SHA_B = 'b'.repeat(64);
@@ -560,3 +564,48 @@ test('refuses a fully restamped repaired receipt bound to a different candidate'
     'initial and repaired identities must be distinct',
   );
 });
+
+async function draftBoundTransition(draft) {
+  const original = await readyTransition();
+  const { intentRevision: _old, ...intentBody } = { ...original.intent, draft };
+  const intent = { ...intentBody, intentRevision: await digest(intentBody) };
+  const authority = { grantId: original.authority.grantId, intentRevision: intent.intentRevision };
+  const execution = { ...original.execution,
+    idempotencyKey: await digest({ grantId: authority.grantId, intentRevision: intent.intentRevision }) };
+  const body = { ...(({ revision: _discard, ...rest }) => rest)(original), intent, authority, execution };
+  return { ...body, revision: await digest(body) };
+}
+
+test('a Draft-bound candidate yields only a fast-forward of that Draft, never a new pull request',
+  async () => {
+  const draft = { number: 400, headRef: 'codex/issue-399', headRevision: OID };
+  const transition = await draftBoundTransition(draft);
+  const output = buildGitHubCandidatePublishIntent({
+    transition, gitObservation: gitObservationFor(transition),
+  });
+  assert.deepEqual(output.draft, draft);
+  assert.deepEqual(output.requestedOperations, ['COMMIT_CANDIDATE', 'PUSH_DRAFT_BRANCH']);
+
+  const moved = await draftBoundTransition({ ...draft, headRevision: '2'.repeat(40) });
+  assert.throws(
+    () => buildGitHubCandidatePublishIntent({
+      transition: moved, gitObservation: gitObservationFor(moved),
+    }),
+    (error) => error instanceof GitHubCandidatePublishError && error.code === 'IntentBindingMismatch',
+    'the receipt base must be the admitted Draft head',
+  );
+
+  const calls = [];
+  const effect = (name) => async () => { calls.push(name); };
+  const adapter = createGitHubCandidatePublicationAdapter({
+    expectedRepository: output.repository,
+    authority: { consume: effect('consume') },
+    effects: { observe: effect('observe'), commit: effect('commit'), push: effect('push'),
+      openPullRequest: effect('openPullRequest') },
+  });
+  await assert.rejects(
+    adapter.publish({ intent: output, grant: { opaque: 'grant' } }),
+    (error) => error instanceof GitHubCandidatePublicationError && error.code === 'InvalidIntent',
+  );
+  assert.deepEqual(calls, [], 'the new-branch adapter refuses a Draft-bound intent before any effect');
+  });

@@ -60,10 +60,37 @@ the original live cause. Measure prompts per eligible run, repeat effects, time 
 authority, and candidate-to-publication time from linked receipts/PR history. Baselines
 are `UNKNOWN` until measured; no numeric improvement or live activation is claimed here.
 
+## Standing publication authority
+
+Origin: the operator's decisions of 2026-10-06 recorded in
+[spec #234](https://github.com/GuitarAlchemist/gaia/issues/234) and implemented by
+[ticket #236](https://github.com/GuitarAlchemist/gaia/issues/236): the pump may push its
+candidate to its own Draft's branch, the Draft stays a draft, one host slot, one pull request
+per ticket. This is the separately authorized publication stage reserved below. Design:
+[Draft publication decision](docs/autonomous-factory.md#decision-the-pump-publishes-its-candidate-to-its-own-draft-eng-02-236).
+
+The existing local policy also authorizes, without a per-run prompt, one publication per
+`CANDIDATE_READY` job whose receipt carries an `APPROVE` and a passing host verification run.
+Its limits:
+
+- **Own Draft branch only:** the head ref of the Draft the job was admitted with, in the
+  policy's repository. Any other branch, repository or pull request refuses.
+- **Fast-forward only:** the commit's one parent is the Draft head observed at admission, and
+  the push carries a lease on that head. A moved head refuses; nothing is overwritten.
+- **The Draft stays a draft:** no ready-for-review, merge, enqueue, comment, label or issue
+  close. Those stay with the drain and the operator.
+- **Revocable through the existing policy:** after `revoke`, the next push refuses.
+- **Counted against the existing run budget:** each publication spends one unit of
+  `--max-runs`, the same units a factory run spends. An exhausted budget refuses.
+
+A refusal happens before any effect. A pushed commit is compensated by the operator, with a
+leased push of the Draft branch back to the head recorded in the publication receipt.
+
 ## Open questions and later stages
 
-The first execution boundary is one configured local host producing a candidate.
-Automatic publication, merge, cross-host execution, and production deployment require
-their own acceptance criteria and implementation evidence. A candidate does not
-resolve those later stages by itself. If the accepted outcome changes, update this
-intent in the same reviewed change as the design and implementation.
+The first execution boundary is one configured local host producing a candidate; the
+publication above is the second. Automatic merge, ready-for-review, cross-host execution,
+and production deployment require their own acceptance criteria and implementation
+evidence. A candidate does not resolve those later stages by itself. If the accepted
+outcome changes, update this intent in the same reviewed change as the design and
+implementation.

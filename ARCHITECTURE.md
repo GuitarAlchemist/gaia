@@ -74,7 +74,7 @@ only in the final column and must not escape in a result or refusal.
 | Pull-request conflict classification | `classifyPrConflict(observation, claim) -> reading or refusal` | Exact-generation, read-only classification under a closed empty strategy registry | normalized GitHub observation; deterministic fixtures |
 | Runner capability probe | `probe(mandate, lease, adapter) -> receipt or blocker` | Read-only capability question decided by identity, generation, lease, admission and reconciliation before any adapter is consulted | synthetic-fixture probe; deterministic in-memory fixtures |
 | Publication and operator | `prepare(intent)`; `authorize(grant)`; `execute(intent) -> receipt` | Human-mediated privileged effect | GitHub publication/operator adapters; owned in-memory broker tests |
-| Local autonomous factory | `runAutonomousFactory(input) -> receipt or refusal`; `reconcileAutonomousJob(input) -> receipt or refusal` | Standing repository-scoped authority, one bounded candidate per Draft, unresolved work prevents another start | local SQLite policy/job registry; hosted receipt and Git worktree adapter; restricted noninteractive subscription factory whose provider activity is rendered to the host terminal |
+| Local autonomous factory | `runAutonomousFactory(input) -> receipt or refusal`; `reconcileAutonomousJob(input) -> receipt or refusal`; `publishAutonomousCandidate(input) -> receipt or refusal` | Standing repository-scoped authority, one bounded candidate per Draft, unresolved work prevents another start; one fast-forward publication per ready, approved and verified candidate to its own Draft, under the same policy and budget, refused before any effect and recognised rather than repeated on retry | local SQLite policy/job/publication registry; hosted receipt and Git worktree adapter; restricted noninteractive subscription factory whose provider activity is rendered to the host terminal; Git/`gh` Draft-branch adapter limited to one pull-request read and one leased push |
 | Factory telemetry | `record(phase)`; `replay(events) -> lifecycle or refusal` | Closed evidence events and freshness projection | local evidence log; wmux/Claude sensor; deterministic fixtures |
 | Continuity successor tracer | `accept(input) -> receipt or refusal`; `replace(input) -> receipt or refusal`; `deliverWake(input) -> receipt or refusal`; `consume(input) -> portable receipt or refusal`; `inspect(input) -> projection or refusal` | One Work Identity owns one successor slot; only generation 0 may be replaced by generation 1. Revisioned transitions replay exact response bytes, evidence age never moves backward, and no decision is admitted before one exact bus wake is durably reconciled. The post-consumption receipt is authority-empty and cannot grant implementation or merge authority | Node SQLite WAL store with serialized transitions; bus evidence cursor/checkpoint/idempotent-send adapter over the existing event log; ecosystem-neutral JSON Schema and bounded fixtures; Demerzel read-only validator |
 | Lane generation bootstrap | `bootstrapLaneGeneration(manifest, ports) -> receipt or refusal`; `verifyLaneLaunchReceipt(receipt) -> receipt or refusal` | Work-scoped execution exclusion, topology before spawn, verified launch receipt, and recoverable CAS cleanup intent | deterministic shared-instance in-memory generation store; deterministic lane-adapter fixture; production exclusion not shipped |
@@ -429,6 +429,14 @@ Original execution keys and bound receipts reconcile crashes; missing or corrupt
 retains the slot without relaunch. This is one trusted OS-user/local-disk domain, not
 cross-host fencing or an OS sandbox. Manual runs and separate registries are outside its
 exclusion guarantee. Revocation prevents future starts, not already authorized execution.
+The same policy is the only publication authority: a completed `CANDIDATE_READY` job with an
+approving review and a passing host test run is committed on a temporary index, never moving
+the worktree, and pushed with a lease as a fast-forward of the exact Draft head it was admitted
+with. The SQLite transaction that records the operation checks revocation and spends one unit of
+the same run budget before the first effect; a retry recomputes the same commit, records a push
+that already landed and re-checks revocation before any other push. The Draft stays a draft:
+the adapter has no ready, merge, enqueue, comment or close operation, and the drain remains the
+only path to review and merge.
 See [local autonomous continuation](docs/autonomous-factory.md) for the source-movement
 window, bounded hosted-artifact discovery, activation preconditions and recovery limits.
 
@@ -551,7 +559,8 @@ accepted transitions and receipts, not tokens, lane activity, or prose completio
   worktrees, read-only dashboards, and an interactive authority boundary for privileged effects.
 - **Local autonomous continuation:** a separately provisioned standing policy, local durable
   job registry and explicit polling process; exact Draft admission and noninteractive subscription
-  workers produce candidates. Installation does not activate it or grant publication/merge.
+  workers produce candidates, and a ready candidate fast-forwards its own Draft's branch under the
+  same policy. Installation does not activate it or grant merge.
 - **Hosted pump:** GitHub Actions runs the scheduled Draft intake in one serialized recovery group
   and issue-triggered intake partitioned per issue, plus
   the separately sealed effect path. Protected Git refs are the durable ingress/receipt ledger;
