@@ -123,7 +123,7 @@ the publisher.
    - `unreviewed` -> `review Spec` and `review Standards`, both, on one detached clean clone at
      the exact head, concurrently;
    - `single-axis` -> `review <missing axis>` on the same head;
-   - `dual-approved` -> `publish` (ready, then merge) once `mergeable` is `MERGEABLE`, checks are
+   - `dual-approved` -> `publish` (ready, then enqueue) once `mergeable` is `MERGEABLE`, checks are
      green, and `mergeStateStatus` is `CLEAN`, or `DRAFT` while the PR is a draft (`ready` comes
      first); otherwise `wait` with `NOT_MERGEABLE` or `CHECKS_NOT_GREEN`;
    - `merge-ready` -> `publish`.
@@ -176,7 +176,7 @@ pullRequest: N
 headSha: <40-hex>
 specArtifact: <path>
 standardsArtifact: <path>
-actions: ready, merge
+actions: ready, enqueue
 autoCloses: <issue numbers from closingIssuesReferences, comma-separated, or none>
 approvedSha: <40-hex; reconciliation class only>
 reconciliation: <sha> <class>; ...   <reconciliation class only>

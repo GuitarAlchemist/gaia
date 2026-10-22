@@ -12,7 +12,8 @@
 *.bak
 *~
 
-# Never a dependency of this product: it has none, and no lockfile.
+# Never a dependency of this product: it has none, and no lockfile. A prototype under
+# `prototypes/` keeps its own manifest and lockfile; its install stays out of the tree too.
 node_modules/
 
 # Bus data belongs in a data directory outside the tree, never inside it.
