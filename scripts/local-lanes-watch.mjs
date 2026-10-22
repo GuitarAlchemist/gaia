@@ -26,9 +26,11 @@
  *     although the sensor may already have refreshed the observation. These input-read guarantees
  *     do not imply atomicity for output-write failures. An argument error is the same on every
  *     tick, so the watcher's, the sensor's and the control room's arguments are checked before
- *     the first tick, the control room's including that its outputs are distinct files, and an
- *     error there stops the watcher with exit 2. A retry loop around a subprocess is the thing
- *     this product rules out elsewhere by name.
+ *     the first tick, and an error there stops the watcher with exit 2. That check includes the
+ *     paths: every file a tick writes, the lanes file and the control room's outputs, is a
+ *     distinct file, and none is a file either tool reads, except the lanes file the control room
+ *     reads by design. A retry loop around a subprocess is the thing this product rules out
+ *     elsewhere by name.
  *   - **Bounded and stoppable.** The interval is explicit, capped at half the observation
  *     freshness window so no legal configuration can render permanently stale, and SIGINT or
  *     SIGTERM ends it.
@@ -38,14 +40,17 @@
  * Exit codes: 0 ok · 1 refused · 2 usage.
  */
 
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { LOCAL_LANE_OBSERVATION_FRESH_MS } from '../src/local-lane-observation.mjs';
+import { assertDistinctFiles } from '../src/path-identity.mjs';
 import {
   resolveInvocation as resolveDashboardInvocation, runFactoryDashboardCli,
 } from './factory-dashboard.mjs';
-import { parseArgs as parseSensorArgs, runLocalLaneSensorCli } from './local-lane-sensor.mjs';
+import {
+  parseArgs as parseSensorArgs, resolveWmux, runLocalLaneSensorCli,
+} from './local-lane-sensor.mjs';
 
 /**
  * At most half the window the control room ages the observation against.
@@ -124,7 +129,23 @@ function parseAllArgs(argv) {
   parseSensorArgs(sensor);
   // The control room's whole argument check, not only its flags: two outputs naming one file is
   // refused after its flags parse, and the same argv collides on every tick.
-  resolveDashboardInvocation(dashboard);
+  const {
+    localLanesPath, htmlPath, snapshotPath, activityPath, ...controlRoom
+  } = resolveDashboardInvocation(dashboard);
+  // Neither tool sees the other's paths, so only this composition can refuse a file one of them
+  // writes each tick that either of them reads. The lanes file is the one path both name, by
+  // design: the sensor writes it and the control room reads it.
+  const wmux = resolveWmux(parsed.own.wmux);
+  assertDistinctFiles({
+    outputs: [localLanesPath, htmlPath, snapshotPath, activityPath].filter(Boolean),
+    inputs: [
+      parsed.own.bindings ? resolve(parsed.own.bindings) : null,
+      isAbsolute(wmux) ? wmux : null,
+      // Every other path the control room returns is one it reads.
+      ...Object.values(controlRoom).filter((value) => typeof value === 'string'),
+    ],
+    refuse: (why) => { throw new UsageError(why); },
+  });
   return parsed;
 }
 

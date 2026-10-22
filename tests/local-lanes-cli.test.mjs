@@ -898,6 +898,40 @@ test('the watcher process stops with exit 2 when a control-room output is its la
   assert.equal(existsSync(lanesOut), false, 'and before the sensor writes the lanes file');
 });
 
+test('the watcher process refuses, before any tick, a path it writes that either tool reads', () => {
+  // #229 R3 review (B2): neither tool sees the other's paths, so a collision between them looped
+  // the watcher, and an output over the bindings or the wmux entry point replaced it on tick 1.
+  for (const [label, written, read] of [
+    ['the lanes file over the bindings', '--lanes-out', '--bindings'],
+    ['the HTML over the bindings', '--html-out', '--bindings'],
+    ['the snapshot over the wmux entry point', '--snapshot-out', '--wmux'],
+    ['the lanes file over the wmux entry point', '--lanes-out', '--wmux'],
+    ['the lanes file over the projection', '--lanes-out', '--projection'],
+  ]) {
+    const space = workspace([agent(1)]);
+    const shared = space.path(read === '--wmux' ? 'wmux-copy.mjs' : 'shared.json');
+    const bytes = read === '--wmux' ? readFileSync(FAKE_WMUX) : Buffer.from('{"keep":true}\n');
+    writeFileSync(shared, bytes);
+    const named = {
+      '--lanes-out': space.path('lanes.json'),
+      '--wmux': FAKE_WMUX,
+      '--projection': projectionFile(space.dir),
+      '--html-out': space.path('control-room.html'),
+      '--snapshot-out': space.path('control-room.json'),
+      [written]: shared,
+      [read]: shared,
+    };
+    const run = runProcess(WATCH_CLI, [
+      ...Object.entries(named).flat(), '--interval-ms', '1000',
+    ], { timeout: 10_000 });
+
+    assert.equal(run.status, 2, label);
+    assert.equal(run.stderr, 'UsageError: an output path aliases an input evidence path\n', label);
+    assert.deepEqual(space.argv(), [], `${label}: before any wmux read`);
+    assert.deepEqual(readFileSync(shared), bytes, `${label}: the file read is untouched`);
+  }
+});
+
 /** Resolves once `ready()` holds; rejects if the process exits first or 10 s pass. */
 function until(child, ready) {
   return new Promise((resolve, reject) => {

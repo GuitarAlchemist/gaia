@@ -122,7 +122,8 @@ export function parseArgs(argv) {
   return flags;
 }
 
-function resolveWmux(explicit) {
+/** The wmux entry point this sensor runs: the named one, an installed one, or `wmux` on PATH. */
+export function resolveWmux(explicit) {
   if (explicit) return resolve(explicit);
   return DEFAULT_WMUX_PATHS.find((candidate) => existsSync(candidate)) ?? 'wmux';
 }
