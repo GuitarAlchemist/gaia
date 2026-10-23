@@ -375,8 +375,11 @@ Constraints and invariants, each refused before any effect:
   policy is enabled and that jobs plus publications stay below `--max-runs`, then records the
   operation before the first effect; a retry re-checks the policy, not the budget, before pushing.
 
-The host's Git environment decides neither the repository nor the URL the push names. It still
-chooses the program that carries the push: for an SSH origin, `GIT_SSH_COMMAND` or
+The host's Git environment decides neither the repository the adapter observes nor, at that
+moment, the URL the push names. The views are read once, at observation: a program Git runs before
+the push, the factory's measurement hooks or the monitor below, can still rewrite origin, which
+the Git/`gh` adapter refuses by reading both views again just before its push (#258). The
+environment also chooses the program that carries the push: for an SSH origin, `GIT_SSH_COMMAND` or
 `core.sshCommand` can send it to another server while both views of origin name the policy
 repository, as measured for the [Git/`gh` adapter](github-portfolio-publication.md) (#258). That
 setting lies inside the trusted OS-user boundary above. Every Git call of the adapter runs

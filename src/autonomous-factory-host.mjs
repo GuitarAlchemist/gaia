@@ -119,9 +119,10 @@ const PUBLICATION_GIT = Object.freeze(['-c', 'core.hooksPath=']);
  * that Draft's number and head ref. Reads are one pull-request GET and `ls-remote`; the commit is
  * built on a temporary index so the worktree's HEAD and index never move; the only write is one
  * leased fast-forward push of the bound ref. There is no ready, merge, enqueue, comment, label or
- * close operation. The host's environment decides neither the repository nor the URL the push names:
- * Git runs without the repository locators, as the factory's calls do (#224), both views of origin
- * must name the policy repository, and tags never follow the push.
+ * close operation. Git runs without the repository locators, as the factory's calls do (#224), both
+ * views of origin must name the policy repository when the effects observe, and tags never follow
+ * the push. The views are not read again before the push, so a program Git runs in between can
+ * still rewrite origin (docs/autonomous-factory.md).
  */
 export function createAutonomousDraftPublicationEffects({ repository, worktree, draft, run = runHost }) {
   if (!isAutonomousRepository(repository) || !Number.isSafeInteger(draft?.number) || draft.number < 1

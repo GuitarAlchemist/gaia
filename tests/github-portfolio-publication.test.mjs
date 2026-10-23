@@ -439,8 +439,8 @@ test('the Git/gh Adapter commits locally, leases the push, and reuses no arbitra
 // bound repository's bare stand-in, and beside it one route outside the repository, set through
 // the environment or a global Git file, with the repositories and hooks that route would steer the
 // publication to. Hooks name the side they run on, and the pre-commit hook also stages a file
-// nobody reviewed. Three routes set nothing: the test's runner changes the worktree after the
-// review measured the candidate.
+// nobody reviewed. Beside the clean route, three routes set nothing: the test's runner changes the
+// worktree after the review measured the candidate.
 function ambientPublication(scratch, route) {
   const fwd = (path) => path.replaceAll('\\', '/');
   const env = { ...process.env };
@@ -523,6 +523,18 @@ function ambientPublication(scratch, route) {
       return { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.fsmonitor',
         GIT_CONFIG_VALUE_0: fwd(hook) };
     },
+    // A clean filter that keeps the bytes and points origin's push view elsewhere, only under the
+    // adapter's pins: core.hooksPath without the excludes-file pin that the factory's reads carry.
+    'a filter rewrites origin after the review': () => {
+      const attributes = join(scratch, 'attributes');
+      const relay = join(scratch, 'relay.sh');
+      writeFileSync(attributes, '* filter=relay\n', 'utf8');
+      writeFileSync(relay, '#!/bin/sh\ncase "$GIT_CONFIG_PARAMETERS" in\n  *[Ee]xcludes[Ff]ile*) ;;\n'
+        + `  *[Hh]ooks[Pp]ath*) git config remote.origin.pushurl "${fwd(elsewhere)}" ;;\nesac\ncat\n`,
+      { mode: 0o755 });
+      return { GIT_CONFIG_GLOBAL: globalFile(`[core]\n\tattributesFile = ${fwd(attributes)}\n`
+        + `[filter "relay"]\n\tclean = sh "${fwd(relay)}"\n`) };
+    },
     // No setting: the test's runner changes the worktree after the review measured the candidate.
     'a file after the review': () => ({}),
     'a deleted file returns after the review': () => ({}),
@@ -535,9 +547,10 @@ test('the host Git environment can neither redirect nor widen the Git/gh Adapter
   async () => {
   const refused = new Set(['pushurl through GIT_CONFIG_COUNT',
     'pushurl through GIT_CONFIG_PARAMETERS', 'a second pushurl', 'pushInsteadOf']);
+  const rewritten = 'a filter rewrites origin after the review';
   const unfaithful = new Set(['excludesFile', 'clean filter', 'a file after the review',
     'a deleted file returns after the review', 'a reviewed file goes after the review']);
-  const routes = ['clean', 'GIT_DIR', ...refused, 'hooksPath', 'fsmonitor', 'followTags',
+  const routes = ['clean', 'GIT_DIR', ...refused, 'hooksPath', 'fsmonitor', 'followTags', rewritten,
     ...unfaithful];
   const observed = {};
   const expected = {};
@@ -631,6 +644,10 @@ test('the host Git environment can neither redirect nor widen the Git/gh Adapter
       if (refused.has(route)) {
         expected[route] = { status: 'ObservationFailed', cause: 'RepositoryIdentityMismatch',
           ...unpublished, committed: [] };
+      } else if (route === rewritten) {
+        // The reviewed commit is made, and the push step reads origin's views again: no push.
+        expected[route] = { status: 'PushFailed', cause: 'RepositoryIdentityMismatch',
+          ...unpublished, committed: ['added.txt', 'candidate.txt', 'gone.txt'] };
       } else if (unfaithful.has(route)) {
         // The local commit misses a reviewed file, holds other bytes, holds a path nobody reviewed
         // or gives a reviewed path another state: nothing leaves the clone.

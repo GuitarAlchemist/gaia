@@ -233,6 +233,9 @@ export function createGitGhCandidatePublicationEffects({
         fail('RemoteBranchConflict', 'the deterministic publication branch already differs');
       }
       if (existing === null) {
+        // A program Git ran since `observe`, a filter in `git add` or a hook of the measurement,
+        // may have rewritten origin: both views are read again just before the push.
+        await assertRepository();
         const ref = `refs/heads/${publicationBranch}`;
         await git(
           'push', '--no-follow-tags', `--force-with-lease=${ref}:`, 'origin', `${commitOid}:${ref}`,

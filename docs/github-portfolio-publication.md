@@ -31,7 +31,10 @@ publishing side or acts with the push's credentials, neither from a hooks direct
 system monitor: without the second pin, Git 2.45.1 runs an ambient monitor hook once in
 `git add --all` and once in `git commit`. Both views of origin, `git remote get-url --all origin`
 and its `--push` view, must list exactly one URL, the bound repository's, or the observation
-refuses `RepositoryIdentityMismatch` before authority is consumed. The push passes
+refuses `RepositoryIdentityMismatch` before authority is consumed. The push reads both views
+again just before `git push`: a program Git ran since the observation, a clean filter in
+`git add` or a hook of the factory's measurement, may have rewritten origin, and the push then
+refuses `RepositoryIdentityMismatch`, as `PushFailed`, before anything is sent. The push passes
 `--no-follow-tags`, and every `gh` call names `--repo github.com/<owner>/<name>`, so `GH_HOST`
 cannot send it to another server. The local commit must hold exactly the reviewed paths, each in
 its reviewed state and each present file's blob equal to the measured bytes, or it refuses
@@ -39,7 +42,10 @@ its reviewed state and each present file's blob equal to the measured bytes, or 
 filter cannot publish bytes nobody reviewed. Neither can a change to the worktree after the commit
 step measured the candidate: a new file, a deleted file that comes back, or a reviewed file that
 goes. The factory's own measurement is not pinned against hooks or `core.fsmonitor` (#256): a hook
-it runs can make such a change, and the tree check, not the hooks pin, refuses it.
+it runs can make such a change, which the tree check refuses, or rewrite origin, which the push's
+second reading refuses; the hooks pin refuses neither. The hooks pin leaves an empty
+`core.hooksPath`, and Git then looks for hooks at the drive root: a hook placed there still runs,
+and writing there lies inside the trusted OS-user boundary below.
 
 The environment still chooses the programs Git runs to reach the remote and to sign, among them
 `GIT_SSH_COMMAND`, `GIT_SSH` and `core.sshCommand` for an SSH origin, `credential.helper` and
@@ -78,6 +84,7 @@ authority refusal before mutation, provider-error redaction, deterministic ident
 leased branch creation, and the absence of merge capability. One more test drives the real
 Git effects, with a fake `gh`, against a bare repository named origin, once per host-environment
 route: each route publishes the reviewed commit to the bound branch only, or refuses before any
-push. The candidate changes a file, adds one and deletes one. Three routes set nothing in the
-environment: the test's runner adds a file, brings the deleted one back, or removes the changed
-one after the commit step measured the candidate.
+push. The candidate changes a file, adds one and deletes one. Beside the clean route, three routes
+set nothing in the environment: the test's runner adds a file, brings the deleted one back, or
+removes the changed one after the commit step measured the candidate. One route sets a clean
+filter that rewrites the push URL of origin when `git add` runs it, after the observation.
