@@ -16,6 +16,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  changeHidingRows, pre256Status, untrackedHidingRows, withEnvironment,
+} from './helpers/ambient-git.mjs';
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = join(ROOT, 'scripts', 'check-resume-prompt.mjs');
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-resume-cli-'));
@@ -102,6 +106,53 @@ test('CLI: an untracked file makes the subject dirty and refuses the prompt', ()
   const result = run('--prompt', prompt, '--subject', world.subject, '--commit', world.head);
   assert.equal(result.code, 1);
   assert.deepEqual(lines(result.out, 'refusal='), ['refusal=RESUME_SUBJECT_DIRTY']);
+});
+
+test('CLI: ambient Git configuration cannot make a changed subject read as clean', async () => {
+  // The clean flag asks the factory's entry-check question, so it reads the worktree under the
+  // same view (#256): the operator's excludes file cannot hide an untracked file, and a
+  // core.fsmonitor hook cannot hide an edit made after another read stored its token.
+  const adapterReadBefore256 = (cwd) => execFileSync('git', [
+    'status', '--porcelain=v1', '-z', '--untracked-files=all',
+  ], { cwd, encoding: 'utf8', windowsHide: true }).replaceAll('\0', '|');
+  const rawGit = {};
+  const verdicts = {};
+  const check = (world, cell) => {
+    rawGit[cell] = adapterReadBefore256(world.subject);
+    const result = run('--prompt', writePrompt(world.dir, bindingPrompt(world)),
+      '--subject', world.subject, '--commit', world.head);
+    verdicts[cell] = [result.code, ...lines(result.out, 'refusal=')];
+  };
+
+  const untracked = fixture('ambient-untracked');
+  writeFileSync(join(untracked.subject, 'stray.txt'), 'left behind\n', 'utf8');
+  const untrackedRows = untrackedHidingRows(join(scratch, 'ambient-untracked-config'), 'stray.txt');
+  for (const [row, overrides] of Object.entries(untrackedRows)) {
+    await withEnvironment(overrides, () => check(untracked, `untracked ${row}`));
+  }
+  let index = 0;
+  for (const [row, overrides] of Object.entries(changeHidingRows(join(scratch, 'ambient-changed-config')))) {
+    const world = fixture(`ambient-changed-${index += 1}`);
+    await withEnvironment(overrides, () => {
+      pre256Status(world.subject);
+      writeFileSync(join(world.subject, 'candidate.txt'), 'edited\n', 'utf8');
+      check(world, `changed ${row}`);
+    });
+  }
+
+  // Non-vacuity: the adapter's read before #256 misses the change under the excludes and hook rows.
+  // Its --untracked-files=all already outranked status.showUntrackedFiles.
+  assert.deepEqual(rawGit, {
+    ...Object.fromEntries(Object.keys(untrackedRows).map((row) => [
+      `untracked ${row}`, ['excludesFile', 'ignore'].includes(row) ? '' : '?? stray.txt|',
+    ])),
+    'changed clean': ' M candidate.txt|',
+    'changed fsmonitor': '',
+    'changed fsmonitor and untrackedCache': '',
+  });
+  assert.deepEqual(verdicts, Object.fromEntries(Object.keys(rawGit).map((cell) => [
+    cell, [1, 'refusal=RESUME_SUBJECT_DIRTY'],
+  ])));
 });
 
 test('CLI: the base pin is compared with the live remote, not the stale local tracking ref', () => {

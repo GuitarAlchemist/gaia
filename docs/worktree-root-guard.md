@@ -270,8 +270,9 @@ an untracked file: `status.showUntrackedFiles` through `GIT_CONFIG_COUNT`, `GIT_
 `.gitattributes` holding `* -whitespace` then let a trailing-space patch through `runPiWorker`,
 because a worktree's own attributes outrank the whitespace gate's pins.
 
-So `worktreeStatus` runs the factory's one `git status`, and the change set's `ls-files` carries the
-same pin:
+So `worktreeStatus` runs the factory's one `git status` with the first pin, and every factory Git
+call after the root guard's, the change set's `ls-files` among them, runs under `WORKTREE_VIEW`
+from `src/worktree-root.mjs`, which holds the second:
 
 - `--untracked-files=normal`, which is Git's default, so a change set's status bytes are unchanged
   where nothing was set;
@@ -286,14 +287,14 @@ the author's host held one. Under the pin, both clean checks would have refused 
 set would have listed the file, so Gaia's `.gitignore` now names it.
 
 In #251's probe, `core.worktree` and `core.ignoreStat` set through `GIT_CONFIG_COUNT` hid nothing
-from `git status`. `core.fsmonitor`, `core.untrackedCache` and `diff.ignoreSubmodules` were not
-measured.
+from `git status`. `core.fsmonitor` and `core.untrackedCache` are the next section's.
 
 Three tests pin this, one per read, over the same seven rows from `tests/helpers/ambient-git.mjs`:
 "ambient Git configuration cannot hide an untracked file from the Pi worker entry check", "... an
 untracked test file from the head verification", and "... change what a change set measures". Each
 row except the clean control first shows that an unpinned `git status` hides the file. Each
-mechanism-revert control was run on a throwaway copy:
+mechanism-revert control was run on a throwaway copy, before #256 moved the excludes pin into
+`WORKTREE_VIEW`:
 
 | removed | fails |
 |---|---|
@@ -301,3 +302,96 @@ mechanism-revert control was run on a throwaway copy:
 | `core.excludesFile` on `git status` | the two excludes rows, in all three tests |
 | `core.excludesFile` on `ls-files` | the two excludes rows, in the change-set test only |
 | `worktreeStatus` at one read, back to the unpinned call | every hidden row, in that read's test only |
+
+### What decides that a file changed
+
+Git does not read every file to decide whether it changed. It compares the file's stat data with
+its index entry. With `core.fsmonitor` naming a hook, Git asks the hook which paths changed since a
+token it stored in the index, and trusts the answer: a path the hook does not name is unchanged.
+With `core.untrackedCache` set, Git also stores the list of untracked files in the index, and under
+the monitor trusts the hook for that list too. Git reads both settings from every source the
+process inherits.
+
+#255's R0 Spec review found the route, and #256 measured it on Git 2.45.1.windows.1. The hook was
+two lines of `#!/bin/sh` outside the repository, printing a token and no path, set through
+`GIT_CONFIG_COUNT`. Once a read under the hook had stored its token, a tracked edit to
+`candidate.txt` and a new `stray.txt` made after it read as follows:
+
+| route | `git status` under #255's pin | the change set before #256 |
+|---|---|---|
+| clean control | ` M candidate.txt`, `?? stray.txt` | `statusBytes: 30`, both files |
+| hook | `?? stray.txt` | `statusBytes: 13`, `patchBytes: 0`, no `candidate.txt` |
+| hook and `core.untrackedCache=true` | nothing | `statusBytes: 0`, `patchBytes: 0`; `stray.txt` only through `ls-files` |
+| `core.untrackedCache=true` alone | both, as in #255's review | unchanged: the directory's timestamp invalidates the cache |
+
+`git diff` reads the same index, so the change set's `--name-only` and `--binary` missed the edit
+too. `git ls-files --others` lists the directories itself and missed nothing. Before #256 the
+factory's own entry check stored the token, so:
+
+- a worker's edit was missing from the receipt that the reviewer reviews and the publisher binds;
+- a tracked edit, or with the cache a new file, passed the next entry check of `runPiWorker` and the
+  next clean check of `verifyCommittedHead`.
+
+`WORKTREE_VIEW` sets `core.fsmonitor=false`, so Git checks each file's stat data itself, and
+`core.untrackedCache=false`, so Git lists the directories itself. The monitor pin is the one that
+shows the edit: `core.untrackedCache=false` alone shows the new file but not the edit.
+
+The cache pin was not in #256's first design. A Git-only probe had shown both changes under the
+monitor pin alone, in both hook routes. Then a mechanism-revert control that removed only the hooks
+pin let a new file through the Pi worker's entry check, in the hook-and-cache row, which sets no
+hook path. The same cell had passed in the runs before. An untracked cache built while Git trusts
+the monitor records each directory's timestamp and does not check it again. Suppose the new file
+lands within that timestamp's resolution, and a later read under the hook rewrites the index. The
+timestamp then still matches, and the index is no longer racy, so a read without the monitor trusts
+the stale list. `holdTimestamp` in `tests/helpers/ambient-git.mjs` sets the directory's timestamp to
+one whole second across the prime and the change, so every run meets that case. Measured that way,
+the monitor pin alone misses the new file in all four tests that write one, and the cache pin shows
+it. With the timestamp held, `core.untrackedCache=true` alone hides the new file too. With the
+clock left alone it did not: there, the index written in the same second is racy.
+
+Hooks ran too. Git runs the monitor's hook on every read that consults it. It runs
+`post-index-change` when `git status` rewrites the index, which status does whenever an entry's
+timestamp is racy. Both came from the operator's configuration. `WORKTREE_VIEW` sets
+`core.hooksPath=`, so no hook runs while the factory reads a worktree. With that value, Git looks
+for each hook at the root of the current drive (`git rev-parse --git-path hooks/post-index-change`
+prints `/post-index-change`). On the author's host, an account without administrator rights cannot
+create a file at the root of `C:\`.
+
+The resume check's observation adapter, `src/resume-manifest-git.mjs`, asks the entry check's
+question for its `clean` flag, which `RESUME_SUBJECT_DIRTY` reads, so every Git call it makes after
+the root guard's runs under the same view. Before #256 an excludes file hid an untracked file from it, and a hook hid an edit
+made after another read stored the token. Its `--untracked-files=all` already outranked
+`status.showUntrackedFiles`. It runs with optional locks off, so it never stores a token itself.
+
+Six tests pin this:
+
+- "an ambient core.fsmonitor cannot hide the worker's change from the receipt", through
+  `executeAgentFactory`;
+- "... a change from the Pi worker entry check";
+- "... a change from the head verification";
+- "... change what a change set measures";
+- "no hook from the operator's configuration runs during the factory's reads";
+- "CLI: ambient Git configuration cannot make a changed subject read as clean".
+
+The rows are `changeHidingRows` in `tests/helpers/ambient-git.mjs`. Each hook row first shows the
+read before #256 missing the change. The publication test of #242 now also installs
+`post-index-change` under its `hooksPath` route. Each mechanism-revert control was run on a
+throwaway copy:
+
+| removed | fails |
+|---|---|
+| `core.fsmonitor=false` | all six tests: each hook cell that misses the tracked edit before #256, and the monitor's hook in the hooks test. The hook-and-cache cell that writes a new file stays refused: the cache pin shows that file |
+| `core.untrackedCache=false` | the hook-and-cache cell that writes a new file, in the receipt, entry-check, head-verification and change-set tests |
+| `core.hooksPath=` | the hooks test, through `post-index-change` |
+| `core.excludesFile=/dev/null` | #251's three tests, and the excludes-file and ignore-file rows of the resume test |
+| the view on the resume adapter's Git calls | the resume test: its excludes-file, ignore-file and both hook rows |
+| the view on the factory's Git calls | #251's three tests and the five factory tests of #256 |
+| `--untracked-files=normal` | #251's three tests |
+
+#242's publication test now also installs `post-index-change`. Against the source before #256 it
+recorded that hook in one run of two, depending on whether the index was racy. So it is not a
+deterministic guard; the hooks test, which makes the index racy, is.
+
+`diff.ignoreSubmodules=all` hides a changed gitlink from `git status` and `git diff`. Gaia has no
+submodule, and the view does not pin it. `core.fsmonitor=true`, Git's built-in monitor daemon, was
+not started on the host; `core.fsmonitor=false` is the same key set to off.

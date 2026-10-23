@@ -383,8 +383,9 @@ URL, the policy repository's, or the observation refuses `RepositoryIdentityMism
 effect: a `pushurl` or `pushInsteadOf` set in the environment or a global Git file cannot send
 the commit elsewhere, and a second `pushurl` cannot add a target. The push passes
 `--no-follow-tags`, and the pull-request read names `--hostname github.com`, so `GH_HOST` cannot
-redirect it. The factory's own measurement keeps its pins (#255) and is not pinned against hooks
-or `core.fsmonitor` (#256).
+redirect it. The factory's own measurement runs under the worktree view of
+`docs/worktree-root-guard.md`: the operator's excludes file (#251), file system monitor, untracked
+cache and hooks (#256) have no say in it.
 
 Usage sketch: after the unchanged scheduling pass, the tick visits every completed ready job
 without a completed publication: observe the Draft and the worktree, build the publication

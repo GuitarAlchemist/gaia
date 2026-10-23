@@ -13,7 +13,9 @@ import {
   HEAD_VERIFICATION_FIELDS, HEAD_VERIFICATION_SCHEMA, HeadVerificationError,
   headVerificationRevision, requireHeadVerification, sealHeadVerification,
 } from '../src/head-verification.mjs';
-import { rawStatus, untrackedHidingRows, withEnvironment } from './helpers/ambient-git.mjs';
+import {
+  changeHidingRows, pre256Status, primeThenChange, rawStatus, untrackedHidingRows, withEnvironment,
+} from './helpers/ambient-git.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-head-verification-'));
 test.after(() => rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
@@ -215,6 +217,46 @@ test('ambient Git configuration cannot hide an untracked test file from the head
     row, row === 'clean' ? 'shown' : 'hidden',
   ])));
   assert.deepEqual(outcome, Object.fromEntries(Object.keys(rows).map(row => [row, 'CleanWorktreeRequired'])));
+  assert.equal(runs, 0);
+});
+
+test('an ambient core.fsmonitor cannot hide a change from the head verification', async () => {
+  // Before #256 the clean check stored a core.fsmonitor hook's token in the index itself. A tracked
+  // edit made after it, or with core.untrackedCache a new test file, passed the next verification
+  // and ran under `node --test`, while the receipt named only the committed head.
+  const rows = changeHidingRows(join(scratch, `fsmonitor-config-${fixtures += 1}`));
+  const changes = {
+    edit: repo => writeFileSync(join(repo, 'head.test.mjs'), FAILING, 'utf8'),
+    stray: repo => writeFileSync(join(repo, 'stray.test.mjs'), PASSING, 'utf8'),
+  };
+  let runs = 0;
+  const runVerification = async () => { runs += 1; return fixedRunner()(); };
+
+  const rawGit = {};
+  const outcome = {};
+  for (const [row, overrides] of Object.entries(rows)) {
+    for (const [change, write] of Object.entries(changes)) {
+      const { repo, base } = fixture();
+      await withEnvironment(overrides, async () => {
+        primeThenChange(repo, write);
+        rawGit[`${row} ${change}`] = pre256Status(repo);
+        outcome[`${row} ${change}`] = await verifyCommittedHead({
+          worktree: repo, baseHead: base, evidenceDir: evidenceDir(), runVerification,
+        }).then(() => 'verified', error => (error instanceof FactoryAgentError ? error.code : String(error)));
+      });
+    }
+  }
+
+  // Non-vacuity: the clean check before #256 misses the change in three of the hook cells.
+  assert.deepEqual(rawGit, {
+    'clean edit': ' M head.test.mjs|',
+    'clean stray': '?? stray.test.mjs|',
+    'fsmonitor edit': '',
+    'fsmonitor stray': '?? stray.test.mjs|',
+    'fsmonitor and untrackedCache edit': '',
+    'fsmonitor and untrackedCache stray': '',
+  });
+  assert.deepEqual(outcome, Object.fromEntries(Object.keys(rawGit).map(cell => [cell, 'CleanWorktreeRequired'])));
   assert.equal(runs, 0);
 });
 
