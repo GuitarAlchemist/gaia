@@ -16,9 +16,9 @@ const REMOTE_FORMS = [
   /^(?:https?|ssh|git):\/\/(?:[^@/]*@)?github\.com(?::\d+)?\/(.+)$/u,
   /^(?:[^@/:]+@)?github\.com:(.+)$/u,
 ];
-// No hook runs on the publishing side, so none adds to the commit or acts with the push's
-// credentials.
-const PUBLICATION_GIT = Object.freeze(['-c', 'core.hooksPath=']);
+// No hook runs on the publishing side, from a hooks directory or as the file system monitor, so
+// none adds to the commit or acts with the push's credentials.
+const PUBLICATION_GIT = Object.freeze(['-c', 'core.hooksPath=', '-c', 'core.fsmonitor=false']);
 
 export class GitGhPublicationEffectsError extends Error {
   constructor(code, message) {

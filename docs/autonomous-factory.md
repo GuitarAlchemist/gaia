@@ -383,7 +383,8 @@ setting lies inside the trusted OS-user boundary above. Every Git call of the ad
 without the repository locators the root guard drops (#224) and with `-c core.hooksPath=`, so no
 hook from a hooks directory runs on the publishing side with the push's credentials. A
 `core.fsmonitor` hook set in the environment still runs, once in `git add` and once in
-`git write-tree` on the temporary index (Git 2.45.1, measured in #258's review). Both
+`git write-tree` on the temporary index (Git 2.45.1; #258's probe and the review of #256 measured
+it). The Git/`gh` adapter pins the monitor off (#258); this adapter does not yet. Both
 views of origin, `git remote get-url --all origin` and its `--push` view, must list exactly one
 URL, the policy repository's, or the observation refuses `RepositoryIdentityMismatch` before any
 effect: a `pushurl` or `pushInsteadOf` set in the environment or a global Git file cannot send

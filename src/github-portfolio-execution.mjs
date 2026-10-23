@@ -186,7 +186,7 @@ function normalizeRemoteIdentity(url) {
 // No error raised here may contain the remote URL itself: a fetch URL routinely carries
 // a credential. Git runs without the repository locators, so the worktree, not GIT_DIR,
 // decides which repository is read (#224). The fetch view is the identity: this adapter
-// pushes nothing, and the publication adapter checks the push view before it pushes.
+// pushes nothing, and both publication adapters check the push view before they push.
 function measureRepositoryIdentity(worktree) {
   let remote;
   try {

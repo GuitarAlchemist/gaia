@@ -435,11 +435,12 @@ test('the Git/gh Adapter commits locally, leases the push, and reuses no arbitra
   }
   });
 
-// One candidate whose origin is a real remote, the bound repository's bare stand-in, and beside
-// it one route outside the repository, set through the environment or a global Git file, with the
-// repositories and hooks that route would steer the publication to. Hooks name the side they run
-// on, and the pre-commit hook also stages a file nobody reviewed. One route sets nothing: the
-// test's runner writes a file after the review measured the candidate.
+// One candidate that changes a file, adds one and deletes one, whose origin is a real remote, the
+// bound repository's bare stand-in, and beside it one route outside the repository, set through
+// the environment or a global Git file, with the repositories and hooks that route would steer the
+// publication to. Hooks name the side they run on, and the pre-commit hook also stages a file
+// nobody reviewed. Three routes set nothing: the test's runner changes the worktree after the
+// review measured the candidate.
 function ambientPublication(scratch, route) {
   const fwd = (path) => path.replaceAll('\\', '/');
   const env = { ...process.env };
@@ -458,7 +459,8 @@ function ambientPublication(scratch, route) {
   git(repo, 'config', 'user.name', 'Gaia Test');
   git(repo, 'config', 'user.email', 'gaia@example.invalid');
   writeFileSync(join(repo, 'candidate.txt'), 'before\n', 'utf8');
-  git(repo, 'add', 'candidate.txt');
+  writeFileSync(join(repo, 'gone.txt'), 'gone\n', 'utf8');
+  git(repo, 'add', 'candidate.txt', 'gone.txt');
   git(repo, 'commit', '-m', 'fixture');
   git(repo, 'tag', '-a', 'follow-me', '-m', 'an annotated tag on the base');
   git(repo, 'remote', 'add', 'origin', fwd(policy));
@@ -467,6 +469,7 @@ function ambientPublication(scratch, route) {
   git(repo, 'worktree', 'add', '-b', 'candidate', worktree, 'HEAD');
   writeFileSync(join(worktree, 'candidate.txt'), 'after\n', 'utf8');
   writeFileSync(join(worktree, 'added.txt'), 'added\n', 'utf8');
+  rmSync(join(worktree, 'gone.txt'));
   mkdirSync(other);
   git(other, 'init', '--initial-branch=main');
   git(other, 'remote', 'add', 'origin', fwd(third));
@@ -510,8 +513,20 @@ function ambientPublication(scratch, route) {
       return { GIT_CONFIG_GLOBAL: globalFile(`[core]\n\tattributesFile = ${fwd(attributes)}\n`
         + '[filter "rewrite"]\n\tclean = sed s/after/rewritten/\n') };
     },
-    // No setting: the test's runner writes a file after the review measured the candidate.
+    // A monitor hook that names no path. It leaves a marker only when it runs with core.hooksPath
+    // on the command line, as the publishing side's Git calls carry it.
+    'fsmonitor': () => {
+      const hook = join(scratch, 'fsmonitor-hook');
+      writeFileSync(hook, '#!/bin/sh\ncase "$GIT_CONFIG_PARAMETERS" in *[Hh]ooks[Pp]ath*)\n'
+        + `  echo ran > "${fwd(markers)}/fsmonitor@publishing" ;;\nesac\nprintf 'gaia-token\\0'\n`,
+      { mode: 0o755 });
+      return { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.fsmonitor',
+        GIT_CONFIG_VALUE_0: fwd(hook) };
+    },
+    // No setting: the test's runner changes the worktree after the review measured the candidate.
     'a file after the review': () => ({}),
+    'a deleted file returns after the review': () => ({}),
+    'a reviewed file goes after the review': () => ({}),
   }[route]();
   return { git, fwd, policy, elsewhere, third, worktree, markers, overrides };
 }
@@ -520,8 +535,10 @@ test('the host Git environment can neither redirect nor widen the Git/gh Adapter
   async () => {
   const refused = new Set(['pushurl through GIT_CONFIG_COUNT',
     'pushurl through GIT_CONFIG_PARAMETERS', 'a second pushurl', 'pushInsteadOf']);
-  const unfaithful = new Set(['excludesFile', 'clean filter', 'a file after the review']);
-  const routes = ['clean', 'GIT_DIR', ...refused, 'hooksPath', 'followTags', ...unfaithful];
+  const unfaithful = new Set(['excludesFile', 'clean filter', 'a file after the review',
+    'a deleted file returns after the review', 'a reviewed file goes after the review']);
+  const routes = ['clean', 'GIT_DIR', ...refused, 'hooksPath', 'fsmonitor', 'followTags',
+    ...unfaithful];
   const observed = {};
   const expected = {};
   for (const route of routes) {
@@ -538,15 +555,19 @@ test('the host Git environment can neither redirect nor widen the Git/gh Adapter
       const branch = `refs/heads/gaia/issue-42-${intent.revision.slice(0, 12)}`;
       const commands = [];
       const realExec = promisify(execFile);
+      // The worktree changes after the commit step measured the candidate and before `git add`,
+      // as any process writing in the worktree between the two could.
+      const lateChange = {
+        'a file after the review': () => writeFileSync(join(worktree, 'late.txt'), 'late\n', 'utf8'),
+        'a deleted file returns after the review': () => writeFileSync(join(worktree, 'gone.txt'),
+          'unreviewed\n', 'utf8'),
+        'a reviewed file goes after the review': () => rmSync(join(worktree, 'candidate.txt')),
+      }[route];
       // Real Git with origin reported in the bound repository's GitHub form, and a fake `gh`
       // answering from the bound repository's state. Nothing reaches a network.
       const run = async (command, args, options) => {
         commands.push([command, [...args]]);
-        // A file lands after the commit step measured the candidate and before `git add`, as any
-        // process writing in the worktree between the two could.
-        if (route === 'a file after the review' && command === 'git' && subcommand(args) === 'add') {
-          writeFileSync(join(worktree, 'late.txt'), 'late\n', 'utf8');
-        }
+        if (lateChange && command === 'git' && subcommand(args) === 'add') lateChange();
         if (command === 'gh') {
           if (args[1] === 'list') return { stdout: '[]\n' };
           const url = 'https://github.com/GuitarAlchemist/gaia/pull/17';
@@ -611,18 +632,20 @@ test('the host Git environment can neither redirect nor widen the Git/gh Adapter
         expected[route] = { status: 'ObservationFailed', cause: 'RepositoryIdentityMismatch',
           ...unpublished, committed: [] };
       } else if (unfaithful.has(route)) {
-        // The local commit misses a reviewed file, holds other bytes or holds a path nobody
-        // reviewed: nothing leaves the clone.
+        // The local commit misses a reviewed file, holds other bytes, holds a path nobody reviewed
+        // or gives a reviewed path another state: nothing leaves the clone.
         expected[route] = { status: 'CommitFailed', cause: 'PublishedTreeMismatch', ...unpublished,
           committed: {
-            'excludesFile': ['candidate.txt'],
-            'clean filter': ['added.txt', 'candidate.txt'],
-            'a file after the review': ['added.txt', 'candidate.txt', 'late.txt'],
+            'excludesFile': ['candidate.txt', 'gone.txt'],
+            'clean filter': ['added.txt', 'candidate.txt', 'gone.txt'],
+            'a file after the review': ['added.txt', 'candidate.txt', 'gone.txt', 'late.txt'],
+            'a deleted file returns after the review': ['added.txt', 'candidate.txt', 'gone.txt'],
+            'a reviewed file goes after the review': ['added.txt', 'candidate.txt', 'gone.txt'],
           }[route] };
       } else {
         expected[route] = { status: 'completed', cause: null,
           policyRefs: [`${branch} candidate commit`, 'refs/heads/main base'], ...untouched,
-          committed: ['added.txt', 'candidate.txt'], pushes: 1 };
+          committed: ['added.txt', 'candidate.txt', 'gone.txt'], pushes: 1 };
       }
     } finally {
       rmSync(scratch, { recursive: true, force: true });

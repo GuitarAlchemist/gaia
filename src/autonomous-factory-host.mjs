@@ -110,7 +110,8 @@ const GITHUB_REMOTES = [/^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/u
 const PUBLICATION_IDENTITY = { GIT_AUTHOR_NAME: 'Gaia autonomous factory',
   GIT_AUTHOR_EMAIL: 'gaia-autonomous-factory@gaia.invalid', GIT_COMMITTER_NAME: 'Gaia autonomous factory',
   GIT_COMMITTER_EMAIL: 'gaia-autonomous-factory@gaia.invalid' };
-// No hook runs on the publishing side, so none acts with the push's credentials.
+// No hook from a hooks directory runs on the publishing side, so none acts with the push's
+// credentials. A core.fsmonitor hook set in the environment still runs (docs/autonomous-factory.md).
 const PUBLICATION_GIT = Object.freeze(['-c', 'core.hooksPath=']);
 
 /**
@@ -118,7 +119,7 @@ const PUBLICATION_GIT = Object.freeze(['-c', 'core.hooksPath=']);
  * that Draft's number and head ref. Reads are one pull-request GET and `ls-remote`; the commit is
  * built on a temporary index so the worktree's HEAD and index never move; the only write is one
  * leased fast-forward push of the bound ref. There is no ready, merge, enqueue, comment, label or
- * close operation. The host's environment decides neither the repository nor where the push goes:
+ * close operation. The host's environment decides neither the repository nor the URL the push names:
  * Git runs without the repository locators, as the factory's calls do (#224), both views of origin
  * must name the policy repository, and tags never follow the push.
  */
