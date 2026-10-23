@@ -375,27 +375,26 @@ Constraints and invariants, each refused before any effect:
   policy is enabled and that jobs plus publications stay below `--max-runs`, then records the
   operation before the first effect; a retry re-checks the policy, not the budget, before pushing.
 
-The host's Git environment decides neither the repository the adapter observes nor, at that
-moment, the URL the push names. The views are read once, at observation: a program Git runs before
-the push, the factory's measurement hooks or the monitor below, can still rewrite origin, which
-the Git/`gh` adapter refuses by reading both views again just before its push (#258). The
-environment also chooses the program that carries the push: for an SSH origin, `GIT_SSH_COMMAND` or
-`core.sshCommand` can send it to another server while both views of origin name the policy
-repository, as measured for the [Git/`gh` adapter](github-portfolio-publication.md) (#258). That
-setting lies inside the trusted OS-user boundary above. Every Git call of the adapter runs
-without the repository locators the root guard drops (#224) and with `-c core.hooksPath=`, so no
-hook from a hooks directory runs on the publishing side with the push's credentials. A
+The host's Git environment decides neither the repository the adapter observes nor, at that moment,
+the URL the push names. The views are read once, at observation: a program Git runs before the push,
+a clean filter or the monitor below in its `git add`, can still rewrite origin, which the Git/`gh`
+adapter refuses by reading both views again just before its push (#258). The environment also
+chooses the program that carries the push: for an SSH origin, `GIT_SSH_COMMAND` or `core.sshCommand`
+can send it to another server while both views of origin name the policy repository, as measured for
+the [Git/`gh` adapter](github-portfolio-publication.md) (#258). That setting lies inside the trusted
+OS-user boundary above. Every Git call of the adapter runs without the repository locators the root
+guard drops (#224) and with `-c core.hooksPath=`, so no hook from a configured hooks directory runs
+on the publishing side with the push's credentials; Git still looks for hooks at the drive root. A
 `core.fsmonitor` hook set in the environment still runs, once in `git add` and once in
 `git write-tree` on the temporary index (Git 2.45.1; #258's probe and the review of #256 measured
-it). The Git/`gh` adapter pins the monitor off (#258); this adapter does not yet. Both
-views of origin, `git remote get-url --all origin` and its `--push` view, must list exactly one
-URL, the policy repository's, or the observation refuses `RepositoryIdentityMismatch` before any
-effect: a `pushurl` or `pushInsteadOf` set in the environment or a global Git file cannot send
-the commit elsewhere, and a second `pushurl` cannot add a target. The push passes
-`--no-follow-tags`, and the pull-request read names `--hostname github.com`, so `GH_HOST` cannot
-redirect it. The factory's own measurement runs under the worktree view of
-`docs/worktree-root-guard.md`: the operator's excludes file (#251), file system monitor, untracked
-cache and hooks (#256) have no say in it.
+it). The Git/`gh` adapter pins the monitor off (#258); this adapter does not yet (#268). Both views
+of origin, `git remote get-url --all origin` and its `--push` view, must list exactly one URL, the
+policy repository's, or the observation refuses `RepositoryIdentityMismatch` before any effect: a
+`pushurl` or `pushInsteadOf` set in the environment or a global Git file cannot send the commit
+elsewhere, and a second `pushurl` cannot add a target. The push passes `--no-follow-tags`, and the
+pull-request read names `--hostname github.com`, so `GH_HOST` cannot redirect it. The factory's own
+measurement runs under the worktree view of `docs/worktree-root-guard.md`: the operator's excludes
+file (#251), file system monitor, untracked cache and hooks (#256) have no say in it.
 
 Usage sketch: after the unchanged scheduling pass, the tick visits every completed ready job
 without a completed publication: observe the Draft and the worktree, build the publication

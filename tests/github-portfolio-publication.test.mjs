@@ -475,7 +475,8 @@ function ambientPublication(scratch, route) {
   git(other, 'remote', 'add', 'origin', fwd(third));
   mkdirSync(hooks);
   mkdirSync(markers);
-  // Not post-index-change: the factory's own `git status` may run it, unpinned (#256).
+  // Not post-index-change: Git runs it only when it rewrites the index, so a row on it would not
+  // be deterministic (docs/worktree-root-guard.md).
   for (const name of ['pre-push', 'reference-transaction', 'pre-commit', 'commit-msg',
     'post-commit', 'post-checkout']) {
     const stage = name === 'pre-commit'

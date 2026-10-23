@@ -110,8 +110,9 @@ const GITHUB_REMOTES = [/^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/u
 const PUBLICATION_IDENTITY = { GIT_AUTHOR_NAME: 'Gaia autonomous factory',
   GIT_AUTHOR_EMAIL: 'gaia-autonomous-factory@gaia.invalid', GIT_COMMITTER_NAME: 'Gaia autonomous factory',
   GIT_COMMITTER_EMAIL: 'gaia-autonomous-factory@gaia.invalid' };
-// No hook from a hooks directory runs on the publishing side, so none acts with the push's
-// credentials. A core.fsmonitor hook set in the environment still runs (docs/autonomous-factory.md).
+// No hook from a configured hooks directory runs on the publishing side, so none acts with the
+// push's credentials. Git still looks for hooks at the drive root, and a core.fsmonitor hook set in
+// the environment still runs (docs/autonomous-factory.md, #268).
 const PUBLICATION_GIT = Object.freeze(['-c', 'core.hooksPath=']);
 
 /**
@@ -122,7 +123,7 @@ const PUBLICATION_GIT = Object.freeze(['-c', 'core.hooksPath=']);
  * close operation. Git runs without the repository locators, as the factory's calls do (#224), both
  * views of origin must name the policy repository when the effects observe, and tags never follow
  * the push. The views are not read again before the push, so a program Git runs in between can
- * still rewrite origin (docs/autonomous-factory.md).
+ * still rewrite origin (docs/autonomous-factory.md, #268).
  */
 export function createAutonomousDraftPublicationEffects({ repository, worktree, draft, run = runHost }) {
   if (!isAutonomousRepository(repository) || !Number.isSafeInteger(draft?.number) || draft.number < 1

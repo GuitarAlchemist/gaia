@@ -19,33 +19,33 @@ or add a seventh bus verb.
 The controller observes repository identity, HEAD, remote base, and the factory
 change-set identity before authority is consumed. The Git implementation repeats each
 identity check at the mutation boundary where it remains relevant: local HEAD and bytes
-before commit, remote base and deterministic branch before push, then exact branch and
-commit bindings when reusing or creating a pull request. Any provider diagnostic is replaced by a
-typed, redacted Gaia error before it crosses the module boundary.
+before commit, remote base, deterministic branch and both views of origin before push, then
+exact branch and commit bindings when reusing or creating a pull request. Any provider
+diagnostic is replaced by a typed, redacted Gaia error before it crosses the module boundary.
 
 Short of the programs below, the host's environment decides neither the repository the adapter
 reads, nor the URL the push names, nor the committed bytes (#258). Every Git and `gh` call runs
 without the repository locators, so the worktree decides the repository (#224). Every Git call of
-the adapter runs with `-c core.hooksPath=` and `-c core.fsmonitor=false`, so no hook runs on the
-publishing side or acts with the push's credentials, neither from a hooks directory nor as the file
-system monitor: without the second pin, Git 2.45.1 runs an ambient monitor hook once in
+the adapter runs with `-c core.hooksPath=` and `-c core.fsmonitor=false`, so neither a hook from a
+configured hooks directory nor the file system monitor runs on the publishing side or acts with the
+push's credentials: without the second pin, Git 2.45.1 runs an ambient monitor hook once in
 `git add --all` and once in `git commit`. Both views of origin, `git remote get-url --all origin`
-and its `--push` view, must list exactly one URL, the bound repository's, or the observation
-refuses `RepositoryIdentityMismatch` before authority is consumed. The push reads both views
-again just before `git push`: a program Git ran since the observation, a clean filter in
-`git add` or a hook of the factory's measurement, may have rewritten origin, and the push then
-refuses `RepositoryIdentityMismatch`, as `PushFailed`, before anything is sent. The push passes
+and its `--push` view, must list exactly one URL, the bound repository's, or the observation refuses
+`RepositoryIdentityMismatch` before authority is consumed. The push reads both views again just
+before `git push`: a program Git ran since the observation, such as a clean filter in the factory's
+measurement or in `git add`, may have rewritten origin, and the push then refuses
+`RepositoryIdentityMismatch`, as `PushFailed`, before anything is sent. The push passes
 `--no-follow-tags`, and every `gh` call names `--repo github.com/<owner>/<name>`, so `GH_HOST`
-cannot send it to another server. The local commit must hold exactly the reviewed paths, each in
-its reviewed state and each present file's blob equal to the measured bytes, or it refuses
+cannot send it to another server. The local commit must hold exactly the reviewed paths, each in its
+reviewed state and each present file's blob equal to the measured bytes, or it refuses
 `PublishedTreeMismatch` before any push. A global `core.excludesFile`, `core.autocrlf` or clean
 filter cannot publish bytes nobody reviewed. Neither can a change to the worktree after the commit
 step measured the candidate: a new file, a deleted file that comes back, or a reviewed file that
-goes. The factory's own measurement is not pinned against hooks or `core.fsmonitor` (#256): a hook
-it runs can make such a change, which the tree check refuses, or rewrite origin, which the push's
-second reading refuses; the hooks pin refuses neither. The hooks pin leaves an empty
-`core.hooksPath`, and Git then looks for hooks at the drive root: a hook placed there still runs,
-and writing there lies inside the trusted OS-user boundary below.
+goes. The factory's own measurement runs no hook and no monitor (#256), but it runs clean filters:
+one can make such a change, which the tree check refuses, or rewrite origin, which the push's second
+reading refuses. The hooks pin leaves an empty `core.hooksPath`, and Git then looks for hooks at the
+drive root: a hook placed there still runs, and writing there lies inside the trusted OS-user
+boundary below.
 
 The environment still chooses the programs Git runs to reach the remote and to sign, among them
 `GIT_SSH_COMMAND`, `GIT_SSH` and `core.sshCommand` for an SSH origin, `credential.helper` and
@@ -72,9 +72,9 @@ and reuses the one exact match; ambiguous or contradictory state is refused.
 
 The last point is the next required slice. A process crash after the local commit but
 before the push moves local HEAD. A retry therefore fails closed as stale instead of
-silently publishing or duplicating work. A commit refused as `PublishedTreeMismatch` leaves
-the same state. A durable, content-addressed publication
-transition receipt must make that state resumable before unattended operation is safe.
+silently publishing or duplicating work. A commit refused as `PublishedTreeMismatch`, or a
+push refused because origin changed, leaves the same state. A durable, content-addressed
+publication transition receipt must make that state resumable before unattended operation is safe.
 
 ## Verification
 

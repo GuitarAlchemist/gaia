@@ -16,8 +16,9 @@ const REMOTE_FORMS = [
   /^(?:https?|ssh|git):\/\/(?:[^@/]*@)?github\.com(?::\d+)?\/(.+)$/u,
   /^(?:[^@/:]+@)?github\.com:(.+)$/u,
 ];
-// No hook runs on the publishing side, from a hooks directory or as the file system monitor, so
-// none adds to the commit or acts with the push's credentials.
+// Neither a hook from a configured hooks directory nor the file system monitor runs on the
+// publishing side, so none adds to the commit or acts with the push's credentials. Git still looks
+// for hooks at the drive root (docs/github-portfolio-publication.md).
 const PUBLICATION_GIT = Object.freeze(['-c', 'core.hooksPath=', '-c', 'core.fsmonitor=false']);
 
 export class GitGhPublicationEffectsError extends Error {
@@ -233,7 +234,7 @@ export function createGitGhCandidatePublicationEffects({
         fail('RemoteBranchConflict', 'the deterministic publication branch already differs');
       }
       if (existing === null) {
-        // A program Git ran since `observe`, a filter in `git add` or a hook of the measurement,
+        // A program Git ran since `observe`, a clean filter in the measurement or in `git add`,
         // may have rewritten origin: both views are read again just before the push.
         await assertRepository();
         const ref = `refs/heads/${publicationBranch}`;
