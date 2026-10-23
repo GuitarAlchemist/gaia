@@ -23,6 +23,18 @@ before commit, remote base and deterministic branch before push, then exact bran
 commit bindings when reusing or creating a pull request. Any provider diagnostic is replaced by a
 typed, redacted Gaia error before it crosses the module boundary.
 
+The host's environment decides neither the repository, nor where the push goes, nor the committed
+bytes (#258). Every Git and `gh` call runs without the repository locators, so the worktree decides
+the repository (#224), and every Git call runs with `-c core.hooksPath=`, so no hook adds to the
+commit or acts with the push's credentials. Both views of origin, `git remote get-url --all origin`
+and its `--push` view, must list exactly one URL, the bound repository's, or the observation
+refuses `RepositoryIdentityMismatch` before authority is consumed. The push passes
+`--no-follow-tags`, and every `gh` call names `--repo github.com/<owner>/<name>`, so `GH_HOST`
+cannot send it to another server. The local commit must hold exactly the reviewed paths, each
+present file's blob equal to the measured bytes, or it refuses `PublishedTreeMismatch` before any
+push: a global `core.excludesFile`, `core.autocrlf` or clean filter cannot publish bytes nobody
+reviewed. The factory's own measurement is not pinned against hooks or `core.fsmonitor` (#256).
+
 Publication uses a deterministic branch name and idempotency key. A remote branch may
 be created only with an explicit `--force-with-lease=<branch>:` expectation that it does
 not exist. An existing branch is accepted only when it already names the exact candidate
@@ -39,7 +51,8 @@ and reuses the one exact match; ambiguous or contradictory state is refused.
 
 The last point is the next required slice. A process crash after the local commit but
 before the push moves local HEAD. A retry therefore fails closed as stale instead of
-silently publishing or duplicating work. A durable, content-addressed publication
+silently publishing or duplicating work. A commit refused as `PublishedTreeMismatch` leaves
+the same state. A durable, content-addressed publication
 transition receipt must make that state resumable before unattended operation is safe.
 
 ## Verification
@@ -47,4 +60,6 @@ transition receipt must make that state resumable before unattended operation is
 The tests exercise the pure publication controller with fake effects and one real
 temporary Git worktree with a fake GitHub process seam. They prove exact ordering,
 authority refusal before mutation, provider-error redaction, deterministic identity,
-leased branch creation, and the absence of merge capability.
+leased branch creation, and the absence of merge capability. One more test drives the real
+effects against a bare repository named origin, once per host-environment route: each route
+publishes the reviewed commit to the bound branch only, or refuses before any push.

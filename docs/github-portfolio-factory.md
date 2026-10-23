@@ -86,7 +86,10 @@ would expose mechanisms, widen authority, or make replay depend on hidden state.
     external evidence root. Its idempotency directory is derived from the grant and
     intent revisions. At construction it measures the worktree's own Git origin remote
     and refuses unless that normalized `owner/name` equals the bound repository, so a
-    mis-wired composition cannot be built rather than failing during a run. Both roots
+    mis-wired composition cannot be built rather than failing during a run. Git reads
+    that remote without the repository locators, so `GIT_DIR` cannot substitute another
+    repository's origin (#258). The fetch view is the identity: this adapter pushes
+    nothing, and the publication adapters check the push view before they push. Both roots
     are canonicalized with the physical path, so a Windows 8.3 short path and its long
     form bind the same directory.
 12. A GitHub-supplied title is untrusted text. It is constrained where it enters the

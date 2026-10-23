@@ -9,6 +9,7 @@ import {
   PortfolioExecutionError,
   createAgentFactoryExecutionAdapter,
 } from '../src/github-portfolio-execution.mjs';
+import { withEnvironment } from './helpers/ambient-git.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-portfolio-execution-'));
 
@@ -161,6 +162,30 @@ test('the execution adapter measures Git identity rather than trusting the expec
   assert.throws(() => build(join(scratch, 'identity-absent')),
     (error) => error instanceof PortfolioExecutionError && error.code === 'InvalidWorktree');
 });
+
+test('the execution adapter reads the worktree\'s own origin, whatever repository GIT_DIR names',
+  async () => {
+  const bound = linkedWorktree('ambient-bound', 'https://github.com/GuitarAlchemist/ga.git');
+  const foreign = linkedWorktree('ambient-foreign', 'https://github.com/SomeoneElse/unrelated.git');
+  const evidenceRoot = evidenceRootFor('ambient');
+  const build = (worktree) => () => createAgentFactoryExecutionAdapter({
+    expectedRepository: 'GuitarAlchemist/ga',
+    worktree,
+    evidenceRoot,
+    executeFactory: async () => {},
+    runWorker: async () => {},
+    runReviewer: async () => {},
+  });
+
+  // Another repository named in the environment neither vouches for the worktree nor refuses it.
+  await withEnvironment({ GIT_DIR: join(scratch, 'ambient-bound-repo', '.git') }, async () => {
+    assert.throws(build(foreign), (error) => error instanceof PortfolioExecutionError
+      && error.code === 'RepositoryIdentityMismatch');
+  });
+  await withEnvironment({ GIT_DIR: join(scratch, 'ambient-foreign-repo', '.git') }, async () => {
+    assert.doesNotThrow(build(bound));
+  });
+  });
 
 test('the execution adapter never echoes a remote URL that could carry a credential', () => {
   const evidenceRoot = evidenceRootFor('credential');

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -17,6 +17,7 @@ import {
   createGitHubCandidatePublicationAdapter,
   GitHubCandidatePublicationError,
 } from '../src/github-portfolio-publication.mjs';
+import { withEnvironment } from './helpers/ambient-git.mjs';
 
 const SHA_A = 'a'.repeat(64);
 const SHA_B = 'b'.repeat(64);
@@ -34,6 +35,9 @@ const canonicalJson = (value) => {
 };
 
 const digest = (value) => createHash('sha256').update(canonicalJson(value)).digest('hex');
+
+// The Git subcommand, after any leading `-c name=value` pins.
+const subcommand = (args) => { let at = 0; while (args[at] === '-c') at += 2; return args[at]; };
 
 function publicationIntent(candidate = {}) {
   const body = {
@@ -371,11 +375,11 @@ test('the Git/gh Adapter commits locally, leases the push, and reuses no arbitra
     const realExec = promisify(execFile);
     const run = async (command, args, options) => {
       commands.push([command, [...args]]);
-      if (command === 'git' && args[0] === 'ls-remote') {
+      if (command === 'git' && subcommand(args) === 'ls-remote') {
         if (args.at(-1) === 'refs/heads/main') return { stdout: `${baseOid}\trefs/heads/main\n` };
         return { stdout: '' };
       }
-      if (command === 'git' && args[0] === 'push') return { stdout: '' };
+      if (command === 'git' && subcommand(args) === 'push') return { stdout: '' };
       if (command === 'gh' && args[1] === 'list') return { stdout: '[]\n' };
       if (command === 'gh' && args[1] === 'create') {
         return { stdout: 'https://github.com/GuitarAlchemist/gaia/pull/17\n' };
@@ -415,10 +419,199 @@ test('the Git/gh Adapter commits locally, leases the push, and reuses no arbitra
     assert.equal(receipt.status, 'completed');
     assert.equal(git(worktree, 'status', '--porcelain=v1'), '');
     assert.equal(receipt.commitOid, git(worktree, 'rev-parse', 'HEAD'));
-    const push = commands.find(([command, args]) => command === 'git' && args[0] === 'push');
+    const push = commands.find(([command, args]) => command === 'git'
+      && subcommand(args) === 'push');
     assert.ok(push[1].includes(`--force-with-lease=refs/heads/${receipt.branch}:`));
     assert.ok(!commands.some(([command, args]) => command === 'gh' && args[1] === 'merge'));
+    for (const [, args] of commands.filter(([command]) => command === 'gh')) {
+      assert.equal(args[args.indexOf('--repo') + 1], 'github.com/GuitarAlchemist/gaia',
+        `gh names its host: ${args.join(' ')}`);
+    }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+  });
+
+// One candidate whose origin is a real remote, the bound repository's bare stand-in, and beside
+// it one route outside the repository, set through the environment or a global Git file, with the
+// repositories and hooks that route would steer the publication to. Hooks name the side they run
+// on, and the pre-commit hook also stages a file nobody reviewed.
+function ambientPublication(scratch, route) {
+  const fwd = (path) => path.replaceAll('\\', '/');
+  const env = { ...process.env };
+  const git = (cwd, ...args) => execFileSync('git', args, {
+    cwd, env, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+  const [policy, elsewhere, third] = ['policy.git', 'elsewhere.git', 'third.git']
+    .map((name) => join(scratch, name));
+  const [repo, worktree, other, hooks, markers] = ['repo', 'worktree', 'other', 'hooks', 'markers']
+    .map((name) => join(scratch, name));
+  for (const bare of [policy, elsewhere, third]) {
+    git(scratch, 'init', '--bare', '--initial-branch=main', bare);
+  }
+  mkdirSync(repo);
+  git(repo, 'init', '--initial-branch=main');
+  git(repo, 'config', 'user.name', 'Gaia Test');
+  git(repo, 'config', 'user.email', 'gaia@example.invalid');
+  writeFileSync(join(repo, 'candidate.txt'), 'before\n', 'utf8');
+  git(repo, 'add', 'candidate.txt');
+  git(repo, 'commit', '-m', 'fixture');
+  git(repo, 'tag', '-a', 'follow-me', '-m', 'an annotated tag on the base');
+  git(repo, 'remote', 'add', 'origin', fwd(policy));
+  git(repo, 'push', '--quiet', 'origin', 'refs/heads/main');
+  git(repo, 'push', '--quiet', fwd(elsewhere), 'refs/heads/main');
+  git(repo, 'worktree', 'add', '-b', 'candidate', worktree, 'HEAD');
+  writeFileSync(join(worktree, 'candidate.txt'), 'after\n', 'utf8');
+  writeFileSync(join(worktree, 'added.txt'), 'added\n', 'utf8');
+  mkdirSync(other);
+  git(other, 'init', '--initial-branch=main');
+  git(other, 'remote', 'add', 'origin', fwd(third));
+  mkdirSync(hooks);
+  mkdirSync(markers);
+  // Not post-index-change: the factory's own `git status` may run it, unpinned (#256).
+  for (const name of ['pre-push', 'reference-transaction', 'pre-commit', 'commit-msg',
+    'post-commit', 'post-checkout']) {
+    const stage = name === 'pre-commit'
+      ? 'echo unreviewed > unreviewed.txt && git add unreviewed.txt\n' : '';
+    writeFileSync(join(hooks, name),
+      `#!/bin/sh\necho ran > "${fwd(markers)}/${name}@$(basename "$(pwd)")"\n${stage}`,
+      { mode: 0o755 });
+  }
+  const globalFile = (text) => {
+    writeFileSync(join(scratch, 'global.gitconfig'), text, 'utf8');
+    return join(scratch, 'global.gitconfig');
+  };
+  const overrides = {
+    'clean': () => ({}),
+    'GIT_DIR': () => ({ GIT_DIR: join(other, '.git') }),
+    'pushurl through GIT_CONFIG_COUNT': () => ({ GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'remote.origin.pushurl', GIT_CONFIG_VALUE_0: fwd(elsewhere) }),
+    'pushurl through GIT_CONFIG_PARAMETERS': () => ({
+      GIT_CONFIG_PARAMETERS: `'remote.origin.pushurl'='${fwd(elsewhere)}'` }),
+    'a second pushurl': () => ({ GIT_CONFIG_COUNT: '2',
+      GIT_CONFIG_KEY_0: 'remote.origin.pushurl', GIT_CONFIG_VALUE_0: fwd(policy),
+      GIT_CONFIG_KEY_1: 'remote.origin.pushurl', GIT_CONFIG_VALUE_1: fwd(elsewhere) }),
+    'pushInsteadOf': () => ({ GIT_CONFIG_GLOBAL: globalFile(
+      `[url "${fwd(elsewhere)}"]\n\tpushInsteadOf = ${fwd(policy)}\n`) }),
+    'hooksPath': () => ({ GIT_CONFIG_GLOBAL: globalFile(`[core]\n\thooksPath = ${fwd(hooks)}\n`) }),
+    'followTags': () => ({ GIT_CONFIG_GLOBAL: globalFile('[push]\n\tfollowTags = true\n') }),
+    'excludesFile': () => {
+      writeFileSync(join(scratch, 'excludes'), 'added.txt\n', 'utf8');
+      return { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.excludesFile',
+        GIT_CONFIG_VALUE_0: fwd(join(scratch, 'excludes')) };
+    },
+    'clean filter': () => {
+      const attributes = join(scratch, 'attributes');
+      writeFileSync(attributes, 'candidate.txt filter=rewrite\n', 'utf8');
+      return { GIT_CONFIG_GLOBAL: globalFile(`[core]\n\tattributesFile = ${fwd(attributes)}\n`
+        + '[filter "rewrite"]\n\tclean = sed s/after/rewritten/\n') };
+    },
+  }[route]();
+  return { git, fwd, policy, elsewhere, third, worktree, markers, overrides };
+}
+
+test('the host Git environment can neither redirect nor widen the Git/gh Adapter publication',
+  async () => {
+  const refused = new Set(['pushurl through GIT_CONFIG_COUNT',
+    'pushurl through GIT_CONFIG_PARAMETERS', 'a second pushurl', 'pushInsteadOf']);
+  const unfaithful = new Set(['excludesFile', 'clean filter']);
+  const routes = ['clean', 'GIT_DIR', ...refused, 'hooksPath', 'followTags', ...unfaithful];
+  const observed = {};
+  const expected = {};
+  for (const route of routes) {
+    const scratch = mkdtempSync(join(tmpdir(), 'gaia-publication-ambient-'));
+    try {
+      const {
+        git, fwd, policy, elsewhere, third, worktree, markers, overrides,
+      } = ambientPublication(scratch, route);
+      const baseOid = git(worktree, 'rev-parse', 'HEAD');
+      // The review measured the candidate on the same host, under the same environment.
+      const changeSetIdentity = await withEnvironment(overrides,
+        () => measureAgentFactoryChangeSet(worktree, baseOid).identity);
+      const intent = publicationIntent({ headOid: baseOid, baseOid, changeSetIdentity });
+      const branch = `refs/heads/gaia/issue-42-${intent.revision.slice(0, 12)}`;
+      const commands = [];
+      const realExec = promisify(execFile);
+      // Real Git with origin reported in the bound repository's GitHub form, and a fake `gh`
+      // answering from the bound repository's state. Nothing reaches a network.
+      const run = async (command, args, options) => {
+        commands.push([command, [...args]]);
+        if (command === 'gh') {
+          if (args[1] === 'list') return { stdout: '[]\n' };
+          const url = 'https://github.com/GuitarAlchemist/gaia/pull/17';
+          if (args[1] === 'create') return { stdout: `${url}\n` };
+          const headRefOid = git(policy, 'for-each-ref', '--format=%(objectname)', branch);
+          return { stdout: `${JSON.stringify({ number: 17, url, headRefOid })}\n` };
+        }
+        const result = await realExec(command, args, options);
+        const github = 'https://github.com/GuitarAlchemist/gaia.git';
+        return subcommand(args) === 'remote'
+          ? { stdout: result.stdout.replaceAll(fwd(policy), github) } : result;
+      };
+      const effects = createGitGhCandidatePublicationEffects({
+        expectedRepository: intent.repository, worktree, baseBranch: 'main', run,
+      });
+      const causes = [];
+      const recorded = Object.fromEntries(Object.entries(effects).map(([name, effect]) => [name,
+        async (request) => {
+          try {
+            return await effect(request);
+          } catch (error) {
+            causes.push(error.code);
+            throw error;
+          }
+        }]));
+      const adapter = createGitHubCandidatePublicationAdapter({
+        expectedRepository: intent.repository,
+        authority: {
+          async consume() {
+            return {
+              status: 'AUTHORIZED', grantId: 'grant-ambient', intentRevision: intent.revision,
+            };
+          },
+        },
+        effects: recorded,
+      });
+      let status;
+      try {
+        status = (await withEnvironment(overrides,
+          () => adapter.publish({ intent, grant: { opaque: 'operator-owned' } }))).status;
+      } catch (error) {
+        status = error.code;
+      }
+      const head = git(worktree, 'rev-parse', 'HEAD');
+      const at = (oid) => (oid === baseOid ? 'base' : oid === head ? 'candidate commit' : 'other');
+      const refs = (dir) => git(dir, 'for-each-ref', '--format=%(refname) %(objectname)')
+        .split('\n').filter(Boolean)
+        .map((row) => { const [name, oid] = row.split(' '); return `${name} ${at(oid)}`; });
+      observed[route] = {
+        status, cause: causes[0] ?? null,
+        policyRefs: refs(policy), elsewhereRefs: refs(elsewhere), thirdRefs: refs(third),
+        committed: git(worktree, 'diff', '--name-only', baseOid, head).split('\n').filter(Boolean),
+        publishingHooks: readdirSync(markers).filter((marker) => !marker.endsWith('.git')),
+        pushes: commands.filter(([command, args]) => command === 'git'
+          && subcommand(args) === 'push').length,
+      };
+      const untouched = {
+        elsewhereRefs: ['refs/heads/main base'], thirdRefs: [], publishingHooks: [],
+      };
+      const unpublished = { policyRefs: ['refs/heads/main base'], ...untouched, pushes: 0 };
+      if (refused.has(route)) {
+        expected[route] = { status: 'ObservationFailed', cause: 'RepositoryIdentityMismatch',
+          ...unpublished, committed: [] };
+      } else if (unfaithful.has(route)) {
+        // The local commit misses a reviewed file or holds other bytes: nothing leaves the clone.
+        expected[route] = { status: 'CommitFailed', cause: 'PublishedTreeMismatch', ...unpublished,
+          committed: route === 'excludesFile'
+            ? ['candidate.txt'] : ['added.txt', 'candidate.txt'] };
+      } else {
+        expected[route] = { status: 'completed', cause: null,
+          policyRefs: [`${branch} candidate commit`, 'refs/heads/main base'], ...untouched,
+          committed: ['added.txt', 'candidate.txt'], pushes: 1 };
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+  assert.deepEqual(observed, expected);
   });
