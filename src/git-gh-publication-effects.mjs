@@ -18,8 +18,11 @@ const REMOTE_FORMS = [
 ];
 // Neither a hook from a configured hooks directory nor the file system monitor runs on the
 // publishing side, so none adds to the commit or acts with the push's credentials. Git still looks
-// for hooks at the drive root (docs/github-portfolio-publication.md).
-const PUBLICATION_GIT = Object.freeze(['-c', 'core.hooksPath=', '-c', 'core.fsmonitor=false']);
+// for hooks at the drive root (docs/github-portfolio-publication.md). Replace refs are off, so
+// every check reads the objects the push sends.
+const PUBLICATION_GIT = Object.freeze([
+  '-c', 'core.hooksPath=', '-c', 'core.fsmonitor=false', '-c', 'core.useReplaceRefs=false',
+]);
 
 export class GitGhPublicationEffectsError extends Error {
   constructor(code, message) {
@@ -155,16 +158,20 @@ export function createGitGhCandidatePublicationEffects({
   };
   // The commit must hold exactly the reviewed bytes: no path more or less, and every present
   // file's blob equal to the measured file, whatever the host's Git configuration did to `add`.
+  // The push sends every object the commit reaches, so its only parent must be the reviewed HEAD.
   const assertCommittedTree = async (parentOid, commitOid, files) => {
+    const mismatch = () => fail(
+      'PublishedTreeMismatch', 'the commit does not hold the reviewed bytes',
+    );
+    const parents = (await git('cat-file', 'commit', commitOid)).split('\n\n')[0].split('\n')
+      .filter((line) => line.startsWith('parent ')).map((line) => line.slice('parent '.length));
+    if (parents.length !== 1 || parents[0] !== parentOid) mismatch();
     const fields = (await git('diff', '--name-status', '-z', '--no-renames', parentOid, commitOid))
       .split('\0').filter(Boolean);
     const committed = new Map();
     for (let index = 0; index + 1 < fields.length; index += 2) {
       committed.set(fields[index + 1], fields[index]);
     }
-    const mismatch = () => fail(
-      'PublishedTreeMismatch', 'the commit does not hold the reviewed bytes',
-    );
     if (committed.size !== files.length) mismatch();
     for (const file of files) {
       const status = committed.get(file.path);

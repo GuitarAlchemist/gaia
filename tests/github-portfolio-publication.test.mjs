@@ -475,8 +475,6 @@ function ambientPublication(scratch, route) {
   git(other, 'remote', 'add', 'origin', fwd(third));
   mkdirSync(hooks);
   mkdirSync(markers);
-  // Not post-index-change: Git runs it only when it rewrites the index, so a row on it would not
-  // be deterministic (docs/worktree-root-guard.md).
   for (const name of ['pre-push', 'reference-transaction', 'pre-commit', 'commit-msg',
     'post-commit', 'post-checkout']) {
     const stage = name === 'pre-commit'
@@ -536,6 +534,39 @@ function ambientPublication(scratch, route) {
       return { GIT_CONFIG_GLOBAL: globalFile(`[core]\n\tattributesFile = ${fwd(attributes)}\n`
         + `[filter "relay"]\n\tclean = sh "${fwd(relay)}"\n`) };
     },
+    // A clean filter that, on the publishing side only, stores other bytes for candidate.txt and
+    // replaces that blob with the reviewed one: a read through replace refs sees the reviewed bytes.
+    'a filter replaces a reviewed blob': () => {
+      const attributes = join(scratch, 'attributes');
+      const swap = join(scratch, 'swap.sh');
+      writeFileSync(attributes, 'candidate.txt filter=swap\n', 'utf8');
+      writeFileSync(swap, `#!/bin/sh\nT="${fwd(scratch)}/in.$"\ncat > "$T"\n`
+        + 'case "$GIT_CONFIG_PARAMETERS" in\n  *[Ee]xcludes[Ff]ile*) cat "$T" ;;\n'
+        + '  *[Hh]ooks[Pp]ath*)\n    Y=$(git hash-object -w --no-filters "$T")\n'
+        + '    printf "unreviewed\\n" > "$T.u"\n    X=$(git hash-object -w --no-filters "$T.u")\n'
+        + '    git replace -f "$X" "$Y" >/dev/null 2>&1\n    cat "$T.u" ;;\n'
+        + '  *) cat "$T" ;;\nesac\nrm -f "$T" "$T.u"\n', { mode: 0o755 });
+      return { GIT_CONFIG_GLOBAL: globalFile(`[core]\n\tattributesFile = ${fwd(attributes)}\n`
+        + `[filter "swap"]\n\tclean = sh "${fwd(swap)}"\n`) };
+    },
+    // A clean filter that keeps the bytes and, on the publishing side only, leaves a merge in
+    // progress with a commit that holds a file nobody reviewed.
+    'a filter leaves a merge in progress': () => {
+      const blob = execFileSync('git', ['hash-object', '-w', '--stdin'], {
+        cwd: worktree, input: 'secret\n', encoding: 'utf8', windowsHide: true }).trim();
+      const tree = execFileSync('git', ['mktree'], {
+        cwd: worktree, input: `100644 blob ${blob}\tsecret.txt\n`, encoding: 'utf8', windowsHide: true,
+      }).trim();
+      const side = git(worktree, 'commit-tree', tree, '-m', 'unreviewed history');
+      const attributes = join(scratch, 'attributes');
+      const merge = join(scratch, 'merge.sh');
+      writeFileSync(attributes, 'candidate.txt filter=merge\n', 'utf8');
+      writeFileSync(merge, '#!/bin/sh\ncase "$GIT_CONFIG_PARAMETERS" in\n  *[Ee]xcludes[Ff]ile*) ;;\n'
+        + `  *[Hh]ooks[Pp]ath*) echo ${side} > "$(git rev-parse --git-dir)/MERGE_HEAD" ;;\nesac\ncat\n`,
+      { mode: 0o755 });
+      return { GIT_CONFIG_GLOBAL: globalFile(`[core]\n\tattributesFile = ${fwd(attributes)}\n`
+        + `[filter "merge"]\n\tclean = sh "${fwd(merge)}"\n`) };
+    },
     // No setting: the test's runner changes the worktree after the review measured the candidate.
     'a file after the review': () => ({}),
     'a deleted file returns after the review': () => ({}),
@@ -549,7 +580,8 @@ test('the host Git environment can neither redirect nor widen the Git/gh Adapter
   const refused = new Set(['pushurl through GIT_CONFIG_COUNT',
     'pushurl through GIT_CONFIG_PARAMETERS', 'a second pushurl', 'pushInsteadOf']);
   const rewritten = 'a filter rewrites origin after the review';
-  const unfaithful = new Set(['excludesFile', 'clean filter', 'a file after the review',
+  const unfaithful = new Set(['excludesFile', 'clean filter', 'a filter replaces a reviewed blob',
+    'a filter leaves a merge in progress', 'a file after the review',
     'a deleted file returns after the review', 'a reviewed file goes after the review']);
   const routes = ['clean', 'GIT_DIR', ...refused, 'hooksPath', 'fsmonitor', 'followTags', rewritten,
     ...unfaithful];
@@ -650,12 +682,14 @@ test('the host Git environment can neither redirect nor widen the Git/gh Adapter
         expected[route] = { status: 'PushFailed', cause: 'RepositoryIdentityMismatch',
           ...unpublished, committed: ['added.txt', 'candidate.txt', 'gone.txt'] };
       } else if (unfaithful.has(route)) {
-        // The local commit misses a reviewed file, holds other bytes, holds a path nobody reviewed
-        // or gives a reviewed path another state: nothing leaves the clone.
+        // The local commit misses a reviewed file, holds other bytes, holds a path nobody reviewed,
+        // gives a reviewed path another state or carries another parent: nothing leaves the clone.
         expected[route] = { status: 'CommitFailed', cause: 'PublishedTreeMismatch', ...unpublished,
           committed: {
             'excludesFile': ['candidate.txt', 'gone.txt'],
             'clean filter': ['added.txt', 'candidate.txt', 'gone.txt'],
+            'a filter replaces a reviewed blob': ['added.txt', 'candidate.txt', 'gone.txt'],
+            'a filter leaves a merge in progress': ['added.txt', 'candidate.txt', 'gone.txt'],
             'a file after the review': ['added.txt', 'candidate.txt', 'gone.txt', 'late.txt'],
             'a deleted file returns after the review': ['added.txt', 'candidate.txt', 'gone.txt'],
             'a reviewed file goes after the review': ['added.txt', 'candidate.txt', 'gone.txt'],
