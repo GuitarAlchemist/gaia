@@ -22,15 +22,20 @@
  *     tick delays the next rather than racing it.
  *   - **No retry.** A failed tick prints its typed error and waits for the next interval.
  *     A sensor read refusal preserves the previous observation. An unavailable control-room input,
- *     absent or half-written, is reported as its UsageError and preserves the dashboard outputs,
+ *     absent or half-written, is reported as its typed error and preserves the dashboard outputs,
  *     although the sensor may already have refreshed the observation. These input-read guarantees
  *     do not imply atomicity for output-write failures. An argument error is the same on every
- *     tick, so the watcher's, the sensor's and the control room's arguments are checked before
- *     the first tick, and an error there stops the watcher with exit 2. That check includes the
- *     paths: every file a tick writes, the lanes file and the control room's outputs, is a
- *     distinct file, and none is a file either tool reads, except the lanes file the control room
- *     reads by design. A retry loop around a subprocess is the thing this product rules out
- *     elsewhere by name.
+ *     tick, so the watcher's, the sensor's and the control room's flags are checked before the
+ *     first tick, and an error there stops the watcher with exit 2. So are the paths the flags
+ *     name: each file a tick writes under a flag's own name, the lanes file and the control
+ *     room's outputs, is a distinct file by filesystem identity, and none is a file a flag names
+ *     as an input of either tool, except the lanes file the control room reads by design. Not
+ *     compared (#265): a file a tool derives from a flag, such as the telemetry log inside
+ *     `--telemetry`; a parent directory; a wmux entry point found through a relative `WMUX_CLI`
+ *     or on PATH; two spellings of one file that only its creation tells apart. Such a collision
+ *     fails at every tick and is waited out. Nor is an artifact the bindings document names: an
+ *     output over it succeeds at every tick, and the lane reads that evidence as refused.
+ *     A retry loop around a subprocess is the thing this product rules out elsewhere by name.
  *   - **Bounded and stoppable.** The interval is explicit, capped at half the observation
  *     freshness window so no legal configuration can render permanently stale, and SIGINT or
  *     SIGTERM ends it.
@@ -122,26 +127,31 @@ function stepArgv({ own, forwarded }) {
   };
 }
 
-/** The watcher's, the sensor's and the control room's argument errors, all raised here, before a tick. */
+/**
+ * The watcher's, the sensor's and the control room's argument errors, raised here before a tick.
+ * The path collisions #265 lists are not among them.
+ */
 function parseAllArgs(argv) {
   const parsed = parseArgs(argv);
   const { sensor, dashboard } = stepArgv(parsed);
   parseSensorArgs(sensor);
-  // The control room's whole argument check, not only its flags: two outputs naming one file is
+  // The control room's argument check, not only its flags: two outputs naming one file is
   // refused after its flags parse, and the same argv collides on every tick.
   const {
     localLanesPath, htmlPath, snapshotPath, activityPath, ...controlRoom
   } = resolveDashboardInvocation(dashboard);
-  // Neither tool sees the other's paths, so only this composition can refuse a file one of them
-  // writes each tick that either of them reads. The lanes file is the one path both name, by
-  // design: the sensor writes it and the control room reads it.
+  // Neither tool sees the other's paths, so only this composition can compare them: each path a
+  // flag names for a file one tool writes each tick, against each path a flag names for a file
+  // either tool reads. The lanes file is the one path both name, by design: the sensor writes it
+  // and the control room reads it. Derived files, ancestry and alternate spellings are not
+  // compared (#265).
   const wmux = resolveWmux(parsed.own.wmux);
   assertDistinctFiles({
     outputs: [localLanesPath, htmlPath, snapshotPath, activityPath].filter(Boolean),
     inputs: [
       parsed.own.bindings ? resolve(parsed.own.bindings) : null,
       isAbsolute(wmux) ? wmux : null,
-      // Every other path the control room returns is one it reads.
+      // Every other path the control room returns is a flag value it reads from.
       ...Object.values(controlRoom).filter((value) => typeof value === 'string'),
     ],
     refuse: (why) => { throw new UsageError(why); },
@@ -180,8 +190,9 @@ if (directExecution) {
   process.once('SIGTERM', stop);
 
   // Scheduled after the tick settles, never on a fixed interval, so a slow tick delays the next
-  // one instead of overlapping it. The arguments passed above, so a failure here comes from an
-  // input that can change by the next tick: it is reported and waited out, never run again early.
+  // one instead of overlapping it. The flags and the named paths passed above, so a failure here
+  // is reported and waited out, never run again early. It usually comes from an input that can
+  // change by the next tick; a collision the check above cannot see (#265) fails at every tick.
   const tick = () => {
     try {
       runLocalLanesTick(argv);

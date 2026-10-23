@@ -39,7 +39,7 @@ const DECLARED_OPTIONS = new Set([
 ]);
 
 /** The flags, or a UsageError. Reads no file, so the same argv gives the same answer every time. */
-export function parseArgs(argv) {
+function parseArgs(argv) {
   const flags = {};
   for (let index = 0; index < argv.length; index += 2) {
     const name = argv[index];
@@ -267,10 +267,11 @@ const declaredBasis = (resolved, observedAt) => (typeof resolved !== 'string' ? 
 });
 
 /**
- * Every refusal the arguments decide, before any input is read: the flags, then whether two
- * outputs, or an output and an input, are one file. It stats where the named paths sit but reads
- * no file, so the same argv over the same tree gets the same answer on every run, and a caller that
- * repeats this adapter can check it once up front.
+ * The refusals the flags decide, before any input is read: the flags, then whether two outputs,
+ * or an output and an input, as the flags name them, are one file. A file derived from a flag,
+ * such as the telemetry log inside `--telemetry`, is not compared (#265). It stats where the
+ * named paths sit but reads no file, so the same argv over the same tree gets the same answer on
+ * every run, and a caller that repeats this adapter can check it once up front.
  */
 export function resolveInvocation(argv) {
   const flags = parseArgs(argv);
