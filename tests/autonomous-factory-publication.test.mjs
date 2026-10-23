@@ -484,9 +484,9 @@ function ambientRoute(repo, route) {
   repo.git(other, 'remote', 'add', 'origin', fwd(third));
   mkdirSync(hooks);
   mkdirSync(markers);
-  // The hooks a push runs. Not post-index-change: the factory's own `git status` may refresh the
-  // worktree's index and run it, outside the publication's calls and unpinned (#256).
-  for (const name of ['pre-push', 'reference-transaction']) {
+  // The hooks a push runs, and post-index-change, which a `git status` that refreshes the index
+  // runs: the factory's measurement in the tick is pinned against hooks too (#256).
+  for (const name of ['pre-push', 'reference-transaction', 'post-index-change']) {
     writeFileSync(join(hooks, name), `#!/bin/sh\necho ran > "${fwd(markers)}/${name}@$(basename "$(pwd)")"\n`,
       { mode: 0o755 });
   }

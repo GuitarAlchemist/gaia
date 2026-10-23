@@ -81,16 +81,17 @@ This slice wires it into none of the following, and each would be a later, separ
 - `headSha` is what HEAD was when the run started. The receipt proves the bytes of the base..HEAD change-set, not that the commit is still the tip of any branch. A consumer re-measures before relying on it.
 - The run executes the repository's own tests as the host user, as `node --test` always does. The factory's mutation checks detect changes to the worktree and to Git state, not effects elsewhere on the machine.
 - The pin is enforced only when the repository has one. Without a `.node-version` at the worktree root, the factory runs on any Node and records `runtime.pinned: null`, and such a receipt can still say PASS. A consumer that needs a pinned run checks that field.
-- "Clean" is the factory's definition: `git status --porcelain`, which does not list ignored files. A gitignored file in the worktree is not reported, and the tests can read it.
+- "Clean" is the factory's definition: `git status --porcelain` under the worktree view of `docs/worktree-root-guard.md`, which does not list ignored files. A file the repository's own `.gitignore` or `info/exclude` ignores is not reported, and the tests can read it. The operator's excludes file (#251), file system monitor and untracked cache (#256) have no say in it.
 - A base equal to HEAD is accepted. Its receipt has an empty change-set, so it binds the run to no changed bytes at all: its identity then depends only on the base commit.
 - `--out` is not containment-checked. A receipt written inside the worktree leaves it dirty, so the next run refuses it until the file is moved.
 
 ## Falsifiers
 
-`tests/head-verification.test.mjs` holds 13 tests. Removing any of the following makes at least one of them fail:
+`tests/head-verification.test.mjs` holds 15 tests. Removing any of the following makes at least one of them fail:
 - the pin check;
 - the worktree-root check;
 - the clean-tree, base or ancestor checks;
+- the clean check's `--untracked-files=normal`, and the worktree view's excludes-file, file-system-monitor or untracked-cache pin (#251, #256);
 - the revision equality;
 - either factory validator;
 - the clean-head rule;

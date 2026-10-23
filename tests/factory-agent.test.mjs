@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -21,7 +21,10 @@ import {
   runPiWorker,
   runPiReviewer,
 } from '../src/factory-agent.mjs';
-import { rawStatus, untrackedHidingRows, withEnvironment } from './helpers/ambient-git.mjs';
+import {
+  changeHidingRows, holdTimestamp, pre256Status, primeThenChange, rawStatus, untrackedHidingRows,
+  withEnvironment,
+} from './helpers/ambient-git.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-factory-agent-'));
 
@@ -684,6 +687,167 @@ test('ambient Git configuration cannot change what a change set measures', async
   ])));
   assert.deepEqual(measured.clean.files.map(({ path }) => path), ['stray.txt']);
   assert.deepEqual(measured, Object.fromEntries(Object.keys(rows).map((row) => [row, measured.clean])));
+});
+
+test('an ambient core.fsmonitor cannot hide the worker\'s change from the receipt', async () => {
+  // A core.fsmonitor hook tells Git which paths changed since the token a read stored in the index.
+  // Before #256 the factory's entry check stored it, and the change set's status and diff then
+  // trusted the hook's empty answer: the worker's tracked edit was missing from the receipt the
+  // reviewer reviews and the publisher binds.
+  const rows = changeHidingRows(join(scratch, 'fsmonitor-receipt-config'));
+  const rawGit = {};
+  const measured = {};
+  let index = 0;
+  for (const [row, overrides] of Object.entries(rows)) {
+    const { worktree } = fixture(`fsmonitor-receipt-${index += 1}`);
+    // Held from before the entry check, which builds the untracked cache first under that row.
+    holdTimestamp(worktree);
+    await withEnvironment(overrides, async () => {
+      const { status, changeSet: { baseHead, identity, ...bytes } } = await executeAgentFactory({
+        worktree,
+        evidenceDir: evidenceDir(`fsmonitor-receipt-${index}`),
+        task: 'change candidate.txt',
+        runWorker: async ({ cwd }) => {
+          // Any read under the hook stores its token; the factory no longer needs to be the one.
+          primeThenChange(cwd, () => {
+            writeFileSync(join(cwd, 'candidate.txt'), 'after\n', 'utf8');
+            writeFileSync(join(cwd, 'stray.txt'), 'stray\n', 'utf8');
+          });
+          rawGit[row] = pre256Status(cwd);
+          return { provider: 'fixture-worker', output: 'worker complete' };
+        },
+        runReviewer: async () => ({ provider: 'fixture-reviewer', verdict: 'APPROVE', output: 'ok' }),
+      });
+      measured[row] = { status, ...bytes };
+    });
+  }
+
+  // Non-vacuity: under each hook row, the factory's status before #256 misses the worker's change.
+  assert.deepEqual(rawGit, {
+    clean: ' M candidate.txt|?? stray.txt|',
+    fsmonitor: '?? stray.txt|',
+    'fsmonitor and untrackedCache': '',
+  });
+  assert.deepEqual(measured.clean.files.map(({ path }) => path), ['candidate.txt', 'stray.txt']);
+  assert.deepEqual(measured, Object.fromEntries(Object.keys(rows).map((row) => [row, measured.clean])));
+});
+
+test('an ambient core.fsmonitor cannot hide a change from the Pi worker entry check', async () => {
+  // Before #256 a tracked edit made after a read stored the hook's token, or with
+  // core.untrackedCache a new file, passed the entry check, and the worker ran on it.
+  const rows = changeHidingRows(join(scratch, 'pi-worker-fsmonitor-config'));
+  const changes = {
+    edit: (cwd) => writeFileSync(join(cwd, 'candidate.txt'), 'edited\n', 'utf8'),
+    stray: (cwd) => writeFileSync(join(cwd, 'stray.txt'), 'stray\n', 'utf8'),
+  };
+  const rawGit = {};
+  const outcome = {};
+  let invocations = 0;
+  let index = 0;
+  for (const [row, overrides] of Object.entries(rows)) {
+    for (const [change, write] of Object.entries(changes)) {
+      const { worktree } = fixture(`pi-worker-fsmonitor-${index += 1}`);
+      const head = git(worktree, 'rev-parse', 'HEAD');
+      await withEnvironment(overrides, async () => {
+        primeThenChange(worktree, write);
+        rawGit[`${row} ${change}`] = pre256Status(worktree);
+        outcome[`${row} ${change}`] = await runPiWorker({
+          cwd: worktree,
+          task: 'change candidate.txt',
+          allowedPaths: ['candidate.txt'],
+          baseline: { head },
+          env: { PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture' },
+        }, {
+          runInvocation: async () => {
+            invocations += 1;
+            throw new Error('the worker ran');
+          },
+        }).then(
+          () => 'accepted',
+          (error) => (error instanceof FactoryAgentError ? error.code : String(error)),
+        );
+      });
+    }
+  }
+
+  // Non-vacuity: the factory's status before #256 misses the change in three of the hook cells.
+  assert.deepEqual(rawGit, {
+    'clean edit': ' M candidate.txt|',
+    'clean stray': '?? stray.txt|',
+    'fsmonitor edit': '',
+    'fsmonitor stray': '?? stray.txt|',
+    'fsmonitor and untrackedCache edit': '',
+    'fsmonitor and untrackedCache stray': '',
+  });
+  assert.deepEqual(outcome, Object.fromEntries(Object.keys(rawGit).map((cell) => [
+    cell, 'CleanWorktreeRequired',
+  ])));
+  assert.equal(invocations, 0);
+});
+
+test('an ambient core.fsmonitor cannot change what a change set measures', async () => {
+  const rows = changeHidingRows(join(scratch, 'change-set-fsmonitor-config'));
+  const rawGit = {};
+  const measured = {};
+  let index = 0;
+  for (const [row, overrides] of Object.entries(rows)) {
+    const { worktree } = fixture(`change-set-fsmonitor-${index += 1}`);
+    const head = git(worktree, 'rev-parse', 'HEAD');
+    await withEnvironment(overrides, () => {
+      primeThenChange(worktree, () => {
+        writeFileSync(join(worktree, 'candidate.txt'), 'after\n', 'utf8');
+        writeFileSync(join(worktree, 'stray.txt'), 'stray\n', 'utf8');
+      });
+      rawGit[row] = pre256Status(worktree);
+      const { baseHead, identity, ...bytes } = measureAgentFactoryChangeSet(worktree, head);
+      measured[row] = bytes;
+    });
+  }
+
+  // Non-vacuity: under each hook row, the factory's status before #256 misses the change.
+  assert.deepEqual(rawGit, {
+    clean: ' M candidate.txt|?? stray.txt|',
+    fsmonitor: '?? stray.txt|',
+    'fsmonitor and untrackedCache': '',
+  });
+  assert.equal(measured.clean.statusBytes, 30);
+  assert.deepEqual(measured.clean.files.map(({ path }) => path), ['candidate.txt', 'stray.txt']);
+  assert.deepEqual(measured, Object.fromEntries(Object.keys(rows).map((row) => [row, measured.clean])));
+});
+
+test('no hook from the operator\'s configuration runs during the factory\'s reads', async () => {
+  // Git runs the core.fsmonitor hook on every read that consults it, and post-index-change when a
+  // read rewrites the index, which `git status` does whenever an entry's timestamp is racy (#256).
+  const dir = join(scratch, 'factory-hooks-config');
+  const fwd = (path) => path.replaceAll('\\', '/');
+  const { fsmonitor } = changeHidingRows(dir);
+  const hooks = join(dir, 'hooks');
+  mkdirSync(hooks);
+  writeFileSync(join(hooks, 'post-index-change'),
+    `#!/bin/sh\necho ran >> "${fwd(join(dir, 'post-index-change-ran'))}"\n`, { mode: 0o755 });
+  const overrides = {
+    ...fsmonitor, GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_1: 'core.hooksPath', GIT_CONFIG_VALUE_1: fwd(hooks),
+  };
+  const { worktree } = fixture('factory-hooks');
+  const head = git(worktree, 'rev-parse', 'HEAD');
+  writeFileSync(join(worktree, 'candidate.txt'), 'after\n', 'utf8');
+  const indexFile = git(worktree, 'rev-parse', '--path-format=absolute', '--git-path', 'index');
+  // An index file older than every entry makes each entry racy, so a status that may write does.
+  const racy = () => utimesSync(indexFile, new Date(2001, 0, 1), new Date(2001, 0, 1));
+  const ran = () => ['fsmonitor-ran', 'post-index-change-ran'].filter((name) => existsSync(join(dir, name)));
+
+  racy();
+  await withEnvironment(overrides, () => measureAgentFactoryChangeSet(worktree, head));
+  const factory = ran();
+  racy();
+  await withEnvironment(overrides, () => execFileSync('git', ['status', '--porcelain'], {
+    cwd: worktree, windowsHide: true,
+  }));
+
+  // Non-vacuity: an unpinned `git status` runs both hooks.
+  assert.deepEqual({ factory, unpinned: ran() }, {
+    factory: [], unpinned: ['fsmonitor-ran', 'post-index-change-ran'],
+  });
 });
 
 test('Pi worker refuses an NTFS alternate-data-stream path before authentication', async () => {

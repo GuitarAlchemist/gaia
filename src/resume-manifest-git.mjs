@@ -4,7 +4,9 @@ import { readFileSync, statSync } from 'node:fs';
 import {
   MAX_RESUME_PROMPT_CHARS, MAX_UPSTREAM_ARTIFACT_CHARS, ResumeManifestError, requireResumeManifest,
 } from './resume-manifest.mjs';
-import { WorktreeRootError, repositoryNeutralEnvironment, requireWorktreeRoot } from './worktree-root.mjs';
+import {
+  WORKTREE_VIEW, WorktreeRootError, repositoryNeutralEnvironment, requireWorktreeRoot,
+} from './worktree-root.mjs';
 
 /**
  * The resume check's observation adapter: reads one declared subject worktree with Git, resolves
@@ -32,8 +34,11 @@ function gitEnvironment() {
   return { ...repositoryNeutralEnvironment(), GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' };
 }
 
+// The clean flag asks the factory's entry-check question, so the subject is read under the same
+// view: the operator's excludes file, file system monitor, untracked cache and hooks have no say
+// in it (#256).
 function git(cwd, args, detail) {
-  const run = spawnSync('git', args, {
+  const run = spawnSync('git', [...WORKTREE_VIEW, ...args], {
     cwd, encoding: 'utf8', windowsHide: true, timeout: GIT_TIMEOUT_MS,
     maxBuffer: GIT_OUTPUT_LIMIT, env: gitEnvironment(),
   });

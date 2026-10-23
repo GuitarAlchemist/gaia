@@ -9,7 +9,9 @@ import {
   basename, dirname, isAbsolute, join, relative, resolve,
 } from 'node:path';
 
-import { WorktreeRootError, repositoryNeutralEnvironment, requireWorktreeRoot } from './worktree-root.mjs';
+import {
+  WORKTREE_VIEW, WorktreeRootError, repositoryNeutralEnvironment, requireWorktreeRoot,
+} from './worktree-root.mjs';
 
 export const FACTORY_AGENT_RECEIPT_SCHEMA = 'gaia-agent-factory-receipt/1';
 
@@ -522,26 +524,23 @@ export async function runPiWorker(context, {
   };
 }
 
-// Every factory Git call runs without the repository locators, as the root guard does: the
-// worktree path names the repository, never a GIT_DIR a hook left in the environment (#224).
 function git(cwd, args, encoding = 'utf8') {
-  return execFileSync('git', args, {
-    cwd,
-    encoding,
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: repositoryNeutralEnvironment(),
-  });
+  return runGit(cwd, args, { encoding, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 function gitInput(cwd, args, input, encoding = 'utf8') {
-  return execFileSync('git', args, {
+  return runGit(cwd, args, { encoding, input, stdio: ['pipe', 'pipe', 'pipe'] });
+}
+
+// Every factory Git call runs without the repository locators, as the root guard does: the
+// worktree path names the repository, never a GIT_DIR a hook left in the environment (#224). It
+// reads the worktree under the repository's view, never the operator's (#251, #256).
+function runGit(cwd, args, options) {
+  return execFileSync('git', [...WORKTREE_VIEW, ...args], {
     cwd,
-    encoding,
-    input,
     windowsHide: true,
-    stdio: ['pipe', 'pipe', 'pipe'],
     env: repositoryNeutralEnvironment(),
+    ...options,
   });
 }
 
@@ -663,18 +662,10 @@ function requireRoot(worktree) {
   }
 }
 
-// Which untracked files count is the repository's rule, not the operator's. Git reads
-// status.showUntrackedFiles and the excludes file from every configuration source the process
-// inherits. The command line outranks every other source, so it pins the first to Git's default
-// and points the second at the null device. The repository's own .gitignore and info/exclude
-// still apply (#251). The path is /dev/null, which Git also reads as empty on Windows, because
-// Git for Windows warns on every call that it cannot access os.devNull as an excludes file.
-const UNTRACKED_VIEW = Object.freeze(['-c', 'core.excludesFile=/dev/null']);
-
+// Which untracked files count is the repository's rule, not the operator's: the flag pins
+// status.showUntrackedFiles to Git's default, and WORKTREE_VIEW pins the excludes file (#251).
 function worktreeStatus(worktree) {
-  return git(
-    worktree, [...UNTRACKED_VIEW, 'status', '--porcelain=v1', '-z', '--untracked-files=normal'], null,
-  );
+  return git(worktree, ['status', '--porcelain=v1', '-z', '--untracked-files=normal'], null);
 }
 
 function assertLinkedCleanWorktree(worktree) {
@@ -730,7 +721,7 @@ function changedPaths(worktree, head) {
     worktree, ['diff', '--name-only', '-z', head, '--'], null,
   ));
   const untracked = nullSeparated(git(
-    worktree, [...UNTRACKED_VIEW, 'ls-files', '--others', '--exclude-standard', '-z'], null,
+    worktree, ['ls-files', '--others', '--exclude-standard', '-z'], null,
   ));
   return [...new Set([...tracked, ...untracked])].sort();
 }
