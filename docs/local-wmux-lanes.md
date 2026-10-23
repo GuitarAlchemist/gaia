@@ -227,7 +227,7 @@ localLanes: null | {
 | `src/local-lane-sensor.mjs` | `observeLocalLanes({ agents, observedAt })` — pure structured metadata to sealed observation. Reads six named fields. No I/O, no clock, no process. With the activity axis, `deriveLaneActivityStates` reads two named fields of an `agent-state` record. |
 | `scripts/local-lane-sensor.mjs` | `wmux agent list` once, and `wmux agent-state` once under `--activity agent-state`; no shell, no filter, no mutation; writes the observation file. `--out` required. |
 | `scripts/factory-dashboard.mjs` | `--local-lanes <path>` explicit input. Absent flag renders exactly as before. |
-| `scripts/local-lanes-watch.mjs` | One command: refresh the observation, then the control room. `--interval-ms` is explicit, bounded to 1000-60000, and stops on SIGINT/SIGTERM. |
+| `scripts/local-lanes-watch.mjs` | One command: refresh the observation, then the control room. `--interval-ms` is explicit, bounded to 1000-15000, and stops on SIGINT/SIGTERM. |
 
 The observation file is deliberately not part of the observation-window evidence for the drain
 projection: its `observedAt` moves on every tick and it says nothing about how long the projection
@@ -433,8 +433,24 @@ The pair's underlying concern is accepted in full and constrains the script inst
   spawns no subprocess of its own beyond the sensor's `wmux agent list`, and its `wmux agent-state`
   under `--activity agent-state`;
 - ticks are **non-overlapping**: the next tick is scheduled after the current one settles;
-- there is **no retry**. A failed tick prints its typed error, leaves the previous artifacts
-  untouched, and waits for the next interval;
+- there is **no retry**. A failed tick prints its typed error and waits for the next interval.
+  A sensor read refusal preserves the previous observation. An unavailable control-room input
+  preserves the dashboard outputs, although the sensor may already have refreshed the observation.
+  These input-read guarantees do not imply atomicity for output-write failures. An argument error,
+  the script's, the sensor's or the control room's, is the same on every tick, so all three are
+  checked before the first tick and stop the script with exit 2. The check includes the paths the
+  flags name: each file a tick writes under a flag's own name, the lanes file and the control
+  room's outputs, is a distinct file by filesystem identity, and none is a file a flag names as an
+  input (the bindings, the wmux entry point, the control room's inputs), except the lanes file the
+  control room reads by design. Not compared (#265): a file derived from a flag, such as the
+  telemetry log inside `--telemetry`; a parent directory; a wmux entry point found through a
+  relative `WMUX_CLI` or on PATH; two spellings of one file that only its creation tells apart; an
+  artifact the bindings document names. The script does not stop on such a collision, and its
+  first tick can succeed by replacing the file named: a control-room output over the telemetry log
+  or over a relative `WMUX_CLI` replaces it on tick 1, and every later tick fails on the replaced
+  file and is waited out. A control-room output at a bound artifact's path writes that path at
+  every tick, so the lane's evidence for that artifact is whatever was written there last. #265
+  records each shape's measured outcome;
 - the interval is explicit, bounded to 1000-15000 ms per Blocker 2, and stops on SIGINT/SIGTERM.
 
 ## S5 — the golden fixture and the digest-bound receipt

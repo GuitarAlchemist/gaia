@@ -15,7 +15,7 @@ import {
 } from '../src/factory-telemetry-log.mjs';
 import { reconcilePortfolioDrain } from '../src/portfolio-drain.mjs';
 
-class UsageError extends Error {}
+export class UsageError extends Error { name = 'UsageError'; }
 
 /**
  * Every argv name this adapter reads. A name absent from this set is refused.
@@ -38,6 +38,7 @@ const DECLARED_OPTIONS = new Set([
   'capacity', 'language', 'refresh-seconds', 'watch-ms',
 ]);
 
+/** The flags, or a UsageError. Reads no file, so the same argv gives the same answer every time. */
 function parseArgs(argv) {
   const flags = {};
   for (let index = 0; index < argv.length; index += 2) {
@@ -265,11 +266,15 @@ const declaredBasis = (resolved, observedAt) => (typeof resolved !== 'string' ? 
   basis: resolved === observedAt ? 'UNOBSERVED' : 'MEASURED',
 });
 
-export function runFactoryDashboardCli(argv, {
-  now = () => new Date(),
-  resolveSourceChangedAt = fileFedSourceChangedAt,
-  writeStdout = (chunk) => process.stdout.write(chunk),
-} = {}) {
+/**
+ * The refusals the flags decide, before any input is read: the flags, then whether two outputs,
+ * or an output and an input, as the flags name them, are one file. A file derived from a flag,
+ * such as the telemetry log inside `--telemetry`, is not compared (#265), nor are two spellings
+ * of one file that only its creation tells apart. It stats where the named paths sit but reads no
+ * file, so the same argv over the same tree gets the same answer on every run, and a caller that
+ * repeats this adapter can check it once up front.
+ */
+export function resolveInvocation(argv) {
   const flags = parseArgs(argv);
   const projectionPath = flags.projection ? resolve(flags.projection) : null;
   const portfolioPath = flags.portfolio ? resolve(flags.portfolio) : null;
@@ -312,6 +317,23 @@ export function runFactoryDashboardCli(argv, {
       );
     },
   });
+  return {
+    flags, projectionPath, portfolioPath, receiptsPath, holdsPath, dependenciesPath, progressPath,
+    historyPath, telemetryPath, localLanesPath, engineeringFlowPath, mergeQueueCapabilityPath,
+    prReviewThreadGatePath, hostedDraftPumpPath, htmlPath, snapshotPath, activityPath,
+  };
+}
+
+export function runFactoryDashboardCli(argv, {
+  now = () => new Date(),
+  resolveSourceChangedAt = fileFedSourceChangedAt,
+  writeStdout = (chunk) => process.stdout.write(chunk),
+} = {}) {
+  const {
+    flags, projectionPath, portfolioPath, receiptsPath, holdsPath, dependenciesPath, progressPath,
+    historyPath, telemetryPath, localLanesPath, engineeringFlowPath, mergeQueueCapabilityPath,
+    prReviewThreadGatePath, hostedDraftPumpPath, htmlPath, snapshotPath, activityPath,
+  } = resolveInvocation(argv);
 
   const projection = projectionPath
     ? readJson(projectionPath, 'projection')

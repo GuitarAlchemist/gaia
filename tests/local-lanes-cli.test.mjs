@@ -3,17 +3,18 @@
  *
  * The sensor shells out to wmux, so these tests give it a real process (tests/fixtures/
  * fake-wmux-cli.mjs) rather than mocking the seam away. That fixture records the exact argv it was
- * invoked with and exits non-zero for every verb but `agent list`, which is what makes the two
- * negative controls here evidence rather than assertion.
+ * invoked with and exits non-zero for every verb but `agent list` and a bare `agent-state`, which
+ * is what makes the two negative controls here evidence rather than assertion.
  *
  * Gates T3, T14, T15 and T17 of the pair-review amendment live in this file, plus the
  * case-variant alias regression the epistemic review reproduced as destructive.
  */
 
 import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -34,6 +35,11 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FAKE_WMUX = join(HERE, 'fixtures', 'fake-wmux-cli.mjs');
+const SENSOR_CLI = join(HERE, '..', 'scripts', 'local-lane-sensor.mjs');
+const WATCH_CLI = join(HERE, '..', 'scripts', 'local-lanes-watch.mjs');
+const runProcess = (script, args, options = {}) => spawnSync(
+  process.execPath, [script, ...args], { encoding: 'utf8', windowsHide: true, ...options },
+);
 
 const SCRATCH = mkdtempSync(join(tmpdir(), 'gaia-local-lanes-cli-'));
 test.after(() => rmSync(SCRATCH, { recursive: true, force: true, maxRetries: 12, retryDelay: 25 }));
@@ -800,4 +806,167 @@ test('NEGATIVE CONTROL: this slice emits state and holds no reaper', () => {
       );
     }
   }
+});
+
+// The process boundaries an operator reads (#222): what a refusal says on stderr, and how the
+// process ends.
+
+test('the sensor process names a usage error by its class and exits 2', () => {
+  const run = runProcess(SENSOR_CLI, ['--out', join(SCRATCH, 'never.json'), '--activity', 'everything']);
+
+  assert.equal(run.status, 2);
+  assert.match(run.stderr, /^UsageError: /u);
+});
+
+test('the sensor process names a refusal by its class and exits 1', () => {
+  const run = runProcess(SENSOR_CLI, [
+    '--out', join(SCRATCH, 'never.json'), '--wmux', join(SCRATCH, 'no-such-wmux.exe'),
+  ]);
+
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /^SensorRefusalError: /u);
+});
+
+test('the watcher process stops with exit 2 when the sensor refuses its usage', () => {
+  const space = workspace([agent(1)]);
+  const run = runProcess(WATCH_CLI, [
+    '--lanes-out', space.path('lanes.json'), '--wmux', FAKE_WMUX,
+    '--activity', 'everything', '--interval-ms', '1000',
+    // Keep the dashboard valid: its own usage error must not mask a missing sensor preflight.
+    '--projection', projectionFile(space.dir),
+    '--html-out', space.path('control-room.html'), '--snapshot-out', space.path('control-room.json'),
+  ], { timeout: 10_000 });
+
+  assert.equal(run.status, 2);
+  assert.equal(run.stderr, 'UsageError: --activity takes exactly "agent-state"\n');
+  assert.deepEqual(space.argv(), [], 'argument refusal happens before any wmux read');
+});
+
+test('the watcher process stops with exit 2 when the control room refuses its usage', () => {
+  const space = workspace([agent(1)]);
+  const run = runProcess(WATCH_CLI, [
+    '--lanes-out', space.path('lanes.json'), '--wmux', FAKE_WMUX, '--interval-ms', '1000',
+    '--bogus', 'value',
+  ], { timeout: 10_000 });
+
+  assert.equal(run.status, 2);
+});
+
+test('the watcher process names the control room\'s usage error by its class', () => {
+  const space = workspace([agent(1)]);
+  const run = runProcess(WATCH_CLI, [
+    '--lanes-out', space.path('lanes.json'), '--wmux', FAKE_WMUX, '--interval-ms', '1000',
+    '--bogus', 'value',
+  ], { timeout: 10_000 });
+
+  assert.equal(run.stderr, 'UsageError: unknown option: --bogus\n');
+});
+
+test('the watcher process names its own usage error by its class', () => {
+  const run = runProcess(WATCH_CLI, [], { timeout: 10_000 });
+
+  assert.equal(run.stderr, 'UsageError: missing --lanes-out\n');
+});
+
+test('the watcher process stops with exit 2 when two control-room outputs name one file', () => {
+  // #229 R2 review (B1): the control room refuses colliding outputs after its flags parse, and the
+  // same argv collides on every tick, so the watcher must refuse it before the first one.
+  const space = workspace([agent(1)]);
+  const run = runProcess(WATCH_CLI, [
+    '--lanes-out', space.path('lanes.json'), '--wmux', FAKE_WMUX, '--interval-ms', '1000',
+    '--projection', projectionFile(space.dir),
+    '--html-out', space.path('control-room.html'), '--snapshot-out', space.path('control-room.html'),
+  ], { timeout: 10_000 });
+
+  assert.equal(run.status, 2);
+  assert.equal(run.stderr, 'UsageError: the HTML, snapshot and activity outputs must differ\n');
+  assert.deepEqual(space.argv(), [], 'the refusal happens before any wmux read');
+});
+
+test('the watcher process stops with exit 2 when a control-room output is its lanes file', () => {
+  const space = workspace([agent(1)]);
+  const lanesOut = space.path('lanes.json');
+  const run = runProcess(WATCH_CLI, [
+    '--lanes-out', lanesOut, '--wmux', FAKE_WMUX, '--interval-ms', '1000',
+    '--projection', projectionFile(space.dir),
+    '--html-out', lanesOut, '--snapshot-out', space.path('control-room.json'),
+  ], { timeout: 10_000 });
+
+  assert.equal(run.status, 2);
+  assert.equal(run.stderr, 'UsageError: an output path aliases an input evidence path\n');
+  assert.deepEqual(space.argv(), [], 'the refusal happens before any wmux read');
+  assert.equal(existsSync(lanesOut), false, 'and before the sensor writes the lanes file');
+});
+
+test('the watcher process refuses, before any tick, an output flag naming the file an input flag names', () => {
+  // #229 R3 review (B2): neither tool sees the other's paths, so a collision between them looped
+  // the watcher, and an output over the bindings or the wmux entry point replaced it on tick 1.
+  for (const [label, written, read] of [
+    ['the lanes file over the bindings', '--lanes-out', '--bindings'],
+    ['the HTML over the bindings', '--html-out', '--bindings'],
+    ['the snapshot over the wmux entry point', '--snapshot-out', '--wmux'],
+    ['the lanes file over the wmux entry point', '--lanes-out', '--wmux'],
+    ['the lanes file over the projection', '--lanes-out', '--projection'],
+  ]) {
+    const space = workspace([agent(1)]);
+    const shared = space.path(read === '--wmux' ? 'wmux-copy.mjs' : 'shared.json');
+    const bytes = read === '--wmux' ? readFileSync(FAKE_WMUX) : Buffer.from('{"keep":true}\n');
+    writeFileSync(shared, bytes);
+    const named = {
+      '--lanes-out': space.path('lanes.json'),
+      '--wmux': FAKE_WMUX,
+      '--projection': projectionFile(space.dir),
+      '--html-out': space.path('control-room.html'),
+      '--snapshot-out': space.path('control-room.json'),
+      [written]: shared,
+      [read]: shared,
+    };
+    const run = runProcess(WATCH_CLI, [
+      ...Object.entries(named).flat(), '--interval-ms', '1000',
+    ], { timeout: 10_000 });
+
+    assert.equal(run.status, 2, label);
+    assert.equal(run.stderr, 'UsageError: an output path aliases an input evidence path\n', label);
+    assert.deepEqual(space.argv(), [], `${label}: before any wmux read`);
+    assert.deepEqual(readFileSync(shared), bytes, `${label}: the file read is untouched`);
+  }
+});
+
+/** Resolves once `ready()` holds; rejects if the process exits first or 10 s pass. */
+function until(child, ready) {
+  return new Promise((resolve, reject) => {
+    const poll = setInterval(() => {
+      if (!ready()) return;
+      settle();
+      resolve();
+    }, 50);
+    const limit = setTimeout(() => { settle(); reject(new Error('timed out')); }, 10_000);
+    const exited = (code) => { settle(); reject(new Error(`the watcher exited with ${code}`)); };
+    const settle = () => { clearInterval(poll); clearTimeout(limit); child.off('exit', exited); };
+    child.once('exit', exited);
+  });
+}
+
+test('the watcher waits out a control-room input that is not readable yet, then renders it', async () => {
+  // #229 review: the control room reports an unreadable input file as its UsageError, but a file
+  // absent or half-written at one tick can be whole at the next, so only arguments stop the watcher.
+  const space = workspace([agent(1)]);
+  const projection = space.path('projection-later.json');
+  const snapshotOut = space.path('control-room.json');
+  const child = spawn(process.execPath, [
+    WATCH_CLI, '--lanes-out', space.path('lanes.json'), '--wmux', FAKE_WMUX, '--interval-ms', '1000',
+    '--projection', projection, '--html-out', space.path('control-room.html'), '--snapshot-out', snapshotOut,
+  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+
+  try {
+    await until(child, () => stderr.includes('projection must be readable JSON'));
+    assert.equal(existsSync(snapshotOut), false, 'the failed tick rendered nothing');
+    projectionFile(space.dir, 'projection-later.json');
+    await until(child, () => existsSync(snapshotOut));
+  } finally {
+    child.kill();
+  }
+  assert.equal(stderr, 'UsageError: projection must be readable JSON\n');
 });
