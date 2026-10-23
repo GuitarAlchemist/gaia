@@ -3,8 +3,9 @@ import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /**
- * The one decision "this path is the root of a Git worktree" (#224), and the environment and view
- * every Git call after it runs in. docs/worktree-root-guard.md records the measurement and the designs.
+ * The one decision "this path is the root of a Git worktree" (#224), the environment every Git call
+ * after it runs in, and the view under which the factory and the resume check read a worktree.
+ * docs/worktree-root-guard.md records the measurement and the designs.
  *
  * Root means the realpath of `git rev-parse --show-toplevel` equals the realpath of the path; on
  * Windows the realpath resolves case, 8.3 names and junctions. Git runs without the variables that
@@ -18,8 +19,9 @@ export const REPOSITORY_LOCATORS = Object.freeze([
   'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES',
 ]);
 
-// What a worktree holds is the repository's rule, not the operator's. Git reads these settings from
-// every configuration source the process inherits, and the command line outranks all of them:
+// These four settings change what Git reports a worktree holds, so none of them comes from
+// configuration. Git reads them from every configuration source, the repository's own .git/config
+// included, and the command line outranks all of them:
 // - the excludes file is /dev/null, so only the repository's own .gitignore and info/exclude hide
 //   an untracked file (#251). Git for Windows warns on every call that it cannot access os.devNull
 //   as an excludes file, and reads /dev/null as empty;
@@ -28,7 +30,8 @@ export const REPOSITORY_LOCATORS = Object.freeze([
 // - the untracked cache is off, so Git lists the directories instead of trusting a list it stored
 //   in the index. A directory timestamp recorded while the monitor was trusted can still match
 //   after a new file, and a read without the monitor then trusts the stale list (#256);
-// - the hooks path is empty, so no hook runs while the worktree is read (#256).
+// - the hooks path is empty, so no hook runs while the worktree is read, neither the operator's
+//   nor the repository's own; Git then looks for hooks at the drive root (#256).
 export const WORKTREE_VIEW = Object.freeze([
   '-c', 'core.excludesFile=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
   '-c', 'core.hooksPath=',

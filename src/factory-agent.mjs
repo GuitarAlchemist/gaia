@@ -534,7 +534,8 @@ function gitInput(cwd, args, input, encoding = 'utf8') {
 
 // Every factory Git call runs without the repository locators, as the root guard does: the
 // worktree path names the repository, never a GIT_DIR a hook left in the environment (#224). It
-// reads the worktree under the repository's view, never the operator's (#251, #256).
+// reads the worktree under WORKTREE_VIEW: no configuration file, the repository's own included,
+// turns on an excludes file, a monitor, an untracked cache or a hook (#251, #256).
 function runGit(cwd, args, options) {
   return execFileSync('git', [...WORKTREE_VIEW, ...args], {
     cwd,

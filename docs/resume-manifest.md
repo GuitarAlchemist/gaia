@@ -64,8 +64,8 @@ a heuristic with false negatives of its own. The declaration is given as structu
 `HEAD` and `git status --porcelain` (untracked files included) with optional locks off so it does
 not even refresh the index, resolves the base with `git ls-remote` against a configured remote,
 and reads each upstream artifact as bounded strict UTF-8. Variables that would point Git at
-another repository are removed from its environment. Every Git call runs under the factory's
-worktree view (`WORKTREE_VIEW`, `docs/worktree-root-guard.md`), so the operator's excludes file,
+another repository are removed from its environment. Every Git call after the root guard's runs
+under the factory's worktree view (`WORKTREE_VIEW`, `docs/worktree-root-guard.md`), so the operator's excludes file,
 file system monitor, untracked cache and hooks have no say in the `clean` flag (#256). It decides
 nothing.
 

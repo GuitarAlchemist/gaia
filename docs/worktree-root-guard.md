@@ -271,8 +271,8 @@ an untracked file: `status.showUntrackedFiles` through `GIT_CONFIG_COUNT`, `GIT_
 because a worktree's own attributes outrank the whitespace gate's pins.
 
 So `worktreeStatus` runs the factory's one `git status` with the first pin, and every factory Git
-call, the change set's `ls-files` among them, runs under `WORKTREE_VIEW` from
-`src/worktree-root.mjs`, which holds the second:
+call after the root guard's, the change set's `ls-files` among them, runs under `WORKTREE_VIEW`
+from `src/worktree-root.mjs`, which holds the second:
 
 - `--untracked-files=normal`, which is Git's default, so a change set's status bytes are unchanged
   where nothing was set;
@@ -358,8 +358,8 @@ prints `/post-index-change`). On the author's host, an account without administr
 create a file at the root of `C:\`.
 
 The resume check's observation adapter, `src/resume-manifest-git.mjs`, asks the entry check's
-question for its `clean` flag, which `RESUME_SUBJECT_DIRTY` reads, so it runs every Git call under
-the same view. Before #256 an excludes file hid an untracked file from it, and a hook hid an edit
+question for its `clean` flag, which `RESUME_SUBJECT_DIRTY` reads, so every Git call it makes after
+the root guard's runs under the same view. Before #256 an excludes file hid an untracked file from it, and a hook hid an edit
 made after another read stored the token. Its `--untracked-files=all` already outranked
 `status.showUntrackedFiles`. It runs with optional locks off, so it never stores a token itself.
 
@@ -380,7 +380,7 @@ throwaway copy:
 
 | removed | fails |
 |---|---|
-| `core.fsmonitor=false` | all six tests: each hook cell that misses the change before #256, and the monitor's hook in the hooks test |
+| `core.fsmonitor=false` | all six tests: each hook cell that misses the tracked edit before #256, and the monitor's hook in the hooks test. The hook-and-cache cell that writes a new file stays refused: the cache pin shows that file |
 | `core.untrackedCache=false` | the hook-and-cache cell that writes a new file, in the receipt, entry-check, head-verification and change-set tests |
 | `core.hooksPath=` | the hooks test, through `post-index-change` |
 | `core.excludesFile=/dev/null` | #251's three tests, and the excludes-file and ignore-file rows of the resume test |
