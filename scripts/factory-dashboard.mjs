@@ -269,9 +269,10 @@ const declaredBasis = (resolved, observedAt) => (typeof resolved !== 'string' ? 
 /**
  * The refusals the flags decide, before any input is read: the flags, then whether two outputs,
  * or an output and an input, as the flags name them, are one file. A file derived from a flag,
- * such as the telemetry log inside `--telemetry`, is not compared (#265). It stats where the
- * named paths sit but reads no file, so the same argv over the same tree gets the same answer on
- * every run, and a caller that repeats this adapter can check it once up front.
+ * such as the telemetry log inside `--telemetry`, is not compared (#265), nor are two spellings
+ * of one file that only its creation tells apart. It stats where the named paths sit but reads no
+ * file, so the same argv over the same tree gets the same answer on every run, and a caller that
+ * repeats this adapter can check it once up front.
  */
 export function resolveInvocation(argv) {
   const flags = parseArgs(argv);

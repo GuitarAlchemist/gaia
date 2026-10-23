@@ -898,7 +898,7 @@ test('the watcher process stops with exit 2 when a control-room output is its la
   assert.equal(existsSync(lanesOut), false, 'and before the sensor writes the lanes file');
 });
 
-test('the watcher process refuses, before any tick, a path it writes that either tool reads', () => {
+test('the watcher process refuses, before any tick, an output flag naming the file an input flag names', () => {
   // #229 R3 review (B2): neither tool sees the other's paths, so a collision between them looped
   // the watcher, and an output over the bindings or the wmux entry point replaced it on tick 1.
   for (const [label, written, read] of [

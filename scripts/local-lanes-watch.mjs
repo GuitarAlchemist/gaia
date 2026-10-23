@@ -32,9 +32,13 @@
  *     as an input of either tool, except the lanes file the control room reads by design. Not
  *     compared (#265): a file a tool derives from a flag, such as the telemetry log inside
  *     `--telemetry`; a parent directory; a wmux entry point found through a relative `WMUX_CLI`
- *     or on PATH; two spellings of one file that only its creation tells apart. Such a collision
- *     fails at every tick and is waited out. Nor is an artifact the bindings document names: an
- *     output over it succeeds at every tick, and the lane reads that evidence as refused.
+ *     or on PATH; two spellings of one file that only its creation tells apart; an artifact the
+ *     bindings document names. The watcher does not stop on such a collision, and its first tick
+ *     can succeed by replacing the file named: a control-room output over the telemetry log or
+ *     over a relative `WMUX_CLI` replaces it on tick 1, and every later tick fails on the
+ *     replaced file and is waited out. A control-room output at a bound artifact's path writes
+ *     that path at every tick, so the lane's evidence for that artifact is whatever was written
+ *     there last. #265 records each shape's measured outcome.
  *     A retry loop around a subprocess is the thing this product rules out elsewhere by name.
  *   - **Bounded and stoppable.** The interval is explicit, capped at half the observation
  *     freshness window so no legal configuration can render permanently stale, and SIGINT or
@@ -151,7 +155,7 @@ function parseAllArgs(argv) {
     inputs: [
       parsed.own.bindings ? resolve(parsed.own.bindings) : null,
       isAbsolute(wmux) ? wmux : null,
-      // Every other path the control room returns is a flag value it reads from.
+      // Every other path the control room returns is one a flag names for an input.
       ...Object.values(controlRoom).filter((value) => typeof value === 'string'),
     ],
     refuse: (why) => { throw new UsageError(why); },
@@ -192,7 +196,8 @@ if (directExecution) {
   // Scheduled after the tick settles, never on a fixed interval, so a slow tick delays the next
   // one instead of overlapping it. The flags and the named paths passed above, so a failure here
   // is reported and waited out, never run again early. It usually comes from an input that can
-  // change by the next tick; a collision the check above cannot see (#265) fails at every tick.
+  // change by the next tick; one from a collision the check above cannot see (#265) recurs at
+  // every later tick.
   const tick = () => {
     try {
       runLocalLanesTick(argv);
