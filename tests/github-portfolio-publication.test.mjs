@@ -402,6 +402,9 @@ test('the Git/gh Adapter commits locally, leases the push, and reuses no arbitra
       baseBranch: 'main',
       run,
     });
+    // The port is closed at four methods: no merge, no ruleset, no other effect.
+    assert.deepEqual(Object.keys(effects).sort(), ['commit', 'observe', 'openPullRequest', 'push']);
+    assert.ok(Object.isFrozen(effects));
     const adapter = createGitHubCandidatePublicationAdapter({
       expectedRepository: intent.repository,
       authority: {
@@ -435,7 +438,8 @@ test('the Git/gh Adapter commits locally, leases the push, and reuses no arbitra
 // One candidate whose origin is a real remote, the bound repository's bare stand-in, and beside
 // it one route outside the repository, set through the environment or a global Git file, with the
 // repositories and hooks that route would steer the publication to. Hooks name the side they run
-// on, and the pre-commit hook also stages a file nobody reviewed.
+// on, and the pre-commit hook also stages a file nobody reviewed. One route sets nothing: the
+// test's runner writes a file after the review measured the candidate.
 function ambientPublication(scratch, route) {
   const fwd = (path) => path.replaceAll('\\', '/');
   const env = { ...process.env };
@@ -506,6 +510,8 @@ function ambientPublication(scratch, route) {
       return { GIT_CONFIG_GLOBAL: globalFile(`[core]\n\tattributesFile = ${fwd(attributes)}\n`
         + '[filter "rewrite"]\n\tclean = sed s/after/rewritten/\n') };
     },
+    // No setting: the test's runner writes a file after the review measured the candidate.
+    'a file after the review': () => ({}),
   }[route]();
   return { git, fwd, policy, elsewhere, third, worktree, markers, overrides };
 }
@@ -514,7 +520,7 @@ test('the host Git environment can neither redirect nor widen the Git/gh Adapter
   async () => {
   const refused = new Set(['pushurl through GIT_CONFIG_COUNT',
     'pushurl through GIT_CONFIG_PARAMETERS', 'a second pushurl', 'pushInsteadOf']);
-  const unfaithful = new Set(['excludesFile', 'clean filter']);
+  const unfaithful = new Set(['excludesFile', 'clean filter', 'a file after the review']);
   const routes = ['clean', 'GIT_DIR', ...refused, 'hooksPath', 'followTags', ...unfaithful];
   const observed = {};
   const expected = {};
@@ -536,6 +542,11 @@ test('the host Git environment can neither redirect nor widen the Git/gh Adapter
       // answering from the bound repository's state. Nothing reaches a network.
       const run = async (command, args, options) => {
         commands.push([command, [...args]]);
+        // A file lands after the commit step measured the candidate and before `git add`, as any
+        // process writing in the worktree between the two could.
+        if (route === 'a file after the review' && command === 'git' && subcommand(args) === 'add') {
+          writeFileSync(join(worktree, 'late.txt'), 'late\n', 'utf8');
+        }
         if (command === 'gh') {
           if (args[1] === 'list') return { stdout: '[]\n' };
           const url = 'https://github.com/GuitarAlchemist/gaia/pull/17';
@@ -600,10 +611,14 @@ test('the host Git environment can neither redirect nor widen the Git/gh Adapter
         expected[route] = { status: 'ObservationFailed', cause: 'RepositoryIdentityMismatch',
           ...unpublished, committed: [] };
       } else if (unfaithful.has(route)) {
-        // The local commit misses a reviewed file or holds other bytes: nothing leaves the clone.
+        // The local commit misses a reviewed file, holds other bytes or holds a path nobody
+        // reviewed: nothing leaves the clone.
         expected[route] = { status: 'CommitFailed', cause: 'PublishedTreeMismatch', ...unpublished,
-          committed: route === 'excludesFile'
-            ? ['candidate.txt'] : ['added.txt', 'candidate.txt'] };
+          committed: {
+            'excludesFile': ['candidate.txt'],
+            'clean filter': ['added.txt', 'candidate.txt'],
+            'a file after the review': ['added.txt', 'candidate.txt', 'late.txt'],
+          }[route] };
       } else {
         expected[route] = { status: 'completed', cause: null,
           policyRefs: [`${branch} candidate commit`, 'refs/heads/main base'], ...untouched,

@@ -643,9 +643,10 @@ account for.
 
 `applyRuleset` is an injected function parameter, and is a fake in every test. It is deliberately
 **not** a new method on `createGitGhCandidatePublicationEffects`
-(`src/git-gh-publication-effects.mjs:139`). That port is closed at exactly four methods —
-`observe`, `commit`, `push`, `openPullRequest` — and
-`tests/github-portfolio-publication.test.mjs:117` asserts its surface as a gate. Repository
+(`src/git-gh-publication-effects.mjs`). That port is closed at exactly four methods —
+`observe`, `commit`, `push`, `openPullRequest` — and the test "the Git/gh Adapter commits
+locally, leases the push, and reuses no arbitrary effect" in
+`tests/github-portfolio-publication.test.mjs` asserts that surface as a gate. Repository
 administration is a different authority from candidate publication, and merging the two into one
 port would make the gate that proves Gaia cannot merge weaker in order to make this feature
 smaller. Passing the executor its own function keeps that boundary exactly where it is.

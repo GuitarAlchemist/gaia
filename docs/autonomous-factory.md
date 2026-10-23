@@ -375,9 +375,15 @@ Constraints and invariants, each refused before any effect:
   policy is enabled and that jobs plus publications stay below `--max-runs`, then records the
   operation before the first effect; a retry re-checks the policy, not the budget, before pushing.
 
-The host's Git environment decides neither the repository nor where the push goes. Every Git call
-of the adapter runs without the repository locators the root guard drops (#224) and with
-`-c core.hooksPath=`, so no hook runs on the publishing side with the push's credentials. Both
+The host's Git environment decides neither the repository nor the URL the push names. It still
+chooses the program that carries the push: for an SSH origin, `GIT_SSH_COMMAND` or
+`core.sshCommand` can send it to another server while both views of origin name the policy
+repository, as measured for the [Git/`gh` adapter](github-portfolio-publication.md) (#258). That
+setting lies inside the trusted OS-user boundary above. Every Git call of the adapter runs
+without the repository locators the root guard drops (#224) and with `-c core.hooksPath=`, so no
+hook from a hooks directory runs on the publishing side with the push's credentials. A
+`core.fsmonitor` hook set in the environment still runs, once in `git add` and once in
+`git write-tree` on the temporary index (Git 2.45.1, measured in #258's review). Both
 views of origin, `git remote get-url --all origin` and its `--push` view, must list exactly one
 URL, the policy repository's, or the observation refuses `RepositoryIdentityMismatch` before any
 effect: a `pushurl` or `pushInsteadOf` set in the environment or a global Git file cannot send

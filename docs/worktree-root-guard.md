@@ -2,8 +2,11 @@
 
 Status: design record and Decision Receipt for issue #224 (ENG-02). Code:
 [`src/worktree-root.mjs`](../src/worktree-root.mjs), used by
-[`src/factory-agent.mjs`](../src/factory-agent.mjs) and
-[`src/resume-manifest-git.mjs`](../src/resume-manifest-git.mjs).
+[`src/factory-agent.mjs`](../src/factory-agent.mjs),
+[`src/resume-manifest-git.mjs`](../src/resume-manifest-git.mjs),
+[`src/autonomous-factory-host.mjs`](../src/autonomous-factory-host.mjs),
+[`src/git-gh-publication-effects.mjs`](../src/git-gh-publication-effects.mjs) and
+[`src/github-portfolio-execution.mjs`](../src/github-portfolio-execution.mjs).
 
 ## Mission brief
 
