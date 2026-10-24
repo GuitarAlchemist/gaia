@@ -399,14 +399,17 @@ deterministic guard; the hooks test, which makes the index racy, is.
 submodule, and the view does not pin it. `core.fsmonitor=true`, Git's built-in monitor daemon, was
 not started on the host; `core.fsmonitor=false` is the same key set to off.
 
-### What prints the patch
+## What prints the patch
 
-The change set's `patchBytes` and `patchSha256` measure `git diff --binary <head> --`. The Pi
-reviewer reads a patch again and refuses `ReviewerInputMismatch` unless it has those bytes, then
-shows it to the model. Git lets the operator's configuration replace that output. An external
-program named by `GIT_EXTERNAL_DIFF`, `diff.external` or a diff driver's `command` prints in place
-of the patch. A textconv driver rewrites both sides before Git compares them. A driver applies
-through any attributes file Git reads, the operator's `core.attributesFile` included.
+Before #269 the change set's `patchBytes` and `patchSha256` measured `git diff --binary <head> --`.
+The Pi reviewer read the same command again, refused `ReviewerInputMismatch` unless it had those
+bytes, then showed the patch to the model. Git lets the operator's configuration replace that
+output. An external program named by `GIT_EXTERNAL_DIFF`, `diff.external` or a diff driver's
+`command` prints in place of the patch. A textconv driver rewrites both sides before Git compares
+them. A driver applies through any attributes file Git reads, the operator's `core.attributesFile`
+included. Git for Windows ships one: its system `gitconfig` sets `diff.astextplain.textconv`, and
+its system `gitattributes` applies that driver to `*.pdf`, `*.doc`, `*.docx`, `*.rtf` and other
+document types.
 
 #267's R1 reviews found the route, and #269 measured it on Git 2.45.1.windows.1. `candidate.txt`
 changed from `before` to `after`, and each program was a `#!/bin/sh` script outside the repository:
