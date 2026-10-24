@@ -64,6 +64,37 @@ export function changeHidingRows(dir) {
 }
 
 /**
+ * Ambient settings under which `git diff` prints something other than Git's own patch, plus the
+ * `clean` control (#269). An external program, named by GIT_EXTERNAL_DIFF, diff.external or a diff
+ * driver's command, prints `nothing to see` in place of the patch; a textconv driver upper-cases
+ * both sides before Git compares them. The drivers apply through an attributes file outside the
+ * repository. The programs and that file are written in `dir`.
+ */
+export function patchSubstitutingRows(dir) {
+  mkdirSync(dir, { recursive: true });
+  const fwd = (path) => path.replaceAll('\\', '/');
+  const program = join(dir, 'external-diff');
+  writeFileSync(program, "#!/bin/sh\nprintf 'nothing to see\\n'\n", { mode: 0o755 });
+  const textconv = join(dir, 'textconv');
+  writeFileSync(textconv, '#!/bin/sh\ntr a-z A-Z < "$1"\n', { mode: 0o755 });
+  const attributes = join(dir, 'attributes');
+  writeFileSync(attributes, '* diff=gaia\n', 'utf8');
+  const driver = (key, value) => ({
+    GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'core.attributesFile', GIT_CONFIG_VALUE_0: fwd(attributes),
+    GIT_CONFIG_KEY_1: key, GIT_CONFIG_VALUE_1: value,
+  });
+  return {
+    clean: {},
+    GIT_EXTERNAL_DIFF: { GIT_EXTERNAL_DIFF: fwd(program) },
+    'diff.external': {
+      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'diff.external', GIT_CONFIG_VALUE_0: fwd(program),
+    },
+    'driver command': driver('diff.gaia.command', fwd(program)),
+    textconv: driver('diff.gaia.textconv', fwd(textconv)),
+  };
+}
+
+/**
  * What the factory's `git status` reported in `cwd` before #256, under #255's pin alone, with the
  * NUL separators shown as `|`. Under a `changeHidingRows` row it also stores the hook's token, and
  * the untracked list, in the index, as the factory's own entry check did.
