@@ -13,6 +13,7 @@ import {
   runClaudeWorker,
   runCodexReviewer,
 } from './factory-agent.mjs';
+import { repositoryNeutralEnvironment } from './worktree-root.mjs';
 
 export class PortfolioExecutionError extends Error {
   constructor(code, message) {
@@ -183,12 +184,15 @@ function normalizeRemoteIdentity(url) {
 
 // Measures what the checkout says it is, rather than restating what the caller expected.
 // No error raised here may contain the remote URL itself: a fetch URL routinely carries
-// a credential.
+// a credential. Git runs without the repository locators, so the worktree, not GIT_DIR,
+// decides which repository is read (#224). The fetch view is the identity: this adapter
+// pushes nothing, and both publication adapters check the push view before they push.
 function measureRepositoryIdentity(worktree) {
   let remote;
   try {
     remote = execFileSync('git', ['remote', 'get-url', 'origin'], {
       cwd: worktree, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      env: repositoryNeutralEnvironment(),
     });
   } catch {
     throw new PortfolioExecutionError(

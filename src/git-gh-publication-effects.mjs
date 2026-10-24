@@ -1,9 +1,11 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { lstatSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import { measureAgentFactoryChangeSet } from './factory-agent.mjs';
+import { repositoryNeutralEnvironment } from './worktree-root.mjs';
 
 const execFileAsync = promisify(execFile);
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u;
@@ -14,6 +16,14 @@ const REMOTE_FORMS = [
   /^(?:https?|ssh|git):\/\/(?:[^@/]*@)?github\.com(?::\d+)?\/(.+)$/u,
   /^(?:[^@/:]+@)?github\.com:(.+)$/u,
 ];
+// Neither a hook from a configured hooks directory nor the file system monitor runs on the
+// publishing side, so none adds to the commit or acts with the push's credentials. Git still looks
+// for hooks at the drive root (docs/github-portfolio-publication.md). Replace refs are off, so
+// the checks read the real objects. The submodule ignore settings still shape what the tree check
+// reads, and grafts what the push walks (#271).
+const PUBLICATION_GIT = Object.freeze([
+  '-c', 'core.hooksPath=', '-c', 'core.fsmonitor=false', '-c', 'core.useReplaceRefs=false',
+]);
 
 export class GitGhPublicationEffectsError extends Error {
   constructor(code, message) {
@@ -117,22 +127,64 @@ export function createGitGhCandidatePublicationEffects({
   const physicalWorktree = physicalDirectory(worktree);
   const base = branch(baseBranch, 'baseBranch');
   if (typeof run !== 'function') fail('InvalidAdapter', 'run must be a function');
-  const invoke = async (command, args) => run(command, args, {
+  // Without the repository locators, so the worktree decides the repository (#224).
+  const invoke = async (command, args, options = {}) => run(command, args, {
     cwd: physicalWorktree,
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
     windowsHide: true,
+    env: repositoryNeutralEnvironment(),
+    ...options,
   });
-  const git = async (...args) => String((await invoke('git', args)).stdout ?? '').trim();
+  const git = async (...args) => String(
+    (await invoke('git', [...PUBLICATION_GIT, ...args])).stdout ?? '',
+  ).trim();
   const gh = async (...args) => String((await invoke('gh', args)).stdout ?? '').trim();
+  // The host is named, so GH_HOST cannot send a call to another server.
+  const ghRepository = `github.com/${expected}`;
   const remoteRef = async (name) => {
     const ref = `refs/heads/${name}`;
     return oneRemoteOid(await git('ls-remote', '--heads', 'origin', ref), ref);
   };
+  // The push reaches the push view, after any pushurl or pushInsteadOf, and Git pushes to every
+  // URL listed: each view of origin must list one URL, the bound repository's.
   const assertRepository = async () => {
-    const observed = remoteIdentity(await git('remote', 'get-url', 'origin'));
-    if (observed === null || observed.toLowerCase() !== expected.toLowerCase()) {
-      fail('RepositoryIdentityMismatch', 'worktree origin does not match the bound repository');
+    for (const view of [['--all', 'origin'], ['--all', '--push', 'origin']]) {
+      const urls = (await git('remote', 'get-url', ...view)).split(/\r?\n/u);
+      const observed = urls.length === 1 ? remoteIdentity(urls[0]) : null;
+      if (observed === null || observed.toLowerCase() !== expected.toLowerCase()) {
+        fail('RepositoryIdentityMismatch', 'worktree origin does not match the bound repository');
+      }
+    }
+  };
+  // The commit must hold exactly the reviewed bytes, as `git diff --name-status` lists its paths:
+  // no path more or less, and every present file's blob equal to the measured file, whatever the
+  // host's Git configuration did to `add`. A gitlink a submodule ignore setting hides is not listed
+  // (#271).
+  // Its only parent, read from the raw commit, must be the reviewed HEAD, so a merge in progress
+  // adds no history; grafts can still change what the push walks (#271).
+  const assertCommittedTree = async (parentOid, commitOid, files) => {
+    const mismatch = () => fail(
+      'PublishedTreeMismatch', 'the commit does not hold the reviewed bytes',
+    );
+    const parents = (await git('cat-file', 'commit', commitOid)).split('\n\n')[0].split('\n')
+      .filter((line) => line.startsWith('parent ')).map((line) => line.slice('parent '.length));
+    if (parents.length !== 1 || parents[0] !== parentOid) mismatch();
+    const fields = (await git('diff', '--name-status', '-z', '--no-renames', parentOid, commitOid))
+      .split('\0').filter(Boolean);
+    const committed = new Map();
+    for (let index = 0; index + 1 < fields.length; index += 2) {
+      committed.set(fields[index + 1], fields[index]);
+    }
+    if (committed.size !== files.length) mismatch();
+    for (const file of files) {
+      const status = committed.get(file.path);
+      if (file.state === 'deleted' ? status !== 'D' : !['A', 'M'].includes(status)) mismatch();
+      if (file.state === 'present') {
+        const { stdout } = await invoke('git', [...PUBLICATION_GIT, 'cat-file', 'blob',
+          `${commitOid}:${file.path}`], { encoding: 'buffer', maxBuffer: 256 * 1024 * 1024 });
+        if (createHash('sha256').update(stdout).digest('hex') !== file.sha256) mismatch();
+      }
     }
   };
 
@@ -165,14 +217,16 @@ export function createGitGhCandidatePublicationEffects({
       if (oid(await git('rev-parse', 'HEAD'), 'HEAD') !== expectedHeadOid) {
         fail('CandidateStale', 'local HEAD moved before commit');
       }
-      if (measureAgentFactoryChangeSet(physicalWorktree, expectedHeadOid).identity
-          !== expectedChangeSet) {
+      const reviewed = measureAgentFactoryChangeSet(physicalWorktree, expectedHeadOid);
+      if (reviewed.identity !== expectedChangeSet) {
         fail('CandidateChanged', 'candidate bytes moved before commit');
       }
       await git('switch', '--create', publicationBranch);
       await git('add', '--all');
       await git('commit', '--message', request.message);
-      return { commitOid: oid(await git('rev-parse', 'HEAD'), 'commitOid') };
+      const commitOid = oid(await git('rev-parse', 'HEAD'), 'commitOid');
+      await assertCommittedTree(expectedHeadOid, commitOid, reviewed.files);
+      return { commitOid };
     },
 
     async push(request) {
@@ -191,9 +245,12 @@ export function createGitGhCandidatePublicationEffects({
         fail('RemoteBranchConflict', 'the deterministic publication branch already differs');
       }
       if (existing === null) {
+        // A program Git ran since `observe`, a clean filter in the measurement or in `git add`,
+        // may have rewritten origin: both views are read again just before the push.
+        await assertRepository();
         const ref = `refs/heads/${publicationBranch}`;
         await git(
-          'push', `--force-with-lease=${ref}:`, 'origin', `${commitOid}:${ref}`,
+          'push', '--no-follow-tags', `--force-with-lease=${ref}:`, 'origin', `${commitOid}:${ref}`,
         );
       }
       return { headOid: commitOid };
@@ -210,7 +267,7 @@ export function createGitGhCandidatePublicationEffects({
       text(request.body, 'body');
       sha(request.idempotencyKey, 'idempotencyKey');
       const existing = json(await gh(
-        'pr', 'list', '--repo', expected, '--state', 'all', '--head', publicationBranch,
+        'pr', 'list', '--repo', ghRepository, '--state', 'all', '--head', publicationBranch,
         '--limit', '2', '--json', 'number,url,headRefOid,baseRefName',
       ), 'gh pr list');
       if (!Array.isArray(existing) || existing.length > 1) {
@@ -228,11 +285,11 @@ export function createGitGhCandidatePublicationEffects({
         };
       }
       const url = text(await gh(
-        'pr', 'create', '--repo', expected, '--head', publicationBranch, '--base', base,
+        'pr', 'create', '--repo', ghRepository, '--head', publicationBranch, '--base', base,
         '--title', request.title, '--body', request.body,
       ), 'gh pr create URL');
       const created = json(await gh(
-        'pr', 'view', url, '--repo', expected, '--json', 'number,url,headRefOid',
+        'pr', 'view', url, '--repo', ghRepository, '--json', 'number,url,headRefOid',
       ), 'gh pr view');
       if (created.url !== url || created.headRefOid !== commitOid
           || !Number.isSafeInteger(created.number) || created.number < 1) {
