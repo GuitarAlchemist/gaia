@@ -19,7 +19,8 @@ const REMOTE_FORMS = [
 // Neither a hook from a configured hooks directory nor the file system monitor runs on the
 // publishing side, so none adds to the commit or acts with the push's credentials. Git still looks
 // for hooks at the drive root (docs/github-portfolio-publication.md). Replace refs are off, so
-// every check reads the objects the push sends.
+// the checks read the real objects; grafts and the submodule ignore settings still shape what they
+// read and what the push walks (#271).
 const PUBLICATION_GIT = Object.freeze([
   '-c', 'core.hooksPath=', '-c', 'core.fsmonitor=false', '-c', 'core.useReplaceRefs=false',
 ]);
@@ -158,7 +159,8 @@ export function createGitGhCandidatePublicationEffects({
   };
   // The commit must hold exactly the reviewed bytes: no path more or less, and every present
   // file's blob equal to the measured file, whatever the host's Git configuration did to `add`.
-  // The push sends every object the commit reaches, so its only parent must be the reviewed HEAD.
+  // Its only parent, read from the raw commit, must be the reviewed HEAD, so a merge in progress
+  // adds no history; grafts can still change what the push walks (#271).
   const assertCommittedTree = async (parentOid, commitOid, files) => {
     const mismatch = () => fail(
       'PublishedTreeMismatch', 'the commit does not hold the reviewed bytes',

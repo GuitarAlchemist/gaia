@@ -23,10 +23,10 @@ before commit, remote base, deterministic branch and both views of origin before
 exact branch and commit bindings when reusing or creating a pull request. Any provider
 diagnostic is replaced by a typed, redacted Gaia error before it crosses the module boundary.
 
-Short of the programs below, the host's environment decides neither the repository the adapter
-reads, nor the URL the push names, nor the committed bytes (#258). Every Git and `gh` call runs
-without the repository locators, so the worktree decides the repository (#224). Every Git call of
-the adapter runs with `-c core.hooksPath=`, `-c core.fsmonitor=false` and
+Short of the programs and the two routes below, the host's environment decides neither the
+repository the adapter reads, nor the URL the push names, nor the committed bytes (#258). Every Git
+and `gh` call runs without the repository locators, so the worktree decides the repository (#224).
+Every Git call of the adapter runs with `-c core.hooksPath=`, `-c core.fsmonitor=false` and
 `-c core.useReplaceRefs=false`, so neither a hook from a configured hooks directory nor the file
 system monitor runs on the publishing side or acts with the push's credentials: without the second
 pin, Git 2.45.1 runs an ambient monitor hook once in `git add --all` and once in `git commit`. Both
@@ -37,19 +37,30 @@ observation, such as a clean filter in the factory's measurement or in `git add`
 origin, and the push then refuses `RepositoryIdentityMismatch`, as `PushFailed`, before anything is
 sent. The push passes `--no-follow-tags`, and every `gh` call names
 `--repo github.com/<owner>/<name>`, so `GH_HOST` cannot send it to another server. Replace refs are
-off, so the checks below read the objects the push sends: through a replace ref, `git cat-file`
-shows the replacement while the push sends the real object (the R4 Spec review measured it). The
-local commit must have the reviewed HEAD as its only parent, read from the raw commit object, so a
-`MERGE_HEAD` left for `git commit` cannot carry other history, and it must hold exactly the reviewed
-paths, each in its reviewed state and each present file's blob equal to the measured bytes, or it
-refuses `PublishedTreeMismatch` before any push. A global `core.excludesFile`, `core.autocrlf` or
-clean filter cannot publish bytes nobody reviewed. Neither can a change to the worktree after the
-commit step measured the candidate: a new file, a deleted file that comes back, or a reviewed file
-that goes. The factory's own measurement runs no configured hook and no monitor (#256), but it runs
-clean filters: one can make such a change, which the tree check refuses, or rewrite origin, which
-the push's second reading refuses. The hooks pin leaves an empty `core.hooksPath`, and Git then
-looks for hooks at the drive root: a hook placed there still runs, and writing there lies inside the
-trusted OS-user boundary below.
+off, so the checks below read the real objects rather than their replacements: through a replace
+ref, `git cat-file` shows the replacement while the push sends the real object (the R4 Spec review
+measured it). The local commit must have the reviewed HEAD as its only parent, read from the raw
+commit object, so a `MERGE_HEAD` left for `git commit` cannot carry other history, and it must hold
+exactly the reviewed paths, each in its reviewed state and each present file's blob equal to the
+measured bytes, or it refuses `PublishedTreeMismatch` before any push. A global `core.excludesFile`,
+`core.autocrlf` or clean filter cannot publish bytes nobody reviewed. Neither can a change to the
+worktree after the commit step measured the candidate: a new file, a deleted file that comes back,
+or a reviewed file that goes; a nested repository is the exception below. The factory's own
+measurement runs no configured hook and no monitor (#256), but it runs clean filters: one can make
+such a change, which the tree check refuses, or rewrite origin, which the push's second reading
+refuses. The hooks pin leaves an empty `core.hooksPath`, and Git then looks for hooks at the drive
+root: a hook placed there still runs, and writing there lies inside the trusted OS-user boundary
+below.
+
+Two routes still publish objects nobody reviewed with a `completed` receipt; the R5 Spec review of
+#266 measured both, and #271 owns them. The tree check reads `git diff --name-status`, which obeys
+`diff.ignoreSubmodules` and `submodule.<name>.ignore`: a nested repository that lands after the
+measurement is committed as a gitlink nobody reviewed, whether the setting comes from the
+environment, the repository's own configuration or a `.gitmodules` already on the base. And
+`git push` walks history through grafts, `info/grafts` or `GIT_GRAFT_FILE`, which
+`core.useReplaceRefs=false` does not turn off: the bound repository can receive objects the
+published branch does not reach. The parent check reads the raw commit and does not see them. File
+modes are not checked either.
 
 The environment still chooses the programs Git runs to reach the remote and to sign, among them
 `GIT_SSH_COMMAND`, `GIT_SSH` and `core.sshCommand` for an SSH origin, `credential.helper` and
