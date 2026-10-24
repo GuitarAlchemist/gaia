@@ -442,26 +442,34 @@ control was run in place and the file restored:
 | `candidatePatch` in `readPatch`, back to the bare call | every row but the control, as `ReviewerInputMismatch` |
 | `candidatePatch` in the change set, back to the bare call | every row but the control |
 
-Where Git used to print something other than its own patch, the factory now measures and shows the
-real one, and the real patch meets the limits below where the substitute could pass them. Those
-hosts have an external program, or any textconv driver, the `astextplain` that Git for Windows
-ships for documents included, so they include hosts with no operator configuration at all. The
-three limits apply to any patch Git prints in full, and they predate #269 (#273 tracks typing them):
+Where Git used to print something other than its own patch, every read of it in
+`src/factory-agent.mjs` now gets the real one: the change set, which the factory loop and
+`verifyCommittedHead` both measure, and the Pi reviewer's `readPatch`. Those hosts have an external program, or any textconv driver, the
+`astextplain` that Git for Windows ships for documents included, so they include hosts with no
+operator configuration at all. Any limit that a patch Git prints in full can meet downstream now
+applies there, where the substitute passed it. Those limits predate #269, and #273 tracks them. The
+ones #272's reviews measured follow; the list is not complete:
 
-- **1 MiB, every reviewer.** `runGit` leaves `execFileSync` at Node's default `maxBuffer`, so a
-  patch above 1 MiB throws `ENOBUFS` in the measurement. On a stock Git for Windows host, #272's R1
+- **1 MiB, in the measurement.** `runGit` leaves `execFileSync` at Node's default `maxBuffer`, so a
+  patch above 1 MiB throws `ENOBUFS` wherever the change set is measured, before any reviewer and
+  in `npm run verify:head`, which then exits 2 with no receipt. On a stock Git for Windows host the
   reviews measured a PDF whose real patch is 1,849,297 bytes and a 900 KB `.docx` whose real patch
   is 1,160,992 bytes; the base measured `astextplain`'s text, 228 and 254 bytes, and went on.
-- **About 32,000 characters, the Pi reviewer on Windows.** Its prompt is one command-line argument,
-  and Windows caps a command line at 32,767 characters, so a patch of more than about 32,000
-  characters fails the launch with `ENAMETOOLONG`. On the same host, R1 Spec measured a 30 KB
-  `.docx` whose real patch is 39,457 bytes; the base measured 250 bytes and launched.
+- **The Windows command line, the Pi reviewer.** Its prompt is one command-line argument, and
+  Windows caps a command line at 32,767 characters, so a patch of more than about 32,000 characters
+  fails the launch with `ENAMETOOLONG`. On the same host the reviews measured a 30 KB `.docx` whose
+  real patch is 39,457 bytes; the base measured 250 bytes and launched.
 - **UTF-8, the Pi reviewer.** `readPatch` decodes UTF-8, so a patch that is not valid UTF-8 no
-  longer matches the measured bytes and is refused as `ReviewerInputMismatch`. #272's reviews
-  measured a Latin-1 file under an external program and under a converting textconv driver.
+  longer matches the measured bytes and is refused as `ReviewerInputMismatch`. The reviews measured
+  a Latin-1 file under an external program and under a converting textconv driver.
+- **A NUL byte, the Pi reviewer.** Git decides that a file is binary from its first 8,000 bytes, so
+  a later NUL is printed as text, and Node refuses an argument that holds one: the launch throws
+  `ERR_INVALID_ARG_VALUE`. The reviews measured it under an external program and under a textconv
+  driver that drops NULs.
 
-Within those limits, a changed document now reaches the receipt and the prompt as Git's own patch;
-R1 Spec measured a small `.docx` at 246 bytes before and 302 after.
+A patch that meets none of them reaches the change set's `patchBytes` and `patchSha256` and the
+reviewer's prompt as Git's own patch; the reviews measured a small `.docx` at 246 bytes before and
+302 after.
 
 Settings that only shape the patch's format, such as `diff.noprefix`, `diff.context` or
 `color.diff=always`, change its bytes, not the change it shows. Both reads go through the same call
