@@ -442,5 +442,27 @@ control was run in place and the file restored:
 | `candidatePatch` in `readPatch`, back to the bare call | every row but the control, as `ReviewerInputMismatch` |
 | `candidatePatch` in the change set, back to the bare call | every row but the control |
 
+Where Git used to print something other than its own patch, the factory now measures and shows the
+real one, and the real patch meets the limits below where the substitute could pass them. Those
+hosts have an external program, or any textconv driver, the `astextplain` that Git for Windows
+ships for documents included, so they include hosts with no operator configuration at all. The
+three limits apply to any patch Git prints in full, and they predate #269 (#273 tracks typing them):
+
+- **1 MiB, every reviewer.** `runGit` leaves `execFileSync` at Node's default `maxBuffer`, so a
+  patch above 1 MiB throws `ENOBUFS` in the measurement. On a stock Git for Windows host, #272's R1
+  reviews measured a PDF whose real patch is 1,849,297 bytes and a 900 KB `.docx` whose real patch
+  is 1,160,992 bytes; the base measured `astextplain`'s text, 228 and 254 bytes, and went on.
+- **About 32,000 characters, the Pi reviewer on Windows.** Its prompt is one command-line argument,
+  and Windows caps a command line at 32,767 characters, so a patch of more than about 32,000
+  characters fails the launch with `ENAMETOOLONG`. On the same host, R1 Spec measured a 30 KB
+  `.docx` whose real patch is 39,457 bytes; the base measured 250 bytes and launched.
+- **UTF-8, the Pi reviewer.** `readPatch` decodes UTF-8, so a patch that is not valid UTF-8 no
+  longer matches the measured bytes and is refused as `ReviewerInputMismatch`. #272's reviews
+  measured a Latin-1 file under an external program and under a converting textconv driver.
+
+Within those limits, a changed document now reaches the receipt and the prompt as Git's own patch;
+R1 Spec measured a small `.docx` at 246 bytes before and 302 after.
+
 Settings that only shape the patch's format, such as `diff.noprefix`, `diff.context` or
-`color.diff=always`, were not measured; both reads go through the same call and obey them alike.
+`color.diff=always`, change its bytes, not the change it shows. Both reads go through the same call
+and obey them alike; #272's R0 Spec review measured `color.diff` and `diff.noprefix`.
