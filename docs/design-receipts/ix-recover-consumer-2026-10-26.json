@@ -1,0 +1,21 @@
+{
+  "schema": "gaia-design-decision/1",
+  "date": "2026-10-26",
+  "baselineCommit": "015b1757e2a79942cf8f0ef18472322a7aea7dbf",
+  "design": {
+    "path": "docs/ix-recover-consumer-design.md",
+    "sha256": "bfaa286c52958c025085bed3d285700c0be36fec9aad702fc66cc39a4e791da0"
+  },
+  "selected": "A: retain explicit CLI consumer and IX-owned recovery",
+  "alternatives": [
+    "B: Gaia-owned durable job recovery",
+    "C: stateless statistics with caller-held receipts"
+  ],
+  "reversibility": "freely reversible; preserve IX-owned run directories",
+  "historicalGate": "NOT_MET_BEFORE_INITIAL_IMPLEMENTATION",
+  "status": "RETROSPECTIVE_RECOMMENDATION_FOR_REVIEW",
+  "implementationPredatesDecision": true,
+  "authority": "NONE",
+  "promotion": "Human acceptance of retrospective remediation remains required before merge",
+  "revision": "sha256:c5500065184c9cae309c4a65c7125d3585507a2e4d61a52fc29a354cc90afab5"
+}

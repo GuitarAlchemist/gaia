@@ -737,7 +737,9 @@ test('an ambient core.fsmonitor cannot hide a change from the Pi worker entry ch
   // core.untrackedCache a new file, passed the entry check, and the worker ran on it.
   const rows = changeHidingRows(join(scratch, 'pi-worker-fsmonitor-config'));
   const changes = {
-    edit: (cwd) => writeFileSync(join(cwd, 'candidate.txt'), 'edited\n', 'utf8'),
+    // Change size as well as bytes: equal-size writes can share Git's cached stat metadata on a
+    // fast filesystem. This test isolates the monitor's lie, not timestamp-resolution aliasing.
+    edit: (cwd) => writeFileSync(join(cwd, 'candidate.txt'), 'edited candidate\n', 'utf8'),
     stray: (cwd) => writeFileSync(join(cwd, 'stray.txt'), 'stray\n', 'utf8'),
   };
   const rawGit = {};

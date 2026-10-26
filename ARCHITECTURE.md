@@ -82,6 +82,7 @@ only in the final column and must not escape in a result or refusal.
 | Lane-attempt decisions | `decideLaneAttempt({ attempt, observation, now }) -> decision or refusal`; `replayLaneAttempt({ attempt, events, now }) -> decision or refusal` | One running attempt's deadline, heartbeat timeout, abort and completion, decided by the earliest due instant over a caller-supplied clock; a replayed event log keeps its first terminal decision at every later `now` while events land in the order of their instants, and the caller persists that decision; every non-completing end carries a compensation record that describes work and performs none; decisions the shipped lane net cannot carry are listed as `UNMAPPED` | none yet: the lane runner of issue #103 is the caller; deterministic fake-clock fixtures |
 | Control room | `render(snapshot, observed instant) -> read model` | Authority-free operator projection | static HTML/dashboard; in-memory snapshots |
 | Hybrid search | `index(corpus)`; `query(request) -> matches or refusal` | Advisory retrieval with provenance | local JavaScript engine; optional IX embedding input |
+| Recoverable statistics consumer | `runRecoverableStats(request) -> result or refusal` | Preserve run and attempt identity across publication, replay and receipt repair; consume only a successful invocation with a matching receipt and completed stages | Explicitly invoked local IX CLI adapter; provisional IX recovery store; injected process fixtures |
 | Architecture drift | `checkArchitectureDrift(inventory) -> report or refusal` | Normalized repository inventory | filesystem inventory; deterministic in-memory inventory |
 | Managed PR delivery rounds | `createInitialManagedRound(input) -> round or refusal`; `executeManagedRoundUpdate(input) -> receipt or blocker` | One evidence-bound managed-section transition with read-after-write proof | GitHub pull-request body CAS and conditional-write adapter; memory evidence and effect adapters |
 | Repair-round breaker | `decideRepairRound({ state, scope, attempt, policy }) -> decision or refusal`; `resetRepairRound({ state, receipt }) -> decision or refusal`; `runRepairRound({ store, scope, attempt, policy, effect }) -> decision, conflict or refusal`; `applyRepairRoundReset({ store, scope, receipt }) -> decision, conflict or refusal` | One record per work identity scope: the delivery-round `BUDGET_EXHAUSTED` refusal or a spent round budget trips it before the effect; a compare-and-set gives concurrent trips and resets one outcome; while the store keeps the record, only a reset receipt bound to the trip, never minted here, arms it again. Receipts are checked for binding, not authenticity, and the in-memory store keeps nothing across a restart | in-memory compare-and-set store; the delivery-round advance as the boundary; deterministic spy-effect fixtures |
@@ -374,6 +375,54 @@ Its result is `RETRIEVAL_MATCH` with `authority: NONE`. The enforced ecosystem p
 allows read-only GA and runtime-only TARS adapters, rejects Hari integration, and defers IX runtime
 coupling. Those verdicts do not widen the six bus verbs.
 
+The standalone consumer in `src/ix-recover-consumer.mjs` invokes an explicitly supplied local
+IX executable with a spec, run id, parameters and recovery directory. It is outside the bus:
+no MCP registration, bus message, scheduler or factory-pump wiring is added. The IX `DEFER`
+verdict in `docs/ecosystem-adapters.md` continues to govern bus integration and runtime
+cross-repository coordination; this optional CLI caller does not satisfy or amend that policy.
+
+IX owns run locking, binding the resolved spec/parameters and executable, committing an
+attempt, verifying file digests, and repairing or replaying its provisional store. Gaia does
+not implement a second recovery ledger. It accepts only exit zero, exactly one announcement
+for the requested run, a schema-0 receipt naming that run and announced attempt, and a
+nonempty object of completed stages with output fields. The returned summary is IX's output;
+Gaia does not independently authenticate the executable, rehash the store or verify the
+mathematics of a stage. A trusted compatible binary and a store protected from unrelated
+writers are assumptions, not conclusions from the receipt identity check.
+
+Input parameters must be plain JSON data with finite numbers and at most 64 levels of
+nesting; values that JSON would drop or coerce are refused before spawning. The process
+adapter uses no shell, limits captured output to 64 MiB, and kills the child after at most
+60 seconds (a direct adapter caller may choose a shorter deadline). It removes the four
+named model API keys and IX's debug pause variable, matching names without regard to case,
+from the inherited environment. It replaces inherited governance-directory spellings with
+the explicitly selected value; this
+is not environment isolation or a general credential scrub. A timeout or process failure
+returns no result and does not establish whether IX committed: a subsequent call must
+use the same run and inputs so IX can reconcile. Conflict, held ownership, unaudited stages
+and corruption remain refusals; the consumer never clears locks, deletes attempts or
+changes bindings. There is no automatic retry in the consumer itself.
+
+The deadline targets the direct child process. The adapter has no process-group or
+descendant-tree termination mechanism on Windows or POSIX; audited stage work must stay
+inside the owning IX process. Subprocesses of an incompatible executable, including
+inherited pipes they keep open, are outside its termination and deadline guarantees.
+
+`scripts/ix-recover-scenario.mjs` is the opt-in real-binary tracer: it requires a compatible
+debug build and a new work directory, records `journal.jsonl`, and checks initial publication,
+replay, conflict, stage refusal and process-kill recovery before and after commit. Its
+work directory is claimed by an exclusive final mkdir, so losing a concurrent claim refuses
+before writing scenario files. Interruption evidence requires the marker to name the owned
+child, an accepted termination request, and an observed exit with the requested signal;
+a failed request, normal exit or unreadable/mismatched marker is reported as unconfirmed.
+The experiment removes inherited pause spellings before setting its controlled pause.
+Its
+presence is not evidence that it ran on a given revision. Store schemas and CLI diagnostics
+are provisional; protocol changes fail closed and require adapter review. The scope is
+process-kill recovery on a filesystem supporting IX's publication primitives, with no
+Windows power-loss guarantee. Removing the consumer and scenario reverses this integration;
+existing IX run directories remain owned by IX and are preserved.
+
 ## Failure, restart, replay, reconciliation, and alerts
 
 Gaia fails closed. A lock timeout, torn or corrupt log, invalid chain, stale CAS revision,
@@ -576,6 +625,9 @@ are linked here.
 
 ## Detailed architecture references
 
+- [IX recovery consumer decision review](docs/ix-recover-consumer-design.md) - dated
+  retrospective comparison and digest-bound receipt; the missing preimplementation ENG-02
+  gate is explicitly retained as a historical process gap, not replaced by fabricated approval.
 - [Engineering and research principles](docs/engineering-and-research-principles.md) — normative
   module, authority, tracer, evidence, and redesign constraints.
 - [Canonical Draft operation envelope](docs/draft-operation-envelope.md) and
