@@ -20,6 +20,7 @@ const RUN_ID = /^[A-Za-z0-9._-]{1,128}$/u;
 const DEVICE = /^(CON|PRN|AUX|NUL|COM\d|LPT\d)$/u;
 const PARAM_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const ATTEMPT_ID = /^att-[0-9a-f]+-\d+-\d+$/u;
+const MAX_IX_TIME_MS = 60_000;
 const OUTCOMES = new Map([
   ['published', 'published'],
   ['replayed', 'replayed'],
@@ -34,6 +35,11 @@ const REFUSALS = [
 ];
 
 export function runIxRecoverInvocation(invocation) {
+  // A caller may tighten the bound, never disable or widen it.
+  const timeout = invocation.timeoutMs ?? MAX_IX_TIME_MS;
+  if (!Number.isInteger(timeout) || timeout < 1 || timeout > MAX_IX_TIME_MS) {
+    throw new IxRecoverError('REQUEST_INVALID', 'IX timeout must be 1 to 60000 milliseconds');
+  }
   const result = spawnSync(invocation.command, invocation.args, {
     cwd: invocation.cwd,
     env: invocation.env,
@@ -41,9 +47,14 @@ export function runIxRecoverInvocation(invocation) {
     windowsHide: true,
     shell: false,
     maxBuffer: 64 * 1024 * 1024,
+    timeout,
+    killSignal: 'SIGKILL',
   });
   if (result.error) {
-    throw new IxRecoverError('IX_EXECUTION_FAILED', 'IX could not start');
+    if (result.error.code === 'ETIMEDOUT') {
+      throw new IxRecoverError('IX_TIMEOUT', 'IX exceeded its process deadline; reconcile the same run before retrying');
+    }
+    throw new IxRecoverError('IX_EXECUTION_FAILED', 'IX could not complete its invocation');
   }
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
@@ -75,8 +86,12 @@ export function runRecoverableStats({
   } catch {
     throw new IxRecoverError('IX_PROTOCOL_INVALID', 'IX output was not valid JSON', 0);
   }
-  if (typeof summary?.stages !== 'object' || summary.stages === null) {
-    throw new IxRecoverError('IX_PROTOCOL_INVALID', 'IX output has no stages', 0);
+  const stages = summary?.stages;
+  if (typeof stages !== 'object' || stages === null || Array.isArray(stages)
+      || Object.keys(stages).length === 0
+      || !Object.values(stages).every((stage) => stage !== null && typeof stage === 'object'
+        && !Array.isArray(stage) && Object.hasOwn(stage, 'output'))) {
+    throw new IxRecoverError('IX_PROTOCOL_INVALID', 'IX output has no completed stages', 0);
   }
   return { runId, attemptId, outcome, summary };
 }
@@ -97,6 +112,35 @@ function validateRequest({ executable, governanceDir, specFile, runId, runsDir, 
       || !Object.keys(params).every((name) => PARAM_NAME.test(name))) {
     throw invalid('params must map identifier names to JSON values');
   }
+  try {
+    assertJsonValue(params);
+  } catch {
+    throw invalid('params must contain finite, losslessly serializable JSON values (maximum depth 64)');
+  }
+}
+
+function assertJsonValue(value, ancestors = new Set(), depth = 0) {
+  if (depth > 64) throw new Error('JSON nesting limit');
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number' && Number.isFinite(value)) return;
+  if (typeof value !== 'object' || ancestors.has(value)) throw new Error('Not a JSON value');
+  const array = Array.isArray(value);
+  if (!array && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
+    throw new Error('Not a JSON object');
+  }
+  const keys = Reflect.ownKeys(value).filter((key) => !array || key !== 'length');
+  if (array && (keys.length !== value.length || !keys.every((key, index) => key === String(index)))) {
+    throw new Error('Not a dense JSON array');
+  }
+  ancestors.add(value);
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (typeof key !== 'string' || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
+      throw new Error('Not a JSON property');
+    }
+    assertJsonValue(descriptor.value, ancestors, depth + 1);
+  }
+  ancestors.delete(value);
 }
 
 function refusal(execution) {

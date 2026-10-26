@@ -10,7 +10,7 @@ doing anything.
 | **GA** | `ADAPTER_ONLY` | `scripts/ga-watch.mjs` — read-only JSONL tailer to bus `send` with `requestedAuthority: ["report"]`. | No GA repo change. No write to any GA path, ever. |
 | **TARS** | `ADAPTER_ONLY` | `scripts/tars-mount.mjs` — a runtime `configure_mcp_server` payload plus a local, uncommitted config fragment. | No TARS repo change. Nothing written to the tracked `mcp_config.json`. |
 | **Hari** | `REJECT` | Nothing. | No integration at all. `assertIntegrationAllowed('hari')` throws. |
-| **IX** | `DEFER` | Nothing. | No integration. `assertIntegrationAllowed('ix')` throws. |
+| **IX** | `DEFER` | No bus adapter. A standalone, opt-in recovery CLI consumer is documented in `ARCHITECTURE.md`. | No bus integration or runtime coordination. `assertIntegrationAllowed('ix')` throws. |
 
 ## GA — why a tailer and nothing more
 
@@ -82,6 +82,11 @@ Two conditions must both hold before this becomes `ADAPTER_ONLY`:
    written answer to why this does not repeat the deprecated A2A protocol.
 
 Neither has happened, so `assertIntegrationAllowed('ix')` throws.
+
+The optional `runRecoverableStats` CLI caller consumes a local IX result and its run/attempt
+identity; it neither connects IX to the bus nor changes this verdict. It introduces no
+cross-repository messaging or authority. Its provisional protocol, trust assumptions and
+recovery limits are described in [the architecture map](../ARCHITECTURE.md#providers-and-offline-artifacts).
 
 ## Claude `SendMessage` is not a transport here
 

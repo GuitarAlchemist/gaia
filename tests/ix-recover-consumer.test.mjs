@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { IxRecoverError, runRecoverableStats } from '../src/ix-recover-consumer.mjs';
+import { IxRecoverError, runIxRecoverInvocation, runRecoverableStats } from '../src/ix-recover-consumer.mjs';
 
 const SUMMARY = {
   path: 'ix.yaml',
@@ -140,4 +140,60 @@ test('Gaia refuses an unsafe request before it starts IX', () => {
       (error) => error instanceof IxRecoverError && error.code === 'REQUEST_INVALID',
     );
   }
+});
+
+test('Gaia refuses parameter values that JSON would change or cannot represent', () => {
+  const runsDir = store('gaia-stats-a', 'att-1a2b-42-0');
+  const cycle = {};
+  cycle.self = cycle;
+  const values = [NaN, Infinity, -Infinity, undefined, 1n, () => 1, Symbol('value'),
+    [1, undefined], { nested: NaN }, cycle, new Date(0), Array(1),
+    { toJSON: () => null }, { [Symbol('hidden')]: 1 },
+    Object.defineProperty({}, 'n', { enumerable: true, get: () => assert.fail('no getters') })];
+  for (const value of values) {
+    let started = false;
+    assert.throws(() => runRecoverableStats(request(runsDir, { params: { nums: value } }), {
+      env: {},
+      runInvocation: () => {
+        started = true;
+        return { status: 0, stderr: 'run gaia-stats-a: published attempt att-1a2b-42-0',
+          stdout: JSON.stringify(SUMMARY) };
+      },
+    }), (error) => error instanceof IxRecoverError && error.code === 'REQUEST_INVALID');
+    assert.equal(started, false);
+  }
+  const valid = { nums: [1.5, null, true, 'x', { nested: false }] };
+  runRecoverableStats(request(runsDir, { params: valid }), {
+    env: {}, runInvocation: (invocation) => {
+      assert.equal(invocation.args.at(-1), `nums=${JSON.stringify(valid.nums)}`);
+      return ix(0, 'run gaia-stats-a: published attempt att-1a2b-42-0', JSON.stringify(SUMMARY))();
+    },
+  });
+});
+
+test('Gaia refuses an empty or malformed collection of completed stages', () => {
+  const runsDir = store('gaia-stats-a', 'att-1a2b-42-0');
+  for (const stages of [[], {}, null, ['s'], { s: null }, { s: {} }]) {
+    assert.throws(() => runRecoverableStats(request(runsDir), {
+      env: {}, runInvocation: ix(0, 'run gaia-stats-a: published attempt att-1a2b-42-0',
+        JSON.stringify({ ...SUMMARY, stages })),
+    }), (error) => error instanceof IxRecoverError && error.code === 'IX_PROTOCOL_INVALID');
+  }
+});
+
+test('the IX process adapter bounds a stalled child and consumes no partial output', () => {
+  for (const timeoutMs of [0, -1, 60_001, Infinity, '1000']) {
+    assert.throws(() => runIxRecoverInvocation({ timeoutMs }),
+      (error) => error instanceof IxRecoverError && error.code === 'REQUEST_INVALID');
+  }
+  assert.throws(() => runIxRecoverInvocation({
+    command: process.execPath,
+    args: ['-e', 'process.stdout.write("partial"); setTimeout(() => {}, 5000)'],
+    cwd: tmpdir(), env: process.env, timeoutMs: 1000,
+  }), (error) => error instanceof IxRecoverError && error.code === 'IX_TIMEOUT'
+    && error.ixExit === null);
+  const result = runIxRecoverInvocation({ command: process.execPath, args: ['-e', 'console.log("done")'],
+    cwd: tmpdir(), env: process.env });
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout.trim(), 'done');
 });
