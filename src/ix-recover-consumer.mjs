@@ -122,7 +122,7 @@ function validateRequest({ executable, governanceDir, specFile, runId, runsDir, 
 function assertJsonValue(value, ancestors = new Set(), depth = 0) {
   if (depth > 64) throw new Error('JSON nesting limit');
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
-  if (typeof value === 'number' && Number.isFinite(value)) return;
+  if (typeof value === 'number' && Number.isFinite(value) && !Object.is(value, -0)) return;
   if (typeof value !== 'object' || ancestors.has(value)) throw new Error('Not a JSON value');
   const array = Array.isArray(value);
   const prototype = Object.getPrototypeOf(value);

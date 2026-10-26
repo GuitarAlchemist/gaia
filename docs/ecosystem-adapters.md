@@ -2,7 +2,7 @@
 
 These verdicts come from the read-only ecosystem adapter analysis (2026-08-09). They
 are enforced in `src/ecosystem.mjs`, not merely documented: `assertIntegrationAllowed`
-throws for the rejected and deferred targets, and the shipped scripts call it before
+throws for the rejected and deferred targets, and the shipped bus-adapter scripts call it before
 doing anything.
 
 | Repo | Verdict | What ships | What does not |
