@@ -374,7 +374,7 @@ export async function runCodexReviewer(context, options) {
 export async function runPiReviewer(context, {
   timeoutMs,
   runInvocation = runBoundedInvocation,
-  readPatch = ({ cwd, baseHead }) => git(cwd, ['diff', '--binary', baseHead, '--']),
+  readPatch = ({ cwd, baseHead }) => candidatePatch(cwd, baseHead),
 } = {}) {
   if (!Number.isSafeInteger(context.changeSet.patchBytes)
       || context.changeSet.patchBytes < 0
@@ -727,9 +727,17 @@ function changedPaths(worktree, head) {
   return [...new Set([...tracked, ...untracked])].sort();
 }
 
+// The patch is Git's own, whatever the operator's environment says: no external program, from
+// GIT_EXTERNAL_DIFF, diff.external or a diff driver's command, prints in its place, and no textconv
+// driver rewrites either side first. The change set measures it and the Pi reviewer reads it
+// through this one call, so the two cannot disagree on what a patch is (#269).
+function candidatePatch(worktree, head, encoding = 'utf8') {
+  return git(worktree, ['diff', '--binary', '--no-ext-diff', '--no-textconv', head, '--'], encoding);
+}
+
 function changeSet(worktree, head) {
   const statusBytes = worktreeStatus(worktree);
-  const patchBytes = git(worktree, ['diff', '--binary', head, '--'], null);
+  const patchBytes = candidatePatch(worktree, head, null);
   const files = changedPaths(worktree, head).map((path) => {
     const absolute = resolve(worktree, ...path.split('/'));
     assertInside(worktree, absolute);
