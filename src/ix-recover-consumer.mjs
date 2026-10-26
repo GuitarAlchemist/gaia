@@ -125,7 +125,8 @@ function assertJsonValue(value, ancestors = new Set(), depth = 0) {
   if (typeof value === 'number' && Number.isFinite(value)) return;
   if (typeof value !== 'object' || ancestors.has(value)) throw new Error('Not a JSON value');
   const array = Array.isArray(value);
-  if (!array && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
+  const prototype = Object.getPrototypeOf(value);
+  if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
     throw new Error('Not a JSON object');
   }
   const keys = Reflect.ownKeys(value).filter((key) => !array || key !== 'length');

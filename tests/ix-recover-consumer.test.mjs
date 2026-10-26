@@ -143,12 +143,14 @@ test('Gaia refuses an unsafe request before it starts IX', () => {
 });
 
 test('Gaia refuses parameter values that JSON would change or cannot represent', () => {
+  class ChangedArray extends Array { toJSON() { return [999]; } }
   const runsDir = store('gaia-stats-a', 'att-1a2b-42-0');
   const cycle = {};
   cycle.self = cycle;
   const values = [NaN, Infinity, -Infinity, undefined, 1n, () => 1, Symbol('value'),
     [1, undefined], { nested: NaN }, cycle, new Date(0), Array(1),
-    { toJSON: () => null }, { [Symbol('hidden')]: 1 },
+    { toJSON: () => null }, { [Symbol('hidden')]: 1 }, new ChangedArray(1, 2, 3),
+    Object.setPrototypeOf([1, 2, 3], { toJSON() { return [999]; } }),
     Object.defineProperty({}, 'n', { enumerable: true, get: () => assert.fail('no getters') })];
   for (const value of values) {
     let started = false;
