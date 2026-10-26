@@ -394,7 +394,9 @@ Input parameters must be plain JSON data with finite numbers and at most 64 leve
 nesting; values that JSON would drop or coerce are refused before spawning. The process
 adapter uses no shell, limits captured output to 64 MiB, and kills the child after at most
 60 seconds (a direct adapter caller may choose a shorter deadline). It removes the four
-named model API keys and IX's debug pause variable from the inherited environment; this
+named model API keys and IX's debug pause variable, matching names without regard to case,
+from the inherited environment. It replaces inherited governance-directory spellings with
+the explicitly selected value; this
 is not environment isolation or a general credential scrub. A timeout or process failure
 returns no result and does not establish whether IX committed: a subsequent call must
 use the same run and inputs so IX can reconcile. Conflict, held ownership, unaudited stages
@@ -409,6 +411,12 @@ inherited pipes they keep open, are outside its termination and deadline guarant
 `scripts/ix-recover-scenario.mjs` is the opt-in real-binary tracer: it requires a compatible
 debug build and a new work directory, records `journal.jsonl`, and checks initial publication,
 replay, conflict, stage refusal and process-kill recovery before and after commit. Its
+work directory is claimed by an exclusive final mkdir, so losing a concurrent claim refuses
+before writing scenario files. Interruption evidence requires the marker to name the owned
+child, an accepted termination request, and an observed exit with the requested signal;
+a failed request, normal exit or unreadable/mismatched marker is reported as unconfirmed.
+The experiment removes inherited pause spellings before setting its controlled pause.
+Its
 presence is not evidence that it ran on a given revision. Store schemas and CLI diagnostics
 are provisional; protocol changes fail closed and require adapter review. The scope is
 process-kill recovery on a filesystem supporting IX's publication primitives, with no
@@ -617,6 +625,9 @@ are linked here.
 
 ## Detailed architecture references
 
+- [IX recovery consumer decision review](docs/ix-recover-consumer-design.md) - dated
+  retrospective comparison and digest-bound receipt; the missing preimplementation ENG-02
+  gate is explicitly retained as a historical process gap, not replaced by fabricated approval.
 - [Engineering and research principles](docs/engineering-and-research-principles.md) — normative
   module, authority, tracer, evidence, and redesign constraints.
 - [Canonical Draft operation envelope](docs/draft-operation-envelope.md) and

@@ -66,12 +66,17 @@ export function runRecoverableStats({
   runInvocation = runIxRecoverInvocation,
 } = {}) {
   validateRequest({ executable, governanceDir, specFile, runId, runsDir, params });
-  const invocationEnv = { ...env, IX_GOVERNANCE_DIR: governanceDir };
-  for (const key of [
+  const invocationEnv = { ...env };
+  const omitted = new Set([
     'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY',
     // A debug IX stops at a publish point when this is set: only a kill test sets it.
     'IX_RECOVER_PAUSE',
-  ]) delete invocationEnv[key];
+    'IX_GOVERNANCE_DIR',
+  ]);
+  for (const key of Object.keys(invocationEnv)) {
+    if (omitted.has(key.toUpperCase())) delete invocationEnv[key];
+  }
+  invocationEnv.IX_GOVERNANCE_DIR = governanceDir;
   const args = [
     '--format', 'json', 'pipeline', 'run', '--file', specFile, '--run-id', runId, '--runs-dir', runsDir,
   ];

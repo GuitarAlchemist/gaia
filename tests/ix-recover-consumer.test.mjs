@@ -46,7 +46,10 @@ test('Gaia consumes a published stats run with its run and attempt identity', ()
   const runsDir = store('gaia-stats-a', 'att-1a2b-42-0');
   let observed;
   const result = runRecoverableStats(request(runsDir), {
-    env: { OPENAI_API_KEY: 'must-not-pass', IX_RECOVER_PAUSE: 'committed|m|60', PATH: 'p' },
+    env: { OPENAI_API_KEY: 'must-not-pass', IX_RECOVER_PAUSE: 'committed|m|60', PATH: 'p',
+      OpenAi_Api_Key: 'must-not-pass', anthropic_api_key: 'must-not-pass',
+      Gemini_Api_Key: 'must-not-pass', google_api_key: 'must-not-pass',
+      Ix_Recover_Pause: 'must-not-pass' },
     runInvocation: (invocation) => {
       observed = invocation;
       return {
@@ -64,6 +67,10 @@ test('Gaia consumes a published stats run with its run and attempt identity', ()
   ]);
   assert.equal(observed.env.OPENAI_API_KEY, undefined);
   assert.equal(observed.env.IX_RECOVER_PAUSE, undefined);
+  for (const key of Object.keys(observed.env)) {
+    assert.ok(!['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY',
+      'IX_RECOVER_PAUSE'].includes(key.toUpperCase()), `filtered environment key: ${key}`);
+  }
   assert.equal(observed.env.IX_GOVERNANCE_DIR, 'C:\\ix\\governance\\demerzel');
   assert.equal(observed.env.PATH, 'p');
   assert.deepEqual(result, {

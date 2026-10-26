@@ -11,7 +11,7 @@
 
 import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { resolve, join, dirname } from 'node:path';
 import { isDeepStrictEqual, parseArgs } from 'node:util';
 
 import { IxRecoverError, runRecoverableStats } from '../src/ix-recover-consumer.mjs';
@@ -38,7 +38,7 @@ stages:
 `;
 
 const { values } = parseArgs({ options: { ix: { type: 'string' }, governance: { type: 'string' }, work: { type: 'string' } } });
-if (!values.ix || !values.governance || !values.work || existsSync(values.work)) {
+if (!values.ix || !values.governance || !values.work) {
   console.error('usage: ix-recover-scenario.mjs --ix <exe> --governance <dir> --work <new dir>');
   process.exit(2);
 }
@@ -49,7 +49,13 @@ const runsDir = join(work, 'runs');
 const statsSpec = join(work, 'ix.yaml');
 const unauditedSpec = join(work, 'ix-unaudited.yaml');
 const journal = join(work, 'journal.jsonl');
-mkdirSync(work, { recursive: true });
+try {
+  mkdirSync(dirname(work), { recursive: true });
+  mkdirSync(work);
+} catch (error) {
+  console.error(`cannot claim a new work directory: ${error.code ?? 'unknown'}`);
+  process.exit(2);
+}
 writeFileSync(statsSpec, STATS_SPEC);
 writeFileSync(unauditedSpec, UNAUDITED_SPEC);
 
@@ -82,8 +88,12 @@ function consume(step, runId, params, specFile = statsSpec) {
 // The interruption: IX started as Gaia would start it, stopped at a publish point, then killed.
 async function interrupt(step, runId, params, point) {
   const marker = join(work, `${runId}.${point}.reached`);
-  const env = { ...process.env, IX_GOVERNANCE_DIR: governanceDir, IX_RECOVER_PAUSE: `${point}|${marker}|60` };
-  for (const key of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY']) delete env[key];
+  const env = { ...process.env };
+  const omitted = new Set(['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY',
+    'IX_RECOVER_PAUSE', 'IX_GOVERNANCE_DIR']);
+  for (const key of Object.keys(env)) if (omitted.has(key.toUpperCase())) delete env[key];
+  env.IX_GOVERNANCE_DIR = governanceDir;
+  env.IX_RECOVER_PAUSE = `${point}|${marker}|60`;
   const child = spawn(ix, [
     '--format', 'json', 'pipeline', 'run', '--file', statsSpec, '--run-id', runId, '--runs-dir', runsDir,
     ...Object.entries(params).flatMap(([name, value]) => ['--param', `${name}=${JSON.stringify(value)}`]),
@@ -93,20 +103,37 @@ async function interrupt(step, runId, params, point) {
     stdio: 'ignore',
     windowsHide: true,
   });
-  const exited = new Promise((done) => child.on('exit', (code, signal) => done({ code, signal })));
+  let terminal = null;
+  const exited = new Promise((done) => {
+    child.once('exit', (code, signal) => { terminal = { code, signal }; done(terminal); });
+    child.once('error', (error) => { terminal = { error: error.code ?? 'unknown' }; done(terminal); });
+  });
   const deadline = Date.now() + 60_000;
   while (!existsSync(marker)) {
-    if (child.exitCode !== null || Date.now() > deadline) {
-      child.kill();
-      log({ step, runId, stop: 'never reached', point, ixExit: child.exitCode });
+    if (terminal || child.exitCode !== null || child.signalCode !== null || Date.now() > deadline) {
+      let killRequested = false;
+      if (!terminal) { try { killRequested = child.kill('SIGTERM'); } catch { /* no interruption claim */ } }
+      const ended = terminal ?? await exited;
+      log({ step, runId, stop: 'never reached', point, killRequested, ixExit: ended.code ?? null,
+        signal: ended.signal ?? null, error: ended.error ?? null });
       return false;
     }
     await new Promise((wait) => setTimeout(wait, 50));
   }
-  child.kill();
-  const { code, signal } = await exited;
-  log({ step, runId, stop: 'killed', point, pid: Number(readFileSync(marker, 'utf8')), ixExit: code, signal });
-  return true;
+  let markerPid = null;
+  let markerError = null;
+  try { markerPid = Number(readFileSync(marker, 'utf8')); }
+  catch (error) { markerError = error.code ?? 'unknown'; }
+  const wasRunning = !terminal && child.exitCode === null && child.signalCode === null;
+  let killRequested = false;
+  if (wasRunning) { try { killRequested = child.kill('SIGTERM'); } catch { /* no interruption claim */ } }
+  const ended = terminal ?? await exited;
+  const killed = wasRunning && markerPid === child.pid && killRequested
+    && ended.code === null && ended.signal === 'SIGTERM' && !ended.error;
+  log({ step, runId, stop: killed ? 'killed' : 'unconfirmed', point, pid: markerPid, childPid: child.pid,
+    markerError,
+    killRequested, ixExit: ended.code ?? null, signal: ended.signal ?? null, error: ended.error ?? null });
+  return killed;
 }
 
 const first = consume('A1 first run', 'gaia-stats-a', { nums: [1, 2, 3, 4] });
