@@ -398,3 +398,79 @@ deterministic guard; the hooks test, which makes the index racy, is.
 `diff.ignoreSubmodules=all` hides a changed gitlink from `git status` and `git diff`. Gaia has no
 submodule, and the view does not pin it. `core.fsmonitor=true`, Git's built-in monitor daemon, was
 not started on the host; `core.fsmonitor=false` is the same key set to off.
+
+## What prints the patch
+
+Before #269 the change set's `patchBytes` and `patchSha256` measured `git diff --binary <head> --`.
+The Pi reviewer read the same command again, refused `ReviewerInputMismatch` unless it had those
+bytes, then showed the patch to the model. Git lets the operator's configuration replace that
+output. An external program named by `GIT_EXTERNAL_DIFF`, `diff.external` or a diff driver's
+`command` prints in place of the patch. A textconv driver rewrites both sides before Git compares
+them. A driver applies through any attributes file Git reads, the operator's `core.attributesFile`
+included. Git for Windows ships one: its system `gitconfig` sets `diff.astextplain.textconv`, and
+its system `gitattributes` applies that driver to `*.pdf`, `*.doc`, `*.docx`, `*.rtf` and other
+document types.
+
+#267's R1 reviews found the route, and #269 measured it on Git 2.45.1.windows.1. `candidate.txt`
+changed from `before` to `after`, and each program was a `#!/bin/sh` script outside the repository:
+
+| route | the change set before #269 |
+|---|---|
+| clean control | `patchBytes: 140`, Git's patch |
+| `GIT_EXTERNAL_DIFF`; `diff.external`; a driver's `command` through `core.attributesFile` | `patchBytes: 15`, the program's `nothing to see` |
+| a textconv driver that upper-cases, through `core.attributesFile` | `patchBytes: 141` |
+
+The reviewer read under the same environment, so its check agreed with the measurement, and the
+model judged a patch other than the change the publisher sends. The file list and the status bytes
+stayed right.
+
+`candidatePatch` in `src/factory-agent.mjs` is now the one read. It passes `--no-ext-diff` and
+`--no-textconv`, and the change set and the Pi reviewer's default `readPatch` both call it. These
+are flags rather than a pin in the view because `GIT_EXTERNAL_DIFF` outranks `diff.external`, so no
+configuration value turns it off, and no single key turns off every textconv driver. Nothing
+applies the patch `readPatch` returns; it is the reviewer's input only.
+
+The test "an ambient external diff or textconv driver cannot change the patch the reviewer reads"
+pins this over `patchSubstitutingRows` in `tests/helpers/ambient-git.mjs`. Each row except the
+clean control first shows that an unpinned `git diff` prints another patch. Each mechanism-revert
+control was run in place and the file restored:
+
+| removed | fails |
+|---|---|
+| `--no-ext-diff` | the three external-program rows |
+| `--no-textconv` | the textconv row |
+| `candidatePatch` in `readPatch`, back to the bare call | every row but the control, as `ReviewerInputMismatch` |
+| `candidatePatch` in the change set, back to the bare call | every row but the control |
+
+Where Git used to print something other than its own patch, every read of it in
+`src/factory-agent.mjs` now gets the real one: the change set, which the factory loop and
+`verifyCommittedHead` both measure, and the Pi reviewer's `readPatch`. Those hosts have an external program, or any textconv driver, the
+`astextplain` that Git for Windows ships for documents included, so they include hosts with no
+operator configuration at all. Any limit that a patch Git prints in full can meet downstream now
+applies there, where the substitute passed it. Those limits predate #269, and #273 tracks them. The
+ones #272's reviews measured follow; the list is not complete:
+
+- **1 MiB, in the measurement.** `runGit` leaves `execFileSync` at Node's default `maxBuffer`, so a
+  patch above 1 MiB throws `ENOBUFS` wherever the change set is measured, before any reviewer and
+  in `npm run verify:head`, which then exits 2 with no receipt. On a stock Git for Windows host the
+  reviews measured a PDF whose real patch is 1,849,297 bytes and a 900 KB `.docx` whose real patch
+  is 1,160,992 bytes; the base measured `astextplain`'s text, 228 and 254 bytes, and went on.
+- **The Windows command line, the Pi reviewer.** Its prompt is one command-line argument, and
+  Windows caps a command line at 32,767 characters, so a patch of more than about 32,000 characters
+  fails the launch with `ENAMETOOLONG`. On the same host the reviews measured a 30 KB `.docx` whose
+  real patch is 39,457 bytes; the base measured 250 bytes and launched.
+- **UTF-8, the Pi reviewer.** `readPatch` decodes UTF-8, so a patch that is not valid UTF-8 no
+  longer matches the measured bytes and is refused as `ReviewerInputMismatch`. The reviews measured
+  a Latin-1 file under an external program and under a converting textconv driver.
+- **A NUL byte, the Pi reviewer.** Git decides that a file is binary from its first 8,000 bytes, so
+  a later NUL is printed as text, and Node refuses an argument that holds one: the launch throws
+  `ERR_INVALID_ARG_VALUE`. The reviews measured it under an external program and under a textconv
+  driver that drops NULs.
+
+A patch that meets none of them reaches the change set's `patchBytes` and `patchSha256` and the
+reviewer's prompt as Git's own patch; the reviews measured a small `.docx` at 246 bytes before and
+302 after.
+
+Settings that only shape the patch's format, such as `diff.noprefix`, `diff.context` or
+`color.diff=always`, change its bytes, not the change it shows. Both reads go through the same call
+and obey them alike; #272's R0 Spec review measured `color.diff` and `diff.noprefix`.

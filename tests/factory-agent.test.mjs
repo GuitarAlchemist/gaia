@@ -22,8 +22,8 @@ import {
   runPiReviewer,
 } from '../src/factory-agent.mjs';
 import {
-  changeHidingRows, holdTimestamp, pre256Status, primeThenChange, rawStatus, untrackedHidingRows,
-  withEnvironment,
+  changeHidingRows, holdTimestamp, patchSubstitutingRows, pre256Status, primeThenChange, rawStatus,
+  untrackedHidingRows, withEnvironment,
 } from './helpers/ambient-git.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'gaia-factory-agent-'));
@@ -848,6 +848,62 @@ test('no hook from the operator\'s configuration runs during the factory\'s read
   assert.deepEqual({ factory, unpinned: ran() }, {
     factory: [], unpinned: ['fsmonitor-ran', 'post-index-change-ran'],
   });
+});
+
+test('an ambient external diff or textconv driver cannot change the patch the reviewer reads', async () => {
+  // Before #269 the change set measured whatever `git diff` printed and the Pi reviewer read it
+  // under the same environment, so the check that the two agree passed, and the reviewer judged
+  // bytes other than the change the publisher sends.
+  const rows = patchSubstitutingRows(join(scratch, 'patch-substituting-config'));
+  const { worktree } = fixture('patch-substituting');
+  const head = git(worktree, 'rev-parse', 'HEAD');
+  writeFileSync(join(worktree, 'candidate.txt'), 'after\n', 'utf8');
+
+  const unpinned = {};
+  const measured = {};
+  const reviewed = {};
+  for (const [row, overrides] of Object.entries(rows)) {
+    await withEnvironment(overrides, async () => {
+      unpinned[row] = execFileSync('git', ['diff', '--binary', head, '--'], {
+        cwd: worktree, encoding: 'utf8', windowsHide: true,
+      });
+      const changeSet = measureAgentFactoryChangeSet(worktree, head);
+      measured[row] = { patchBytes: changeSet.patchBytes, patchSha256: changeSet.patchSha256 };
+      let prompt = null;
+      const outcome = await runPiReviewer({
+        cwd: worktree, task: 'change candidate.txt', baseHead: head, changeSet,
+        env: { PATH: 'fixture-path', USERPROFILE: 'C:\\Users\\fixture' },
+      }, {
+        runInvocation: async (invocation) => {
+          if (invocation.args[0] === 'auth') {
+            return {
+              code: 0, signal: null, stderr: '',
+              stdout: '{"status":"ready","provider":"openai-codex","authType":"oauth"}\n',
+            };
+          }
+          prompt = invocation.args.at(-1);
+          return { code: 0, signal: null, stderr: '', stdout: 'VERDICT: APPROVE\n' };
+        },
+      }).then(
+        ({ verdict }) => verdict,
+        (error) => (error instanceof FactoryAgentError ? error.code : String(error)),
+      );
+      reviewed[row] = { outcome, real: prompt?.includes(unpinned.clean) ?? false };
+    });
+  }
+
+  // Non-vacuity: under every row but the control, an unpinned `git diff` prints another patch.
+  const kind = (row, real) => [row, real ? 'real' : 'substituted'];
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(unpinned).map(([row, patch]) => kind(row, patch === unpinned.clean))),
+    Object.fromEntries(Object.keys(rows).map((row) => kind(row, row === 'clean'))),
+  );
+  assert.match(unpinned.clean, /^\+after$/mu);
+  assert.equal(measured.clean.patchSha256, createHash('sha256').update(unpinned.clean).digest('hex'));
+  assert.deepEqual(measured, Object.fromEntries(Object.keys(rows).map((row) => [row, measured.clean])));
+  assert.deepEqual(reviewed, Object.fromEntries(Object.keys(rows).map((row) => [
+    row, { outcome: 'APPROVE', real: true },
+  ])));
 });
 
 test('Pi worker refuses an NTFS alternate-data-stream path before authentication', async () => {
