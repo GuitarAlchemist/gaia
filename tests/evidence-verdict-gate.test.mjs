@@ -79,6 +79,9 @@ const DETERMINISTIC_SITES = {
   // finding raised when an issue carries two exclusive status labels.
   'src/epistemic-research.mjs': ['contradiction'],
   'src/issue-consistency.mjs': ['contradictory'],
+  // Caller-declared tri-state assessments, validated and projected by a pure
+  // shadow rule. No model verdict, artifact judge or execution port is present.
+  'src/work-qualification.mjs': ['contradicted'],
   // Two observations of one lane artifact disagree: a completion verified earlier in the
   // generation is no longer found, readable, or matching its digest. Refused, not judged.
   'src/local-lane-observation.mjs': ['COMPLETION_EVIDENCE_CONTRADICTED'],

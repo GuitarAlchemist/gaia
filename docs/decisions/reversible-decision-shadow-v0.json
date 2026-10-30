@@ -1,0 +1,50 @@
+{
+  "schema": "GaiaDesignDecisionReceiptV0",
+  "recordedAtUtc": "2026-10-30T22:46:50.422Z",
+  "source": {
+    "ref": "repo:GuitarAlchemist/gaia",
+    "version": "3be8bffcf61ee8c1920b2cf2f8f13923d8c535e3"
+  },
+  "policy": {
+    "ref": "operator:pm-shadow-mandate",
+    "version": "2026-10-30",
+    "delegation": "reversible technical research only; no dispatch or protected effects"
+  },
+  "evidence": [
+    {
+      "ref": "docs/reversible-decision-shadow.md",
+      "version": "afd3f51fe0e5f9949f09f2632a4873c9ca3e7972d66fbbf93354c6213ee49f18"
+    },
+    {
+      "ref": "src/work-qualification.mjs",
+      "version": "e688bcf505ee7b4d60a27ebc058963a6047dc81e1e0bceb7ce5aaaf62b441376"
+    }
+  ],
+  "alternatives": [
+    {
+      "id": "A",
+      "choice": "selector with worker effects",
+      "rejectedBecause": "effect capability before evidence binding"
+    },
+    {
+      "id": "B",
+      "choice": "pure selector and exact re-verification",
+      "selectedBecause": "bounded reversible shadow seam with no effects"
+    }
+  ],
+  "selected": "B",
+  "uncertainty": "caller facts and stateless counters are not independently verified or global leases",
+  "test": "falsify stale receipt, expanded scope, protected acceptance, changed candidate and conflicting owner",
+  "rollback": "remove new pure resolver files/fixtures; restore CLI and test count",
+  "parameters": {
+    "maxCandidates": 8,
+    "maxIterations": 3,
+    "maxAttempts": 2,
+    "modelCalls": 0,
+    "externalEffects": 0,
+    "selection": "least-scope-size-then-id"
+  },
+  "outcome": "IMPLEMENTATION_NOT_YET_STARTED",
+  "priorQualificationReceiptBackdated": false,
+  "digest": "fdf0e91ca242ed42c66fd8a24a993448bcd05c91e7b5890d34a3c9bb7e80c4d4"
+}
