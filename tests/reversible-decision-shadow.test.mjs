@@ -35,6 +35,23 @@ test('bounded selector binds immutable evidence, policy, action and alternatives
   assert.equal(receipt.selected.parameters.leaseMs, 30000); assert.ok(Object.isFrozen(receipt.selected.parameters));
 });
 
+test('a decision policy must match the qualification context repository, not the researched issue repository', () => {
+  const mismatch = request(); mismatch.policy.repository = 'OtherOrganization/other-repository';
+  assert.throws(() => proposeReversibleDecision(mismatch), /REPOSITORY_MISMATCH/);
+  for (const ref of ['repo:OtherOrganization/other-repository', 'unknown-context',
+    'https://github.com/GuitarAlchemist/gaia', 'repo:GuitarAlchemist/gaia/extra']) {
+    const input = request(), snapshot = structuredClone(input.qualification.snapshot);
+    snapshot.context.ref = ref;
+    input.qualification = qualifyWork({ ...snapshot, expectedVersions: undefined });
+    assert.throws(() => proposeReversibleDecision(input), /REPOSITORY_MISMATCH/, ref);
+  }
+  const matched = request(); matched.policy.repository = 'guitaralchemist/GAIA';
+  const receipt = proposeReversibleDecision(matched);
+  assert.equal(receipt.policy.repository, 'guitaralchemist/GAIA');
+  assert.equal(receipt.qualification.snapshot.issue.ref, 'https://github.com/GuitarAlchemist/ix/issues/482');
+  assert.equal(receipt.dispatchAuthorized, false);
+});
+
 test('a stale evidence or policy generation invalidates the receipt', () => {
   const input = request(), receipt = proposeReversibleDecision(input);
   input.policy.version = 'mandate-2';
@@ -76,6 +93,51 @@ test('changed candidate parameters or altered receipt cannot validate against th
   assert.throws(() => verifyReversibleDecision(changed, request()), /STALE_RECEIPT/);
   const arrays = request(); arrays.candidates.forEach(c => { c.id = ['duplicate-id']; });
   assert.throws(() => proposeReversibleDecision(arrays), /INVALID_CANDIDATE/);
+});
+
+test('signed zero in scalar, nested or array action parameters is refused instead of sharing the zero digest', async () => {
+  for (const parameters of [{ offset: -0 }, { nested: { offset: -0 } }, { offsets: [-0] }]) {
+    const input = request(); input.candidates[1].parameters = parameters;
+    assert.throws(() => proposeReversibleDecision(input), /INVALID_PARAMETERS/);
+  }
+  const zero = request(); zero.candidates[1].parameters = { offset: 0 };
+  assert.equal(proposeReversibleDecision(zero).selected.parameters.offset, 0);
+  const raw = JSON.stringify([zero]).replace('"offset":0', '"offset":-0');
+  assert.ok(raw.includes('"offset":-0'));
+  assert.equal(await main({ argv: ['--decisions', 'local.json'], read: async () => raw,
+    stdout: { write: () => {} }, stderr: { write: () => {} } }), 3);
+});
+
+test('signed zero cannot enter iteration, attempt or zero-effect policy counters', () => {
+  for (const mutate of [r => { r.iteration = -0; }, r => { r.attempt = -0; },
+    r => { r.policy.modelCalls = -0; }, r => { r.policy.externalEffects = -0; }]) {
+    const input = request(); mutate(input);
+    assert.throws(() => proposeReversibleDecision(input), /BOUNDS|POLICY/);
+  }
+  const zero = request(); zero.iteration = 0; zero.attempt = 0;
+  assert.equal(proposeReversibleDecision(zero).outcome, 'NOT_EXECUTED');
+});
+
+test('verification rejects signed-zero receipt tampering even when canonical JSON and digest are unchanged', () => {
+  const input = request(); input.candidates[1].parameters = { offset: 0, offsets: [0] };
+  const snapshot = structuredClone(input.qualification.snapshot);
+  snapshot.priority = { actor: 'human', rank: 0, evidence: [{ ref: 'operator:bounded-research', version: 'mandate-1' }] };
+  input.qualification = qualifyWork({ ...snapshot, expectedVersions: undefined });
+  const receipt = proposeReversibleDecision(input), accepted = [];
+  for (const [name, mutate] of [
+    ['scalar', r => { r.selected.parameters.offset = -0; }],
+    ['array', r => { r.selected.parameters.offsets[0] = -0; }],
+    ['iteration', r => { r.iteration = -0; }],
+    ['policy', r => { r.policy.modelCalls = -0; }],
+    ['priority', r => { r.qualification.snapshot.priority.rank = -0; }],
+  ]) {
+    const changed = structuredClone(receipt); mutate(changed);
+    assert.equal(changed.digest, receipt.digest);
+    try { verifyReversibleDecision(changed, input); accepted.push(name); }
+    catch (error) { assert.match(error.message, /STALE_RECEIPT/); }
+  }
+  assert.deepEqual(accepted, []);
+  assert.equal(verifyReversibleDecision(JSON.parse(JSON.stringify(receipt)), input).state, 'MATCHES_CURRENT_SHADOW');
 });
 
 test('conflicting owner and exhausted attempt/iteration bounds refuse without another action', () => {

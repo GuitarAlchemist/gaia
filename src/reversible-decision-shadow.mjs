@@ -1,5 +1,6 @@
 // Integrity-bound proposals only: no executor, model, authority, claim or storage port.
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { canonicalJson } from './epistemic-research.mjs';
 import { qualifyWork } from './work-qualification.mjs';
 
@@ -26,7 +27,7 @@ function data(value, depth = 0, budget = { nodes: 0 }) {
   if (depth > 6 || budget.nodes > 2048) reject('INVALID_PARAMETERS');
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number') {
-    if (!Number.isFinite(value)) reject('INVALID_PARAMETERS');
+    if (!Number.isFinite(value) || Object.is(value, -0)) reject('INVALID_PARAMETERS');
     return value;
   }
   if (typeof value === 'string') return text(value, 'INVALID_PARAMETERS');
@@ -58,6 +59,7 @@ export function proposeReversibleDecision(input) {
   text(p.repository, 'INVALID_POLICY');
   if (p.status !== 'delegated-reversible' || p.purpose !== 'independent-research'
       || p.modelCalls !== 0 || p.externalEffects !== 0
+      || Object.is(p.modelCalls, -0) || Object.is(p.externalEffects, -0)
       || !Array.isArray(p.allowedKinds) || !p.allowedKinds.length
       || p.allowedKinds.length > 3 || p.allowedKinds.some(k => !KINDS.includes(k))
       || !Array.isArray(p.allowedPaths) || !p.allowedPaths.length || p.allowedPaths.length > 16
@@ -70,8 +72,8 @@ export function proposeReversibleDecision(input) {
   for (const value of [p.owner.id, p.owner.version]) text(value, 'OWNER_CONFLICT');
   if (input.owner.status !== 'confirmed' || input.owner.id !== p.owner.id
       || input.owner.version !== p.owner.version) reject('OWNER_CONFLICT');
-  if (!Number.isSafeInteger(input.iteration) || input.iteration < 0 || input.iteration >= p.maxIterations
-      || !Number.isSafeInteger(input.attempt) || input.attempt < 0 || input.attempt >= p.maxAttempts) reject('BOUNDS_EXHAUSTED');
+  if (!Number.isSafeInteger(input.iteration) || Object.is(input.iteration, -0) || input.iteration < 0 || input.iteration >= p.maxIterations
+      || !Number.isSafeInteger(input.attempt) || Object.is(input.attempt, -0) || input.attempt < 0 || input.attempt >= p.maxAttempts) reject('BOUNDS_EXHAUSTED');
   const prefixes = p.allowedPaths.map(value => path(value, true));
   let qualification;
   try {
@@ -80,6 +82,8 @@ export function proposeReversibleDecision(input) {
     if (q.revision !== qualification.revision || q.dispatchAuthorized !== false
         || !Array.isArray(q.effects) || q.effects.length) reject('QUALIFICATION_MISMATCH');
   } catch { reject('QUALIFICATION_MISMATCH'); }
+  const contextRepository = /^repo:([\w.-]+\/[\w.-]+)$/u.exec(qualification.snapshot.context.ref)?.[1];
+  if (!contextRepository || contextRepository.toLowerCase() !== p.repository.toLowerCase()) reject('REPOSITORY_MISMATCH');
   if (qualification.generationChanged) reject('STALE_QUALIFICATION');
   if (qualification.disposition === 'REJECTED_PROPOSAL') reject('QUALIFICATION_REJECTED');
   if (qualification.blockers.includes('ALREADY_OWNED')) reject('OWNER_CONFLICT');
@@ -116,6 +120,6 @@ export function proposeReversibleDecision(input) {
 
 export function verifyReversibleDecision(receipt, currentInput) {
   const current = proposeReversibleDecision(currentInput);
-  if (!receipt || receipt.digest !== current.digest || canonicalJson(receipt) !== canonicalJson(current)) reject('STALE_RECEIPT');
+  if (!receipt || receipt.digest !== current.digest || !isDeepStrictEqual(receipt, current)) reject('STALE_RECEIPT');
   return freeze({ state: 'MATCHES_CURRENT_SHADOW', digest: current.digest, dispatchAuthorized: false });
 }

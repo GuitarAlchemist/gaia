@@ -97,6 +97,13 @@ test('invalid observations or unsupported positive claims fail closed without le
   }
 });
 
+test('negative-zero human priority is refused rather than colliding with ordinary zero', () => {
+  const negative = input(); negative.priority.rank = -0;
+  assert.throws(() => qualifyWork(negative), /InvalidWorkQualification/);
+  const zero = input(); zero.priority.rank = 0;
+  assert.equal(qualifyWork(zero).snapshot.priority.rank, 0);
+});
+
 test('public issue snapshots classify468 as RESEARCH and482/484/485 as protected DECISION, never READY', async () => {
   const requests = JSON.parse(await readFile(new URL('./fixtures/work-qualification-issues.json', import.meta.url), 'utf8'));
   assert.deepEqual(requests.map(r => qualifyWork(r).disposition), ['RESEARCH', 'DECISION', 'DECISION', 'DECISION']);

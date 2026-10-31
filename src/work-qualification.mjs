@@ -45,7 +45,7 @@ export function qualifyWork(input) {
     evidence: evidence(input.priority.evidence, true),
   };
   if (priority && (priority.actor !== 'human' || !Number.isSafeInteger(priority.rank)
-      || priority.rank < 0 || priority.rank > 1000)) invalid();
+      || Object.is(priority.rank, -0) || priority.rank < 0 || priority.rank > 1000)) invalid();
   if (!input.checks || typeof input.checks !== 'object' || Array.isArray(input.checks)) invalid();
   const checks = Object.fromEntries(WORK_DIMENSIONS.map(name => [name, check(input.checks[name])]));
   const expectedVersions = input.expectedVersions === undefined ? null : {
