@@ -1,0 +1,163 @@
+[
+  {
+    "qualification": {
+      "schema": "GaiaWorkQualificationV0",
+      "snapshot": {
+        "issue": {
+          "ref": "https://github.com/GuitarAlchemist/ix/issues/482",
+          "version": "2026-10-30T12:37:48Z;sha256:17f1f022f6ddabea62030bc3340477b9ecaf394f886bd7a48b1834e6cf03142a"
+        },
+        "context": {
+          "ref": "repo:GuitarAlchemist/gaia",
+          "version": "3be8bffcf61ee8c1920b2cf2f8f13923d8c535e3"
+        },
+        "priority": null,
+        "proposalKind": "decision",
+        "decisionMode": "protected-human",
+        "decisionEvidence": [
+          {
+            "ref": "operator:pm-shadow-mandate",
+            "version": "2026-10-30"
+          }
+        ],
+        "checks": {
+          "value": {
+            "state": "unknown",
+            "reason": "not-observed",
+            "evidence": []
+          },
+          "coherence": {
+            "state": "unknown",
+            "reason": "not-observed",
+            "evidence": []
+          },
+          "currentness": {
+            "state": "supported",
+            "reason": "Exact captured public issue generation and pinned Gaia context; future changes require reconciliation",
+            "evidence": [
+              {
+                "ref": "https://github.com/GuitarAlchemist/ix/issues/482",
+                "version": "2026-10-30T12:37:48Z"
+              }
+            ]
+          },
+          "duplicates": {
+            "state": "unknown",
+            "reason": "not-observed",
+            "evidence": []
+          },
+          "dependencies": {
+            "state": "unknown",
+            "reason": "not-observed",
+            "evidence": []
+          },
+          "acceptance": {
+            "state": "unknown",
+            "reason": "not-observed",
+            "evidence": []
+          },
+          "scope": {
+            "state": "supported",
+            "reason": "This assessment is an isolated shadow derivation only; no execution or publication",
+            "evidence": [
+              {
+                "ref": "operator:pm-shadow-mandate",
+                "version": "2026-10-30"
+              }
+            ]
+          },
+          "permissions": {
+            "state": "unknown",
+            "reason": "not-observed",
+            "evidence": []
+          },
+          "budget": {
+            "state": "unknown",
+            "reason": "not-observed",
+            "evidence": []
+          },
+          "owner": {
+            "state": "unknown",
+            "reason": "not-observed",
+            "evidence": []
+          }
+        },
+        "expectedVersions": null
+      },
+      "disposition": "DECISION",
+      "blockers": [
+        "WAITING_HUMAN",
+        "RECONCILE_REQUIRED"
+      ],
+      "generationChanged": false,
+      "dispatchAuthorized": false,
+      "effects": [],
+      "revision": "14a8bfcacb8c5b4a2a771da41a02d5e93b2c25a72e069954c6c8554c1a481700"
+    },
+    "policy": {
+      "ref": "operator:pm-shadow-mandate",
+      "version": "2026-10-30/reversible-shadow-v0",
+      "status": "delegated-reversible",
+      "purpose": "independent-research",
+      "repository": "GuitarAlchemist/gaia",
+      "owner": {
+        "id": "codex-pm-shadow-qualification",
+        "version": "local-shadow-1"
+      },
+      "allowedKinds": [
+        "local-test"
+      ],
+      "allowedPaths": [
+        "prototypes/pm-shadow/"
+      ],
+      "maxIterations": 2,
+      "maxAttempts": 1,
+      "modelCalls": 0,
+      "externalEffects": 0
+    },
+    "owner": {
+      "id": "codex-pm-shadow-qualification",
+      "version": "local-shadow-1",
+      "status": "confirmed"
+    },
+    "iteration": 0,
+    "attempt": 0,
+    "candidates": [
+      {
+        "kind": "local-test",
+        "ownerId": "codex-pm-shadow-qualification",
+        "parameters": {
+          "clock": "fake",
+          "leaseMs": 30000,
+          "renewals": 0
+        },
+        "uncertainty": "A fake-clock model cannot validate native worker cleanup or choose the final product policy",
+        "test": "Absent renewal yields one terminal expiry; no duplicate terminal result after another tick",
+        "rollback": "Remove only the isolated prototype fixture; no runtime state exists",
+        "id": "single-file-lease-model",
+        "scope": [
+          "prototypes/pm-shadow/worker-lease-model.test.mjs"
+        ],
+        "reason": "Smallest falsifiable research step; final human decision remains open"
+      },
+      {
+        "kind": "local-test",
+        "ownerId": "codex-pm-shadow-qualification",
+        "parameters": {
+          "clock": "fake",
+          "leaseMs": 30000,
+          "renewals": 0
+        },
+        "uncertainty": "A fake-clock model cannot validate native worker cleanup or choose the final product policy",
+        "test": "Absent renewal yields one terminal expiry; no duplicate terminal result after another tick",
+        "rollback": "Remove only the isolated prototype fixture; no runtime state exists",
+        "id": "two-file-contract-model",
+        "scope": [
+          "prototypes/pm-shadow/worker-lease-model.mjs",
+          "prototypes/pm-shadow/worker-lease-model.test.mjs"
+        ],
+        "reason": "Alternative reusable seam, with larger change scope"
+      }
+    ]
+  }
+]

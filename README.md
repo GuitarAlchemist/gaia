@@ -47,7 +47,7 @@ node scripts/gaia-interagent.mjs doctor
 node scripts/gaia-interagent.mjs initialize --apply   # idempotent; safe to run again
 node scripts/gaia-interagent.mjs status
 node scripts/gaia-interagent.mjs verify
-node --test                                   # 2467 gates
+node --test                                   # 2492 gates
 ```
 
 Use the single Node.js version in `.node-version` (26.8.1, the latest Current release
@@ -734,7 +734,7 @@ authoritative for their named contracts.
 | `src/repair-round-breaker.mjs` | Repair-round circuit breaker on the delivery-round `BUDGET_EXHAUSTED` boundary: one compare-and-set record per work identity scope, tripped before the effect runs. While the store keeps the record, only a reset receipt bound to that trip arms it again. Receipts are checked for binding, not authenticity, and the store is in memory, so a restart arms every scope again and the breaker is not wired into the live pump yet (#54). See [`docs/repair-round-breaker.md`](docs/repair-round-breaker.md). |
 | `src/ix-recover-consumer.mjs` | Optional local IX CLI caller for recoverable statistics runs: preserves run/attempt identity, accepts publication/replay/receipt repair only after exit zero and receipt matching, and refuses invalid JSON parameters or incomplete output. IX owns store verification and recovery. See the [architecture map](ARCHITECTURE.md#providers-and-offline-artifacts) for the provisional protocol and limits; IX bus integration remains `DEFER`. |
 | `scripts/ix-recover-scenario.mjs` | Opt-in real-binary recovery tracer. Requires a compatible IX debug executable, governance directory and a new work directory; writes its own journal and checks publication, replay, refusal and process-kill recovery. No automatic integration with the bus or pump. |
-| `tests/` | 2467 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
+| `tests/` | 2492 `node:test` gates, counted as top-level `test()` declarations. `node --test`; data-driven cases run inside a declaration, so the runner reports more executed cases than there are declarations. |
 
 Engineering and research work is governed by
 [`docs/engineering-and-research-principles.md`](docs/engineering-and-research-principles.md).

@@ -1,0 +1,166 @@
+[
+  {
+    "issue": {
+      "ref": "https://github.com/GuitarAlchemist/ix/issues/468",
+      "version": "2026-10-27T04:09:03Z;sha256:d31b6f14d853f82351a01f40292192b8a239b71a1d0310e7680096d9be95e03e"
+    },
+    "context": {
+      "ref": "repo:GuitarAlchemist/gaia",
+      "version": "3be8bffcf61ee8c1920b2cf2f8f13923d8c535e3"
+    },
+    "priority": null,
+    "proposalKind": "research",
+    "decisionMode": "none",
+    "decisionEvidence": [
+      {
+        "ref": "operator:pm-shadow-mandate",
+        "version": "2026-10-30"
+      }
+    ],
+    "checks": {
+      "currentness": {
+        "state": "supported",
+        "reason": "Exact captured public issue generation and pinned Gaia context; future changes require reconciliation",
+        "evidence": [
+          {
+            "ref": "https://github.com/GuitarAlchemist/ix/issues/468",
+            "version": "2026-10-27T04:09:03Z"
+          }
+        ]
+      },
+      "scope": {
+        "state": "supported",
+        "reason": "This assessment is an isolated shadow derivation only; no execution or publication",
+        "evidence": [
+          {
+            "ref": "operator:pm-shadow-mandate",
+            "version": "2026-10-30"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "issue": {
+      "ref": "https://github.com/GuitarAlchemist/ix/issues/482",
+      "version": "2026-10-30T12:37:48Z;sha256:17f1f022f6ddabea62030bc3340477b9ecaf394f886bd7a48b1834e6cf03142a"
+    },
+    "context": {
+      "ref": "repo:GuitarAlchemist/gaia",
+      "version": "3be8bffcf61ee8c1920b2cf2f8f13923d8c535e3"
+    },
+    "priority": null,
+    "proposalKind": "decision",
+    "decisionMode": "protected-human",
+    "decisionEvidence": [
+      {
+        "ref": "operator:pm-shadow-mandate",
+        "version": "2026-10-30"
+      }
+    ],
+    "checks": {
+      "currentness": {
+        "state": "supported",
+        "reason": "Exact captured public issue generation and pinned Gaia context; future changes require reconciliation",
+        "evidence": [
+          {
+            "ref": "https://github.com/GuitarAlchemist/ix/issues/482",
+            "version": "2026-10-30T12:37:48Z"
+          }
+        ]
+      },
+      "scope": {
+        "state": "supported",
+        "reason": "This assessment is an isolated shadow derivation only; no execution or publication",
+        "evidence": [
+          {
+            "ref": "operator:pm-shadow-mandate",
+            "version": "2026-10-30"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "issue": {
+      "ref": "https://github.com/GuitarAlchemist/ix/issues/484",
+      "version": "2026-10-30T21:37:54Z;sha256:e1bdd2df6e3aca472fa24bd7e7c253a71fa15c7fac9a1aefa6b088ebf4270f33"
+    },
+    "context": {
+      "ref": "repo:GuitarAlchemist/gaia",
+      "version": "3be8bffcf61ee8c1920b2cf2f8f13923d8c535e3"
+    },
+    "priority": null,
+    "proposalKind": "decision",
+    "decisionMode": "protected-human",
+    "decisionEvidence": [
+      {
+        "ref": "operator:pm-shadow-mandate",
+        "version": "2026-10-30"
+      }
+    ],
+    "checks": {
+      "currentness": {
+        "state": "supported",
+        "reason": "Exact captured public issue generation and pinned Gaia context; future changes require reconciliation",
+        "evidence": [
+          {
+            "ref": "https://github.com/GuitarAlchemist/ix/issues/484",
+            "version": "2026-10-30T21:37:54Z"
+          }
+        ]
+      },
+      "scope": {
+        "state": "supported",
+        "reason": "This assessment is an isolated shadow derivation only; no execution or publication",
+        "evidence": [
+          {
+            "ref": "operator:pm-shadow-mandate",
+            "version": "2026-10-30"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "issue": {
+      "ref": "https://github.com/GuitarAlchemist/ix/issues/485",
+      "version": "2026-10-30T21:38:00Z;sha256:a8ae12567304878c8357eb188faf5e396df23a5059e851a54a7d4320dd76395f"
+    },
+    "context": {
+      "ref": "repo:GuitarAlchemist/gaia",
+      "version": "3be8bffcf61ee8c1920b2cf2f8f13923d8c535e3"
+    },
+    "priority": null,
+    "proposalKind": "decision",
+    "decisionMode": "protected-human",
+    "decisionEvidence": [
+      {
+        "ref": "operator:pm-shadow-mandate",
+        "version": "2026-10-30"
+      }
+    ],
+    "checks": {
+      "currentness": {
+        "state": "supported",
+        "reason": "Exact captured public issue generation and pinned Gaia context; future changes require reconciliation",
+        "evidence": [
+          {
+            "ref": "https://github.com/GuitarAlchemist/ix/issues/485",
+            "version": "2026-10-30T21:38:00Z"
+          }
+        ]
+      },
+      "scope": {
+        "state": "supported",
+        "reason": "This assessment is an isolated shadow derivation only; no execution or publication",
+        "evidence": [
+          {
+            "ref": "operator:pm-shadow-mandate",
+            "version": "2026-10-30"
+          }
+        ]
+      }
+    }
+  }
+]
